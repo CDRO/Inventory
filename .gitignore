@@ -5,6 +5,7 @@
 # would conflict on every branch, and anything durable belongs in a GitHub
 # issue or PR comment instead.
 .claude/worklog.md
+.claude/*.log
 
 # Go build output
 /inventory

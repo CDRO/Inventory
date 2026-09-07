@@ -30,13 +30,25 @@ Update `.claude/worklog.md` as you go.
 
 ## 3. Test before pushing
 
+Everything runs in Docker — no host toolchain
+(`docs/specs/01-architecture-and-deployment.md`).
+
+Run it so the **full log lands on disk and only the signal enters context**:
+
 ```bash
-docker compose run --rm app go test ./...
+docker compose run --rm app go test ./... > .claude/last-test.log 2>&1
+echo "exit=$?"
+grep -E '^(--- )?FAIL|^panic:|^\s+.*\.go:[0-9]+' .claude/last-test.log | head -40
+tail -3 .claude/last-test.log
 ```
 
-Everything runs in Docker — no host toolchain
-(`docs/specs/01-architecture-and-deployment.md`). Do not push a red suite; the
-test reviewer will block and the round is wasted.
+A green suite costs three lines instead of several hundred; a red one shows the
+failures and their file:line. The complete output stays in
+`.claude/last-test.log` (gitignored) — read it when a failure needs more than
+the excerpt. Never summarize a run you did not perform, and never report an
+exit code you did not see.
+
+Do not push a red suite; the test reviewer will block and the round is wasted.
 
 ## 4. Open the PR
 

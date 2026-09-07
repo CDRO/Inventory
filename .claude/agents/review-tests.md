@@ -21,11 +21,21 @@ You have **no ability to edit files**, by design.
    section is your checklist — every criterion needs a test that would catch
    its violation, or it is a finding.
 3. `gh pr diff <PR>` — see what changed and what tests came with it.
-4. **Run the suite yourself:**
-   `docker compose run --rm app go test ./... 2>&1 | tail -40`
+4. **Run the suite yourself**, keeping the full log on disk and only the signal
+   in context:
+
+   ```bash
+   docker compose run --rm app go test ./... > .claude/last-test.log 2>&1
+   echo "exit=$?"
+   grep -E '^(--- )?FAIL|^panic:' .claude/last-test.log | head -40
+   tail -3 .claude/last-test.log
+   ```
+
    Report the actual exit code. Never accept a claim in the PR body that tests
-   pass; the only evidence that counts is the run you performed. If the suite
-   cannot run, that is a blocking finding and you say why.
+   pass; the only evidence that counts is the run you performed. Read the full
+   `.claude/last-test.log` when a failure needs more than the excerpt — it is
+   there precisely so you can. If the suite cannot run at all, that is a
+   blocking finding and you say why.
 5. Post your review with `gh pr comment`.
 
 ## What makes a test meaningless
