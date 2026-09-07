@@ -33,17 +33,57 @@ testable without HTTP.
 ## Route conventions
 
 - `/api/auth/*` — session lifecycle (`03-auth-and-multi-tenancy.md`).
-- `/api/admin/*` — admin JSON routes, gated by an `RequireAdmin`
-  middleware that re-queries `users.is_admin` from the database on every
-  request.
-- `/admin/*` — server-rendered admin pages (`internal/admin`), same
-  per-request DB check.
-- `/api/storages/{storage_id}/*` — everything storage-scoped, gated by a
-  `RequireStorageMember` middleware implementing the non-enumeration rules
-  in `03-auth-and-multi-tenancy.md` and injecting the resolved storage id
-  into the request context.
+- `/api/admin/*` — admin JSON routes. **Mounted behind
+  `RequireSession` → `RequireAdmin`.**
+- `/admin/*` — server-rendered admin pages (`internal/admin`). **Mounted
+  behind the exact same `RequireSession` → `RequireAdmin` chain.** The
+  HTML routes are not a separate, weaker path: rendering an admin page
+  goes through the identical middleware as the JSON routes that page
+  posts to.
+- `/api/storages/{storage_id}/*` — everything storage-scoped. Mounted
+  behind `RequireSession` → `RequireStorageMember`.
 - `/` and all other paths — the static frontend (embedded `web/static`, or
-  read from `STATIC_DIR` when set).
+  read from `STATIC_DIR` when set). No session required.
+
+### Middleware definitions
+
+These three middlewares are the only places authorization is decided. No
+handler performs its own check, and no check is duplicated inline.
+
+**`RequireSession`**
+
+1. Read the session cookie. Absent → `401 unauthorized`
+   (`debug_reason: session_missing`).
+2. Look up `sessions` by that id. Missing, or `expires_at <= now()` →
+   delete the row if present, then `401` (`session_expired`).
+3. Load the `users` row and place it in the request context.
+
+**`RequireAdmin`** — always mounted after `RequireSession`
+
+1. **Re-query `users.is_admin` from the database for the context user, on
+   every single request.** Never read it from the session record, a cached
+   user struct carried across requests, a cookie, a header, or any
+   client-supplied value — by design there is no client-supplied value to
+   read (`03-auth-and-multi-tenancy.md`).
+2. `is_admin = FALSE` → respond `404 not_found`
+   (`debug_reason: not_admin`), byte-identical in body and headers to any
+   other `404`. The admin area must not disclose that it exists.
+3. This applies identically to `/admin/*` HTML and `/api/admin/*` JSON.
+   Register both groups on a single `chi` sub-router carrying this chain,
+   so that adding a route to that group is what protects it and a new
+   admin route cannot be forgotten.
+
+**`RequireStorageMember`** — always mounted after `RequireSession`
+
+1. Parse `{storage_id}` from the path; a malformed UUID → `404 not_found`.
+2. Query `storage_members` for `(storage_id, user.id)`. No row — whether
+   because the storage does not exist or because the caller is not a
+   member → `404 not_found`. The two cases are distinguishable **only**
+   via `debug_reason` (`storage_not_found` / `not_storage_member`) when
+   `APP_ENV=dev`; the production response is identical for both.
+3. Place the resolved storage id in the request context. Handlers read it
+   from there and must never re-parse it from the URL, so a handler cannot
+   accidentally operate on an id that was never validated.
 
 ## Response envelope
 
@@ -117,15 +157,15 @@ external queue broker — at household scale, in-process goroutines plus a
 
 ```sql
 CREATE TABLE jobs (
-    id           TEXT PRIMARY KEY,       -- opaque id returned to the client
-    storage_id   INT NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
+    id           UUID PRIMARY KEY,       -- UUIDv7, returned to the client
+    storage_id   UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
     kind         VARCHAR(40) NOT NULL
                  CHECK (kind IN ('shelf_ingestion', 'shopping_list_photo', 'consumption_photo')),
     status       VARCHAR(20) NOT NULL
                  CHECK (status IN ('pending', 'done', 'failed', 'consumed')),
     payload      JSONB,                  -- parsed proposal once done
     error        TEXT,
-    created_by   INT REFERENCES users(id) ON DELETE SET NULL,
+    created_by   UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );

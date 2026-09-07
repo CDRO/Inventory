@@ -17,6 +17,37 @@ trigram extension used for matching:
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 ```
 
+## Primary keys: UUIDv7 everywhere
+
+Every table uses `UUID` primary keys holding **UUIDv7** values, not
+`SERIAL`. UUIDv7 is time-ordered, so it keeps the index locality that made
+sequential ids attractive while removing their two problems here:
+
+- **Sequential ids leak.** A user seeing `storage` ids 3 and 7 learns that
+  other storages exist, and roughly how many — exactly what
+  `03-auth-and-multi-tenancy.md` forbids. Opaque ids remove the inference
+  entirely.
+- Ids can be generated client-of-the-database side (in Go) before the
+  insert, which simplifies multi-row transactional writes such as the
+  ingestion confirm flow in `06-vision-shelf-ingestion.md`.
+
+**Generation:** in Go, via `github.com/google/uuid` (`uuid.NewV7()`), and
+passed explicitly on every insert. PostgreSQL 16 has no native UUIDv7
+generator, so columns are declared with no default — a missing id is a
+programming error that should fail loudly, not silently fall back to a
+random v4 that breaks index locality.
+
+```sql
+id UUID PRIMARY KEY          -- always supplied by the application (uuid.NewV7)
+```
+
+**One deliberate exception: `sessions.id` stays a random opaque token, not
+a UUIDv7.** A session id is a bearer credential; UUIDv7 embeds a
+timestamp and is partially predictable, which is a bad property for a
+secret. Use 256 bits from a CSPRNG, base64url-encoded.
+
+All foreign keys are `UUID` accordingly; the DDL below shows this.
+
 ## Entity overview
 
 ```
@@ -31,7 +62,7 @@ storages ─┬─< storage_members >─┬─ users ─< sessions
           │              └─< inventory_logs (via product_id)
           └─< shopping_lists (see 07) ─< shopping_list_items
 
-catalog_products   (global, anonymous — no storage reference)
+catalog_products   (global, anonymous — no storage reference; self-referencing variants)
 settings           (global key/value app configuration)
 jobs               (background job tracking, see 04)
 ```
@@ -42,7 +73,7 @@ jobs               (background job tracking, see 04)
 
 ```sql
 CREATE TABLE users (
-    id            SERIAL PRIMARY KEY,
+    id            UUID PRIMARY KEY,
     username      VARCHAR(100) NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,          -- argon2id
     display_name  VARCHAR(255) NOT NULL,
@@ -67,8 +98,8 @@ tamper with.
 
 ```sql
 CREATE TABLE sessions (
-    id         TEXT PRIMARY KEY,          -- cryptographically random, opaque
-    user_id    INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    id         TEXT PRIMARY KEY,          -- 256-bit CSPRNG token, base64url; NOT a UUID
+    user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at TIMESTAMPTZ NOT NULL
 );
@@ -84,7 +115,7 @@ a row immediately revokes that session.
 
 ```sql
 CREATE TABLE storages (
-    id         SERIAL PRIMARY KEY,
+    id         UUID PRIMARY KEY,
     name       VARCHAR(255) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -94,8 +125,8 @@ CREATE TABLE storages (
 
 ```sql
 CREATE TABLE storage_members (
-    storage_id INT NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
-    user_id    INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    storage_id UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
+    user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     added_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (storage_id, user_id)
 );
@@ -110,9 +141,9 @@ Self-referencing tree, scoped per storage.
 
 ```sql
 CREATE TABLE locations (
-    id          SERIAL PRIMARY KEY,
-    storage_id  INT NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
-    parent_id   INT REFERENCES locations(id) ON DELETE CASCADE,
+    id          UUID PRIMARY KEY,
+    storage_id  UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
+    parent_id   UUID REFERENCES locations(id) ON DELETE CASCADE,
     name        VARCHAR(255) NOT NULL,
     description TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -138,9 +169,9 @@ cycles, no self-parent). Example path: `Food → Dairy → Cheese`.
 
 ```sql
 CREATE TABLE categories (
-    id                      SERIAL PRIMARY KEY,
-    storage_id              INT NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
-    parent_id               INT REFERENCES categories(id) ON DELETE CASCADE,
+    id                      UUID PRIMARY KEY,
+    storage_id              UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
+    parent_id               UUID REFERENCES categories(id) ON DELETE CASCADE,
     name                    VARCHAR(255) NOT NULL,
     default_shelf_life_days INT,          -- NULL = inherit from ancestor / item_type
     created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -163,10 +194,10 @@ Deleting a category that is still referenced by products must be rejected
 
 ```sql
 CREATE TABLE products (
-    id          SERIAL PRIMARY KEY,
-    storage_id  INT NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
+    id          UUID PRIMARY KEY,
+    storage_id  UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
     name        VARCHAR(255) NOT NULL,
-    category_id INT REFERENCES categories(id) ON DELETE RESTRICT,
+    category_id UUID REFERENCES categories(id) ON DELETE RESTRICT,
     item_type   VARCHAR(20) NOT NULL DEFAULT 'long_shelf_life'
                 CHECK (item_type IN ('perishable', 'long_shelf_life', 'non_perishable')),
     min_stock   INT NOT NULL DEFAULT 0,
@@ -186,7 +217,7 @@ default-expiry behavior (`08-expiration-and-classification.md`) and
 replaces the PRD draft's boolean `is_perishable`. The trigram index backs
 the matching service in `07-shopping-list-reconciliation.md`.
 
-### `catalog_products` (global, anonymous)
+### `catalog_products` (global, anonymous, insert-only)
 
 Purpose: when a user adds a product that some storage has already
 described, skip the expensive identification path — no Gemini call, no
@@ -194,20 +225,23 @@ SerpAPI call — and offer the known data as a suggestion to copy.
 
 ```sql
 CREATE TABLE catalog_products (
-    id                      SERIAL PRIMARY KEY,
+    id                      UUID PRIMARY KEY,
     normalized_name         VARCHAR(255) NOT NULL UNIQUE,  -- lowercased, trimmed, collapsed whitespace
     display_name            VARCHAR(255) NOT NULL,
+    base_id                 UUID REFERENCES catalog_products(id) ON DELETE SET NULL,
     category_path           TEXT,          -- denormalized text, e.g. "Food > Dairy > Cheese"
     item_type               VARCHAR(20) NOT NULL
                             CHECK (item_type IN ('perishable', 'long_shelf_life', 'non_perishable')),
     image_url               TEXT,
     icon_name               VARCHAR(100),
     default_shelf_life_days INT,
-    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT catalog_not_own_base CHECK (base_id IS NULL OR base_id <> id)
 );
 
 CREATE INDEX idx_catalog_products_name_trgm
     ON catalog_products USING gin (normalized_name gin_trgm_ops);
+CREATE INDEX idx_catalog_products_base_id ON catalog_products(base_id);
 ```
 
 **Privacy invariants — these are requirements, not suggestions:**
@@ -219,16 +253,69 @@ CREATE INDEX idx_catalog_products_name_trgm
   infer how many storages exist or when another storage was active. API
   responses derived from this table return only display fields
   (`display_name`, `category_path`, `item_type`, `image_url`, `icon_name`,
-  `default_shelf_life_days`).
+  `default_shelf_life_days`, and variant siblings' display names).
 - The category is stored as a denormalized **text path**, not a
   `categories` FK, precisely because categories are storage-scoped and an
   FK would create a cross-storage link.
 
-**Population:** whenever a product is created or its descriptive fields are
-edited in any storage, upsert the corresponding catalog row keyed on
-`normalized_name` (last write wins; only fill `image_url`/`icon_name` if
-non-empty, so a storage that skipped choosing an image does not blank out
-a good existing entry).
+**Population — insert-only. Rows are never updated after creation.**
+
+`INSERT ... ON CONFLICT (normalized_name) DO NOTHING`. There is no upsert,
+no "last write wins", and no edit path — not from the app, not from a
+product edit in any storage.
+
+The reason is abuse, not tidiness: a globally-visible row that any storage
+can rewrite is a covert messaging channel between households. Once anyone
+notices that editing a product name changes what strangers see, it will be
+used for that. Insert-only reduces the channel to a single one-shot write
+by whoever first names a product, which is a far smaller surface and
+cannot be used for a back-and-forth conversation.
+
+Three consequences that must be implemented alongside it:
+
+- **Editing a product in a storage never touches the catalog.** Local
+  edits stay local. The catalog is a snapshot of how a product was first
+  described, nothing more.
+- **Catalog text is untrusted input.** It was written by a stranger.
+  Render it with `textContent`, never as HTML (`05-frontend-pwa-foundations.md`),
+  and never interpolate it into a prompt sent to Gemini.
+- **`image_url` may only ever be a provider URL** (a SerpAPI result or an
+  Iconify icon) or a locally stored upload path — never an arbitrary
+  user-supplied URL. A URL pointing at someone else's server would let its
+  owner change the picture other households see after the fact, and would
+  expose viewers' IP addresses to them. When a storage accepts a catalog
+  suggestion, fetch the image once and store a local copy
+  (`04-backend-api-conventions.md` upload storage), then reference that.
+- **Admin moderation:** admins can delete a catalog row
+  (`DELETE /api/admin/catalog/{id}`, `03-auth-and-multi-tenancy.md`), which
+  is the only way a bad entry is removed. Deleting a catalog row never
+  touches any storage's own `products`.
+
+**Variants (`base_id`) — handling "tomatoes" vs "cherry tomatoes".**
+
+`base_id` is a self-reference to the more general form of the same
+product: `cherry tomatoes → tomatoes`, `yellow tomatoes → tomatoes`. It
+exists because plain string matching cannot resolve a shopping-list line
+like `"thomatoes, c."` — trigram similarity gets from the typo to
+`tomatoes`, but the `, c.` abbreviation for *cherry* is not recoverable
+from the string. Matching the base and then offering its variants is what
+actually answers that line.
+
+- The graph is **built from real usage, not authored or AI-generated**:
+  when a user is shown a catalog suggestion, rejects the exact name, and
+  creates a differently-named product in the same interaction, the new
+  catalog row is inserted with `base_id` pointing at the row they were
+  shown. No curation step, no external call.
+- Only **one level** is used. A variant's `base_id` must point at a row
+  whose own `base_id` is `NULL`; if the user was shown a variant, link to
+  that variant's base instead. Application-enforced — this keeps
+  "siblings" a simple, cheap lookup and avoids chains that drift
+  semantically.
+- The matching service returns, alongside a base-name hit, its variant
+  siblings as additional choices — see
+  `07-shopping-list-reconciliation.md`.
+- `base_id` is set at insert time only; like every other column here, it
+  is never updated afterward.
 
 **Consumption:** the matching service (`07-shopping-list-reconciliation.md`)
 queries this table *before* calling any external API, and offers hits as
@@ -243,9 +330,9 @@ expiration date. A product's total stock is the sum of its batches.
 
 ```sql
 CREATE TABLE inventory_batches (
-    id              SERIAL PRIMARY KEY,
-    product_id      INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-    location_id     INT NOT NULL REFERENCES locations(id) ON DELETE RESTRICT,
+    id              UUID PRIMARY KEY,
+    product_id      UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    location_id     UUID NOT NULL REFERENCES locations(id) ON DELETE RESTRICT,
     quantity        INT NOT NULL DEFAULT 1 CHECK (quantity >= 0),
     expiration_date DATE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -265,13 +352,13 @@ Append-only audit trail of quantity changes. Never updated or deleted.
 
 ```sql
 CREATE TABLE inventory_logs (
-    id         SERIAL PRIMARY KEY,
-    product_id INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-    batch_id   INT REFERENCES inventory_batches(id) ON DELETE SET NULL,
+    id         UUID PRIMARY KEY,
+    product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    batch_id   UUID REFERENCES inventory_batches(id) ON DELETE SET NULL,
     change_qty INT NOT NULL,
     reason     VARCHAR(50) NOT NULL
                CHECK (reason IN ('purchase', 'consumption', 'audit', 'vision_ingestion')),
-    created_by INT REFERENCES users(id) ON DELETE SET NULL,
+    created_by UUID REFERENCES users(id) ON DELETE SET NULL,
     timestamp  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -283,7 +370,9 @@ CREATE INDEX idx_inventory_logs_timestamp ON inventory_logs(timestamp);
 ingestion), negative for consumption; `audit` may be either sign. Every
 write to `inventory_batches.quantity` must be paired, in the same
 transaction, with an `inventory_logs` row explaining it. This table is the
-data source for `11-reporting-and-analytics.md`.
+data source for `11-reporting-and-analytics.md`, and — because it already
+records who did what, when — the ledger the gamification specs
+(`50-gamification-overview.md`) score from.
 
 ### `settings`
 
@@ -296,7 +385,7 @@ CREATE TABLE settings (
     key        VARCHAR(100) PRIMARY KEY,
     value      TEXT NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_by INT REFERENCES users(id) ON DELETE SET NULL
+    updated_by UUID REFERENCES users(id) ON DELETE SET NULL
 );
 ```
 
@@ -315,8 +404,12 @@ lifecycle are defined in `04-backend-api-conventions.md`.
 - `locations` tree populated/edited via `06-vision-shelf-ingestion.md`.
 - `categories.default_shelf_life_days` resolution:
   `08-expiration-and-classification.md`.
-- `catalog_products` lookup order and UI: `07-shopping-list-reconciliation.md`.
+- `catalog_products` lookup order, variant suggestions, and UI:
+  `07-shopping-list-reconciliation.md`.
 - `products.min_stock` and reorder logic: `10-reorder-and-shopping-export.md`.
 - Shopping-list tables (`shopping_lists`, `shopping_list_items`): defined
   in `07-shopping-list-reconciliation.md`, since their shape is driven
   entirely by that feature's matching workflow.
+- Gamification tables (`user_progress`, `quests`, `achievements`): defined
+  in `51-gamification-scoring.md`. They are additive and optional —
+  nothing in specs `00`–`11` may depend on them.

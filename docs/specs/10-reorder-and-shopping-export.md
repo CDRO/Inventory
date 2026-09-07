@@ -31,8 +31,8 @@ more urgent state.
 
 ```json
 {
-  "out_of_stock": [ { "product_id": 1, "name": "...", "min_stock": 2 } ],
-  "low_stock": [ { "product_id": 2, "name": "...", "current_stock": 1, "min_stock": 3 } ]
+  "out_of_stock": [ { "product_id": "018f...uuid", "name": "...", "min_stock": 2 } ],
+  "low_stock": [ { "product_id": "018f...uuid", "name": "...", "current_stock": 1, "min_stock": 3 } ]
 }
 ```
 

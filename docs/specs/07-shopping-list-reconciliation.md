@@ -12,22 +12,24 @@ classified into one of three states, each with a distinct resolution UI.
 
 ## Additional schema
 
+Primary keys are UUIDv7, per `02-data-model.md`.
+
 ```sql
 CREATE TABLE shopping_lists (
-    id          SERIAL PRIMARY KEY,
-    storage_id  INT NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
+    id          UUID PRIMARY KEY,
+    storage_id  UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
     source      VARCHAR(20) NOT NULL CHECK (source IN ('text', 'photo')),
-    created_by  INT REFERENCES users(id) ON DELETE SET NULL,
+    created_by  UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE shopping_list_items (
-    id                SERIAL PRIMARY KEY,
-    shopping_list_id  INT NOT NULL REFERENCES shopping_lists(id) ON DELETE CASCADE,
-    raw_text          VARCHAR(255) NOT NULL,
-    status            VARCHAR(20) NOT NULL
-                      CHECK (status IN ('exact_match', 'new_item', 'ambiguous', 'resolved')),
-    matched_product_id INT REFERENCES products(id) ON DELETE SET NULL,
+    id                 UUID PRIMARY KEY,
+    shopping_list_id   UUID NOT NULL REFERENCES shopping_lists(id) ON DELETE CASCADE,
+    raw_text           VARCHAR(255) NOT NULL,
+    status             VARCHAR(20) NOT NULL
+                       CHECK (status IN ('exact_match', 'new_item', 'ambiguous', 'resolved')),
+    matched_product_id UUID REFERENCES products(id) ON DELETE SET NULL,
     resolved_quantity  INT,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -78,6 +80,16 @@ response exposes only those display fields; it must never reveal that the
 data came from another storage, or that other storages exist
 (`03-auth-and-multi-tenancy.md`).
 
+**Stage 2b — variant siblings.** Alongside a catalog hit, return the
+variants linked to it via `catalog_products.base_id`: the hit's siblings
+if the hit is itself a variant, or its children if the hit is a base.
+This is what makes an abbreviated list line usable — `"thomatoes, c."`
+trigram-matches the base `tomatoes`, and the variant set then offers
+*cherry tomatoes* / *yellow tomatoes* as one-click choices, which no
+amount of string matching on `", c."` could have produced. Cap the
+returned variants (e.g. 5, by trigram similarity to the raw line) so the
+UI stays a short list rather than a catalog browser.
+
 **Stage 3 — external.** Only if stages 1 and 2 both miss: `new_item` with
 no pre-filled data, which triggers the image-suggestion flow below (and,
 for photo-sourced input, the Gemini call that produced the text).
@@ -92,18 +104,27 @@ numbers.
   (or parsed quantity if present in `raw_text`, e.g. "eggs x2") inventory
   proposal. User reviews/edits quantity and location, then confirms —
   same confirm-writes-batches-and-logs pattern as `06`.
-- **New Item, catalog hit (stage 2):** show the known product card
-  (name, category path, item type, image) with an "Add this" action and an
-  "It's something else" escape hatch. Accepting copies the fields into a
-  new storage-local `products` row, resolving `category_path` against this
-  storage's `categories` tree and creating any missing nodes, then
-  proceeds like an exact match for the initial quantity. No external API
-  is called on this path.
+- **New Item, catalog hit (stage 2/2b):** show the known product card
+  (name, category path, item type, image), any variant siblings as
+  alternative cards, an "Add this" action, and an "It's something else"
+  escape hatch. Accepting copies the fields into a new storage-local
+  `products` row, resolving `category_path` against this storage's
+  `categories` tree and creating any missing nodes, then proceeds like an
+  exact match for the initial quantity. No external API is called on this
+  path. The image is fetched once and stored locally rather than
+  hot-linked (`02-data-model.md`).
 - **New Item, no catalog hit (stage 3):** trigger the **image suggestion**
   flow (below); once the user picks/uploads an image (or explicitly
   skips), let them fill in `name`, `category_id`, `item_type`,
-  `min_stock`, then create the `products` row — upserting it into
-  `catalog_products` — and proceed like an exact match.
+  `min_stock`, then create the `products` row and **insert** it into
+  `catalog_products` (`INSERT ... ON CONFLICT DO NOTHING` — never an
+  update, see `02-data-model.md`).
+- **Rejecting a suggested name creates a variant link:** if the user was
+  shown a catalog card, declined it, and created a differently-named
+  product in the same interaction, insert the new catalog row with
+  `base_id` pointing at the row they were shown (normalized to a base per
+  the one-level rule in `02-data-model.md`). This is the only way the
+  variant graph is built — no curation, no AI call.
 - **Ambiguous:** present the top candidate products (from the matching
   service, e.g. top 3 by similarity) for manual selection, plus an escape
   hatch to "treat as new item" (routes into the New Item flow) or "enter

@@ -46,14 +46,16 @@ Every command is therefore a Docker invocation:
 | Interactive first-time setup | `docker compose run --rm setup` |
 | Build everything | `docker compose build` |
 | Run the stack | `docker compose up -d` |
-| Run tests | `docker compose run --rm app go test ./...` |
+| Run unit tests | `docker compose run --rm app go test ./...` |
+| Run E2E tests (deployment gate) | `docker compose -f docker-compose.e2e.yml run --rm e2e` |
 | Run migrations | `docker compose run --rm app /inventory migrate up` |
 | Lint / vet | `docker compose run --rm app go vet ./...` |
 
-The frontend has **no** build, install, lint, or test command, because it
-has no toolchain — it is plain files. (Optional end-to-end browser tests,
-if ever added, run in their own throwaway container and are never a
-prerequisite for building or deploying.)
+The frontend has **no** build, install, or lint command, because it has no
+toolchain — it is plain files. Browser behavior is covered by end-to-end
+tests that run in a throwaway pulled container: **not** part of the image
+build or the dev loop, but **required to pass before deploying**. See
+`05-frontend-pwa-foundations.md` for the suite and its required coverage.
 
 ## Repository layout
 
@@ -147,6 +149,52 @@ variable is silently missed:
 
 The `setup` service in `docker-compose.yml` mounts the project directory
 and runs with `stdin_open: true` / `tty: true` so prompts work.
+
+### First-run order, and what happens if it is skipped
+
+Setup must run **before** the stack starts, because Docker Compose reads
+`.env` at file-parse time — a running container cannot pick up a `.env`
+written afterwards without being recreated. The system therefore fails
+fast and says so, rather than starting half-configured:
+
+```console
+$ docker compose run --rm setup      # writes ./.env interactively
+$ docker compose up -d
+```
+
+**If `docker compose up` is run first (no `.env` yet):** compose aborts on
+the missing `env_file`, which is correct but cryptic. To make the message
+actionable, the `app` container additionally validates its configuration
+at startup and, on missing/empty required variables, exits non-zero with:
+
+```
+No configuration found (DATABASE_URL, SESSION_SECRET, GEMINI_API_KEY are unset).
+Run:  docker compose run --rm setup
+Then: docker compose up -d
+```
+
+`restart: unless-stopped` must not turn this into a crash loop: the
+config error is a **fatal, non-retryable** exit, so the container exits
+with a distinct code and the message stays readable in
+`docker compose logs app`.
+
+**If setup is run while the stack is already up**, the new `.env` is not
+picked up by running containers. The `setup` command detects this case as
+"an `.env` already existed / the stack may be running" and ends by
+printing the exact command to apply the change:
+
+```
+.env written. Apply it with:
+  docker compose up -d --force-recreate
+```
+
+The application deliberately does **not** restart containers itself. Doing
+so would require mounting `/var/run/docker.sock` into the app container,
+which hands full host-level Docker control to the web application — an
+unacceptable trade for saving one command. Configuration that genuinely
+needs to change at runtime (the Gemini model) is handled instead by the
+`settings` table, which requires no restart at all; see AI model
+resilience below.
 
 ## `.env.example`
 
@@ -307,6 +355,11 @@ services:
   `docker compose build && docker compose up -d` on the NAS — or building
   elsewhere and pulling from a registry; both are supported and require no
   additional tooling.
+- **Deployment gate:** the end-to-end browser suite
+  (`05-frontend-pwa-foundations.md`) must pass before an image is
+  promoted to production. Unit tests already run inside the image build;
+  E2E runs separately because it needs a live stack. A deployment that
+  skips it is not a valid deployment.
 
 ## Remote access (interchangeable by configuration)
 

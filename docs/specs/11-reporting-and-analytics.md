@@ -12,7 +12,7 @@ Implements PRD Feature 7. Depends on: [`02-data-model.md`](02-data-model.md)
 {
   "total_items": 128,
   "location_distribution": [
-    { "location_id": 4, "location_name": "Basement > Right Shelf", "item_count": 37 }
+    { "location_id": "018f...uuid", "location_name": "Basement > Right Shelf", "item_count": 37 }
   ],
   "turnover": [
     { "period": "2026-08", "purchased": 42, "consumed": 35 }

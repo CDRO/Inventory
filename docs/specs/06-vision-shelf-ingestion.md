@@ -117,8 +117,9 @@ body: the edited list of `{product_id | new_product: {name, category_id,
 item_type}, quantity, location_id}`. Backend, in one transaction per
 confirm call:
 
-1. Creates any `new_product` entries, and upserts each into
-   `catalog_products` (`02-data-model.md`) so other storages can reuse the
+1. Creates any `new_product` entries, and **inserts** each into
+   `catalog_products` (`INSERT ... ON CONFLICT DO NOTHING` — never an
+   update; see `02-data-model.md`) so other storages can reuse the
    description later.
 2. Creates any newly-referenced `locations` nodes that were only
    `proposed` until now.

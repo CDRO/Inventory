@@ -164,9 +164,55 @@ the primary flows start with a camera capture.
 
 ## Testing
 
-There is no frontend test toolchain, by design — the frontend has no build
-or dependency step to hang one on. Correctness of the browser layer is
-covered by keeping logic thin (the interesting rules live in Go and are
-tested there per `04-backend-api-conventions.md`) and, optionally, by
-end-to-end browser tests run from a throwaway container. Such tests are
-never a prerequisite for building or deploying.
+The frontend itself has no test toolchain and no dependency step — the
+unit-testable logic lives in Go and is covered there
+(`04-backend-api-conventions.md`). Browser behavior is covered by
+**end-to-end tests, which are a required deployment gate**.
+
+### The rule
+
+| Context | E2E required? |
+|---|---|
+| Editing files in the dev loop (`docker-compose.dev.yml`) | **No.** Never runs automatically; edit-and-refresh stays instant. |
+| `docker compose build` / the image build | **No.** E2E needs a live stack with a database, which a build stage does not have. |
+| **Deploying** (promoting an image to the NAS / cutting a release) | **Yes — must pass first.** A failing E2E run blocks the deployment. |
+
+Running them is explicit and on-demand in dev (`docker compose -f
+docker-compose.e2e.yml run --rm e2e`), so the suite can be used while
+developing without being imposed on every save.
+
+### How they run
+
+- A separate `docker-compose.e2e.yml` brings up the full stack (`app`,
+  `db`, `traefik`) against a **disposable database**, seeds a known
+  fixture (an admin, two users, one storage with a small inventory), and
+  runs the browser suite against it.
+- The runner is a **pre-built browser-automation image pulled from a
+  registry** (e.g. the official Playwright image), used as a throwaway
+  test container. This does not violate the no-toolchain rule in
+  `01-architecture-and-deployment.md`: nothing is installed on the host,
+  and the application image itself still contains no Node.js — the
+  browser runtime exists only inside the test container, and only while
+  tests run.
+- Specs live in `e2e/` as plain JavaScript. They exercise real user
+  journeys through the real UI, not implementation details.
+- External services are stubbed: the Gemini, SerpAPI, and Iconify calls
+  point at a local fake so runs are deterministic, free, and work offline.
+
+### Required coverage before a deployment is allowed
+
+At minimum, these journeys must pass:
+
+1. Log in, land in a storage; log out.
+2. A user with two storages switches between them and sees each storage's
+   own data.
+3. Create a location and a category; add a product; see it in the list.
+4. Upload a shelf photo (stubbed vision), edit the proposal in the review
+   UI, confirm, and verify the resulting inventory.
+5. Log a consumption with an overridden count and verify the decrement.
+6. Reconcile a shopping list across all three match states.
+7. A non-admin gets `404` for `/admin` and for `/api/admin/users` — the
+   admin area is not reachable or discoverable
+   (`03-auth-and-multi-tenancy.md`).
+8. A member of storage A gets `404` for a storage B id, with no
+   distinction from a nonexistent id.

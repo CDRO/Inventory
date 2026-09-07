@@ -84,6 +84,12 @@ vanilla JavaScript with no build step — see
 | 5 | Quick consumption logging | `09-consumption-logging.md` |
 | 6 | Reorder & minimum stock management | `10-reorder-and-shopping-export.md` |
 | 7 | Reporting & analytics | `11-reporting-and-analytics.md` |
+| — | *Later phase:* gamification of inventory upkeep | `50`, `51`, `52` |
+
+**Numbering:** `00`–`11` are the core system. `12`–`49` are reserved for
+further core work not yet specified. `50`+ is a later, optional phase —
+nothing in `00`–`11` may depend on it, and the system must be complete
+and shippable with the `50` range unimplemented.
 
 ## Scale expectations
 

@@ -96,6 +96,13 @@ Every route below re-checks `is_admin` against the database.
 | Revoke a user's access to a storage | `DELETE /api/admin/storages/{id}/members/{user_id}` |
 | Read/update app settings (e.g. Gemini model) | `GET`/`PUT /api/admin/settings` |
 | Download regenerated `.env` | `GET /api/admin/settings/env-file` |
+| Search the global product catalog | `GET /api/admin/catalog?q=` |
+| Delete a catalog entry (moderation) | `DELETE /api/admin/catalog/{id}` |
+
+Catalog moderation exists because `catalog_products` is insert-only
+(`02-data-model.md`): a bad or abusive entry cannot be corrected by its
+author or anyone else, so deletion by an admin is the only remedy.
+Deleting a catalog row never touches any storage's own `products`.
 
 The admin UI is a plain server-rendered table view: user list with a
 "storages" column, storage list with a "members" column, add/remove
