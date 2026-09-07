@@ -1,0 +1,14 @@
+# Local secrets — never committed (see docs/specs/01-architecture-and-deployment.md)
+.env
+
+# Agent scratch state. Deliberately untracked: it is mid-task scratch only, it
+# would conflict on every branch, and anything durable belongs in a GitHub
+# issue or PR comment instead.
+.claude/worklog.md
+
+# Go build output
+/inventory
+*.exe
+
+# Local data volumes
+/data/
