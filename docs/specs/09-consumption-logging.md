@@ -114,6 +114,43 @@ work that was correct.
   single-product image as a one-tap choice, alongside the usual
   suggestions and a custom upload.
 
+#### Optional: background removal on a user photo
+
+A shelf crop has a cluttered background, which makes it a poor product
+thumbnail next to clean provider images. Offering to strip that background
+is worthwhile — with two constraints that shape how it is specified:
+
+- **It needs a different model.** The configured `GEMINI_MODEL`
+  (`01-architecture-and-deployment.md`) is a vision *analysis* model: it
+  reads images and returns text, and cannot return an edited image.
+  Background removal requires a Gemini **image-generation/editing** model,
+  configured separately as `GEMINI_IMAGE_MODEL`. If that variable is
+  unset, or the model is unavailable, **the feature simply does not
+  appear** — no error, no degraded placeholder.
+- **An image model regenerates rather than masks.** It can subtly alter
+  the product itself, including inventing plausible-looking label text.
+  For an image whose only job is helping a human recognize a jar on a
+  shelf that is acceptable, but it must never happen invisibly.
+
+Therefore:
+
+- The offer appears **after** the user picks their own photo, as a
+  suggestion — never automatic, never applied to provider images, never
+  blocking the flow.
+- The result is shown **side by side with the original**, and the user
+  chooses which to keep. The original remains selected until they actively
+  pick the processed version.
+- If the call fails, times out, or returns something unusable, the
+  original is kept silently. This is a cosmetic nicety; it must never cost
+  someone their photo or their place in the flow.
+- The kept image is stored locally like any other user photo, and — like
+  any user photo — is never published to the catalog
+  (`02-data-model.md`).
+- Model availability is handled by the same resilience mechanism as the
+  analysis model (`01-architecture-and-deployment.md`): a deprecated
+  `GEMINI_IMAGE_MODEL` disables the offer and surfaces in the admin
+  banner, rather than failing a review.
+
 **Manual correction is terminal — the AI is never retried automatically.**
 Once a person has said what an item is, the system does not second-guess
 them, re-analyze the row, or overwrite their label on a later pass.
@@ -126,9 +163,45 @@ product image.
 
 **3. Reject** — *"this is not here, write nothing."* Rejected rows stay
 visible but struck through and greyed, so the reviewer can see what was
-proposed and undo a mis-tap rather than having items silently vanish. A
-rejected row is omitted from the confirm payload; nothing about it is
-written.
+proposed and undo a mis-tap rather than having items silently vanish.
+Nothing about a rejected row is written to inventory.
+
+### How a rejected row leaves the review cycle
+
+Nothing can get stuck, because **the unit of review is the job, not the
+row.** A proposal exists only inside its job's `payload`
+(`04-backend-api-conventions.md`); there are no per-item review records to
+strand. When the job is confirmed it becomes `consumed` and disappears
+from the inbox — whether every row was accepted, every row was rejected,
+or anything in between.
+
+To make that airtight rather than merely implied, the confirm payload
+**states a decision for every row**, and rejections are explicit rather
+than silent omissions:
+
+```json
+{
+  "items": [
+    { "row_id": "0", "decision": "accept", "product_id": "018f…", "decrements": [ … ] },
+    { "row_id": "1", "decision": "reject" }
+  ]
+}
+```
+
+- The server validates that the set of `row_id`s **exactly matches** the
+  proposal it issued — no missing rows, no unknown ones. A missing row is
+  `422 validation_failed`, not an implicit rejection. A silently dropped
+  row would otherwise be indistinguishable from a client bug, and would be
+  the one way an item could quietly vanish without a decision.
+- `decision: "reject"` writes nothing: no batch, no `inventory_logs` row,
+  no product.
+- **A job is never partially confirmed.** There is no state in which some
+  rows are done and others still await review. Either the job is confirmed
+  (all rows decided, job `consumed`) or it is untouched and still waiting.
+  A reviewer who does not want to decide yet simply leaves the page —
+  nothing is written and the job stays in the inbox exactly as it was.
+- The only two exits from the inbox are therefore **confirm** and
+  **discard**, and both are explicit user actions.
 
 Beyond the row level:
 
@@ -136,9 +209,9 @@ Beyond the row level:
   `DELETE /api/storages/{storage_id}/jobs/{job_id}`
   (`04-backend-api-conventions.md`), dropping the proposal and its photo.
   It asks for confirmation once, because the photo goes with it.
-- **Rejecting every row and confirming is equivalent to discarding**: the
-  confirm is a no-op that writes nothing and marks the job `consumed`, so
-  it leaves the inbox either way.
+- **Rejecting every row and confirming is equivalent to discarding**,
+  except that discard also deletes the photo: the confirm writes nothing
+  and marks the job `consumed`, so it leaves the inbox either way.
 - An "unrecognized" item must be corrected manually or rejected;
   confirming with an unresolved row is a `422 validation_failed`, never a
   silently skipped line.
@@ -177,3 +250,13 @@ transaction per confirm call:
 - A product with zero total remaining stock after consumption is not
   deleted; it remains browsable at "0 in stock", feeding the reorder
   dashboard in `10-reorder-and-shopping-export.md`.
+- A confirm whose `row_id` set does not exactly match the issued proposal
+  is rejected with `422`; no row can be dropped silently.
+- Confirming leaves the job `consumed` and out of the inbox regardless of
+  how many rows were rejected — no item and no job can remain stuck in
+  review.
+- Every stored image is free of EXIF and other embedded metadata, and
+  phone photos taken in portrait still display upright
+  (`04-backend-api-conventions.md`).
+- With `GEMINI_IMAGE_MODEL` unset, no background-removal control is
+  rendered anywhere and every other flow behaves identically.

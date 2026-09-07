@@ -218,6 +218,8 @@ ADMIN_INITIAL_PASSWORD=changeme-set-on-first-boot
 # --- Vision LLM ---
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-2.0-flash  # may be overridden in-app; see "AI model resilience"
+GEMINI_IMAGE_MODEL=            # optional image-editing model; empty disables
+                               # background removal (09-consumption-logging.md)
 
 # --- Shopping-list image suggestions ---
 SERPAPI_API_KEY=
@@ -253,6 +255,14 @@ degrade visibly rather than failing opaquely:
      line, for operators who prefer redeploying from config.
 - `GET /healthz` reports `{"status":"ok","vision":"ok"|"model_unavailable"}`
   so the degraded state is visible without opening the UI.
+
+**The optional image-editing model** (`GEMINI_IMAGE_MODEL`) follows the
+same rules, with one difference: it is **optional by design**. An empty or
+unavailable value is not a degraded state — the background-removal offer
+in `09-consumption-logging.md` simply does not appear, and nothing else in
+the system is affected. It is listed in the admin banner only when it is
+configured *and* missing from `models.list`, so a deployment that never
+wanted the feature is never told anything is wrong.
 
 ## `docker-compose.yml` (base/production)
 

@@ -149,6 +149,37 @@ Shelf photos can be up to 50MP (`06-vision-shelf-ingestion.md`):
 - Store generated filenames (UUID + extension derived from the sniffed
   content type); never build a path from client-supplied filenames.
 
+### Metadata stripping (mandatory, all uploads)
+
+**No uploaded image is ever written to disk with its embedded metadata
+intact.** A photo taken on a phone typically carries GPS coordinates —
+i.e. the user's home address — plus device model, serial numbers, and
+capture timestamps. That data has no use in an inventory system and every
+downside: it persists in backups, and it travels with any file that is
+later shared or exported.
+
+Applies to **every** image entering the system: shelf photos, product
+photos, consumption photos, and custom product images alike.
+
+1. **Read the EXIF `Orientation` tag first, and apply it to the pixels**
+   if it is not the default. Stripping metadata without doing this is the
+   classic bug that leaves every phone photo sideways — the rotation lives
+   *in* the metadata being deleted.
+2. **Then remove all metadata**: for JPEG, drop the `APPn` (EXIF, XMP,
+   IPTC, thumbnails) and `COM` segments; for PNG, drop `eXIf`, `tEXt`,
+   `iTXt`, and `zTXt` chunks.
+3. Prefer **segment/chunk-level surgery over a full re-encode** when the
+   orientation is already default: it is fast, lossless, and does not cost
+   a 50MP decode-encode cycle on a NAS. Re-encode only when the pixels
+   actually have to change (rotation, or the normalization in
+   `07-shopping-list-reconciliation.md`).
+4. **The stripped file is the only file kept.** The original upload is
+   never persisted alongside it, so there is no copy holding the
+   coordinates.
+
+Stripping happens before the image is handed to the vision API, so
+metadata does not leave the host either.
+
 ### Image storage areas
 
 Three distinct areas under the `uploads` volume, with different lifetimes:

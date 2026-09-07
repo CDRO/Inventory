@@ -230,10 +230,13 @@ the only usable picture of a niche or unlabeled product. That image stays
 local to the storage and is never published to the catalog
 (`02-data-model.md`).
 
-`POST /api/storages/{storage_id}/ingest/{job_id}/confirm` — body: the
-edited list of `{product_id | new_product: {name, category_id,
-item_type}, quantity, location_id, expiration_date}`. Backend, in one
-transaction per confirm call:
+`POST /api/storages/{storage_id}/ingest/{job_id}/confirm` — body: one
+entry per proposed row, each carrying `row_id` and an explicit
+`decision` of `accept` or `reject` (`09-consumption-logging.md`), with
+accepted rows adding `{product_id | new_product: {name, category_id,
+item_type}, quantity, location_id, expiration_date}`. The server rejects a
+payload whose `row_id` set does not exactly match the proposal it issued.
+Backend, in one transaction per confirm call:
 
 1. Creates any `new_product` entries, and **inserts** each into
    `catalog_products` (`INSERT ... ON CONFLICT DO NOTHING` — never an

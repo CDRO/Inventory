@@ -325,6 +325,12 @@ Three consequences that must be implemented alongside it:
   about which of their photos becomes globally visible. The product keeps
   the photo locally; the catalog simply has no image for that entry until
   some storage supplies a provider image for it.
+- **Every uploaded image is stripped of EXIF and all other embedded
+  metadata before it is stored**, catalog or not — see the mandatory
+  stripping rule in `04-backend-api-conventions.md`. A phone photo carries
+  GPS coordinates of the house, the device serial, and capture times; none
+  of that belongs in an inventory system, and it must never survive as far
+  as a file another person could open.
 - **Admin moderation:** admins can delete a catalog row
   (`DELETE /api/admin/catalog/{id}`, `03-auth-and-multi-tenancy.md`), which
   is the only way a bad entry is removed. Deleting a catalog row never
