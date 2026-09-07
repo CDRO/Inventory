@@ -5,13 +5,46 @@ Implements PRD Feature 5. Depends on: [`02-data-model.md`](02-data-model.md),
 job pattern), [`06-vision-shelf-ingestion.md`](06-vision-shelf-ingestion.md)
 (reuses the same Gemini-call + matching-service approach),
 [`05-frontend-pwa-foundations.md`](05-frontend-pwa-foundations.md)
-(`ProposalReviewList`, `useJobPolling`).
+(shared review component, job polling).
 
 ## Goal
 
 User photographs an item they just consumed/used up (e.g. an empty toilet
 paper roll). The system identifies the product and proposes a quantity
 decrement; the user can override the count before confirming.
+
+## Capture mode — decided before the photo, never after
+
+Neither a separate view per action nor a per-photo question. Both are
+wrong for the actual usage pattern: work comes in **runs** — you unpack a
+shopping bag (all additions), or you clear out the fridge (all
+consumption). Asking "was this in or out?" after every shot taxes the
+frequent case to serve the rare one, and splitting the app into
+disconnected views makes the phone camera harder to reach.
+
+Instead there is **one camera entry point with a sticky mode selector**,
+shown as a segmented control above the shutter:
+
+| Mode | Photo means | Endpoint | Sign |
+|---|---|---|---|
+| **Stocking up** | "I am adding this" | `/ingest/product-photos` (`06`) | `+` |
+| **Using up** | "I am removing this" | `/consume/photos` | `−` |
+| **Shelf scan** | "Index everything visible" | `/ingest/shelf-photos` (`06`) | `+` |
+
+- The mode is chosen **before** capture and **persists** across photos,
+  across pages, and across sessions (`localStorage`), defaulting to the
+  last one used. A run of twenty consumption photos asks zero questions —
+  this is the "inventorizing mode" that suppresses the in/out prompt.
+- The current mode is always visible while the camera is open, and is
+  stated again on the resulting review screen ("3 items · using up"), so a
+  mistakenly-left mode is caught before anything is written — the review
+  step (`06-vision-shelf-ingestion.md`) is the safety net, and it exists
+  regardless.
+- The mode is stored on the job, so a proposal reviewed days later still
+  knows its direction without re-asking. @claude: where in the review mode do we find the "reject" option? If none-existant, extend spec accordingly.
+- Switching mode on a review screen is allowed but explicit: it discards
+  the proposal and re-queues the photo under the other mode, rather than
+  silently flipping the sign of a reviewed list.
 
 ## Upload flow
 

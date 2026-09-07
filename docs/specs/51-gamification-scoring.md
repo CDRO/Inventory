@@ -32,7 +32,12 @@ client-supplied.
 
 ## Tables
 
-All primary keys are UUIDv7, per `02-data-model.md`.
+All primary keys are UUIDv7, and enum-like columns are `TEXT` with a
+`CHECK` rather than `VARCHAR(n)` — see the column-type conventions in
+`02-data-model.md`. (No: `VARCHAR(40)` bought nothing here. PostgreSQL
+stores both identically, the `CHECK` is the constraint that actually
+matters, and the length cap would only need widening the first time a
+longer `kind` is added.)
 
 ```sql
 -- Server-written record of scoreable work that inventory_logs does not capture.
@@ -40,7 +45,7 @@ CREATE TABLE contribution_events (
     id         UUID PRIMARY KEY,
     storage_id UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
     user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    kind       VARCHAR(40) NOT NULL
+    kind       TEXT NOT NULL
                CHECK (kind IN ('ai_correction', 'metadata_filled', 'location_mapped',
                                'category_created', 'expiry_confirmed', 'ambiguity_resolved')),
     ref_id     UUID,          -- the product/location/batch the work applied to
@@ -65,7 +70,7 @@ CREATE TABLE user_progress (
 CREATE TABLE achievements_unlocked (
     storage_id     UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
     user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    achievement_key VARCHAR(60) NOT NULL,     -- see 52
+    achievement_key TEXT NOT NULL,            -- see 52
     unlocked_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (storage_id, user_id, achievement_key)
 );
@@ -75,6 +80,14 @@ CREATE TABLE user_preferences (
     user_id             UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     gamification_enabled BOOLEAN NOT NULL DEFAULT TRUE,
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Weeks a user has marked as holiday; streaks pause rather than break (see 52).
+CREATE TABLE holiday_weeks (
+    user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    week_start DATE NOT NULL,          -- Monday
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, week_start)
 );
 
 -- Per-storage toggle for the optional individual leaderboard (principle 3 in 50).
@@ -99,7 +112,7 @@ literals.
 | Action | Source | XP |
 |---|---|---|
 | Item confirmed from a shelf-photo proposal | `inventory_logs.reason = 'vision_ingestion'` | 3 per distinct product (**not** per unit) |
-| Item added via shopping-list resolution | `reason = 'purchase'` | 2 per distinct product |
+| Item added via shopping-list resolution | `reason = 'purchase'` | 3 per distinct product |
 | Consumption logged | `reason = 'consumption'` | **3 per distinct product** — equal to adding, deliberately |
 | AI proposal corrected before confirming | `contribution_events.ai_correction` | 5 |
 | Ambiguous shopping-list line resolved | `ambiguity_resolved` | 4 |
@@ -154,30 +167,108 @@ rule below exists to remove that nudge.
   product id, so deleting and re-adding the same product does not pay
   twice. Deleting a product removes its contribution on the next
   recompute.
-- **Daily cap per action kind** (e.g. 20 scored additions/user/day). Past
-  the cap, the work still happens normally and is still recorded — only
-  the XP stops. Never block the actual inventory action.
+- **No XP cap, ever.** There is deliberately no daily or per-action
+  ceiling on base XP. The single most valuable thing a user can do is the
+  first-time marathon — spending a Saturday indexing a cellar nobody has
+  touched in years — and a cap would punish exactly that, or worse, teach
+  someone to spread real work across days to farm the limit. Diminishing
+  returns is a retention mechanic, not an incentive; it has no place here.
+  Caps exist only inside weekly quests, which are naturally bounded by
+  their own target counts (`52-gamification-quests-and-ui.md`).
 - **Quantity is not scored.** See "per distinct product" above.
 - **Consumption pays as much as addition**, so there is no incentive to
   hoard entries or to avoid logging things being used up.
+- **Same product, same session, one contribution — the 2-hour coalescing
+  window.** Repeatedly adding or removing units of the same product does
+  not multiply XP: events for one `(user, product, kind)` are grouped into
+  a contribution window, and any two events less than **2 hours** apart
+  fall into the same window, which scores once. Taking three yoghurts out
+  one at a time over a morning is one act of logging, and is paid as one.
+  A genuinely separate act — the same product again the next evening —
+  opens a new window and scores again, correctly.
 - **Bulk-ingesting one photo repeatedly earns once.** Confirming a job is
   scored per job (`jobs.status = 'consumed'`), and a job can only be
   consumed once (`04-backend-api-conventions.md`).
-- **Recompute, don't punish.** If data is found to be bogus, the fix is
-  deleting the data and recomputing progress — not a penalty mechanic.
+- **Recompute, don't punish.** Nothing is penalized, and no XP is
+  confiscated as a sanction; miscounts are fixed by recomputing from the
+  ledgers rather than by a penalty mechanic. What "fixing the data" means
+  differs by ledger, and the distinction matters:
+  - `inventory_logs` is **append-only and never deleted**
+    (`02-data-model.md`). A wrong quantity is corrected by a new
+    compensating row with `reason = 'audit'`, and the recompute simply
+    sees the corrected net history.
+  - `contribution_events` **may be deleted** — by an admin, and only for
+    rows recorded in error (a double-counted correction, events from a
+    bug). It is a scoring ledger, not an audit trail, so removing a
+    bogus row is the right fix, and the next recompute reflects it. This
+    is the one deletable ledger in the system, stated explicitly so it is
+    not confused with the inventory audit trail.
+
+## Nightly reconciliation
+
+Progress is recomputed **once a day** (03:00, server-local), rebuilding
+`user_progress` from `inventory_logs` and `contribution_events` with the
+coalescing rules above applied over the completed day.
+
+Intra-day XP shown after an action is provisional and optimistic — it
+assumes each contribution is new. The nightly pass consolidates windows
+that the live path counted separately, so a total may settle *slightly
+lower* the next morning. That is the only direction it moves, and it is
+never framed as a loss: the UI shows a level and a total, not an
+audit trail of adjustments. Anything the reconciliation cannot justify
+from the ledgers simply does not exist in the new total.
+
+Running it nightly rather than continuously also keeps the write path
+cheap: the live update is a single increment, and correctness is the
+batch job's problem.
 
 ## API
 
-All routes are storage-scoped and behind `RequireStorageMember`
-(`04-backend-api-conventions.md`):
+Storage-scoped routes are behind `RequireStorageMember`
+(`04-backend-api-conventions.md`); the `/api/me/*` routes need only a
+session:
 
 | Route | Returns |
 |---|---|
-| `GET /api/storages/{storage_id}/progress` | Caller's XP, level, streak, and the storage health score |
+| `GET /api/storages/{storage_id}/progress` | Caller's XP, level, streak **in this storage**, plus the storage health score |
 | `GET /api/storages/{storage_id}/progress/leaderboard` | Per-member XP — **`404` unless `leaderboard_enabled`** for that storage |
 | `GET`/`PUT /api/storages/{storage_id}/gamification/settings` | Storage-level toggles (any member may change them; rights are flat per `03`) |
-| `GET`/`PUT /api/me/preferences` | The caller's own `gamification_enabled` flag |
+| `GET /api/me/progress` | The caller's **overall** progress across every storage they belong to |
+| `GET`/`PUT /api/me/preferences` | The caller's own `gamification_enabled` flag and holiday weeks |
 
-When the caller has `gamification_enabled = FALSE`, the progress endpoints
+### Per-storage score vs. overall score
+
+The dashboard, quests, leaderboard, and health bar are always about **the
+currently selected storage** — mixing households into one number would
+make the storage goal meaningless.
+
+But a person is one person: someone who keeps a flat, a cellar, and a
+holiday house should see what they have done in total. `GET /api/me/progress`
+returns that, aggregated over the caller's own memberships only:
+
+```json
+{
+  "total_xp": 4820,
+  "overall_level": 10,
+  "longest_streak_weeks": 14,
+  "per_storage": [
+    { "storage_id": "018f...", "name": "Home", "xp": 3900, "level": 9, "streak_weeks": 14 },
+    { "storage_id": "018f...", "name": "Cellar", "xp": 920, "level": 5, "streak_weeks": 2 }
+  ]
+}
+```
+
+- `total_xp` is the sum over the caller's storages; `overall_level` is
+  derived from it with the same formula, so it is not the sum of the
+  per-storage levels.
+- This does **not** breach the non-enumeration rules in
+  `03-auth-and-multi-tenancy.md`: it lists only storages the caller is
+  already a member of and could already see in `GET /api/auth/me`. It
+  never reveals a storage they lack access to, and never compares them to
+  anyone outside a storage.
+- It is surfaced in the user's own profile page, not on any storage
+  dashboard, so the two numbers can never be mistaken for each other.
+
+When the caller has `gamification_enabled = FALSE`, all progress endpoints
 return `204 No Content` and the frontend renders nothing — no empty
 placeholder cards.

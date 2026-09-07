@@ -97,6 +97,7 @@ Every route below re-checks `is_admin` against the database.
 | Read/update app settings (e.g. Gemini model) | `GET`/`PUT /api/admin/settings` |
 | Download regenerated `.env` | `GET /api/admin/settings/env-file` |
 | Search the global product catalog | `GET /api/admin/catalog?q=` |
+| Set a catalog entry's default shelf life | `PATCH /api/admin/catalog/{id}` — body `{default_shelf_life_days}` only |
 | Delete a catalog entry (moderation) | `DELETE /api/admin/catalog/{id}` |
 
 Catalog moderation exists because `catalog_products` is insert-only

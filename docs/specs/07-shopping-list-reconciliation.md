@@ -18,7 +18,7 @@ Primary keys are UUIDv7, per `02-data-model.md`.
 CREATE TABLE shopping_lists (
     id          UUID PRIMARY KEY,
     storage_id  UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
-    source      VARCHAR(20) NOT NULL CHECK (source IN ('text', 'photo')),
+    source      TEXT NOT NULL CHECK (source IN ('text', 'photo')),
     created_by  UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -27,7 +27,7 @@ CREATE TABLE shopping_list_items (
     id                 UUID PRIMARY KEY,
     shopping_list_id   UUID NOT NULL REFERENCES shopping_lists(id) ON DELETE CASCADE,
     raw_text           VARCHAR(255) NOT NULL,
-    status             VARCHAR(20) NOT NULL
+    status             TEXT NOT NULL
                        CHECK (status IN ('exact_match', 'new_item', 'ambiguous', 'resolved')),
     matched_product_id UUID REFERENCES products(id) ON DELETE SET NULL,
     resolved_quantity  INT,
@@ -143,12 +143,15 @@ exactly 3 suggestions:
 ```json
 {
   "suggestions": [
-    { "type": "icon", "url": "https://api.iconify.design/...", "source": "iconify" },
-    { "type": "photo", "url": "https://...", "source": "serpapi" },
-    { "type": "photo", "url": "https://...", "source": "serpapi" }
+    { "type": "icon",  "url": "/api/storages/018f.../images/9c1f…", "source": "iconify" },
+    { "type": "photo", "url": "/api/storages/018f.../images/4ab7…", "source": "serpapi" },
+    { "type": "photo", "url": "/api/storages/018f.../images/e02d…", "source": "serpapi" }
   ]
 }
 ```
+
+Every `url` is on our own origin and serves bytes already fetched into the
+cache below — the browser never contacts Iconify, SerpAPI, or Google.
 
 - **1 icon/vector** via the **Iconify API** (`https://api.iconify.design`,
   no API key required): query a relevant icon set (e.g. search
@@ -160,9 +163,14 @@ exactly 3 suggestions:
   (`https://serpapi.com/search?engine=google_images&q={text}&api_key=...`,
   `SERPAPI_API_KEY` from `01-architecture-and-deployment.md`), taking the
   top 2 image results.
-- The endpoint calls these two providers server-side (never exposing the
-  SerpAPI key to the frontend) and returns plain URLs the frontend `<img>`
-  tags reference directly.
+- **The browser never talks to SerpAPI, Google, or Iconify.** The endpoint
+  calls both providers server-side (never exposing the SerpAPI key),
+  **downloads each candidate image**, stores it in the suggestion cache,
+  and returns URLs on our own origin
+  (`/api/storages/{storage_id}/images/{hash}`) that the frontend `<img>`
+  tags reference. Hot-linking a third-party URL would leak every viewer's
+  IP and user-agent to that host, break on a LAN-only NAS, and let the
+  remote server change the picture after the fact.
 - The user can: pick one of the 3, upload a custom photo instead
   (`POST /api/storages/{storage_id}/products/{id}/image` multipart), or
   re-trigger the search with an edited query (calls the same endpoint
@@ -172,6 +180,41 @@ exactly 3 suggestions:
   return fewer than 3 suggestions rather than failing the whole New Item
   flow; the user can still proceed with a manually uploaded photo or no
   image at all.
+
+### Image cache
+
+Two tiers, because a browsed suggestion and a chosen product image have
+very different lifetimes (`04-backend-api-conventions.md`):
+
+**Suggestion cache — `/data/cache/imagesearch/`, capped at 1GB.**
+
+- Every fetched candidate is stored once, keyed by the SHA-256 of its
+  source URL; the same query later re-serves the cached bytes instead of
+  spending another API call.
+- A `cached_images` table tracks `hash`, `byte_size`, `content_type`,
+  `source_url`, `fetched_at`, `last_accessed_at`.
+- **Enforcement of the 1GB cap:** a cleanup routine runs hourly *and*
+  immediately after any write that pushes the total over the cap. It
+  evicts least-recently-accessed entries until total size is ≤ 90% of the
+  cap (a low-water mark, so eviction isn't re-triggered on every
+  subsequent write). Entries referenced by a product (i.e. promoted, see
+  below) are never in this tier and so are never evicted. @claude: explicitely state, how recent access is managed (using `touch`, I suppose?)
+- Per-image sanity limits before storing: reject anything over 5MB or
+  whose sniffed content type is not an image. An evicted image is simply
+  re-fetched if it is ever needed again. @claude: Oversized images should not be rejected, since we then might refetch the same image over and over. Instead, I want a compressed version of the image. The same goes for sniffed types that do not match images: if it is a gif, we make a static version and store this one.
+
+**Product images — `/data/uploads/products/`, permanent.**
+
+When the user picks a suggestion for a product, the file is **promoted**:
+copied out of the suggestion cache into permanent storage, and
+`products.image_url` is set to its stable local path. From that moment it
+is outside the cache and outside the eviction budget entirely — choosing
+an image must never be undone by a cleanup sweep. The same applies to a
+catalog suggestion accepted into a storage (`02-data-model.md`) and to a
+user-uploaded custom photo, which goes straight to permanent storage.
+
+Deleting a product deletes its permanent image, provided no other product
+references the same file.
 
 ## Acceptance criteria
 

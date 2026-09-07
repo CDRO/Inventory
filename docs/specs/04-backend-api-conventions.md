@@ -149,6 +149,20 @@ Shelf photos can be up to 50MP (`06-vision-shelf-ingestion.md`):
 - Store generated filenames (UUID + extension derived from the sniffed
   content type); never build a path from client-supplied filenames.
 
+### Image storage areas
+
+Three distinct areas under the `uploads` volume, with different lifetimes:
+
+| Path | Holds | Lifetime |
+|---|---|---|
+| `/data/uploads/ingest/` | Photos awaiting or backing a review job | Until the job is `consumed` or discarded, then 30 days |
+| `/data/uploads/products/` | The image finally chosen for a product | Permanent, until the product is deleted |
+| `/data/cache/imagesearch/` | Fetched SerpAPI/Iconify suggestion images | Evictable; hard 1GB cap (`07-shopping-list-reconciliation.md`) |
+
+No external image URL is ever handed to the browser: suggestions are
+fetched server-side, cached, and served from our own origin
+(`07-shopping-list-reconciliation.md`).
+
 ## Background jobs
 
 Vision calls take seconds and must not block a request. There is no
@@ -159,9 +173,10 @@ external queue broker — at household scale, in-process goroutines plus a
 CREATE TABLE jobs (
     id           UUID PRIMARY KEY,       -- UUIDv7, returned to the client
     storage_id   UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
-    kind         VARCHAR(40) NOT NULL
-                 CHECK (kind IN ('shelf_ingestion', 'shopping_list_photo', 'consumption_photo')),
-    status       VARCHAR(20) NOT NULL
+    kind         TEXT NOT NULL
+                 CHECK (kind IN ('shelf_ingestion', 'product_photo',
+                                 'shopping_list_photo', 'consumption_photo')),
+    status       TEXT NOT NULL
                  CHECK (status IN ('pending', 'done', 'failed', 'consumed')),
     payload      JSONB,                  -- parsed proposal once done
     error        TEXT,
@@ -177,6 +192,11 @@ CREATE TABLE jobs (
 - `GET /api/storages/{storage_id}/jobs/{job_id}` returns status and, once
   `done`, the proposal payload. The job is storage-scoped like everything
   else, so one storage's members cannot poll another's job.
+- `GET /api/storages/{storage_id}/jobs?status=…` lists jobs for the review
+  inbox, and `DELETE /api/storages/{storage_id}/jobs/{job_id}` discards
+  one. Uploading and reviewing are decoupled: a `done` job waits
+  indefinitely, is visible to every member of the storage, and is never
+  auto-expired while unreviewed (`06-vision-shelf-ingestion.md`).
 - On process restart, jobs left `pending` are marked `failed` with a
   retryable error at startup — never left hanging forever.
 - A job moves to `consumed` when its confirm endpoint has been applied, so

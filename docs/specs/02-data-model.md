@@ -48,6 +48,19 @@ secret. Use 256 bits from a CSPRNG, base64url-encoded.
 
 All foreign keys are `UUID` accordingly; the DDL below shows this.
 
+## Column type conventions
+
+- **Enum-like columns use `TEXT` with a `CHECK` constraint**, never
+  `VARCHAR(n)`. In PostgreSQL a `VARCHAR` length limit buys no storage or
+  performance advantage over `TEXT` — values are length-prefixed either
+  way — so when a `CHECK` already restricts the value to a fixed set, the
+  length cap is redundant noise that additionally has to be widened
+  (and, on older servers, rewritten) the first time a longer value is
+  added. The `CHECK` is the real constraint; let it be the only one.
+- `VARCHAR(n)` is kept only where the bound is a genuine domain rule about
+  free text — names, usernames — not a guess at how long an identifier
+  might get.
+
 ## Entity overview
 
 ```
@@ -194,20 +207,23 @@ Deleting a category that is still referenced by products must be rejected
 
 ```sql
 CREATE TABLE products (
-    id          UUID PRIMARY KEY,
-    storage_id  UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
-    name        VARCHAR(255) NOT NULL,
-    category_id UUID REFERENCES categories(id) ON DELETE RESTRICT,
-    item_type   VARCHAR(20) NOT NULL DEFAULT 'long_shelf_life'
-                CHECK (item_type IN ('perishable', 'long_shelf_life', 'non_perishable')),
-    min_stock   INT NOT NULL DEFAULT 0,
-    image_url   TEXT,
-    icon_name   VARCHAR(100),
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    id                      UUID PRIMARY KEY,
+    storage_id              UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
+    name                    VARCHAR(255) NOT NULL,
+    category_id             UUID REFERENCES categories(id) ON DELETE RESTRICT,
+    catalog_id              UUID REFERENCES catalog_products(id) ON DELETE SET NULL,
+    item_type               TEXT NOT NULL DEFAULT 'long_shelf_life'
+                            CHECK (item_type IN ('perishable', 'long_shelf_life', 'non_perishable')),
+    default_shelf_life_days INT,          -- local override; NULL = resolve per 08
+    min_stock               INT NOT NULL DEFAULT 0,
+    image_url               TEXT,
+    icon_name               VARCHAR(100),
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_products_storage_id ON products(storage_id);
 CREATE INDEX idx_products_category_id ON products(category_id);
+CREATE INDEX idx_products_catalog_id ON products(catalog_id);
 CREATE INDEX idx_products_name_trgm ON products USING gin (name gin_trgm_ops);
 ```
 
@@ -216,6 +232,19 @@ application-enforced, like the tree invariants above. `item_type` drives
 default-expiry behavior (`08-expiration-and-classification.md`) and
 replaces the PRD draft's boolean `is_perishable`. The trigram index backs
 the matching service in `07-shopping-list-reconciliation.md`.
+
+`catalog_id` records which catalog entry this product was created from, if
+any. It is **server-side only and never exposed in any API response** — it
+exists so that an admin correcting a catalog entry's shelf life can
+cascade that correction (`08-expiration-and-classification.md`). It points
+at a global, anonymous row, so it reveals nothing about other storages.
+Because `catalog_products` is defined after this table in the document,
+the migration must create `catalog_products` first (or add this FK in a
+follow-up migration).
+
+`default_shelf_life_days` is this storage's own override for the product,
+and wins over both the catalog value and the category chain; see the
+resolution order in `08-expiration-and-classification.md`.
 
 ### `catalog_products` (global, anonymous, insert-only)
 
@@ -230,7 +259,7 @@ CREATE TABLE catalog_products (
     display_name            VARCHAR(255) NOT NULL,
     base_id                 UUID REFERENCES catalog_products(id) ON DELETE SET NULL,
     category_path           TEXT,          -- denormalized text, e.g. "Food > Dairy > Cheese"
-    item_type               VARCHAR(20) NOT NULL
+    item_type               TEXT NOT NULL
                             CHECK (item_type IN ('perishable', 'long_shelf_life', 'non_perishable')),
     image_url               TEXT,
     icon_name               VARCHAR(100),
@@ -258,11 +287,12 @@ CREATE INDEX idx_catalog_products_base_id ON catalog_products(base_id);
   `categories` FK, precisely because categories are storage-scoped and an
   FK would create a cross-storage link.
 
-**Population — insert-only. Rows are never updated after creation.**
+**Population — insert-only. Rows are never updated after creation, with
+one narrow admin exception (below).**
 
 `INSERT ... ON CONFLICT (normalized_name) DO NOTHING`. There is no upsert,
-no "last write wins", and no edit path — not from the app, not from a
-product edit in any storage.
+no "last write wins", and no user-facing edit path — not from the app, not
+from a product edit in any storage.
 
 The reason is abuse, not tidiness: a globally-visible row that any storage
 can rewrite is a covert messaging channel between households. Once anyone
@@ -290,6 +320,17 @@ Three consequences that must be implemented alongside it:
   (`DELETE /api/admin/catalog/{id}`, `03-auth-and-multi-tenancy.md`), which
   is the only way a bad entry is removed. Deleting a catalog row never
   touches any storage's own `products`.
+
+**The one permitted update: `default_shelf_life_days`, by an admin only.**
+
+An admin may edit that single column
+(`PATCH /api/admin/catalog/{id}`, `03-auth-and-multi-tenancy.md`), and the
+change cascades to existing data per
+`08-expiration-and-classification.md`. This does not reopen the abuse hole
+the insert-only rule closes: the field is a **bounded integer written only
+by an admin**, so it cannot carry a message to another household, unlike
+the free-text and image fields, which stay permanently immutable. No other
+column may be updated by anyone, ever.
 
 **Variants (`base_id`) — handling "tomatoes" vs "cherry tomatoes".**
 
@@ -330,12 +371,14 @@ expiration date. A product's total stock is the sum of its batches.
 
 ```sql
 CREATE TABLE inventory_batches (
-    id              UUID PRIMARY KEY,
-    product_id      UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-    location_id     UUID NOT NULL REFERENCES locations(id) ON DELETE RESTRICT,
-    quantity        INT NOT NULL DEFAULT 1 CHECK (quantity >= 0),
-    expiration_date DATE,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    id                UUID PRIMARY KEY,
+    product_id        UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    location_id       UUID NOT NULL REFERENCES locations(id) ON DELETE RESTRICT,
+    quantity          INT NOT NULL DEFAULT 1 CHECK (quantity >= 0),
+    expiration_date   DATE,
+    expiration_source TEXT NOT NULL DEFAULT 'derived'
+                      CHECK (expiration_source IN ('derived', 'user')),
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_inventory_batches_product_id ON inventory_batches(product_id);
@@ -345,6 +388,16 @@ CREATE INDEX idx_inventory_batches_location_id ON inventory_batches(location_id)
 A batch reaching `quantity = 0` is deleted in the same transaction that
 decremented it — see `09-consumption-logging.md`. Application code must
 verify `location_id` belongs to the same storage as the product.
+
+**A batch lives at exactly one location.** Moving part of a batch
+elsewhere is a *split* into two batches, not a batch with two homes; see
+the split/move operations in `06-vision-shelf-ingestion.md`.
+
+`expiration_source` records whether `expiration_date` was computed from
+the shelf-life rules (`derived`) or typed by a person (`user`). It exists
+so that an admin's shelf-life correction can cascade into existing
+`derived` dates without ever overwriting a date a human deliberately set
+(`08-expiration-and-classification.md`).
 
 ### `inventory_logs`
 
@@ -356,8 +409,9 @@ CREATE TABLE inventory_logs (
     product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     batch_id   UUID REFERENCES inventory_batches(id) ON DELETE SET NULL,
     change_qty INT NOT NULL,
-    reason     VARCHAR(50) NOT NULL
-               CHECK (reason IN ('purchase', 'consumption', 'audit', 'vision_ingestion')),
+    reason     TEXT NOT NULL
+               CHECK (reason IN ('purchase', 'consumption', 'audit',
+                                 'vision_ingestion', 'move')),
     created_by UUID REFERENCES users(id) ON DELETE SET NULL,
     timestamp  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -367,9 +421,13 @@ CREATE INDEX idx_inventory_logs_timestamp ON inventory_logs(timestamp);
 ```
 
 `change_qty` is signed: positive for additions (purchase, vision
-ingestion), negative for consumption; `audit` may be either sign. Every
-write to `inventory_batches.quantity` must be paired, in the same
-transaction, with an `inventory_logs` row explaining it. This table is the
+ingestion), negative for consumption; `audit` may be either sign. A
+`move` (a batch split or relocation, `06-vision-shelf-ingestion.md`)
+writes **two** rows that sum to zero — negative at the origin, positive at
+the destination — so product totals are unaffected while per-location
+figures stay correct. Every write to `inventory_batches.quantity` must be
+paired, in the same transaction, with an `inventory_logs` row explaining
+it. This table is the
 data source for `11-reporting-and-analytics.md`, and — because it already
 records who did what, when — the ledger the gamification specs
 (`50-gamification-overview.md`) score from.

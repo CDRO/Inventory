@@ -63,11 +63,17 @@ A per-user setting disables the whole layer: no XP, no toasts, no cards,
 no quests. Turning it off must never disable or degrade any inventory
 feature, and must not affect other members of the same storage.
 
-**5. Gentle streaks.**
+**5. Gentle streaks, with a holiday mode.**
 Streaks are measured in **weeks, not days**. A household does not do
-inventory daily, and a daily streak turns a two-day holiday into a
+inventory daily, and a daily streak turns a two-day absence into a
 punishment. Missing a week costs the streak; it never costs progress
 already earned.
+
+Because a real absence should not cost anything either, a user can mark
+weeks as **holiday**: those weeks neither continue nor break the streak,
+they pause it. The budget and rules are in
+`52-gamification-quests-and-ui.md`. Nothing about being away should feel
+like a penalty — that is the whole point of a streak being gentle.
 
 **6. No cross-storage anything.**
 No global leaderboards, no "you're in the top 10% of households", no

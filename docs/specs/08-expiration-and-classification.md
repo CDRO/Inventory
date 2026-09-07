@@ -10,7 +10,7 @@ Implements PRD Feature 4. Depends on: [`02-data-model.md`](02-data-model.md)
 - `perishable` — e.g. fruits, dairy, fresh produce.
 - `long_shelf_life` — e.g. canned goods, dry pasta, rice.
 - `non_perishable` — e.g. plush toys, trading cards, collectibles,
-  tools — items that don't meaningfully expire.
+  tools, clothes — items that don't meaningfully expire.
 
 Set when a product is created (vision ingestion review, shopping-list New
 Item flow, or manual product creation) — always user-editable afterward
@@ -20,15 +20,21 @@ via a product edit screen (`PATCH /api/storages/{storage_id}/products/{id}`).
 
 Shelf-life rules are **data, not code**: they live in
 `categories.default_shelf_life_days` (`02-data-model.md`), so a user can
-edit them in the category tree without a code change or redeploy.
+edit them in the category tree without a code change or redeploy — and,
+for a specific product, in `catalog_products.default_shelf_life_days`,
+which only an admin may set (see "Catalog shelf life", below).
 
 Resolution for a new batch, in order — first non-`NULL` wins:
 
-1. The product's own category (`products.category_id`).
-2. Each ancestor category, walking up the tree toward the root.
-3. The `item_type` fallback map in Go (`internal/expiry`), used when no
-   category in the chain defines a value, or when the product has no
-   category at all:
+1. `products.default_shelf_life_days` — this storage's own override for
+   this product.
+2. `catalog_products.default_shelf_life_days` for the catalog entry the
+   product came from (`products.catalog_id`) — the admin-curated value.
+3. The product's own category (`products.category_id`).
+4. Each ancestor category, walking up the tree toward the root.
+5. The `item_type` fallback map in Go (`internal/expiry`), used when
+   nothing above defines a value, or when the product has no category at
+   all:
 
 ```go
 // internal/expiry/defaults.go — final fallback only
@@ -52,6 +58,46 @@ server-side at batch-creation time (in the confirm endpoints of
 and always shown as an editable field in review UIs before the batch is
 created — never silently applied without the user seeing it. A resolved
 value of "no expiration" leaves `expiration_date` `NULL`.
+
+Batches record where their date came from in
+`inventory_batches.expiration_source` (`02-data-model.md`): `'user'` when
+a person typed or cleared it, `'derived'` when they accepted the computed
+default. That distinction is what makes the cascade below safe.
+
+## Catalog shelf life (admin-only, cascading)
+
+Category rules are coarse — "dairy: 10 days" is wrong for both fresh milk
+and hard cheese. So a shelf life may also be set **per product** on the
+global catalog entry, by an admin only:
+
+- `PATCH /api/admin/catalog/{id}` with `{default_shelf_life_days}` is the
+  **only** permitted update to a `catalog_products` row
+  (`02-data-model.md` explains why this single bounded integer does not
+  reopen the covert-channel problem that makes the table insert-only).
+- Ordinary users never edit the catalog. A household that disagrees with
+  the curated value sets `products.default_shelf_life_days` locally, which
+  outranks it.
+
+**Cascade against current state.** Changing that value is a correction —
+it means the old number was wrong — so it applies to data already in the
+database, not only to future batches:
+
+1. Find every product with `catalog_id = {id}`, across all storages.
+2. Recompute `expiration_date` for their existing batches **where
+   `expiration_source = 'derived'`**, as
+   `created_at (date) + newly_resolved_days`.
+3. **Never touch a batch with `expiration_source = 'user'`.** A date a
+   person read off a package and typed in outranks any rule, forever.
+4. Skip products that set their own `products.default_shelf_life_days`,
+   since the catalog value does not apply to them.
+5. Run it as a background job (`04-backend-api-conventions.md`) — the
+   admin gets a count of affected batches, and the work is logged. It
+   writes no `inventory_logs` rows: quantities do not change.
+
+The same cascade runs, scoped to one storage, when a user changes
+`categories.default_shelf_life_days` or
+`products.default_shelf_life_days`: derived dates are recomputed,
+user-set dates are left alone.
 
 ## Editing / removing expiry
 
@@ -89,8 +135,16 @@ client-side from `expiration_date` relative to "today":
 - Creating a batch without an explicit expiration date always applies the
   resolved default (or `NULL` when the resolution yields "no expiration"),
   never leaves it unset by omission.
-- Changing a product's `item_type` or `category_id` after creation does
-  not retroactively change `expiration_date` on already-existing batches —
-  it only affects defaults for batches created afterward.
-- Editing `default_shelf_life_days` on a category takes effect immediately
-  for subsequently created batches, with no redeploy.
+- A batch whose `expiration_source = 'user'` never has its
+  `expiration_date` changed by any cascade, rule edit, category
+  reassignment, or admin action — only by a person editing that batch.
+- Changing a shelf-life rule (`categories.default_shelf_life_days`,
+  `products.default_shelf_life_days`, or the admin-only catalog value)
+  recomputes `expiration_date` on existing `derived` batches, and takes
+  effect immediately for new ones, with no redeploy.
+- Re-assigning a product to a different category likewise recomputes
+  `derived` dates for its existing batches: `derived` means "follows the
+  current rules", and a stale derived date is simply a wrong one. @claude: what happens if a user removes the expiration date?
+- Changing a product's `item_type` affects resolution only where it is
+  actually consulted — the final fallback — and never overrides a more
+  specific rule.
