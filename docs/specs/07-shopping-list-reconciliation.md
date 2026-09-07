@@ -176,6 +176,10 @@ cache below — the browser never contacts Iconify, SerpAPI, or Google.
   re-trigger the search with an edited query (calls the same endpoint
   again with different `query` text — useful when the auto-derived query
   from `raw_text` was poor).
+- A custom uploaded photo is stored locally for that product and, unlike a
+  provider image, is **never written to the catalog entry**
+  (`02-data-model.md`): the name is shareable, a photo taken in someone's
+  home is not.
 - If SerpAPI or Iconify is unreachable/rate-limited, degrade gracefully:
   return fewer than 3 suggestions rather than failing the whole New Item
   flow; the user can still proceed with a manually uploaded photo or no

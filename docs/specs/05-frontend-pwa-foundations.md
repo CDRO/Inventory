@@ -116,15 +116,25 @@ inventory. Implement that list once:
   small DOM helpers — no string-concatenated HTML for user- or AI-supplied
   values (avoid injection; use `textContent`).
 - Each row exposes editable quantity, product, and location/expiry fields
-  as appropriate, plus a per-row include/exclude toggle.
+  as appropriate, and the **three row actions** defined in
+  `09-consumption-logging.md`: accept (with edits), correct manually, and
+  reject. All three behave identically across the features that use this
+  component — a user who learns the review screen once has learned all of
+  them.
+- Manual correction may set a product image from the item's own crop or
+  the uploaded photo itself, without any further AI call.
+- Rejected rows remain rendered, struck through, and reversible; they are
+  omitted from the confirm payload rather than removed from the DOM.
 - A single "Confirm" action posts the edited set to the feature's confirm
-  endpoint. Nothing is written before that.
+  endpoint, and a "Discard" action drops the whole job. Nothing is written
+  before one of them.
 
 ## Shared tree view (`js/tree.js`)
 
 Used for both `locations` and `categories` (identical shape per
-`02-data-model.md`): expand/collapse, inline add-child, rename, and a
-"move to…" picker. Drag-and-drop is optional and not required.
+`02-data-model.md`): expand/collapse, inline add-child, rename, a
+"move to…" picker, and required drag-and-drop re-parenting via native
+HTML5 drag events (`06-vision-shelf-ingestion.md`).
 
 ## Styling
 

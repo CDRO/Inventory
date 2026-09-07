@@ -309,13 +309,22 @@ Three consequences that must be implemented alongside it:
 - **Catalog text is untrusted input.** It was written by a stranger.
   Render it with `textContent`, never as HTML (`05-frontend-pwa-foundations.md`),
   and never interpolate it into a prompt sent to Gemini.
-- **`image_url` may only ever be a provider URL** (a SerpAPI result or an
-  Iconify icon) or a locally stored upload path — never an arbitrary
-  user-supplied URL. A URL pointing at someone else's server would let its
+- **`image_url` may only ever reference an image that came from a
+  provider** — a SerpAPI result or an Iconify icon, normalized and stored
+  locally (`07-shopping-list-reconciliation.md`). Never an arbitrary
+  user-supplied URL: one pointing at someone else's server would let its
   owner change the picture other households see after the fact, and would
-  expose viewers' IP addresses to them. When a storage accepts a catalog
-  suggestion, fetch the image once and store a local copy
-  (`04-backend-api-conventions.md` upload storage), then reference that.
+  expose viewers' IP addresses to them.
+- **A user-uploaded photo is never published to the catalog.** When a
+  product's image is a photo the user took — a custom upload, or a crop of
+  their own shelf/product photo (`09-consumption-logging.md`) — the
+  catalog row is inserted with `image_url` left `NULL`. That picture was
+  taken inside someone's home; it may show their kitchen, their
+  handwriting, their belongings. Names and categories are shareable
+  metadata, private photographs are not, and no user should have to reason
+  about which of their photos becomes globally visible. The product keeps
+  the photo locally; the catalog simply has no image for that entry until
+  some storage supplies a provider image for it.
 - **Admin moderation:** admins can delete a catalog row
   (`DELETE /api/admin/catalog/{id}`, `03-auth-and-multi-tenancy.md`), which
   is the only way a bad entry is removed. Deleting a catalog row never

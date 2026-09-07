@@ -88,18 +88,50 @@ batch with the nearest `expiration_date` (typically the intended
 first-out one) but let the user reassign to a different batch or split
 across batches if the total exceeds one batch's quantity.
 
-### Rejecting
+### Rejecting and correcting
 
-Vision models hallucinate items and misread labels, so rejecting must be
-as easy as accepting — at two levels, both provided by the shared review
-component (`05-frontend-pwa-foundations.md`) and therefore identical in
-`06`, `07`, and here:
+Vision models hallucinate items and misread labels, so disagreeing with a
+proposal must be as easy as accepting it. Every row therefore offers
+**three** actions, not two — provided by the shared review component
+(`05-frontend-pwa-foundations.md`) and identical in `06`, `07`, and here:
 
-- **Per item — a reject toggle on every row.** Rejected rows stay visible
-  but struck through and greyed, so the reviewer can see what the AI
-  proposed and undo a mis-tap, rather than having items silently vanish.
-  A rejected row is simply omitted from the confirm payload; nothing about
-  it is written.
+**1. Accept** — with any edits to product, quantity, location, or expiry.
+
+**2. Correct manually** — *"the AI got this wrong, here is what it
+actually is."* This is the right action for a misidentification, and
+usually a better one than rejecting: the photo and the count were fine,
+only the identification failed, so throwing the whole row away discards
+work that was correct.
+
+- Pick an existing product by autocomplete (the only option here in `09`,
+  since consumption never creates products), or — in the flows that can
+  create products (`06`, `07`, `10`) — type a name and create one.
+- A typed name still runs matching stages 1 and 2 (local products, then
+  the anonymous catalog) because those are free and local, but **stage 3
+  never re-invokes Gemini for that row**.
+- The product image can come from the **photo the user already took**:
+  offer the item's own crop (from `bounding_box`) or the whole
+  single-product image as a one-tap choice, alongside the usual
+  suggestions and a custom upload.
+
+**Manual correction is terminal — the AI is never retried automatically.**
+Once a person has said what an item is, the system does not second-guess
+them, re-analyze the row, or overwrite their label on a later pass.
+Re-analysis exists only as an explicit action on the whole job
+("Analyze again"), never as an automatic retry. This matters most for
+exactly the case where vision keeps failing: niche, regional, homemade, or
+unlabeled products, where the model will not get it right on the second
+attempt either, and where the user's own photo *is* the best possible
+product image.
+
+**3. Reject** — *"this is not here, write nothing."* Rejected rows stay
+visible but struck through and greyed, so the reviewer can see what was
+proposed and undo a mis-tap rather than having items silently vanish. A
+rejected row is omitted from the confirm payload; nothing about it is
+written.
+
+Beyond the row level:
+
 - **Whole proposal — "Discard".** Calls
   `DELETE /api/storages/{storage_id}/jobs/{job_id}`
   (`04-backend-api-conventions.md`), dropping the proposal and its photo.
@@ -107,12 +139,16 @@ component (`05-frontend-pwa-foundations.md`) and therefore identical in
 - **Rejecting every row and confirming is equivalent to discarding**: the
   confirm is a no-op that writes nothing and marks the job `consumed`, so
   it leaves the inbox either way.
-- An "unrecognized" item the reviewer cannot map to a product must be
-  either assigned a product or rejected; confirming with an unresolved row
-  is a `422 validation_failed`, never a silently skipped line.
+- An "unrecognized" item must be corrected manually or rejected;
+  confirming with an unresolved row is a `422 validation_failed`, never a
+  silently skipped line.
 - Rejection is not scored, and carries no penalty
-  (`51-gamification-scoring.md`) — correcting the AI is worth more than
-  accepting it, and throwing out a bad proposal is part of that.
+  (`51-gamification-scoring.md`); manual correction is scored **more**
+  than acceptance, because it is the act that keeps the data truthful.
+- **A user-supplied photo never leaves the storage.** A manually chosen
+  product name may be inserted into the global catalog, but a photo taken
+  inside someone's home must not be: see the image rule in
+  `02-data-model.md`.
 
 ## Confirm endpoint
 

@@ -218,8 +218,17 @@ image), the matched/candidate product name (editable, with autocomplete
 against existing products), an editable quantity, an editable expiry
 (defaulted per `08-expiration-and-classification.md`), and an editable
 location path (a picker rooted at this storage's tree, defaulting to the
-AI's proposal or the upload's `location_id` hint). Each item can be
-individually removed before confirming (e.g. a false-positive detection).
+AI's proposal or the upload's `location_id` hint). Each row carries the
+three actions defined in `09-consumption-logging.md` — accept, correct
+manually, reject — so a false-positive detection is dropped and a
+misidentified item is renamed by hand rather than re-run through the
+model.
+
+Manual correction here may also create a new product, and its image may be
+**the item's own crop from this photo** (`bounding_box`), which is often
+the only usable picture of a niche or unlabeled product. That image stays
+local to the storage and is never published to the catalog
+(`02-data-model.md`).
 
 `POST /api/storages/{storage_id}/ingest/{job_id}/confirm` — body: the
 edited list of `{product_id | new_product: {name, category_id,
