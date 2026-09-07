@@ -1,0 +1,2 @@
+Unrelated scratch file. Nothing to do with the README.
+Left here on purpose to trip the scope check.
