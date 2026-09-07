@@ -41,7 +41,7 @@ shown as a segmented control above the shutter:
   step (`06-vision-shelf-ingestion.md`) is the safety net, and it exists
   regardless.
 - The mode is stored on the job, so a proposal reviewed days later still
-  knows its direction without re-asking. @claude: where in the review mode do we find the "reject" option? If none-existant, extend spec accordingly.
+  knows its direction without re-asking.
 - Switching mode on a review screen is allowed but explicit: it discards
   the proposal and re-queues the photo under the other mode, rather than
   silently flipping the sign of a reviewed list.
@@ -87,6 +87,32 @@ partial consumption from a specific shelf vs. the fridge). Default to the
 batch with the nearest `expiration_date` (typically the intended
 first-out one) but let the user reassign to a different batch or split
 across batches if the total exceeds one batch's quantity.
+
+### Rejecting
+
+Vision models hallucinate items and misread labels, so rejecting must be
+as easy as accepting — at two levels, both provided by the shared review
+component (`05-frontend-pwa-foundations.md`) and therefore identical in
+`06`, `07`, and here:
+
+- **Per item — a reject toggle on every row.** Rejected rows stay visible
+  but struck through and greyed, so the reviewer can see what the AI
+  proposed and undo a mis-tap, rather than having items silently vanish.
+  A rejected row is simply omitted from the confirm payload; nothing about
+  it is written.
+- **Whole proposal — "Discard".** Calls
+  `DELETE /api/storages/{storage_id}/jobs/{job_id}`
+  (`04-backend-api-conventions.md`), dropping the proposal and its photo.
+  It asks for confirmation once, because the photo goes with it.
+- **Rejecting every row and confirming is equivalent to discarding**: the
+  confirm is a no-op that writes nothing and marks the job `consumed`, so
+  it leaves the inbox either way.
+- An "unrecognized" item the reviewer cannot map to a product must be
+  either assigned a product or rejected; confirming with an unresolved row
+  is a `422 validation_failed`, never a silently skipped line.
+- Rejection is not scored, and carries no penalty
+  (`51-gamification-scoring.md`) — correcting the AI is worth more than
+  accepting it, and throwing out a bad proposal is part of that.
 
 ## Confirm endpoint
 

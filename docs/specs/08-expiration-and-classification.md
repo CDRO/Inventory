@@ -103,9 +103,35 @@ user-set dates are left alone.
 
 - `PATCH /api/storages/{storage_id}/inventory-batches/{id}` accepts
   `{expiration_date: "YYYY-MM-DD" | null}` to edit or clear a batch's
-  expiration independent of its product's default rule.
+  expiration independent of its product's default rule. Either way, the
+  write also sets `expiration_source = 'user'`.
 - Clearing (`null`) is a valid, first-class state — e.g. a canned good the
   user knows has no printed date — not an error state.
+
+### Two kinds of "no expiry", and why the difference matters
+
+`expiration_date IS NULL` can mean two different things, and
+`expiration_source` is what tells them apart:
+
+| State | Meaning | Behavior on a rule change or cascade |
+|---|---|---|
+| `NULL` + `derived` | No rule produced a date (e.g. a `non_perishable` item) | Recomputed like any derived value — if a rule later supplies a shelf life, this batch gets a date |
+| `NULL` + `user` | **A person deliberately said this has no expiry** | Never touched again by any cascade, rule edit, category reassignment, or admin correction |
+
+So removing an expiration date is a **sticky, deliberate statement**, not
+an empty field waiting to be refilled. Without this distinction, a user who
+clears the date on a jar with no printed date would find the system
+helpfully putting one back the next time an admin adjusted a shelf-life
+rule — and would reasonably conclude the app ignores them.
+
+- The UI must reflect this: a batch showing "no expiry" that a person set
+  reads as *"No expiry (set by you)"*, not as a blank field.
+- **Getting back to automatic:** a `{expiration_source: "derived"}` reset
+  on the same `PATCH` clears the manual flag and immediately recomputes
+  the date from the current rules. Without this, an accidental edit would
+  permanently opt a batch out of the rules with no way back — so this
+  action is required, not optional, and is surfaced in the batch editor as
+  "Use the automatic date again".
 
 ## Sorting & filtering by urgency
 
@@ -144,7 +170,11 @@ client-side from `expiration_date` relative to "today":
   effect immediately for new ones, with no redeploy.
 - Re-assigning a product to a different category likewise recomputes
   `derived` dates for its existing batches: `derived` means "follows the
-  current rules", and a stale derived date is simply a wrong one. @claude: what happens if a user removes the expiration date?
+  current rules", and a stale derived date is simply a wrong one.
+- Clearing a batch's expiration date sets `expiration_source = 'user'`,
+  and no later cascade, rule change, or admin action ever gives that batch
+  a date again — only the explicit "use the automatic date again" reset
+  does.
 - Changing a product's `item_type` affects resolution only where it is
   actually consulted — the final fallback — and never overrides a more
   specific rule.

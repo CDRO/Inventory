@@ -465,9 +465,10 @@ lifecycle are defined in `04-backend-api-conventions.md`.
 - `catalog_products` lookup order, variant suggestions, and UI:
   `07-shopping-list-reconciliation.md`.
 - `products.min_stock` and reorder logic: `10-reorder-and-shopping-export.md`.
-- Shopping-list tables (`shopping_lists`, `shopping_list_items`): defined
-  in `07-shopping-list-reconciliation.md`, since their shape is driven
-  entirely by that feature's matching workflow.
+- Shopping-list tables (`shopping_lists`, `shopping_list_items`) and the
+  suggestion-image cache (`cached_images`): defined in
+  `07-shopping-list-reconciliation.md`, since their shape is driven
+  entirely by that feature's matching and image workflow.
 - Gamification tables (`user_progress`, `quests`, `achievements`): defined
   in `51-gamification-scoring.md`. They are additive and optional —
   nothing in specs `00`–`11` may depend on them.

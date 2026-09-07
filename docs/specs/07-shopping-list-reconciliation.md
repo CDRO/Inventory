@@ -191,17 +191,87 @@ very different lifetimes (`04-backend-api-conventions.md`):
 - Every fetched candidate is stored once, keyed by the SHA-256 of its
   source URL; the same query later re-serves the cached bytes instead of
   spending another API call.
-- A `cached_images` table tracks `hash`, `byte_size`, `content_type`,
-  `source_url`, `fetched_at`, `last_accessed_at`.
+
+```sql
+CREATE TABLE cached_images (
+    hash             TEXT PRIMARY KEY,     -- SHA-256 of source_url
+    source_url       TEXT NOT NULL,
+    content_type     TEXT NOT NULL,
+    byte_size        BIGINT NOT NULL,
+    width            INT,
+    height           INT,
+    status           TEXT NOT NULL DEFAULT 'ok'
+                     CHECK (status IN ('ok', 'unusable')),
+    fetched_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_accessed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_cached_images_lru ON cached_images(last_accessed_at)
+    WHERE status = 'ok';
+```
+
+#### Recency tracking
+
+Recency is tracked in the database (`last_accessed_at`), **not** by
+filesystem timestamps. `atime` is not usable here: most systems mount with
+`relatime` or `noatime`, and Docker volumes on a NAS routinely do, so
+`touch`-based recency would silently degrade to "whatever the mount
+options allow" — and a `touch` per request costs a filesystem write
+anyway.
+
+- On each cache hit, the serving handler updates `last_accessed_at`
+  **asynchronously** (after the response is written), so recency
+  bookkeeping never adds latency to an image request.
+- The update is **throttled**: it is skipped when the stored value is
+  already newer than one hour. A 1GB LRU does not need
+  minute-resolution recency, and this turns a write-per-request into at
+  most one write per image per hour.
+- Eviction deletes the row inside a transaction, then unlinks the file. A
+  crash in between leaves an orphan file, not a dangling reference; a
+  startup and hourly sweep deletes files under `/data/cache/imagesearch/`
+  that no `cached_images` row points at, so the cache is self-healing in
+  the safe direction.
+
+#### Normalization: transcode, never reject
+
+A rejected image is fetched again the next time the same query runs, and
+again after that — rejection creates exactly the refetch loop it was meant
+to avoid, while still paying for the download every time. So every
+candidate is **normalized on ingest and stored in normalized form**; the
+original bytes are discarded.
+
+- **Raster images** (JPEG, PNG, WebP, BMP) are downscaled so the longest
+  edge is at most 1024px and re-encoded as JPEG at quality ~80 — or PNG
+  when the source has meaningful transparency. A typical normalized
+  suggestion lands well under 200KB, so the 1GB budget holds thousands of
+  them rather than a few hundred originals.
+- **Animated GIFs** are decoded and stored as a **static first frame**
+  in the normal raster path. An animated thumbnail is never useful here
+  and costs a multiple of the size.
+- **SVG** (the Iconify case) is stored as SVG — rasterizing an icon
+  would lose the one advantage it has — but is **sanitized first**:
+  strip `<script>`, `<foreignObject>`, event-handler attributes, and any
+  external references. Because it is served from our own origin, it is
+  additionally served with `Content-Security-Policy: default-src 'none'`
+  and `X-Content-Type-Options: nosniff`, so an SVG opened directly can
+  still not execute anything.
+- **Guards before decoding**, to bound work rather than to refuse
+  service: cap the download at 20MB and the decoded dimensions at 50MP.
+  A candidate exceeding either, or one that simply fails to decode, is
+  recorded as a `status = 'unusable'` row (metadata only, no file) so it
+  is **never fetched again**, and the suggestion falls back to the icon.
+  Negative caching is the point: remembering that something is unusable
+  is what prevents the loop.
+- Normalization happens once, at fetch time, so serving a cached image is
+  a plain file read.
+
 - **Enforcement of the 1GB cap:** a cleanup routine runs hourly *and*
   immediately after any write that pushes the total over the cap. It
   evicts least-recently-accessed entries until total size is ≤ 90% of the
   cap (a low-water mark, so eviction isn't re-triggered on every
   subsequent write). Entries referenced by a product (i.e. promoted, see
-  below) are never in this tier and so are never evicted. @claude: explicitely state, how recent access is managed (using `touch`, I suppose?)
-- Per-image sanity limits before storing: reject anything over 5MB or
-  whose sniffed content type is not an image. An evicted image is simply
-  re-fetched if it is ever needed again. @claude: Oversized images should not be rejected, since we then might refetch the same image over and over. Instead, I want a compressed version of the image. The same goes for sniffed types that do not match images: if it is a gif, we make a static version and store this one.
+  below) are never in this tier and so are never evicted. An evicted
+  image is simply re-fetched if it is ever needed again.
 
 **Product images — `/data/uploads/products/`, permanent.**
 

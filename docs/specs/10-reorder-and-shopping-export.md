@@ -40,7 +40,49 @@ Rendered on `dashboard.html` (`05-frontend-pwa-foundations.md`) alongside
 the expiring-soon widget from `08-expiration-and-classification.md`, as
 two clearly separated sections reusing the urgency tokens from
 `css/tokens.css` (out-of-stock uses `--urgency-expired`, low-stock uses
-`--urgency-soon`). @claude: the user should be able to extend the shopping list by adding a product, for example if I haven't yet inventarized butter, because I had non, I'd like to be able to add it here, which will trigger the creation of a product with batch size 0 in my storage, respecting the whole process about looking for a product image, but this time based on a product name.T
+`--urgency-soon`).
+
+## Adding a missing product from the reorder list
+
+The reorder list is built from what the inventory knows about, which
+misses the most ordinary case there is: **you are out of butter precisely
+because you never had any to inventory.** So the list has an "Add item"
+input where a product can be created by name, directly from the dashboard.
+
+Typing a name and confirming runs the **same pipeline as
+`07-shopping-list-reconciliation.md`** — reuse `internal/matching` and the
+image-suggestion flow, do not build a second, thinner version of it:
+
+1. **Stage 1 — local products.** If the name matches an existing product
+   in this storage, do **not** create a duplicate. Offer instead to put it
+   on the list by setting its `min_stock` (default 1 if unset) — the usual
+   reason an existing product is missing from the reorder list is that its
+   threshold is `0`, i.e. it was never tracked for reorder.
+2. **Stage 2 — anonymous catalog (plus variants).** A hit pre-fills name,
+   category path, item type, image, and shelf life for one-click
+   acceptance, with **no Gemini and no SerpAPI call**.
+3. **Stage 3 — image suggestions by name.** On a miss, the same
+   `GET /api/storages/{storage_id}/image-suggestions?query={name}`
+   endpoint returns the 1 icon + 2 product photos, cached and served from
+   our own origin. The query here is the **typed product name** rather
+   than an OCR'd shopping-list line — the only difference between this
+   path and `07`'s, which is why nothing else needs to change.
+
+The product is then created with:
+
+- **no `inventory_batches` rows at all** — stock is `0` because there
+  genuinely is none. It must not create a zero-quantity batch: batches
+  represent physical things in a place, and there is no butter in any
+  location (`02-data-model.md`).
+- `min_stock` defaulting to `1`, so the product appears immediately in
+  `out_of_stock` and in the export. A product created here with
+  `min_stock = 0` would vanish from the very list it was created on.
+- No `inventory_logs` row: nothing was purchased or consumed, so there is
+  no quantity change to record.
+
+When the item is later actually bought, it is stocked through the normal
+paths (`06`, `07`, or the "Stocking up" capture mode in `09`), which
+create the first real batch.
 
 ## Shopping list export
 
@@ -91,3 +133,10 @@ out of scope here — do not build it unless asked.)
 - The reorder dashboard and export reflect the same underlying query (no
   separate, possibly-inconsistent logic between the on-screen list and
   the exported file).
+- Adding a product from the reorder list creates a `products` row with
+  **zero batches** and `min_stock >= 1`, no `inventory_logs` row, and it
+  appears in `out_of_stock` immediately.
+- Adding a name that already exists in the storage adjusts that product's
+  `min_stock` instead of creating a second product with the same name.
+- The add-item flow issues no external API call when the catalog already
+  describes the product.
