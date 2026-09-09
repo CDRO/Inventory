@@ -72,6 +72,27 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # --- Remote access ---------------------------------------------------------
+  # Exactly one remote-access method should be active at a time.
+  #
+  # The active default is Tailscale, installed as a Synology package outside
+  # this compose file: it joins the NAS to a private WireGuard network, opens
+  # no router ports, and needs nothing application-side.
+  #
+  # Cloudflare Tunnel is the documented alternative. It attaches to Traefik's
+  # `web` entrypoint exactly as Tailscale does, so swapping is a config edit
+  # with zero application changes. Uncomment this service and disable the
+  # Tailscale package to switch (docs/specs/01-architecture-and-deployment.md).
+  #
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   command: tunnel --no-autoupdate run --url http://traefik:80
+  #   environment:
+  #     - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+  #   depends_on:
+  #     - traefik
+  #   restart: unless-stopped
+
 volumes:
   pgdata:
   uploads:

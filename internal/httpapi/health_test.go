@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"testing/fstest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -130,4 +131,76 @@ func TestHealthzRejectsNonGET(t *testing.T) {
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/healthz", nil))
 
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
+// TestRouterServesStaticAssets covers the mount the other router tests skip by
+// passing StaticFS: nil. Without it, a frontend that is embedded correctly but
+// never wired to "/" ships with every test green and every page 404.
+func TestRouterServesStaticAssets(t *testing.T) {
+	t.Parallel()
+
+	assets := fstest.MapFS{
+		"index.html":   &fstest.MapFile{Data: []byte("<h1>index</h1>")},
+		"css/base.css": &fstest.MapFile{Data: []byte("body{}")},
+	}
+	router := httpapi.NewRouter(httpapi.Deps{
+		DB:       stubPinger{},
+		Vision:   stubVision{status: vision.StatusOK},
+		StaticFS: assets,
+	})
+
+	tests := []struct {
+		path string
+		want string
+	}{
+		{path: "/", want: "<h1>index</h1>"},
+		{path: "/css/base.css", want: "body{}"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			t.Parallel()
+
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.path, nil))
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			assert.Contains(t, rec.Body.String(), tc.want)
+		})
+	}
+
+	// http.FileServer canonicalises /index.html to /. Pinned because it is
+	// stdlib behaviour the frontend's own links depend on, not a bug.
+	t.Run("/index.html redirects to /", func(t *testing.T) {
+		t.Parallel()
+
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/index.html", nil))
+
+		require.Equal(t, http.StatusMovedPermanently, rec.Code)
+		assert.Equal(t, "./", rec.Header().Get("Location"))
+	})
+}
+
+// TestStaticMountDoesNotShadowHealthz pins the route precedence: the catch-all
+// file server is registered on "/*", and if it took priority the readiness
+// probe would start answering 404 to Traefik and the compose healthcheck.
+func TestStaticMountDoesNotShadowHealthz(t *testing.T) {
+	t.Parallel()
+
+	router := httpapi.NewRouter(httpapi.Deps{
+		DB:     stubPinger{},
+		Vision: stubVision{status: vision.StatusOK},
+		StaticFS: fstest.MapFS{
+			"healthz": &fstest.MapFile{Data: []byte("this file must never be served")},
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got httpapi.HealthResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, "ok", got.Status)
 }

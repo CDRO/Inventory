@@ -30,6 +30,11 @@ var generatedVars = map[string]bool{
 var optionalVars = map[string]bool{
 	"STATIC_DIR":         true, // empty means "serve the embedded assets"
 	"GEMINI_IMAGE_MODEL": true, // optional by design; empty disables the feature
+	// SerpAPI backs shopping-list image suggestions
+	// (07-shopping-list-reconciliation.md) and nothing in the startup path
+	// needs it. Forcing a value here would make an operator who does not want
+	// image search invent one, or loop on the prompt forever.
+	"SERPAPI_API_KEY": true,
 }
 
 // sessionSecretBytes is 256 bits of entropy, base64url-encoded when written.

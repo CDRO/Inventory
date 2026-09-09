@@ -21,10 +21,11 @@ import (
 // Candidate migration directories, in order. The first is where the production
 // image keeps them; the second is the repository layout used in dev, where the
 // source tree is bind-mounted at /src.
+//
+// There is deliberately no environment override. The two locations cover both
+// images the project ships, and an undocumented knob that silently repoints the
+// schema is worse than no knob at all.
 var candidateDirs = []string{"/migrations", "migrations"}
-
-// dirEnv overrides the search entirely.
-const dirEnv = "MIGRATIONS_DIR"
 
 // Run applies action ("up", "down", "status", "version") against dsn.
 func Run(ctx context.Context, dsn, action string, out io.Writer) error {
@@ -85,14 +86,8 @@ func Run(ctx context.Context, dsn, action string, out io.Writer) error {
 	return nil
 }
 
-// resolveDir picks the migrations directory, preferring an explicit override.
+// resolveDir picks the first candidate directory that exists.
 func resolveDir() (string, error) {
-	if dir := os.Getenv(dirEnv); dir != "" {
-		if isDir(dir) {
-			return dir, nil
-		}
-		return "", fmt.Errorf("migrate: %s=%q is not a directory", dirEnv, dir)
-	}
 	for _, dir := range candidateDirs {
 		if isDir(dir) {
 			return dir, nil

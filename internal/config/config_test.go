@@ -40,15 +40,17 @@ func TestLoadReportsEveryMissingRequiredVariable(t *testing.T) {
 		missing.Names,
 	)
 
-	msg := err.Error()
-	for _, want := range []string{
-		"DATABASE_URL", "SESSION_SECRET", "GEMINI_API_KEY",
-		"docker compose run --rm setup",
-		"docker compose up -d",
-	} {
-		assert.Contains(t, msg, want)
-	}
-	assert.Contains(t, msg, "are unset")
+	// Asserted whole, not by substring. The spec gives this message verbatim,
+	// and it is the only thing an operator sees when a fresh deployment will
+	// not start; a reword that keeps the tokens but drops "No configuration
+	// found" or restructures the Run/Then lines would slip past a Contains
+	// check while making the output worse.
+	assert.Equal(t,
+		"No configuration found (DATABASE_URL, SESSION_SECRET, GEMINI_API_KEY are unset).\n"+
+			"Run:  docker compose run --rm setup\n"+
+			"Then: docker compose up -d",
+		err.Error(),
+	)
 }
 
 // TestLoadTreatsBlankAsUnset covers the case that actually happens: a variable

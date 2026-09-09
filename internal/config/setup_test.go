@@ -256,3 +256,99 @@ func TestWizardFailsWithoutExample(t *testing.T) {
 	assert.Contains(t, err.Error(), config.ExampleFile)
 	assert.NoFileExists(t, filepath.Join(dir, config.EnvFile))
 }
+
+// TestWizardFirstRunPrintsStartHint covers the other closing message. On a
+// fresh install the next step is `up -d`, not `--force-recreate`; telling a
+// first-time operator to recreate containers that do not exist reads as an
+// error.
+func TestWizardFirstRunPrintsStartHint(t *testing.T) {
+	t.Parallel()
+
+	dir := newProject(t)
+
+	transcript, err := runWizard(t, dir, "", "", "", "", "gemini-key", "")
+	require.NoError(t, err)
+
+	assert.Contains(t, transcript, "docker compose up -d")
+	assert.NotContains(t, transcript, "--force-recreate", "nothing is running yet on a first run")
+}
+
+// exampleKeys returns the variables of a .env.example in file order.
+func exampleKeys(t *testing.T, path string) []string {
+	t.Helper()
+
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	var keys []string
+	for _, line := range strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if key, _, found := strings.Cut(line, "="); found {
+			keys = append(keys, strings.TrimSpace(key))
+		}
+	}
+	return keys
+}
+
+// TestWizardAgainstRealExample drives the wizard with the repository's actual
+// .env.example rather than a reduced fixture.
+//
+// The wizard echoes whatever the template contains, so every other test in
+// this file would stay green if the real file drifted — gained a variable the
+// spec forbids, or lost a required one. This is the only test that looks at
+// the shipped file.
+func TestWizardAgainstRealExample(t *testing.T) {
+	t.Parallel()
+
+	repoExample := filepath.Join("..", "..", config.ExampleFile)
+	keys := exampleKeys(t, repoExample)
+	require.NotEmpty(t, keys, "the repository .env.example must define variables")
+
+	dir := t.TempDir()
+	raw, err := os.ReadFile(repoExample)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, config.ExampleFile), raw, 0o600))
+
+	// SESSION_SECRET is generated, never prompted. Everything else takes its
+	// documented default except the one variable that ships empty and is
+	// required — supplying a value there is the operator's job.
+	var answers []string
+	for _, key := range keys {
+		switch key {
+		case "SESSION_SECRET":
+			continue
+		case "GEMINI_API_KEY":
+			answers = append(answers, "a-real-gemini-key")
+		default:
+			answers = append(answers, "")
+		}
+	}
+
+	transcript, err := runWizard(t, dir, answers...)
+	require.NoError(t, err, "the shipped .env.example must be completable with defaults plus the API key.\n%s", transcript)
+
+	values := readEnv(t, dir)
+
+	for _, key := range keys {
+		assert.Contains(t, values, key, "%s from .env.example must reach .env", key)
+	}
+	assert.GreaterOrEqual(t, len(values["SESSION_SECRET"]), 43, "the secret is generated, not copied from the template")
+	assert.Equal(t, "a-real-gemini-key", values["GEMINI_API_KEY"])
+	assert.Equal(t, "prod", values["APP_ENV"], "the shipped default must not be dev")
+
+	// The frontend calls relative /api paths because Traefik serves UI and API
+	// from one origin; a base-URL variable here would mean that stopped being
+	// true (docs/specs/01-architecture-and-deployment.md).
+	for _, key := range keys {
+		assert.NotContains(t, key, "API_URL", "the spec forbids a frontend API-URL variable")
+		assert.NotContains(t, key, "FRONTEND", "the spec forbids a frontend API-URL variable")
+	}
+
+	// SerpAPI backs a spec-07 feature; a deployment that does not want image
+	// search must be able to leave it empty rather than invent a key.
+	assert.Empty(t, values["SERPAPI_API_KEY"], "SERPAPI_API_KEY must be completable as empty")
+	assert.Empty(t, values["GEMINI_IMAGE_MODEL"], "the image model is optional by design")
+}

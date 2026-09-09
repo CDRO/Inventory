@@ -3,6 +3,7 @@ package vision
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -207,6 +208,67 @@ func TestCacheExpiresAfterTTL(t *testing.T) {
 
 	require.Equal(t, StatusOK, c.Status(context.Background()))
 	assert.Equal(t, 2, lister.calls, "an expired cache must be refetched")
+}
+
+// blockingLister counts calls safely and holds each one open until released,
+// so a burst of callers is guaranteed to overlap.
+type blockingLister struct {
+	mu      sync.Mutex
+	calls   int
+	release chan struct{}
+	models  []string
+}
+
+func (b *blockingLister) ListModels(context.Context) ([]string, error) {
+	b.mu.Lock()
+	b.calls++
+	b.mu.Unlock()
+
+	<-b.release
+	return b.models, nil
+}
+
+func (b *blockingLister) callCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.calls
+}
+
+// TestConcurrentStatusMakesOneRequest is the point of the single-flight: every
+// /healthz hit calls Status, so a cold cache under load must produce one
+// outbound models.list, not one per probe. Holding the lock across the HTTP
+// call would still pass the sequential cache test above while turning a
+// readiness probe into a convoy behind a single in-flight request.
+func TestConcurrentStatusMakesOneRequest(t *testing.T) {
+	t.Parallel()
+
+	lister := &blockingLister{
+		release: make(chan struct{}),
+		models:  []string{"models/gemini-2.0-flash"},
+	}
+	c := NewChecker(nil, lister, "gemini-2.0-flash")
+
+	const probes = 20
+	results := make(chan string, probes)
+	var wg sync.WaitGroup
+	for i := 0; i < probes; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- c.Status(context.Background())
+		}()
+	}
+
+	// Let every probe arrive and pile up, then let the single fetch finish.
+	time.Sleep(50 * time.Millisecond)
+	close(lister.release)
+	wg.Wait()
+	close(results)
+
+	for status := range results {
+		assert.Equal(t, StatusOK, status)
+	}
+	assert.Equal(t, 1, lister.callCount(), "concurrent probes must share one models.list call")
 }
 
 // TestModelsListsAvailableIDs covers the data behind the admin banner that

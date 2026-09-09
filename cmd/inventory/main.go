@@ -45,17 +45,36 @@ const (
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		// A configuration failure is fatal and non-retryable: it exits with a
-		// distinct code so `restart: unless-stopped` does not spin the
-		// container and scroll the remediation out of `docker compose logs`.
-		var missing *config.MissingError
-		if errors.As(err, &missing) {
-			fmt.Fprintln(os.Stderr, missing.Error())
-			os.Exit(config.ExitConfig)
-		}
-		fmt.Fprintf(os.Stderr, "inventory: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintln(os.Stderr, errorMessage(err))
+		os.Exit(exitCodeFor(err))
 	}
+}
+
+// exitCodeFor maps a failure to the process exit code.
+//
+// A configuration failure gets config.ExitConfig rather than a generic 1
+// because it is fatal and non-retryable: the operator must act before the
+// container can ever succeed. Restart policies do not discriminate on exit
+// code, so the distinct code is what lets an operator (and the logs) tell
+// "misconfigured, stop trying" apart from "crashed, worth restarting"
+// (docs/specs/01-architecture-and-deployment.md).
+func exitCodeFor(err error) int {
+	var missing *config.MissingError
+	if errors.As(err, &missing) {
+		return config.ExitConfig
+	}
+	return 1
+}
+
+// errorMessage renders err for the operator. A configuration failure is
+// printed bare, because its message is already the full remediation block and
+// prefixing it would bury the first line.
+func errorMessage(err error) string {
+	var missing *config.MissingError
+	if errors.As(err, &missing) {
+		return missing.Error()
+	}
+	return "inventory: " + err.Error()
 }
 
 func run(args []string) error {
@@ -70,7 +89,10 @@ func run(args []string) error {
 	case "setup":
 		return (&config.Wizard{}).Run()
 	case "migrate":
-		return runMigrate(args[1:])
+		// Signal-aware: a long `migrate up` should respond to docker stop.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return runMigrate(ctx, args[1:])
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 		return nil
@@ -91,7 +113,7 @@ Commands:
 `)
 }
 
-func runMigrate(args []string) error {
+func runMigrate(ctx context.Context, args []string) error {
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
 		return err
@@ -100,7 +122,7 @@ func runMigrate(args []string) error {
 	if len(args) > 0 {
 		action = args[0]
 	}
-	return migrate.Run(context.Background(), cfg.DatabaseURL, action, os.Stdout)
+	return migrate.Run(ctx, cfg.DatabaseURL, action, os.Stdout)
 }
 
 func serve() error {

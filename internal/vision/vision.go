@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -63,6 +64,11 @@ type Checker struct {
 	models    map[string]struct{}
 	fetchedAt time.Time
 	fetchErr  error
+	// inflight is non-nil while one goroutine is fetching the model list, and
+	// is closed when that fetch completes. Concurrent callers wait on it
+	// instead of queueing behind the mutex, so a burst of readiness probes
+	// costs one outbound request rather than one convoy.
+	inflight chan struct{}
 }
 
 // NewChecker builds a Checker. envModel is the GEMINI_MODEL fallback; settings
@@ -145,21 +151,58 @@ func (c *Checker) Invalidate() {
 	c.fetchErr = nil
 }
 
+// available returns the cached model set, fetching it when the cache is cold or
+// stale. The outbound call is made without holding c.mu: a readiness probe runs
+// on every /healthz hit, and blocking every concurrent probe on one in-flight
+// HTTP request would turn a health check into a queue.
 func (c *Checker) available(ctx context.Context) (map[string]struct{}, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.models != nil && c.now().Sub(c.fetchedAt) < c.ttl {
-		return c.models, c.fetchErr
-	}
+	// c.lister is set once at construction and never reassigned.
 	if c.lister == nil {
 		return nil, fmt.Errorf("vision: no model lister configured")
 	}
 
-	ids, err := c.lister.ListModels(ctx)
+	for {
+		c.mu.Lock()
+		if c.models != nil && c.now().Sub(c.fetchedAt) < c.ttl {
+			models, err := c.models, c.fetchErr
+			c.mu.Unlock()
+			return models, err
+		}
+		if wait := c.inflight; wait != nil {
+			c.mu.Unlock()
+			select {
+			case <-wait:
+				continue // re-read the cache the winner just populated
+			case <-ctx.Done():
+				return nil, fmt.Errorf("vision: await model list: %w", ctx.Err())
+			}
+		}
+		done := make(chan struct{})
+		c.inflight = done
+		c.mu.Unlock()
+
+		models, err := c.fetch(ctx)
+		close(done)
+		return models, err
+	}
+}
+
+// fetch performs the outbound call and stores the result. It must only be
+// called by the goroutine that installed c.inflight.
+func (c *Checker) fetch(ctx context.Context) (map[string]struct{}, error) {
+	ids, listErr := c.lister.ListModels(ctx)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	c.fetchedAt = c.now()
-	if err != nil {
-		c.models, c.fetchErr = map[string]struct{}{}, fmt.Errorf("vision: list models: %w", err)
+	c.inflight = nil
+
+	if listErr != nil {
+		// Cache the failure too, so a provider outage does not produce one
+		// outbound attempt per probe for the whole of the TTL.
+		c.models = map[string]struct{}{}
+		c.fetchErr = fmt.Errorf("vision: list models: %w", listErr)
 		return c.models, c.fetchErr
 	}
 
@@ -207,12 +250,17 @@ func (l *APILister) ListModels(ctx context.Context) ([]string, error) {
 	var ids []string
 	pageToken := ""
 	for page := 0; page < 10; page++ { // bounded: never loop on a stuck token
-		url := fmt.Sprintf("%s?key=%s&pageSize=200", endpoint, l.APIKey)
+		// Built with url.Values rather than concatenated: a page token
+		// containing '+', '=' or '&' would otherwise truncate the query and
+		// silently end pagination early.
+		query := url.Values{}
+		query.Set("key", l.APIKey)
+		query.Set("pageSize", "200")
 		if pageToken != "" {
-			url += "&pageToken=" + pageToken
+			query.Set("pageToken", pageToken)
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+query.Encode(), nil)
 		if err != nil {
 			return nil, fmt.Errorf("vision: build models.list request: %w", err)
 		}
