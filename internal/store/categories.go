@@ -39,6 +39,9 @@ func (s *Store) CreateCategory(ctx context.Context, storageID uuid.UUID, in NewC
 
 	var out *Category
 	err = s.inTx(ctx, func(tx pgx.Tx) error {
+		if err := lockStorageTree(ctx, tx, storageID); err != nil {
+			return err
+		}
 		if err := resolveParent(ctx, tx, treeCategories, storageID, nil, in.ParentID); err != nil {
 			return err
 		}
@@ -66,6 +69,9 @@ func (s *Store) CreateCategory(ctx context.Context, storageID uuid.UUID, in NewC
 // as MoveLocation.
 func (s *Store) MoveCategory(ctx context.Context, storageID, id uuid.UUID, parentID *uuid.UUID) error {
 	return s.inTx(ctx, func(tx pgx.Tx) error {
+		if err := lockStorageTree(ctx, tx, storageID); err != nil {
+			return err
+		}
 		if err := requireSameStorage(ctx, tx, treeCategories, storageID, id); err != nil {
 			return err
 		}
@@ -93,6 +99,9 @@ func (s *Store) MoveCategory(ctx context.Context, storageID, id uuid.UUID, paren
 // an answer that names the number of products in the way.
 func (s *Store) DeleteCategory(ctx context.Context, storageID, id uuid.UUID) error {
 	return s.inTx(ctx, func(tx pgx.Tx) error {
+		if err := lockStorageTree(ctx, tx, storageID); err != nil {
+			return err
+		}
 		if err := requireSameStorage(ctx, tx, treeCategories, storageID, id); err != nil {
 			return err
 		}

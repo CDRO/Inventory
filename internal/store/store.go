@@ -1,11 +1,28 @@
-// Package store owns every database access in the system: connection
-// lifecycle, and one query file per table group as the schema grows
+// Package store owns every database access in the system: the connection
+// lifecycle, and one file per table group
 // (docs/specs/04-backend-api-conventions.md).
 //
-// At this stage it carries only what the deployment skeleton needs — a pool, a
-// readiness ping, and the settings lookup that lets the effective Gemini model
-// be corrected in-app without a redeploy. The inventory schema itself arrives
-// with docs/specs/02-data-model.md.
+// It is also where the data model's invariants live, because several of them
+// cannot be stated in SQL (docs/specs/02-data-model.md):
+//
+//   - Same-storage validation on every id a caller supplies. A foreign key
+//     proves the referenced row exists; it says nothing about which storage
+//     owns it, so parent_id, category_id, location_id and every move target
+//     are re-checked against the storage in the request.
+//   - Cycle prevention on the locations and categories trees. A CHECK stops a
+//     row being its own parent; a ring of two or more is invisible to the
+//     schema, and a ring has no root, so it vanishes from every tree query
+//     while its rows still exist and still hold inventory.
+//   - The paired ledger write: every change to inventory_batches.quantity is
+//     accompanied, in the same transaction, by an inventory_logs row
+//     explaining it. writeLog is unexported and takes a transaction so that no
+//     caller can move stock without also explaining it.
+//   - Insert-only catalog_products with a one-level variant graph, and
+//     tombstones written in the same transaction as the delete they record.
+//
+// Errors are the domain values in errors.go — ErrNotFound, ErrConflict,
+// ErrValidation. Nothing in this package knows about HTTP; mapping them to
+// status codes belongs to the handlers.
 package store
 
 import (

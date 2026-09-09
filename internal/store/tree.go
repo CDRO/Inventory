@@ -27,6 +27,27 @@ const (
 // that already-corrupt data cannot turn a cycle check into an unbounded query.
 const maxTreeDepth = 64
 
+// lockStorageTree serialises structural changes to one storage's trees.
+//
+// The cycle check reads the tree and then writes it, and those two steps are
+// not atomic on their own. Two moves in opposite directions — A under B, and B
+// under A — each read a snapshot in which the other has not committed, both
+// pass, and the result is exactly the rootless ring wouldCycle exists to
+// prevent. Row locks do not help: the rows each transaction needs to notice
+// are the ones the *other* is about to change.
+//
+// An advisory lock keyed on the storage is the cheap fix. It is held to the
+// end of the transaction, contends only between operations on the same
+// storage, and tree edits are rare enough that serialising them costs nothing
+// noticeable. Only ever one lock per transaction, so it cannot deadlock.
+func lockStorageTree(ctx context.Context, q querier, storageID uuid.UUID) error {
+	if _, err := q.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, storageID); err != nil {
+		return fmt.Errorf("store: lock storage tree: %w", err)
+	}
+	return nil
+}
+
 // requireSameStorage confirms that id names a row of this tree belonging to
 // storageID.
 //

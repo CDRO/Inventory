@@ -1,0 +1,3919 @@
+diff --git a/go.mod b/go.mod
+index 955f557..a97325f 100644
+--- a/go.mod
++++ b/go.mod
+@@ -4,6 +4,7 @@ go 1.25
+ 
+ require (
+ 	github.com/go-chi/chi/v5 v5.1.0
++	github.com/google/uuid v1.6.0
+ 	github.com/jackc/pgx/v5 v5.7.1
+ 	github.com/pressly/goose/v3 v3.22.1
+ 	github.com/stretchr/testify v1.9.0
+diff --git a/internal/migrate/migrate.go b/internal/migrate/migrate.go
+index 44625d6..4561587 100644
+--- a/internal/migrate/migrate.go
++++ b/internal/migrate/migrate.go
+@@ -59,7 +59,11 @@ func Run(ctx context.Context, dsn, action string, out io.Writer) error {
+ 	if err := goose.SetDialect("postgres"); err != nil {
+ 		return fmt.Errorf("migrate: set dialect: %w", err)
+ 	}
+-	goose.SetLogger(goose.NopLogger())
++	// goose reports through its logger, not its return value: `status` and
++	// `version` produce their entire output that way. A NopLogger here — which
++	// is what this was until the first migrations existed to report on — makes
++	// those two subcommands print nothing at all and look broken.
++	goose.SetLogger(writerLogger{out: out})
+ 
+ 	switch action {
+ 	case "up":
+@@ -86,6 +90,24 @@ func Run(ctx context.Context, dsn, action string, out io.Writer) error {
+ 	return nil
+ }
+ 
++// writerLogger adapts an io.Writer to goose's logger interface.
++//
++// Fatalf deliberately does not exit the process: goose calls it for migration
++// failures, and killing the process there would skip the deferred database
++// close and lose the error's place in the caller's own reporting. The
++// corresponding Run call returns an error anyway.
++type writerLogger struct {
++	out io.Writer
++}
++
++func (l writerLogger) Printf(format string, v ...any) {
++	fmt.Fprintf(l.out, format, v...)
++}
++
++func (l writerLogger) Fatalf(format string, v ...any) {
++	fmt.Fprintf(l.out, format, v...)
++}
++
+ // resolveDir picks the first candidate directory that exists.
+ func resolveDir() (string, error) {
+ 	for _, dir := range candidateDirs {
+diff --git a/internal/store/batches.go b/internal/store/batches.go
+new file mode 100644
+index 0000000..56d4626
+--- /dev/null
++++ b/internal/store/batches.go
+@@ -0,0 +1,280 @@
++package store
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"time"
++
++	"github.com/google/uuid"
++	"github.com/jackc/pgx/v5"
++)
++
++// LogReason is why a quantity changed. The set matches the CHECK on
++// inventory_logs.reason.
++type LogReason string
++
++const (
++	ReasonPurchase        LogReason = "purchase"
++	ReasonConsumption     LogReason = "consumption"
++	ReasonAudit           LogReason = "audit"
++	ReasonVisionIngestion LogReason = "vision_ingestion"
++	ReasonMove            LogReason = "move"
++)
++
++// ExpirationSource records whether a date was computed from the shelf-life
++// rules or typed by a person. The distinction is what makes the cascade in
++// docs/specs/08-expiration-and-classification.md safe.
++type ExpirationSource string
++
++const (
++	ExpirationDerived ExpirationSource = "derived"
++	ExpirationUser    ExpirationSource = "user"
++)
++
++// Batch is a quantity of one product at exactly one location.
++type Batch struct {
++	ID               uuid.UUID
++	ProductID        uuid.UUID
++	LocationID       uuid.UUID
++	Quantity         int
++	ExpirationDate   *time.Time
++	ExpirationSource ExpirationSource
++	CreatedAt        time.Time
++}
++
++// NewBatch is the input to CreateBatch.
++type NewBatch struct {
++	ProductID        uuid.UUID
++	LocationID       uuid.UUID
++	Quantity         int
++	ExpirationDate   *time.Time
++	ExpirationSource ExpirationSource
++	Reason           LogReason
++	CreatedBy        *uuid.UUID
++}
++
++// CreateBatch inserts a batch and its paired inventory_logs row in one
++// transaction.
++//
++// Both the product and the location are checked against storageID. The
++// location check is the invariant PostgreSQL cannot express: locations and
++// products both carry storage_id, but inventory_batches.location_id is a plain
++// foreign key, so without this a batch could be filed against a shelf in
++// somebody else's house.
++func (s *Store) CreateBatch(ctx context.Context, storageID uuid.UUID, in NewBatch) (*Batch, error) {
++	if in.Quantity < 0 {
++		return nil, fmt.Errorf("%w: batch quantity must not be negative", ErrValidation)
++	}
++	if in.Reason == "" {
++		return nil, fmt.Errorf("%w: a batch write needs a log reason", ErrValidation)
++	}
++	if in.ExpirationSource == "" {
++		in.ExpirationSource = ExpirationDerived
++	}
++
++	id, err := newID()
++	if err != nil {
++		return nil, err
++	}
++
++	var out *Batch
++	err = s.inTx(ctx, func(tx pgx.Tx) error {
++		if err := requireProductInStorage(ctx, tx, storageID, in.ProductID); err != nil {
++			return err
++		}
++		if err := requireSameStorage(ctx, tx, treeLocations, storageID, in.LocationID); err != nil {
++			return err
++		}
++
++		row := tx.QueryRow(ctx, `
++			INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_date, expiration_source)
++			VALUES ($1, $2, $3, $4, $5, $6)
++			RETURNING id, product_id, location_id, quantity, expiration_date, expiration_source, created_at`,
++			id, in.ProductID, in.LocationID, in.Quantity, in.ExpirationDate, string(in.ExpirationSource))
++
++		batch, err := scanBatch(row)
++		if err != nil {
++			return err
++		}
++
++		if err := writeLog(ctx, tx, in.ProductID, &batch.ID, in.Quantity, in.Reason, in.CreatedBy); err != nil {
++			return err
++		}
++		out = batch
++		return nil
++	})
++	if err != nil {
++		return nil, err
++	}
++	return out, nil
++}
++
++// AdjustBatch changes a batch's quantity by delta and writes the paired log
++// row in the same transaction.
++//
++// A batch that reaches exactly zero is deleted in that same transaction:
++// batches represent physical things in a place, and one holding nothing is not
++// a thing. Contrast products, which validly sit at zero total stock and feed
++// the reorder dashboard.
++//
++// A delta that would take the batch below zero is rejected rather than
++// clamped. Silently clamping would record a consumption that did not happen
++// and leave the ledger disagreeing with the shelf.
++func (s *Store) AdjustBatch(ctx context.Context, storageID, batchID uuid.UUID, delta int, reason LogReason, userID *uuid.UUID) error {
++	if delta == 0 {
++		return fmt.Errorf("%w: a zero adjustment writes a log row that explains nothing", ErrValidation)
++	}
++	if reason == "" {
++		return fmt.Errorf("%w: a batch write needs a log reason", ErrValidation)
++	}
++
++	return s.inTx(ctx, func(tx pgx.Tx) error {
++		var productID uuid.UUID
++		var quantity int
++		err := tx.QueryRow(ctx, `
++			SELECT b.product_id, b.quantity
++			  FROM inventory_batches b
++			  JOIN products p ON p.id = b.product_id
++			 WHERE b.id = $1 AND p.storage_id = $2
++			 FOR UPDATE OF b`, batchID, storageID).Scan(&productID, &quantity)
++		if errors.Is(err, pgx.ErrNoRows) {
++			return ErrNotFound
++		}
++		if err != nil {
++			return fmt.Errorf("store: load batch: %w", err)
++		}
++
++		updated := quantity + delta
++		if updated < 0 {
++			return fmt.Errorf("%w: batch holds %d, cannot apply %d", ErrValidation, quantity, delta)
++		}
++
++		if updated == 0 {
++			if _, err := tx.Exec(ctx, `DELETE FROM inventory_batches WHERE id = $1`, batchID); err != nil {
++				return fmt.Errorf("store: delete emptied batch: %w", err)
++			}
++			// batch_id is ON DELETE SET NULL, so the log keeps its meaning
++			// after the row it pointed at is gone.
++			return writeLog(ctx, tx, productID, nil, delta, reason, userID)
++		}
++
++		if _, err := tx.Exec(ctx,
++			`UPDATE inventory_batches SET quantity = $1 WHERE id = $2`, updated, batchID); err != nil {
++			return fmt.Errorf("store: update batch quantity: %w", err)
++		}
++		return writeLog(ctx, tx, productID, &batchID, delta, reason, userID)
++	})
++}
++
++// SplitBatch moves quantity units of a batch to another location.
++//
++// The physical case is three jars in the cellar and one carried to the
++// kitchen. That is a split into two batches, never one batch with two homes.
++//
++// Both halves keep the original expiration_date *and* expiration_source: they
++// are the same jars, so their expiry does not reset, and a date a person typed
++// stays a date a person typed. Two log rows are written with reason 'move',
++// summing to zero, so product totals are unchanged while per-location figures
++// stay correct.
++func (s *Store) SplitBatch(ctx context.Context, storageID, batchID uuid.UUID, quantity int, targetLocationID uuid.UUID, userID *uuid.UUID) (*Batch, error) {
++	newBatchID, err := newID()
++	if err != nil {
++		return nil, err
++	}
++
++	var out *Batch
++	err = s.inTx(ctx, func(tx pgx.Tx) error {
++		var source Batch
++		var srcExpiration string
++		err := tx.QueryRow(ctx, `
++			SELECT b.id, b.product_id, b.location_id, b.quantity, b.expiration_date, b.expiration_source
++			  FROM inventory_batches b
++			  JOIN products p ON p.id = b.product_id
++			 WHERE b.id = $1 AND p.storage_id = $2
++			 FOR UPDATE OF b`, batchID, storageID).
++			Scan(&source.ID, &source.ProductID, &source.LocationID, &source.Quantity,
++				&source.ExpirationDate, &srcExpiration)
++		if errors.Is(err, pgx.ErrNoRows) {
++			return ErrNotFound
++		}
++		if err != nil {
++			return fmt.Errorf("store: load batch to split: %w", err)
++		}
++		source.ExpirationSource = ExpirationSource(srcExpiration)
++
++		// Splitting the whole batch is a move, which is a different operation.
++		if quantity < 1 || quantity > source.Quantity-1 {
++			return fmt.Errorf("%w: split quantity must be between 1 and %d", ErrValidation, source.Quantity-1)
++		}
++		if err := requireSameStorage(ctx, tx, treeLocations, storageID, targetLocationID); err != nil {
++			return err
++		}
++
++		if _, err := tx.Exec(ctx,
++			`UPDATE inventory_batches SET quantity = quantity - $1 WHERE id = $2`,
++			quantity, batchID); err != nil {
++			return fmt.Errorf("store: debit source batch: %w", err)
++		}
++
++		row := tx.QueryRow(ctx, `
++			INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_date, expiration_source)
++			VALUES ($1, $2, $3, $4, $5, $6)
++			RETURNING id, product_id, location_id, quantity, expiration_date, expiration_source, created_at`,
++			newBatchID, source.ProductID, targetLocationID, quantity,
++			source.ExpirationDate, string(source.ExpirationSource))
++
++		created, err := scanBatch(row)
++		if err != nil {
++			return err
++		}
++
++		if err := writeLog(ctx, tx, source.ProductID, &batchID, -quantity, ReasonMove, userID); err != nil {
++			return err
++		}
++		if err := writeLog(ctx, tx, source.ProductID, &created.ID, quantity, ReasonMove, userID); err != nil {
++			return err
++		}
++
++		out = created
++		return nil
++	})
++	if err != nil {
++		return nil, err
++	}
++	return out, nil
++}
++
++// writeLog appends the inventory_logs row that explains a quantity change.
++//
++// It is unexported and takes a transaction because of the rule in
++// docs/specs/02-data-model.md: every write to inventory_batches.quantity must
++// be paired, in the same transaction, with a log row. Keeping this private
++// means no caller outside this file can move stock without also explaining it.
++func writeLog(ctx context.Context, tx pgx.Tx, productID uuid.UUID, batchID *uuid.UUID, changeQty int, reason LogReason, userID *uuid.UUID) error {
++	id, err := newID()
++	if err != nil {
++		return err
++	}
++	if _, err := tx.Exec(ctx, `
++		INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by)
++		VALUES ($1, $2, $3, $4, $5, $6)`,
++		id, productID, batchID, changeQty, string(reason), userID); err != nil {
++		return fmt.Errorf("store: write inventory log: %w", err)
++	}
++	return nil
++}
++
++func scanBatch(row rowScanner) (*Batch, error) {
++	var b Batch
++	var source string
++	err := row.Scan(&b.ID, &b.ProductID, &b.LocationID, &b.Quantity, &b.ExpirationDate, &source, &b.CreatedAt)
++	if errors.Is(err, pgx.ErrNoRows) {
++		return nil, ErrNotFound
++	}
++	if err != nil {
++		return nil, fmt.Errorf("store: scan batch: %w", err)
++	}
++	b.ExpirationSource = ExpirationSource(source)
++	return &b, nil
++}
+diff --git a/internal/store/catalog.go b/internal/store/catalog.go
+new file mode 100644
+index 0000000..8646f42
+--- /dev/null
++++ b/internal/store/catalog.go
+@@ -0,0 +1,248 @@
++package store
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"strings"
++	"time"
++
++	"github.com/google/uuid"
++	"github.com/jackc/pgx/v5"
++)
++
++// CatalogProduct is a row of the global, anonymous product catalogue.
++//
++// It carries no storage reference, no user, no quantity and no count by
++// design: a catalog row describes *what a product is*, never who has it. Any
++// response derived from it must expose display fields only — never the id,
++// never created_at, never ordering that could hint at how many storages exist
++// (docs/specs/02-data-model.md).
++type CatalogProduct struct {
++	ID                   uuid.UUID
++	NormalizedName       string
++	DisplayName          string
++	BaseID               *uuid.UUID
++	CategoryPath         *string
++	ItemType             ItemType
++	ImageURL             *string
++	IconName             *string
++	DefaultShelfLifeDays *int
++	CreatedAt            time.Time
++}
++
++// NewCatalogProduct is the input to InsertCatalogProduct.
++//
++// ShownID is the catalog row the user was offered and declined, if any. It is
++// how the variant graph gets built: from real usage, never authored or
++// AI-generated.
++type NewCatalogProduct struct {
++	DisplayName          string
++	CategoryPath         *string
++	ItemType             ItemType
++	ImageURL             *string
++	IconName             *string
++	DefaultShelfLifeDays *int
++	ShownID              *uuid.UUID
++}
++
++// NormalizeCatalogName lowercases, trims and collapses whitespace. It is the
++// uniqueness key, so it has to be deterministic and is exported for the
++// matching service to reuse rather than re-derive.
++func NormalizeCatalogName(name string) string {
++	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(name))), " ")
++}
++
++// InsertCatalogProduct adds a row if its normalized name is not already
++// present, and returns the row that now holds that name.
++//
++// **Insert-only. There is no upsert and no edit path.** The reason is abuse,
++// not tidiness: a globally visible row that any storage can rewrite is a
++// covert messaging channel between households. Once someone notices that
++// editing a product name changes what strangers see, it will be used for that.
++// Insert-only reduces the channel to a single one-shot write by whoever first
++// names a product, which cannot carry a conversation.
++//
++// A conflict is therefore not an error — it means another storage described
++// this product first, and their description stands.
++func (s *Store) InsertCatalogProduct(ctx context.Context, in NewCatalogProduct) (*CatalogProduct, error) {
++	normalized := NormalizeCatalogName(in.DisplayName)
++	if normalized == "" {
++		return nil, fmt.Errorf("%w: catalog name must not be blank", ErrValidation)
++	}
++	if in.ItemType == "" {
++		in.ItemType = ItemLongShelfLife
++	}
++
++	id, err := newID()
++	if err != nil {
++		return nil, err
++	}
++
++	var out *CatalogProduct
++	err = s.inTx(ctx, func(tx pgx.Tx) error {
++		baseID, err := resolveVariantBase(ctx, tx, in.ShownID)
++		if err != nil {
++			return err
++		}
++
++		_, err = tx.Exec(ctx, `
++			INSERT INTO catalog_products (id, normalized_name, display_name, base_id, category_path,
++			                              item_type, image_url, icon_name, default_shelf_life_days)
++			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
++			ON CONFLICT (normalized_name) DO NOTHING`,
++			id, normalized, in.DisplayName, baseID, in.CategoryPath,
++			string(in.ItemType), in.ImageURL, in.IconName, in.DefaultShelfLifeDays)
++		if err != nil {
++			return fmt.Errorf("store: insert catalog product: %w", err)
++		}
++
++		// Read back by name, not by id: on conflict the surviving row is the
++		// one written first, and that is the row callers must be given.
++		row := tx.QueryRow(ctx, `
++			SELECT id, normalized_name, display_name, base_id, category_path, item_type,
++			       image_url, icon_name, default_shelf_life_days, created_at
++			  FROM catalog_products WHERE normalized_name = $1`, normalized)
++
++		cp, err := scanCatalogProduct(row)
++		if err != nil {
++			return err
++		}
++		out = cp
++		return nil
++	})
++	if err != nil {
++		return nil, err
++	}
++	return out, nil
++}
++
++// resolveVariantBase turns "the row the user was shown" into the base a new
++// variant should point at.
++//
++// Only one level is used: if the shown row is itself a variant, the new row
++// links to that variant's base instead. Chains drift semantically — cherry
++// tomato → tomato is useful, and a third hop is how "tomato" ends up a variant
++// of "vegetable" — and a flat graph keeps the sibling lookup a single cheap
++// query.
++func resolveVariantBase(ctx context.Context, q querier, shownID *uuid.UUID) (*uuid.UUID, error) {
++	if shownID == nil {
++		return nil, nil
++	}
++
++	var id uuid.UUID
++	var baseID *uuid.UUID
++	err := q.QueryRow(ctx,
++		`SELECT id, base_id FROM catalog_products WHERE id = $1`, *shownID).Scan(&id, &baseID)
++	if errors.Is(err, pgx.ErrNoRows) {
++		// The row the client claims to have been shown does not exist. Drop
++		// the link rather than failing the insert: the product is still worth
++		// recording, and the variant edge is a convenience.
++		return nil, nil
++	}
++	if err != nil {
++		return nil, fmt.Errorf("store: resolve variant base: %w", err)
++	}
++
++	if baseID != nil {
++		return baseID, nil
++	}
++	return &id, nil
++}
++
++// CatalogVariants returns the display names of a row's variant siblings: its
++// children when it is a base, its co-variants when it is itself a variant.
++//
++// Only display names are returned. Handing back ids or timestamps would let a
++// caller correlate catalog rows across requests and start inferring how many
++// storages exist.
++func (s *Store) CatalogVariants(ctx context.Context, id uuid.UUID, limit int) ([]string, error) {
++	if limit <= 0 {
++		limit = 5
++	}
++
++	rows, err := s.pool.Query(ctx, `
++		WITH target AS (
++		    SELECT id, coalesce(base_id, id) AS base FROM catalog_products WHERE id = $1
++		)
++		SELECT c.display_name
++		  FROM catalog_products c, target t
++		 WHERE c.id <> t.id
++		   AND (c.base_id = t.base OR c.id = t.base)
++		 ORDER BY c.display_name
++		 LIMIT $2`, id, limit)
++	if err != nil {
++		return nil, fmt.Errorf("store: catalog variants: %w", err)
++	}
++	defer rows.Close()
++
++	var names []string
++	for rows.Next() {
++		var name string
++		if err := rows.Scan(&name); err != nil {
++			return nil, fmt.Errorf("store: scan catalog variant: %w", err)
++		}
++		names = append(names, name)
++	}
++	if err := rows.Err(); err != nil {
++		return nil, fmt.Errorf("store: catalog variants: %w", err)
++	}
++	return names, nil
++}
++
++// SetCatalogShelfLife is the ONLY permitted update to a catalog_products row,
++// and only an admin may call it.
++//
++// It does not reopen the abuse hole the insert-only rule closes: the field is
++// a bounded integer written by an admin, so it cannot carry a message to
++// another household — unlike the free-text and image fields, which stay
++// permanently immutable.
++func (s *Store) SetCatalogShelfLife(ctx context.Context, id uuid.UUID, days *int) error {
++	tag, err := s.pool.Exec(ctx,
++		`UPDATE catalog_products SET default_shelf_life_days = $1 WHERE id = $2`, days, id)
++	if err != nil {
++		return fmt.Errorf("store: set catalog shelf life: %w", err)
++	}
++	if tag.RowsAffected() == 0 {
++		return ErrNotFound
++	}
++	return nil
++}
++
++// DeleteCatalogProduct is admin moderation, the only way a bad entry is
++// removed. It never touches any storage's own products: products.catalog_id is
++// ON DELETE SET NULL, so a household keeps the product it created.
++func (s *Store) DeleteCatalogProduct(ctx context.Context, id uuid.UUID) error {
++	tag, err := s.pool.Exec(ctx, `DELETE FROM catalog_products WHERE id = $1`, id)
++	if err != nil {
++		return fmt.Errorf("store: delete catalog product: %w", err)
++	}
++	if tag.RowsAffected() == 0 {
++		return ErrNotFound
++	}
++	return nil
++}
++
++// FindCatalogProduct looks a row up by its normalized name.
++func (s *Store) FindCatalogProduct(ctx context.Context, name string) (*CatalogProduct, error) {
++	row := s.pool.QueryRow(ctx, `
++		SELECT id, normalized_name, display_name, base_id, category_path, item_type,
++		       image_url, icon_name, default_shelf_life_days, created_at
++		  FROM catalog_products WHERE normalized_name = $1`, NormalizeCatalogName(name))
++	return scanCatalogProduct(row)
++}
++
++func scanCatalogProduct(row rowScanner) (*CatalogProduct, error) {
++	var c CatalogProduct
++	var itemType string
++	err := row.Scan(&c.ID, &c.NormalizedName, &c.DisplayName, &c.BaseID, &c.CategoryPath,
++		&itemType, &c.ImageURL, &c.IconName, &c.DefaultShelfLifeDays, &c.CreatedAt)
++	if errors.Is(err, pgx.ErrNoRows) {
++		return nil, ErrNotFound
++	}
++	if err != nil {
++		return nil, fmt.Errorf("store: scan catalog product: %w", err)
++	}
++	c.ItemType = ItemType(itemType)
++	return &c, nil
++}
+diff --git a/internal/store/catalog_test.go b/internal/store/catalog_test.go
+new file mode 100644
+index 0000000..f4c6324
+--- /dev/null
++++ b/internal/store/catalog_test.go
+@@ -0,0 +1,235 @@
++package store_test
++
++import (
++	"context"
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++
++	"github.com/CDRO/Inventory/internal/store"
++)
++
++// catalog_products is the one global table, and the rules on it are abuse
++// controls rather than tidiness. It is insert-only because a globally visible
++// row that any storage can rewrite is a covert messaging channel between
++// households (docs/specs/02-data-model.md).
++
++func TestNormalizeCatalogName(t *testing.T) {
++	t.Parallel()
++
++	tests := map[string]string{
++		"Cherry Tomatoes":     "cherry tomatoes",
++		"  Cherry Tomatoes  ": "cherry tomatoes",
++		"CHERRY   TOMATOES":   "cherry tomatoes",
++		"Cherry\tTomatoes":    "cherry tomatoes",
++		"cherry\n tomatoes":   "cherry tomatoes",
++		"":                    "",
++		"   ":                 "",
++	}
++
++	for in, want := range tests {
++		assert.Equalf(t, want, store.NormalizeCatalogName(in), "normalising %q", in)
++	}
++}
++
++// TestCatalogIsInsertOnly is the abuse control. A second storage describing
++// the same product must not be able to change what the first one wrote —
++// that is the covert channel the insert-only rule closes.
++func TestCatalogIsInsertOnly(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	name := "Insert Only " + randomSuffix()
++
++	first, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{
++		DisplayName:  name,
++		ItemType:     store.ItemPerishable,
++		CategoryPath: ptrString("Food > Dairy"),
++	})
++	require.NoError(t, err)
++
++	second, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{
++		DisplayName:  name,
++		ItemType:     store.ItemNonPerishable,
++		CategoryPath: ptrString("Household > Cleaning"),
++		ImageURL:     ptrString("https://example.invalid/hijack.png"),
++	})
++	require.NoError(t, err, "a conflict is not an error: another storage described it first")
++
++	assert.Equal(t, first.ID, second.ID, "the surviving row is the one written first")
++	assert.Equal(t, store.ItemPerishable, second.ItemType, "item_type must not be overwritten")
++	require.NotNil(t, second.CategoryPath)
++	assert.Equal(t, "Food > Dairy", *second.CategoryPath, "category_path must not be overwritten")
++	assert.Nil(t, second.ImageURL, "a later writer must not be able to set the image")
++
++	assert.Equal(t, 1, countRows(t, ctx,
++		`SELECT count(*) FROM catalog_products WHERE normalized_name = $1`,
++		store.NormalizeCatalogName(name)))
++}
++
++func TestCatalogRejectsBlankName(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	_, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{DisplayName: "   "})
++
++	require.ErrorIs(t, err, store.ErrValidation)
++}
++
++// TestVariantGraphStaysOneLevel pins the rule that keeps sibling lookup a
++// single cheap query. Chains drift semantically: cherry tomato → tomato is
++// useful, and a third hop is how "tomato" ends up a variant of "vegetable".
++func TestVariantGraphStaysOneLevel(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	suffix := randomSuffix()
++
++	base, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{
++		DisplayName: "Tomatoes " + suffix,
++		ItemType:    store.ItemPerishable,
++	})
++	require.NoError(t, err)
++	assert.Nil(t, base.BaseID, "a first-seen product is its own base")
++
++	cherry, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{
++		DisplayName: "Cherry Tomatoes " + suffix,
++		ItemType:    store.ItemPerishable,
++		ShownID:     &base.ID,
++	})
++	require.NoError(t, err)
++	require.NotNil(t, cherry.BaseID)
++	assert.Equal(t, base.ID, *cherry.BaseID)
++
++	// The user was shown the *variant* this time. The new row must link to the
++	// variant's base, not to the variant — otherwise the graph grows a second
++	// level.
++	yellow, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{
++		DisplayName: "Yellow Cherry Tomatoes " + suffix,
++		ItemType:    store.ItemPerishable,
++		ShownID:     &cherry.ID,
++	})
++	require.NoError(t, err)
++	require.NotNil(t, yellow.BaseID)
++	assert.Equal(t, base.ID, *yellow.BaseID,
++		"a variant of a variant must link to the shared base, keeping the graph one level deep")
++
++	assert.Equal(t, 0, countRows(t, ctx, `
++		SELECT count(*) FROM catalog_products child
++		  JOIN catalog_products parent ON child.base_id = parent.id
++		 WHERE parent.base_id IS NOT NULL`),
++		"no row may point at a row that is itself a variant")
++}
++
++func TestVariantSiblingsReturnDisplayNamesOnly(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	suffix := randomSuffix()
++	base, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{DisplayName: "Peppers " + suffix})
++	require.NoError(t, err)
++	_, err = s.InsertCatalogProduct(ctx, store.NewCatalogProduct{
++		DisplayName: "Red Peppers " + suffix, ShownID: &base.ID,
++	})
++	require.NoError(t, err)
++	_, err = s.InsertCatalogProduct(ctx, store.NewCatalogProduct{
++		DisplayName: "Green Peppers " + suffix, ShownID: &base.ID,
++	})
++	require.NoError(t, err)
++
++	names, err := s.CatalogVariants(ctx, base.ID, 5)
++	require.NoError(t, err)
++
++	assert.ElementsMatch(t, []string{"Green Peppers " + suffix, "Red Peppers " + suffix}, names)
++}
++
++// TestUnknownShownIDDoesNotFailTheInsert — the variant edge is a convenience,
++// and the product is still worth recording without it.
++func TestUnknownShownIDDoesNotFailTheInsert(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	invented := newUUID(t)
++
++	created, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{
++		DisplayName: "Orphan " + randomSuffix(),
++		ShownID:     &invented,
++	})
++
++	require.NoError(t, err)
++	assert.Nil(t, created.BaseID)
++}
++
++// TestSetCatalogShelfLifeIsTheOnlyPermittedUpdate documents the single
++// exception to insert-only. It is a bounded integer written by an admin, so it
++// cannot carry a message to another household — unlike the free-text and image
++// fields, which stay permanently immutable.
++func TestSetCatalogShelfLifeIsTheOnlyPermittedUpdate(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	created, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{
++		DisplayName: "Hard Cheese " + randomSuffix(),
++		ItemType:    store.ItemPerishable,
++	})
++	require.NoError(t, err)
++
++	require.NoError(t, s.SetCatalogShelfLife(ctx, created.ID, ptrInt(90)))
++
++	after, err := s.FindCatalogProduct(ctx, created.DisplayName)
++	require.NoError(t, err)
++	require.NotNil(t, after.DefaultShelfLifeDays)
++	assert.Equal(t, 90, *after.DefaultShelfLifeDays)
++
++	// Everything else is unchanged.
++	assert.Equal(t, created.DisplayName, after.DisplayName)
++	assert.Equal(t, created.ItemType, after.ItemType)
++}
++
++// TestDeleteCatalogProductLeavesStorageProductsAlone — moderation removes the
++// global entry, never a household's own row. products.catalog_id is
++// ON DELETE SET NULL precisely so the local product survives.
++func TestDeleteCatalogProductLeavesStorageProductsAlone(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	storageID := newStorage(t, ctx)
++	entry, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{
++		DisplayName: "Moderated " + randomSuffix(),
++	})
++	require.NoError(t, err)
++
++	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{
++		Name:      "Local copy",
++		CatalogID: &entry.ID,
++	})
++	require.NoError(t, err)
++
++	require.NoError(t, s.DeleteCatalogProduct(ctx, entry.ID))
++
++	assert.Equal(t, 1, countRows(t, ctx, `SELECT count(*) FROM products WHERE id = $1`, product.ID),
++		"deleting a catalog row never touches a storage's own products")
++
++	var catalogID *string
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT catalog_id::text FROM products WHERE id = $1`, product.ID).Scan(&catalogID))
++	assert.Nil(t, catalogID, "the dangling reference is cleared, not left pointing at nothing")
++}
++
++func TestCatalogCarriesNoStorageReference(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	// A structural assertion rather than a behavioural one: the privacy
++	// guarantee is that these columns do not exist to be populated by accident.
++	forbidden := []string{"storage_id", "user_id", "created_by", "quantity", "location_id"}
++	for _, column := range forbidden {
++		assert.Equalf(t, 0, countRows(t, ctx, `
++			SELECT count(*) FROM information_schema.columns
++			 WHERE table_name = 'catalog_products' AND column_name = $1`, column),
++			"catalog_products must not have a %s column", column)
++	}
++
++	_ = s
++}
+diff --git a/internal/store/categories.go b/internal/store/categories.go
+new file mode 100644
+index 0000000..ab095ff
+--- /dev/null
++++ b/internal/store/categories.go
+@@ -0,0 +1,206 @@
++package store
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"time"
++
++	"github.com/google/uuid"
++	"github.com/jackc/pgx/v5"
++)
++
++// Category is one node of a storage's category tree. Same shape and same
++// application-level invariants as Location.
++type Category struct {
++	ID                   uuid.UUID
++	StorageID            uuid.UUID
++	ParentID             *uuid.UUID
++	Name                 string
++	DefaultShelfLifeDays *int
++	CreatedAt            time.Time
++	UpdatedAt            time.Time
++}
++
++// NewCategory is the input to CreateCategory.
++type NewCategory struct {
++	ParentID             *uuid.UUID
++	Name                 string
++	DefaultShelfLifeDays *int
++}
++
++// CreateCategory inserts a node, rejecting a parent from another storage with
++// ErrNotFound.
++func (s *Store) CreateCategory(ctx context.Context, storageID uuid.UUID, in NewCategory) (*Category, error) {
++	id, err := newID()
++	if err != nil {
++		return nil, err
++	}
++
++	var out *Category
++	err = s.inTx(ctx, func(tx pgx.Tx) error {
++		if err := resolveParent(ctx, tx, treeCategories, storageID, nil, in.ParentID); err != nil {
++			return err
++		}
++
++		row := tx.QueryRow(ctx, `
++			INSERT INTO categories (id, storage_id, parent_id, name, default_shelf_life_days)
++			VALUES ($1, $2, $3, $4, $5)
++			RETURNING id, storage_id, parent_id, name, default_shelf_life_days, created_at, updated_at`,
++			id, storageID, in.ParentID, in.Name, in.DefaultShelfLifeDays)
++
++		cat, err := scanCategory(row)
++		if err != nil {
++			return err
++		}
++		out = cat
++		return nil
++	})
++	if err != nil {
++		return nil, err
++	}
++	return out, nil
++}
++
++// MoveCategory re-parents a node, with the same same-storage and cycle rules
++// as MoveLocation.
++func (s *Store) MoveCategory(ctx context.Context, storageID, id uuid.UUID, parentID *uuid.UUID) error {
++	return s.inTx(ctx, func(tx pgx.Tx) error {
++		if err := requireSameStorage(ctx, tx, treeCategories, storageID, id); err != nil {
++			return err
++		}
++		if err := resolveParent(ctx, tx, treeCategories, storageID, &id, parentID); err != nil {
++			return err
++		}
++
++		_, err := tx.Exec(ctx, `
++			UPDATE categories SET parent_id = $1, updated_at = now()
++			 WHERE id = $2 AND storage_id = $3`,
++			parentID, id, storageID)
++		if err != nil {
++			return fmt.Errorf("store: move category: %w", err)
++		}
++		return nil
++	})
++}
++
++// DeleteCategory removes a node and its descendants.
++//
++// It refuses with ErrConflict while any node in the subtree is still
++// referenced by a product — the same policy as a location that still holds
++// inventory. products.category_id is ON DELETE RESTRICT, so the database would
++// refuse the cascade anyway; checking first turns a foreign-key violation into
++// an answer that names the number of products in the way.
++func (s *Store) DeleteCategory(ctx context.Context, storageID, id uuid.UUID) error {
++	return s.inTx(ctx, func(tx pgx.Tx) error {
++		if err := requireSameStorage(ctx, tx, treeCategories, storageID, id); err != nil {
++			return err
++		}
++
++		subtree, err := categorySubtree(ctx, tx, id)
++		if err != nil {
++			return err
++		}
++
++		used, err := scanCount(ctx, tx, `
++			SELECT count(*) FROM products WHERE category_id = ANY($1)`, subtree)
++		if err != nil {
++			return fmt.Errorf("store: check products in category: %w", err)
++		}
++		if used > 0 {
++			return fmt.Errorf("%w: category is still used by %d product(s)", ErrConflict, used)
++		}
++
++		if _, err := tx.Exec(ctx, `DELETE FROM categories WHERE id = $1 AND storage_id = $2`, id, storageID); err != nil {
++			return fmt.Errorf("store: delete category: %w", err)
++		}
++
++		return recordTombstones(ctx, tx, storageID, TombstoneCategory, subtree)
++	})
++}
++
++// SetCategoryShelfLife updates the shelf-life rule.
++//
++// The recompute of derived expiration dates that this change triggers belongs
++// to docs/specs/08-expiration-and-classification.md and is not done here; this
++// is the data-model write only.
++func (s *Store) SetCategoryShelfLife(ctx context.Context, storageID, id uuid.UUID, days *int) error {
++	tag, err := s.pool.Exec(ctx, `
++		UPDATE categories SET default_shelf_life_days = $1, updated_at = now()
++		 WHERE id = $2 AND storage_id = $3`, days, id, storageID)
++	if err != nil {
++		return fmt.Errorf("store: set category shelf life: %w", err)
++	}
++	if tag.RowsAffected() == 0 {
++		return ErrNotFound
++	}
++	return nil
++}
++
++// CategoryTree returns every node of one storage.
++func (s *Store) CategoryTree(ctx context.Context, storageID uuid.UUID) ([]Category, error) {
++	rows, err := s.pool.Query(ctx, `
++		SELECT id, storage_id, parent_id, name, default_shelf_life_days, created_at, updated_at
++		  FROM categories
++		 WHERE storage_id = $1
++		 ORDER BY created_at, id`, storageID)
++	if err != nil {
++		return nil, fmt.Errorf("store: list categories: %w", err)
++	}
++	defer rows.Close()
++
++	var out []Category
++	for rows.Next() {
++		cat, err := scanCategory(rows)
++		if err != nil {
++			return nil, err
++		}
++		out = append(out, *cat)
++	}
++	if err := rows.Err(); err != nil {
++		return nil, fmt.Errorf("store: list categories: %w", err)
++	}
++	return out, nil
++}
++
++func categorySubtree(ctx context.Context, q querier, root uuid.UUID) ([]uuid.UUID, error) {
++	rows, err := q.Query(ctx, fmt.Sprintf(`
++		WITH RECURSIVE subtree AS (
++		    SELECT id, 1 AS depth FROM categories WHERE id = $1
++		    UNION ALL
++		    SELECT c.id, s.depth + 1
++		      FROM categories c
++		      JOIN subtree s ON c.parent_id = s.id
++		     WHERE s.depth < %d
++		)
++		SELECT id FROM subtree`, maxTreeDepth), root)
++	if err != nil {
++		return nil, fmt.Errorf("store: collect category subtree: %w", err)
++	}
++	defer rows.Close()
++
++	var ids []uuid.UUID
++	for rows.Next() {
++		var id uuid.UUID
++		if err := rows.Scan(&id); err != nil {
++			return nil, fmt.Errorf("store: collect category subtree: %w", err)
++		}
++		ids = append(ids, id)
++	}
++	if err := rows.Err(); err != nil {
++		return nil, fmt.Errorf("store: collect category subtree: %w", err)
++	}
++	return ids, nil
++}
++
++func scanCategory(row rowScanner) (*Category, error) {
++	var cat Category
++	err := row.Scan(&cat.ID, &cat.StorageID, &cat.ParentID, &cat.Name, &cat.DefaultShelfLifeDays, &cat.CreatedAt, &cat.UpdatedAt)
++	if errors.Is(err, pgx.ErrNoRows) {
++		return nil, ErrNotFound
++	}
++	if err != nil {
++		return nil, fmt.Errorf("store: scan category: %w", err)
++	}
++	return &cat, nil
++}
+diff --git a/internal/store/clientsync_test.go b/internal/store/clientsync_test.go
+new file mode 100644
+index 0000000..172fc83
+--- /dev/null
++++ b/internal/store/clientsync_test.go
+@@ -0,0 +1,320 @@
++package store_test
++
++import (
++	"context"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++
++	"github.com/CDRO/Inventory/internal/store"
++)
++
++// TestPairingCodeIsRedeemableExactlyOnce is the rule that matters most on this
++// table: the code is the one unauthenticated credential that mints a session,
++// so a second redemption must fail even inside the TTL.
++func TestPairingCodeIsRedeemableExactlyOnce(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	userID := newUser(t, ctx)
++
++	code, err := s.CreatePairingCode(ctx, userID)
++	require.NoError(t, err)
++
++	got, err := s.RedeemPairingCode(ctx, code)
++	require.NoError(t, err)
++	assert.Equal(t, userID, got)
++
++	_, err = s.RedeemPairingCode(ctx, code)
++	require.ErrorIs(t, err, store.ErrNotFound, "a code must not be redeemable twice")
++
++	var usedAt *time.Time
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT used_at FROM pairing_codes WHERE code = $1`, code).Scan(&usedAt))
++	assert.NotNil(t, usedAt, "redemption records when the code was consumed")
++}
++
++// TestPairingCodeRaceYieldsOneWinner — two clients scanning the same QR at
++// once must not both get a session. The single-use rule has to hold under
++// concurrency, not just in sequence.
++func TestPairingCodeRaceYieldsOneWinner(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	userID := newUser(t, ctx)
++
++	code, err := s.CreatePairingCode(ctx, userID)
++	require.NoError(t, err)
++
++	const racers = 8
++	var wg sync.WaitGroup
++	results := make(chan error, racers)
++
++	for i := 0; i < racers; i++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			_, err := s.RedeemPairingCode(ctx, code)
++			results <- err
++		}()
++	}
++	wg.Wait()
++	close(results)
++
++	var wins, losses int
++	for err := range results {
++		if err == nil {
++			wins++
++		} else {
++			require.ErrorIs(t, err, store.ErrNotFound)
++			losses++
++		}
++	}
++
++	assert.Equal(t, 1, wins, "exactly one racer may redeem the code")
++	assert.Equal(t, racers-1, losses)
++}
++
++func TestExpiredPairingCodeIsNotRedeemable(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	userID := newUser(t, ctx)
++
++	code, err := s.CreatePairingCode(ctx, userID)
++	require.NoError(t, err)
++
++	// Age it past its TTL rather than waiting two minutes.
++	_, err = execTest(ctx,
++		`UPDATE pairing_codes SET expires_at = now() - interval '1 second' WHERE code = $1`, code)
++	require.NoError(t, err)
++
++	_, err = s.RedeemPairingCode(ctx, code)
++	require.ErrorIs(t, err, store.ErrNotFound)
++}
++
++func TestUnknownPairingCodeIsNotFound(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	_, err := s.RedeemPairingCode(ctx, "not-a-real-code")
++	require.ErrorIs(t, err, store.ErrNotFound)
++
++	_, err = s.RedeemPairingCode(ctx, "")
++	require.ErrorIs(t, err, store.ErrNotFound)
++}
++
++// TestIdempotencyReplaysTheSameRequest covers the honest retry: a phone whose
++// response was lost re-sends and must get the original answer, not a second
++// debit.
++func TestIdempotencyReplaysTheSameRequest(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	userID := newUser(t, ctx)
++
++	key := "key-" + randomSuffix()
++	hash := store.HashRequest("POST", "/api/storages/x/consume", []byte(`{"qty":1}`))
++
++	missing, err := s.LookupIdempotent(ctx, key, userID, hash)
++	require.NoError(t, err)
++	assert.Nil(t, missing, "an unseen key is not a hit")
++
++	require.NoError(t, s.RecordIdempotent(ctx, key, userID, nil, hash, 201, []byte(`{"ok":true}`)))
++
++	replay, err := s.LookupIdempotent(ctx, key, userID, hash)
++	require.NoError(t, err)
++	require.NotNil(t, replay)
++	assert.Equal(t, 201, replay.Status)
++	assert.JSONEq(t, `{"ok":true}`, string(replay.Body))
++}
++
++// TestIdempotencyKeyReuseWithDifferentBodyIsRejected — replaying here would
++// hand back a response belonging to an entirely different call, which is worse
++// than the duplicate the key was meant to prevent.
++func TestIdempotencyKeyReuseWithDifferentBodyIsRejected(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	userID := newUser(t, ctx)
++
++	key := "key-" + randomSuffix()
++	original := store.HashRequest("POST", "/api/storages/x/consume", []byte(`{"qty":1}`))
++	different := store.HashRequest("POST", "/api/storages/x/consume", []byte(`{"qty":99}`))
++
++	require.NoError(t, s.RecordIdempotent(ctx, key, userID, nil, original, 201, []byte(`{"ok":true}`)))
++
++	_, err := s.LookupIdempotent(ctx, key, userID, different)
++
++	require.ErrorIs(t, err, store.ErrValidation)
++}
++
++// TestIdempotencyKeysAreScopedPerUser — the primary key is (key, user_id)
++// precisely so one client's "key-1" cannot collide with another's.
++func TestIdempotencyKeysAreScopedPerUser(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	alice := newUser(t, ctx)
++	bob := newUser(t, ctx)
++
++	key := "shared-" + randomSuffix()
++	hash := store.HashRequest("POST", "/api/x", []byte(`{}`))
++
++	require.NoError(t, s.RecordIdempotent(ctx, key, alice, nil, hash, 201, []byte(`{"who":"alice"}`)))
++
++	bobsView, err := s.LookupIdempotent(ctx, key, bob, hash)
++	require.NoError(t, err)
++	assert.Nil(t, bobsView, "Bob must not see Alice's recorded response")
++}
++
++func TestHashRequestSeparatesFields(t *testing.T) {
++	t.Parallel()
++
++	// Without the field separator, method+path+body could be re-partitioned to
++	// produce the same digest for different requests.
++	a := store.HashRequest("POST", "/a", []byte("bc"))
++	b := store.HashRequest("POST", "/ab", []byte("c"))
++
++	assert.NotEqual(t, a, b, "field boundaries must be part of the digest")
++	assert.Equal(t, a, store.HashRequest("POST", "/a", []byte("bc")), "hashing is deterministic")
++}
++
++// TestSessionKindsAreIndependent is what makes "revoke my phone" work: the
++// device session must be removable without touching the browser's.
++func TestSessionKindsAreIndependent(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	userID := newUser(t, ctx)
++
++	browser, err := s.CreateSession(ctx, userID, store.SessionBrowser, nil, time.Hour)
++	require.NoError(t, err)
++	phone, err := s.CreateSession(ctx, userID, store.SessionDevice, ptrString("Pixel 9"), 30*24*time.Hour)
++	require.NoError(t, err)
++
++	assert.Equal(t, store.SessionBrowser, browser.Kind)
++	assert.Nil(t, browser.Label, "a browser session carries no device label")
++	require.NotNil(t, phone.Label)
++	assert.Equal(t, "Pixel 9", *phone.Label)
++
++	sessions, err := s.UserSessions(ctx, userID)
++	require.NoError(t, err)
++	assert.Len(t, sessions, 2)
++
++	require.NoError(t, s.DeleteSession(ctx, phone.ID))
++
++	_, err = s.LookupSession(ctx, phone.ID)
++	assert.ErrorIs(t, err, store.ErrNotFound, "the revoked device is gone")
++
++	still, err := s.LookupSession(ctx, browser.ID)
++	require.NoError(t, err, "revoking a phone must not sign the laptop out")
++	assert.Equal(t, browser.ID, still.ID)
++}
++
++// TestSessionTokenIsOpaqueAndUnpredictable pins the one deliberate exception
++// to UUIDv7: a session id is a bearer credential, so it must not embed a
++// timestamp.
++func TestSessionTokenIsOpaqueAndUnpredictable(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	userID := newUser(t, ctx)
++
++	seen := map[string]bool{}
++	for i := 0; i < 20; i++ {
++		session, err := s.CreateSession(ctx, userID, store.SessionBrowser, nil, time.Hour)
++		require.NoError(t, err)
++
++		assert.GreaterOrEqual(t, len(session.ID), 43, "256 bits base64url-encodes to 43 characters")
++		assert.NotContains(t, session.ID, "=", "the encoding is unpadded base64url")
++
++		_, err = uuid.Parse(session.ID)
++		assert.Error(t, err, "a session id must not be a UUID")
++
++		require.False(t, seen[session.ID], "tokens must never repeat")
++		seen[session.ID] = true
++	}
++}
++
++// TestExpiredSessionIsClearedOnLookup — a credential has to stop working the
++// moment it lapses, not whenever the sweep next runs.
++func TestExpiredSessionIsClearedOnLookup(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	userID := newUser(t, ctx)
++
++	session, err := s.CreateSession(ctx, userID, store.SessionBrowser, nil, time.Hour)
++	require.NoError(t, err)
++
++	_, err = execTest(ctx,
++		`UPDATE sessions SET expires_at = now() - interval '1 second' WHERE id = $1`, session.ID)
++	require.NoError(t, err)
++
++	_, err = s.LookupSession(ctx, session.ID)
++
++	require.ErrorIs(t, err, store.ErrNotFound)
++	assert.Equal(t, 0, countRows(t, ctx, `SELECT count(*) FROM sessions WHERE id = $1`, session.ID),
++		"the lapsed row is cleared on lookup, not left for the sweep")
++}
++
++// TestTouchSessionIsThrottled — last_seen_at exists for a "last active"
++// display. Rewriting it on every request would be a database write per
++// request for a column nobody reads that often.
++func TestTouchSessionIsThrottled(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	userID := newUser(t, ctx)
++
++	session, err := s.CreateSession(ctx, userID, store.SessionDevice, ptrString("Pixel 9"), time.Hour)
++	require.NoError(t, err)
++
++	require.NoError(t, s.TouchSession(ctx, session.ID))
++
++	var first *time.Time
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT last_seen_at FROM sessions WHERE id = $1`, session.ID).Scan(&first))
++	require.NotNil(t, first, "the first touch records activity")
++
++	// Several more touches in quick succession must all be suppressed.
++	for i := 0; i < 5; i++ {
++		require.NoError(t, s.TouchSession(ctx, session.ID))
++	}
++
++	var second *time.Time
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT last_seen_at FROM sessions WHERE id = $1`, session.ID).Scan(&second))
++	require.NotNil(t, second)
++	assert.Equal(t, *first, *second, "a touch within the hour must not rewrite the row")
++
++	// Age it past the throttle; the next touch is allowed through.
++	_, err = execTest(ctx,
++		`UPDATE sessions SET last_seen_at = now() - interval '2 hours' WHERE id = $1`, session.ID)
++	require.NoError(t, err)
++
++	require.NoError(t, s.TouchSession(ctx, session.ID))
++
++	var third *time.Time
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT last_seen_at FROM sessions WHERE id = $1`, session.ID).Scan(&third))
++	require.NotNil(t, third)
++	assert.True(t, third.After(*second), "once the throttle window passes, activity is recorded again")
++}
++
++func TestSweepsRemoveOnlyDeadRows(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	userID := newUser(t, ctx)
++
++	live, err := s.CreateSession(ctx, userID, store.SessionBrowser, nil, time.Hour)
++	require.NoError(t, err)
++	dead, err := s.CreateSession(ctx, userID, store.SessionBrowser, nil, time.Hour)
++	require.NoError(t, err)
++	_, err = execTest(ctx,
++		`UPDATE sessions SET expires_at = now() - interval '1 second' WHERE id = $1`, dead.ID)
++	require.NoError(t, err)
++
++	removed, err := s.SweepSessions(ctx)
++	require.NoError(t, err)
++	assert.GreaterOrEqual(t, removed, int64(1))
++
++	assert.Equal(t, 1, countRows(t, ctx, `SELECT count(*) FROM sessions WHERE id = $1`, live.ID),
++		"the live session survives the sweep")
++	assert.Equal(t, 0, countRows(t, ctx, `SELECT count(*) FROM sessions WHERE id = $1`, dead.ID))
++}
+diff --git a/internal/store/cycles_test.go b/internal/store/cycles_test.go
+new file mode 100644
+index 0000000..b89c000
+--- /dev/null
++++ b/internal/store/cycles_test.go
+@@ -0,0 +1,187 @@
++package store_test
++
++import (
++	"context"
++	"testing"
++
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++
++	"github.com/CDRO/Inventory/internal/store"
++)
++
++// Cycle prevention is the other invariant no CHECK can express. The
++// locations_not_own_parent constraint stops the one-node case; a ring of two or
++// more is invisible to the schema.
++//
++// The consequence is worse than an odd-looking tree: a ring has no root, so it
++// disappears from every tree query while its rows still exist and still hold
++// inventory. The stock is neither visible nor deletable through the UI.
++
++// chain builds root → child → grandchild and returns their ids.
++func locationChain(t *testing.T, ctx context.Context, s *store.Store, storageID uuid.UUID) (root, child, grandchild uuid.UUID) {
++	t.Helper()
++
++	r, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Basement"})
++	require.NoError(t, err)
++	c, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Right Shelf", ParentID: &r.ID})
++	require.NoError(t, err)
++	g, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Layer 2", ParentID: &c.ID})
++	require.NoError(t, err)
++	return r.ID, c.ID, g.ID
++}
++
++func TestMoveLocationRejectsCycles(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	storageID := newStorage(t, ctx)
++
++	root, child, grandchild := locationChain(t, ctx, s, storageID)
++
++	tests := []struct {
++		name   string
++		node   uuid.UUID
++		parent uuid.UUID
++	}{
++		{name: "node under itself", node: root, parent: root},
++		{name: "root under its direct child", node: root, parent: child},
++		{name: "root under a deeper descendant", node: root, parent: grandchild},
++		{name: "child under its own child", node: child, parent: grandchild},
++	}
++
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			err := s.MoveLocation(ctx, storageID, tc.node, &tc.parent)
++			require.ErrorIs(t, err, store.ErrConflict)
++		})
++	}
++
++	// The tree must be exactly as it started: every node still reachable from
++	// the root.
++	var rootParent, childParent, grandchildParent *uuid.UUID
++	require.NoError(t, testPool.QueryRow(ctx, `SELECT parent_id FROM locations WHERE id = $1`, root).Scan(&rootParent))
++	require.NoError(t, testPool.QueryRow(ctx, `SELECT parent_id FROM locations WHERE id = $1`, child).Scan(&childParent))
++	require.NoError(t, testPool.QueryRow(ctx, `SELECT parent_id FROM locations WHERE id = $1`, grandchild).Scan(&grandchildParent))
++
++	assert.Nil(t, rootParent)
++	require.NotNil(t, childParent)
++	assert.Equal(t, root, *childParent)
++	require.NotNil(t, grandchildParent)
++	assert.Equal(t, child, *grandchildParent)
++}
++
++func TestMoveCategoryRejectsCycles(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	storageID := newStorage(t, ctx)
++
++	food, err := s.CreateCategory(ctx, storageID, store.NewCategory{Name: "Food"})
++	require.NoError(t, err)
++	dairy, err := s.CreateCategory(ctx, storageID, store.NewCategory{Name: "Dairy", ParentID: &food.ID})
++	require.NoError(t, err)
++	cheese, err := s.CreateCategory(ctx, storageID, store.NewCategory{Name: "Cheese", ParentID: &dairy.ID})
++	require.NoError(t, err)
++
++	assert.ErrorIs(t, s.MoveCategory(ctx, storageID, food.ID, &cheese.ID), store.ErrConflict)
++	assert.ErrorIs(t, s.MoveCategory(ctx, storageID, food.ID, &food.ID), store.ErrConflict)
++	assert.ErrorIs(t, s.MoveCategory(ctx, storageID, dairy.ID, &cheese.ID), store.ErrConflict)
++}
++
++// TestLegitimateMovesStillWork guards against the cycle check being so eager
++// that it blocks ordinary re-parenting. A test suite that only proves the
++// rejections would pass with a function that rejects everything.
++func TestLegitimateMovesStillWork(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	storageID := newStorage(t, ctx)
++
++	root, child, grandchild := locationChain(t, ctx, s, storageID)
++
++	t.Run("promote a grandchild to a root", func(t *testing.T) {
++		require.NoError(t, s.MoveLocation(ctx, storageID, grandchild, nil))
++
++		var parent *uuid.UUID
++		require.NoError(t, testPool.QueryRow(ctx,
++			`SELECT parent_id FROM locations WHERE id = $1`, grandchild).Scan(&parent))
++		assert.Nil(t, parent)
++	})
++
++	t.Run("move a former descendant back under the root", func(t *testing.T) {
++		require.NoError(t, s.MoveLocation(ctx, storageID, grandchild, &root))
++
++		var parent *uuid.UUID
++		require.NoError(t, testPool.QueryRow(ctx,
++			`SELECT parent_id FROM locations WHERE id = $1`, grandchild).Scan(&parent))
++		require.NotNil(t, parent)
++		assert.Equal(t, root, *parent)
++	})
++
++	t.Run("move a sibling under another sibling", func(t *testing.T) {
++		require.NoError(t, s.MoveLocation(ctx, storageID, grandchild, &child))
++	})
++}
++
++// TestMoveTouchesUpdatedAt covers the delta-sync column: a re-parent that did
++// not bump updated_at would be invisible to a client asking for "everything
++// changed since X", leaving the node under its old parent forever.
++func TestMoveTouchesUpdatedAt(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	storageID := newStorage(t, ctx)
++
++	root, child, _ := locationChain(t, ctx, s, storageID)
++
++	var before, after any
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT updated_at FROM locations WHERE id = $1`, child).Scan(&before))
++
++	require.NoError(t, s.MoveLocation(ctx, storageID, child, nil))
++
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT updated_at FROM locations WHERE id = $1`, child).Scan(&after))
++
++	assert.NotEqual(t, before, after, "a move must bump updated_at for delta sync")
++
++	// Restore so the fixture reads naturally if this test is extended.
++	require.NoError(t, s.MoveLocation(ctx, storageID, child, &root))
++}
++
++// TestRenameTouchesUpdatedAt covers the same column on the other write path.
++func TestRenameTouchesUpdatedAt(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	storageID := newStorage(t, ctx)
++
++	loc, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Shed"})
++	require.NoError(t, err)
++
++	var before, after any
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT updated_at FROM locations WHERE id = $1`, loc.ID).Scan(&before))
++
++	require.NoError(t, s.RenameLocation(ctx, storageID, loc.ID, "Garden Shed", nil))
++
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT updated_at FROM locations WHERE id = $1`, loc.ID).Scan(&after))
++	assert.NotEqual(t, before, after)
++}
++
++// TestRenameRejectsForeignRow keeps the same-storage rule on the rename path,
++// which does its check in the WHERE clause rather than via requireSameStorage.
++func TestRenameRejectsForeignRow(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	storageA, storageB := twoStorages(t, ctx)
++
++	theirs, err := s.CreateLocation(ctx, storageB, store.NewLocation{Name: "Theirs"})
++	require.NoError(t, err)
++
++	err = s.RenameLocation(ctx, storageA, theirs.ID, "Mine Now", nil)
++
++	require.ErrorIs(t, err, store.ErrNotFound)
++	var name string
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT name FROM locations WHERE id = $1`, theirs.ID).Scan(&name))
++	assert.Equal(t, "Theirs", name)
++}
+diff --git a/internal/store/errors.go b/internal/store/errors.go
+new file mode 100644
+index 0000000..e8c257f
+--- /dev/null
++++ b/internal/store/errors.go
+@@ -0,0 +1,28 @@
++package store
++
++import "errors"
++
++// Domain errors. Handlers map these to status codes
++// (docs/specs/04-backend-api-conventions.md); nothing below knows about HTTP.
++var (
++	// ErrNotFound covers both "no such row" and "that row belongs to another
++	// storage" — deliberately the same error.
++	//
++	// docs/specs/03-auth-and-multi-tenancy.md requires the two to be
++	// indistinguishable to a caller, because a distinguishable response
++	// confirms that an id refers to a real row somewhere and lets a user probe
++	// for the existence of other storages. Collapsing them here means the
++	// distinction is never represented in the first place, so no handler can
++	// leak it by accident and no future refactor can reintroduce the tell.
++	ErrNotFound = errors.New("store: not found")
++
++	// ErrConflict is a legal row that cannot take the requested action: a
++	// location that still holds inventory, a category still referenced by a
++	// product, a re-parent that would create a cycle. Maps to 409.
++	ErrConflict = errors.New("store: conflict")
++
++	// ErrValidation is a payload the model rejects on its own terms — a batch
++	// decrement larger than the batch, a catalog variant pointing at another
++	// variant. Maps to 422.
++	ErrValidation = errors.New("store: validation failed")
++)
+diff --git a/internal/store/idempotency.go b/internal/store/idempotency.go
+new file mode 100644
+index 0000000..413047e
+--- /dev/null
++++ b/internal/store/idempotency.go
+@@ -0,0 +1,101 @@
++package store
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"time"
++
++	"github.com/google/uuid"
++	"github.com/jackc/pgx/v5"
++)
++
++// IdempotencyRetention is how long a recorded response stays replayable. Long
++// enough to cover a phone that was offline overnight, short enough that the
++// table does not grow forever (docs/specs/12-client-api-contract.md).
++const IdempotencyRetention = 7 * 24 * time.Hour
++
++// IdempotentResponse is a previously recorded reply to the same request.
++type IdempotentResponse struct {
++	Status int
++	Body   []byte
++}
++
++// HashRequest builds the fingerprint stored alongside an idempotency key.
++//
++// It covers method, path and body together: a client that reuses a key for a
++// genuinely different request is a bug, and the hash is what makes that
++// distinguishable from an honest retry.
++func HashRequest(method, path string, body []byte) string {
++	sum := sha256.New()
++	sum.Write([]byte(method))
++	sum.Write([]byte{0})
++	sum.Write([]byte(path))
++	sum.Write([]byte{0})
++	sum.Write(body)
++	return hex.EncodeToString(sum.Sum(nil))
++}
++
++// LookupIdempotent returns a recorded response for this key, if any.
++//
++// A hit whose request_hash differs from the current request is not a replay —
++// it is the same key being used for a different call. That returns
++// ErrValidation so the caller can answer 422, rather than replaying a response
++// that belongs to some other request entirely.
++//
++// The key is scoped by user, so one client's key can never collide with
++// another's.
++func (s *Store) LookupIdempotent(ctx context.Context, key string, userID uuid.UUID, requestHash string) (*IdempotentResponse, error) {
++	var status int
++	var body []byte
++	var storedHash string
++
++	err := s.pool.QueryRow(ctx, `
++		SELECT request_hash, response_status, response_body
++		  FROM idempotency_records
++		 WHERE key = $1 AND user_id = $2`, key, userID).Scan(&storedHash, &status, &body)
++
++	if errors.Is(err, pgx.ErrNoRows) {
++		return nil, nil
++	}
++	if err != nil {
++		return nil, fmt.Errorf("store: lookup idempotency record: %w", err)
++	}
++
++	if storedHash != requestHash {
++		return nil, fmt.Errorf("%w: idempotency key reused for a different request", ErrValidation)
++	}
++	return &IdempotentResponse{Status: status, Body: body}, nil
++}
++
++// RecordIdempotent stores the response for a key so a retry replays it.
++//
++// Concurrent first attempts are resolved by the primary key: the loser's
++// insert is ignored and the winner's response is the one that will be
++// replayed, which is the behaviour a client retrying into a race needs.
++func (s *Store) RecordIdempotent(ctx context.Context, key string, userID uuid.UUID, storageID *uuid.UUID, requestHash string, status int, body []byte) error {
++	if key == "" {
++		return fmt.Errorf("%w: idempotency key must not be empty", ErrValidation)
++	}
++
++	if _, err := s.pool.Exec(ctx, `
++		INSERT INTO idempotency_records (key, user_id, storage_id, request_hash, response_status, response_body)
++		VALUES ($1, $2, $3, $4, $5, $6)
++		ON CONFLICT (key, user_id) DO NOTHING`,
++		key, userID, storageID, requestHash, status, body); err != nil {
++		return fmt.Errorf("store: record idempotency: %w", err)
++	}
++	return nil
++}
++
++// SweepIdempotencyRecords deletes rows past the retention window.
++func (s *Store) SweepIdempotencyRecords(ctx context.Context, now time.Time) (int64, error) {
++	tag, err := s.pool.Exec(ctx,
++		`DELETE FROM idempotency_records WHERE created_at < $1`, now.Add(-IdempotencyRetention))
++	if err != nil {
++		return 0, fmt.Errorf("store: sweep idempotency records: %w", err)
++	}
++	return tag.RowsAffected(), nil
++}
+diff --git a/internal/store/ledger_test.go b/internal/store/ledger_test.go
+new file mode 100644
+index 0000000..4b3c49b
+--- /dev/null
++++ b/internal/store/ledger_test.go
+@@ -0,0 +1,317 @@
++package store_test
++
++import (
++	"context"
++	"testing"
++
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++
++	"github.com/CDRO/Inventory/internal/store"
++)
++
++// The rule under test: every write to inventory_batches.quantity is paired, in
++// the same transaction, with an inventory_logs row explaining it
++// (docs/specs/02-data-model.md).
++//
++// It fails silently in the worst way. Stock still looks right, so nothing
++// surfaces until someone asks the ledger a question — analytics (spec 11) or
++// the gamification scoring (spec 51), both of which read inventory_logs as the
++// record of what happened.
++
++// stocked returns a storage with one product holding `qty` at one location.
++func stocked(t *testing.T, ctx context.Context, s *store.Store, qty int) (storageID, productID, locationID, batchID uuid.UUID) {
++	t.Helper()
++
++	storageID = newStorage(t, ctx)
++	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Canned Tomatoes"})
++	require.NoError(t, err)
++	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Cellar"})
++	require.NoError(t, err)
++	batch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
++		ProductID: product.ID, LocationID: location.ID, Quantity: qty, Reason: store.ReasonPurchase,
++	})
++	require.NoError(t, err)
++	return storageID, product.ID, location.ID, batch.ID
++}
++
++func logCount(t *testing.T, ctx context.Context, productID uuid.UUID) int {
++	t.Helper()
++	return countRows(t, ctx, `SELECT count(*) FROM inventory_logs WHERE product_id = $1`, productID)
++}
++
++func TestCreateBatchWritesPairedLog(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	_, productID, _, batchID := stocked(t, ctx, s, 6)
++
++	assert.Equal(t, 1, logCount(t, ctx, productID))
++
++	var changeQty int
++	var reason string
++	var loggedBatch *uuid.UUID
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT change_qty, reason, batch_id FROM inventory_logs WHERE product_id = $1`,
++		productID).Scan(&changeQty, &reason, &loggedBatch))
++
++	assert.Equal(t, 6, changeQty, "the log records the quantity that arrived")
++	assert.Equal(t, "purchase", reason)
++	require.NotNil(t, loggedBatch)
++	assert.Equal(t, batchID, *loggedBatch)
++}
++
++func TestAdjustBatchWritesPairedLog(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	storageID, productID, _, batchID := stocked(t, ctx, s, 6)
++
++	require.NoError(t, s.AdjustBatch(ctx, storageID, batchID, -2, store.ReasonConsumption, nil))
++
++	var quantity int
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT quantity FROM inventory_batches WHERE id = $1`, batchID).Scan(&quantity))
++	assert.Equal(t, 4, quantity)
++
++	assert.Equal(t, 2, logCount(t, ctx, productID), "the create and the adjust each logged once")
++	assert.Equal(t, 1, countRows(t, ctx,
++		`SELECT count(*) FROM inventory_logs WHERE product_id = $1 AND change_qty = -2 AND reason = 'consumption'`,
++		productID))
++}
++
++// TestBatchEmptiedIsDeletedAndStillLogged covers the pairing on the path where
++// the batch row disappears. A log written before the delete, or skipped
++// because the row is gone, would lose the consumption that emptied it.
++func TestBatchEmptiedIsDeletedAndStillLogged(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	storageID, productID, _, batchID := stocked(t, ctx, s, 3)
++
++	require.NoError(t, s.AdjustBatch(ctx, storageID, batchID, -3, store.ReasonConsumption, nil))
++
++	assert.Equal(t, 0, countRows(t, ctx,
++		`SELECT count(*) FROM inventory_batches WHERE id = $1`, batchID),
++		"a batch at zero is deleted; batches are physical things in a place")
++
++	assert.Equal(t, 1, countRows(t, ctx,
++		`SELECT count(*) FROM inventory_logs WHERE product_id = $1 AND change_qty = -3`, productID),
++		"the consumption that emptied the batch must still be recorded")
++
++	// The product survives at zero stock, feeding the reorder dashboard.
++	assert.Equal(t, 1, countRows(t, ctx, `SELECT count(*) FROM products WHERE id = $1`, productID))
++	stock, err := s.CurrentStock(ctx, storageID, productID)
++	require.NoError(t, err)
++	assert.Equal(t, 0, stock)
++}
++
++// TestAdjustBelowZeroIsRejectedNotClamped — clamping would record a
++// consumption that did not happen and leave the ledger disagreeing with the
++// shelf.
++func TestAdjustBelowZeroIsRejectedNotClamped(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	storageID, productID, _, batchID := stocked(t, ctx, s, 2)
++	before := logCount(t, ctx, productID)
++
++	err := s.AdjustBatch(ctx, storageID, batchID, -5, store.ReasonConsumption, nil)
++
++	require.ErrorIs(t, err, store.ErrValidation)
++
++	var quantity int
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT quantity FROM inventory_batches WHERE id = $1`, batchID).Scan(&quantity))
++	assert.Equal(t, 2, quantity, "the batch must be untouched, not clamped to zero")
++	assert.Equal(t, before, logCount(t, ctx, productID), "a rejected adjustment writes no log")
++}
++
++// TestSplitPreservesExpiryAndTotal is the acceptance criterion from spec 06,
++// enforced here at the model level: the jars are the same jars, so their
++// expiry does not reset, and moving one across the house does not change how
++// many exist.
++func TestSplitPreservesExpiryAndTotal(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	storageID := newStorage(t, ctx)
++	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Pickles"})
++	require.NoError(t, err)
++	cellar, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Cellar"})
++	require.NoError(t, err)
++	kitchen, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Kitchen"})
++	require.NoError(t, err)
++
++	expiry := day(2027, 3, 14)
++	source, err := s.CreateBatch(ctx, storageID, store.NewBatch{
++		ProductID:        product.ID,
++		LocationID:       cellar.ID,
++		Quantity:         3,
++		ExpirationDate:   expiry,
++		ExpirationSource: store.ExpirationUser,
++		Reason:           store.ReasonPurchase,
++	})
++	require.NoError(t, err)
++
++	created, err := s.SplitBatch(ctx, storageID, source.ID, 1, kitchen.ID, nil)
++	require.NoError(t, err)
++
++	assert.Equal(t, 1, created.Quantity)
++	assert.Equal(t, kitchen.ID, created.LocationID)
++	require.NotNil(t, created.ExpirationDate)
++	assert.Equal(t, expiry.Format("2006-01-02"), created.ExpirationDate.Format("2006-01-02"),
++		"both halves keep the original expiration date")
++	assert.Equal(t, store.ExpirationUser, created.ExpirationSource,
++		"a date a person typed stays a date a person typed, on both halves")
++
++	total, err := s.CurrentStock(ctx, storageID, product.ID)
++	require.NoError(t, err)
++	assert.Equal(t, 3, total, "a split moves stock, it does not create or destroy it")
++
++	// Two move rows, summing to zero.
++	var moveRows, moveSum int
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT count(*), coalesce(sum(change_qty), 0) FROM inventory_logs
++		  WHERE product_id = $1 AND reason = 'move'`, product.ID).Scan(&moveRows, &moveSum))
++	assert.Equal(t, 2, moveRows)
++	assert.Equal(t, 0, moveSum, "a move nets to zero so product totals are unaffected")
++}
++
++func TestSplitRejectsWholeBatchAndOverdraw(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	storageID := newStorage(t, ctx)
++	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Jars"})
++	require.NoError(t, err)
++	cellar, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Cellar"})
++	require.NoError(t, err)
++	kitchen, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Kitchen"})
++	require.NoError(t, err)
++	batch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
++		ProductID: product.ID, LocationID: cellar.ID, Quantity: 3, Reason: store.ReasonPurchase,
++	})
++	require.NoError(t, err)
++
++	for _, qty := range []int{0, -1, 3, 4} {
++		_, err := s.SplitBatch(ctx, storageID, batch.ID, qty, kitchen.ID, nil)
++		require.ErrorIsf(t, err, store.ErrValidation, "split of %d must be rejected", qty)
++	}
++
++	var quantity int
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT quantity FROM inventory_batches WHERE id = $1`, batch.ID).Scan(&quantity))
++	assert.Equal(t, 3, quantity)
++}
++
++// TestDeleteLocationRefusesWhileDescendantHoldsStock — the check has to cover
++// the whole subtree, because the location cascade would take the descendant
++// out too and orphan stock that physically exists.
++func TestDeleteLocationRefusesWhileDescendantHoldsStock(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	storageID := newStorage(t, ctx)
++	basement, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Basement"})
++	require.NoError(t, err)
++	shelf, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Shelf", ParentID: &basement.ID})
++	require.NoError(t, err)
++	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Beans"})
++	require.NoError(t, err)
++	_, err = s.CreateBatch(ctx, storageID, store.NewBatch{
++		ProductID: product.ID, LocationID: shelf.ID, Quantity: 4, Reason: store.ReasonPurchase,
++	})
++	require.NoError(t, err)
++
++	err = s.DeleteLocation(ctx, storageID, basement.ID)
++
++	require.ErrorIs(t, err, store.ErrConflict)
++	assert.Equal(t, 2, countRows(t, ctx,
++		`SELECT count(*) FROM locations WHERE storage_id = $1`, storageID),
++		"neither the root nor the descendant may be removed")
++	assert.Equal(t, 0, countRows(t, ctx,
++		`SELECT count(*) FROM tombstones WHERE storage_id = $1`, storageID),
++		"a refused delete must not leave a tombstone behind")
++}
++
++// TestDeleteLocationWritesTombstonesForWholeSubtree — a client that cached the
++// subtree has to learn the whole thing is gone, not only its root, or the
++// descendants live in its cache forever.
++func TestDeleteLocationWritesTombstonesForWholeSubtree(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	storageID := newStorage(t, ctx)
++	root, child, grandchild := locationChain(t, ctx, s, storageID)
++
++	require.NoError(t, s.DeleteLocation(ctx, storageID, root))
++
++	assert.Equal(t, 0, countRows(t, ctx,
++		`SELECT count(*) FROM locations WHERE storage_id = $1`, storageID))
++
++	for _, id := range []uuid.UUID{root, child, grandchild} {
++		assert.Equal(t, 1, countRows(t, ctx,
++			`SELECT count(*) FROM tombstones WHERE storage_id = $1 AND entity_type = 'location' AND entity_id = $2`,
++			storageID, id), "every removed node needs its own tombstone")
++	}
++}
++
++func TestDeleteCategoryRefusesWhileProductUsesIt(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	storageID := newStorage(t, ctx)
++	food, err := s.CreateCategory(ctx, storageID, store.NewCategory{Name: "Food"})
++	require.NoError(t, err)
++	dairy, err := s.CreateCategory(ctx, storageID, store.NewCategory{Name: "Dairy", ParentID: &food.ID})
++	require.NoError(t, err)
++	_, err = s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Milk", CategoryID: &dairy.ID})
++	require.NoError(t, err)
++
++	// Deleting the ancestor would cascade onto the category the product uses.
++	err = s.DeleteCategory(ctx, storageID, food.ID)
++
++	require.ErrorIs(t, err, store.ErrConflict)
++	assert.Equal(t, 2, countRows(t, ctx,
++		`SELECT count(*) FROM categories WHERE storage_id = $1`, storageID))
++}
++
++func TestDeleteProductWritesTombstoneInSameTransaction(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	storageID, productID, _, _ := stocked(t, ctx, s, 2)
++
++	require.NoError(t, s.DeleteProduct(ctx, storageID, productID))
++
++	assert.Equal(t, 0, countRows(t, ctx, `SELECT count(*) FROM products WHERE id = $1`, productID))
++	assert.Equal(t, 1, countRows(t, ctx,
++		`SELECT count(*) FROM tombstones WHERE entity_type = 'product' AND entity_id = $1`, productID))
++}
++
++// TestDeltaIsResumable covers the honesty rule for delta sync: a client whose
++// cursor predates the oldest surviving tombstone cannot be brought up to date,
++// and must be told to resync rather than handed an answer that quietly omits a
++// swept deletion.
++func TestDeltaIsResumable(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++
++	storageID, productID, _, _ := stocked(t, ctx, s, 1)
++
++	fresh, err := s.DeltaIsResumable(ctx, storageID, timeNow(t, ctx))
++	require.NoError(t, err)
++	assert.True(t, fresh, "with no deletions recorded, any cursor is resumable")
++
++	require.NoError(t, s.DeleteProduct(ctx, storageID, productID))
++
++	tombstones, err := s.TombstonesSince(ctx, storageID, timeZero())
++	require.NoError(t, err)
++	require.Len(t, tombstones, 1)
++
++	stale, err := s.DeltaIsResumable(ctx, storageID, timeZero())
++	require.NoError(t, err)
++	assert.False(t, stale, "a cursor older than the oldest tombstone cannot be resumed")
++}
+diff --git a/internal/store/locations.go b/internal/store/locations.go
+new file mode 100644
+index 0000000..341905d
+--- /dev/null
++++ b/internal/store/locations.go
+@@ -0,0 +1,222 @@
++package store
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"time"
++
++	"github.com/google/uuid"
++	"github.com/jackc/pgx/v5"
++)
++
++// Location is one node of a storage's location tree.
++type Location struct {
++	ID          uuid.UUID
++	StorageID   uuid.UUID
++	ParentID    *uuid.UUID
++	Name        string
++	Description *string
++	CreatedAt   time.Time
++	UpdatedAt   time.Time
++}
++
++// NewLocation is the input to CreateLocation. StorageID is not a field: it
++// comes from the validated request context, never from a request body, so a
++// caller cannot insert into a storage they do not belong to.
++type NewLocation struct {
++	ParentID    *uuid.UUID
++	Name        string
++	Description *string
++}
++
++// CreateLocation inserts a node, rejecting a parent that belongs to another
++// storage with ErrNotFound.
++//
++// The new row's storage_id is taken from storageID, never from the input, so
++// there is no request field that could place a node in a foreign storage.
++func (s *Store) CreateLocation(ctx context.Context, storageID uuid.UUID, in NewLocation) (*Location, error) {
++	id, err := newID()
++	if err != nil {
++		return nil, err
++	}
++
++	var out *Location
++	err = s.inTx(ctx, func(tx pgx.Tx) error {
++		if err := resolveParent(ctx, tx, treeLocations, storageID, nil, in.ParentID); err != nil {
++			return err
++		}
++
++		row := tx.QueryRow(ctx, `
++			INSERT INTO locations (id, storage_id, parent_id, name, description)
++			VALUES ($1, $2, $3, $4, $5)
++			RETURNING id, storage_id, parent_id, name, description, created_at, updated_at`,
++			id, storageID, in.ParentID, in.Name, in.Description)
++
++		loc, err := scanLocation(row)
++		if err != nil {
++			return err
++		}
++		out = loc
++		return nil
++	})
++	if err != nil {
++		return nil, err
++	}
++	return out, nil
++}
++
++// MoveLocation re-parents a node.
++//
++// Both ends are validated against storageID, which is what makes a
++// cross-storage move impossible by construction rather than by a check someone
++// has to remember: a parent in another storage is ErrNotFound, and so is a
++// node in another storage.
++func (s *Store) MoveLocation(ctx context.Context, storageID, id uuid.UUID, parentID *uuid.UUID) error {
++	return s.inTx(ctx, func(tx pgx.Tx) error {
++		if err := requireSameStorage(ctx, tx, treeLocations, storageID, id); err != nil {
++			return err
++		}
++		if err := resolveParent(ctx, tx, treeLocations, storageID, &id, parentID); err != nil {
++			return err
++		}
++
++		_, err := tx.Exec(ctx, `
++			UPDATE locations SET parent_id = $1, updated_at = now()
++			 WHERE id = $2 AND storage_id = $3`,
++			parentID, id, storageID)
++		if err != nil {
++			return fmt.Errorf("store: move location: %w", err)
++		}
++		return nil
++	})
++}
++
++// RenameLocation updates the display fields, touching updated_at so a client
++// delta picks the change up.
++func (s *Store) RenameLocation(ctx context.Context, storageID, id uuid.UUID, name string, description *string) error {
++	tag, err := s.pool.Exec(ctx, `
++		UPDATE locations SET name = $1, description = $2, updated_at = now()
++		 WHERE id = $3 AND storage_id = $4`,
++		name, description, id, storageID)
++	if err != nil {
++		return fmt.Errorf("store: rename location: %w", err)
++	}
++	if tag.RowsAffected() == 0 {
++		return ErrNotFound
++	}
++	return nil
++}
++
++// DeleteLocation removes a node and its descendants.
++//
++// It refuses with ErrConflict while the node *or any descendant* still holds
++// inventory: the rows would be taken out by the location cascade, orphaning
++// stock that physically exists. The user has to move or clear it first.
++//
++// A tombstone is written for every removed node, in the same transaction, so a
++// client that cached the subtree learns the whole thing is gone rather than
++// only its root.
++func (s *Store) DeleteLocation(ctx context.Context, storageID, id uuid.UUID) error {
++	return s.inTx(ctx, func(tx pgx.Tx) error {
++		if err := requireSameStorage(ctx, tx, treeLocations, storageID, id); err != nil {
++			return err
++		}
++
++		subtree, err := locationSubtree(ctx, tx, id)
++		if err != nil {
++			return err
++		}
++
++		held, err := scanCount(ctx, tx, `
++			SELECT count(*) FROM inventory_batches WHERE location_id = ANY($1)`, subtree)
++		if err != nil {
++			return fmt.Errorf("store: check inventory under location: %w", err)
++		}
++		if held > 0 {
++			return fmt.Errorf("%w: location still holds %d inventory batch(es)", ErrConflict, held)
++		}
++
++		if _, err := tx.Exec(ctx, `DELETE FROM locations WHERE id = $1 AND storage_id = $2`, id, storageID); err != nil {
++			return fmt.Errorf("store: delete location: %w", err)
++		}
++
++		return recordTombstones(ctx, tx, storageID, TombstoneLocation, subtree)
++	})
++}
++
++// LocationTree returns every node of one storage, ordered so parents precede
++// children. The query is filtered by storage_id, so no other storage's node
++// can appear at any depth.
++func (s *Store) LocationTree(ctx context.Context, storageID uuid.UUID) ([]Location, error) {
++	rows, err := s.pool.Query(ctx, `
++		SELECT id, storage_id, parent_id, name, description, created_at, updated_at
++		  FROM locations
++		 WHERE storage_id = $1
++		 ORDER BY created_at, id`, storageID)
++	if err != nil {
++		return nil, fmt.Errorf("store: list locations: %w", err)
++	}
++	defer rows.Close()
++
++	var out []Location
++	for rows.Next() {
++		loc, err := scanLocation(rows)
++		if err != nil {
++			return nil, err
++		}
++		out = append(out, *loc)
++	}
++	if err := rows.Err(); err != nil {
++		return nil, fmt.Errorf("store: list locations: %w", err)
++	}
++	return out, nil
++}
++
++// locationSubtree returns the id of root and of every node beneath it.
++func locationSubtree(ctx context.Context, q querier, root uuid.UUID) ([]uuid.UUID, error) {
++	rows, err := q.Query(ctx, fmt.Sprintf(`
++		WITH RECURSIVE subtree AS (
++		    SELECT id, 1 AS depth FROM locations WHERE id = $1
++		    UNION ALL
++		    SELECT l.id, s.depth + 1
++		      FROM locations l
++		      JOIN subtree s ON l.parent_id = s.id
++		     WHERE s.depth < %d
++		)
++		SELECT id FROM subtree`, maxTreeDepth), root)
++	if err != nil {
++		return nil, fmt.Errorf("store: collect location subtree: %w", err)
++	}
++	defer rows.Close()
++
++	var ids []uuid.UUID
++	for rows.Next() {
++		var id uuid.UUID
++		if err := rows.Scan(&id); err != nil {
++			return nil, fmt.Errorf("store: collect location subtree: %w", err)
++		}
++		ids = append(ids, id)
++	}
++	if err := rows.Err(); err != nil {
++		return nil, fmt.Errorf("store: collect location subtree: %w", err)
++	}
++	return ids, nil
++}
++
++// rowScanner is satisfied by both pgx.Row and pgx.Rows.
++type rowScanner interface {
++	Scan(dest ...any) error
++}
++
++func scanLocation(row rowScanner) (*Location, error) {
++	var loc Location
++	err := row.Scan(&loc.ID, &loc.StorageID, &loc.ParentID, &loc.Name, &loc.Description, &loc.CreatedAt, &loc.UpdatedAt)
++	if errors.Is(err, pgx.ErrNoRows) {
++		return nil, ErrNotFound
++	}
++	if err != nil {
++		return nil, fmt.Errorf("store: scan location: %w", err)
++	}
++	return &loc, nil
++}
+diff --git a/internal/store/pairing.go b/internal/store/pairing.go
+new file mode 100644
+index 0000000..18995c6
+--- /dev/null
++++ b/internal/store/pairing.go
+@@ -0,0 +1,86 @@
++package store
++
++import (
++	"context"
++	"crypto/subtle"
++	"errors"
++	"fmt"
++	"time"
++
++	"github.com/google/uuid"
++	"github.com/jackc/pgx/v5"
++)
++
++// PairingTTL is how long a QR pairing code stays redeemable. Short on purpose:
++// the code appears on a screen, and the window only has to cover the walk from
++// laptop to phone (docs/specs/12-client-api-contract.md).
++const PairingTTL = 2 * time.Minute
++
++// CreatePairingCode mints a single-use code for a user.
++func (s *Store) CreatePairingCode(ctx context.Context, userID uuid.UUID) (string, error) {
++	code, err := NewToken()
++	if err != nil {
++		return "", err
++	}
++
++	if _, err := s.pool.Exec(ctx, `
++		INSERT INTO pairing_codes (code, user_id, expires_at)
++		VALUES ($1, $2, now() + $3::interval)`,
++		code, userID, PairingTTL.String()); err != nil {
++		return "", fmt.Errorf("store: create pairing code: %w", err)
++	}
++	return code, nil
++}
++
++// RedeemPairingCode consumes a code and returns the user it belongs to.
++//
++// Redemption is exactly once. The UPDATE carries the whole condition — unused,
++// unexpired — and its RETURNING tells us whether it matched, so two clients
++// racing on the same code cannot both win: the second finds used_at already
++// set and gets nothing.
++//
++// This is the one unauthenticated endpoint that mints a session, so it is the
++// one worth guessing at. The lookup is by primary key, which means the
++// database is doing an equality comparison on attacker-supplied input; the
++// constant-time check below is what stops the *application* adding a timing
++// signal on top of that, and the code is 256 CSPRNG bits so the search space
++// is not attackable regardless.
++func (s *Store) RedeemPairingCode(ctx context.Context, code string) (uuid.UUID, error) {
++	if code == "" {
++		return uuid.Nil, ErrNotFound
++	}
++
++	var userID uuid.UUID
++	var stored string
++	err := s.pool.QueryRow(ctx, `
++		UPDATE pairing_codes
++		   SET used_at = now()
++		 WHERE code = $1
++		   AND used_at IS NULL
++		   AND expires_at > now()
++		RETURNING code, user_id`, code).Scan(&stored, &userID)
++
++	if errors.Is(err, pgx.ErrNoRows) {
++		// Unknown, already used, or expired — all the same answer. Telling
++		// them apart would confirm to a guesser that a code once existed.
++		return uuid.Nil, ErrNotFound
++	}
++	if err != nil {
++		return uuid.Nil, fmt.Errorf("store: redeem pairing code: %w", err)
++	}
++
++	if subtle.ConstantTimeCompare([]byte(stored), []byte(code)) != 1 {
++		return uuid.Nil, ErrNotFound
++	}
++	return userID, nil
++}
++
++// SweepPairingCodes deletes used and expired rows.
++func (s *Store) SweepPairingCodes(ctx context.Context) (int64, error) {
++	tag, err := s.pool.Exec(ctx,
++		`DELETE FROM pairing_codes WHERE used_at IS NOT NULL OR expires_at <= now()`)
++	if err != nil {
++		return 0, fmt.Errorf("store: sweep pairing codes: %w", err)
++	}
++	return tag.RowsAffected(), nil
++}
+diff --git a/internal/store/products.go b/internal/store/products.go
+new file mode 100644
+index 0000000..88ca14f
+--- /dev/null
++++ b/internal/store/products.go
+@@ -0,0 +1,185 @@
++package store
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"time"
++
++	"github.com/google/uuid"
++	"github.com/jackc/pgx/v5"
++)
++
++// ItemType drives default-expiry behaviour
++// (docs/specs/08-expiration-and-classification.md).
++type ItemType string
++
++const (
++	ItemPerishable    ItemType = "perishable"
++	ItemLongShelfLife ItemType = "long_shelf_life"
++	ItemNonPerishable ItemType = "non_perishable"
++)
++
++// Product is a storage-local product.
++//
++// CatalogID is deliberately absent from this struct's JSON-facing use: it is
++// server-side only and must never appear in an API response
++// (docs/specs/02-data-model.md). It is carried here because the shelf-life
++// cascade in spec 08 needs it.
++type Product struct {
++	ID                   uuid.UUID
++	StorageID            uuid.UUID
++	Name                 string
++	CategoryID           *uuid.UUID
++	CatalogID            *uuid.UUID
++	ItemType             ItemType
++	DefaultShelfLifeDays *int
++	MinStock             int
++	ImageURL             *string
++	IconName             *string
++	CreatedAt            time.Time
++	UpdatedAt            time.Time
++}
++
++// NewProduct is the input to CreateProduct.
++type NewProduct struct {
++	Name                 string
++	CategoryID           *uuid.UUID
++	CatalogID            *uuid.UUID
++	ItemType             ItemType
++	DefaultShelfLifeDays *int
++	MinStock             int
++	ImageURL             *string
++	IconName             *string
++}
++
++// CreateProduct inserts a product, rejecting a category from another storage
++// with ErrNotFound.
++//
++// The same-storage rule on category_id is the one the database cannot express:
++// categories and products both carry storage_id, but a plain foreign key only
++// checks that the category exists, not that it belongs here.
++func (s *Store) CreateProduct(ctx context.Context, storageID uuid.UUID, in NewProduct) (*Product, error) {
++	id, err := newID()
++	if err != nil {
++		return nil, err
++	}
++	if in.ItemType == "" {
++		in.ItemType = ItemLongShelfLife
++	}
++
++	var out *Product
++	err = s.inTx(ctx, func(tx pgx.Tx) error {
++		if in.CategoryID != nil {
++			if err := requireSameStorage(ctx, tx, treeCategories, storageID, *in.CategoryID); err != nil {
++				return err
++			}
++		}
++
++		row := tx.QueryRow(ctx, `
++			INSERT INTO products (id, storage_id, name, category_id, catalog_id, item_type,
++			                      default_shelf_life_days, min_stock, image_url, icon_name)
++			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
++			RETURNING id, storage_id, name, category_id, catalog_id, item_type,
++			          default_shelf_life_days, min_stock, image_url, icon_name, created_at, updated_at`,
++			id, storageID, in.Name, in.CategoryID, in.CatalogID, string(in.ItemType),
++			in.DefaultShelfLifeDays, in.MinStock, in.ImageURL, in.IconName)
++
++		p, err := scanProduct(row)
++		if err != nil {
++			return err
++		}
++		out = p
++		return nil
++	})
++	if err != nil {
++		return nil, err
++	}
++	return out, nil
++}
++
++// SetProductCategory re-categorises a product, rejecting a category from
++// another storage with ErrNotFound.
++func (s *Store) SetProductCategory(ctx context.Context, storageID, id uuid.UUID, categoryID *uuid.UUID) error {
++	return s.inTx(ctx, func(tx pgx.Tx) error {
++		if err := requireProductInStorage(ctx, tx, storageID, id); err != nil {
++			return err
++		}
++		if categoryID != nil {
++			if err := requireSameStorage(ctx, tx, treeCategories, storageID, *categoryID); err != nil {
++				return err
++			}
++		}
++
++		if _, err := tx.Exec(ctx, `
++			UPDATE products SET category_id = $1, updated_at = now()
++			 WHERE id = $2 AND storage_id = $3`, categoryID, id, storageID); err != nil {
++			return fmt.Errorf("store: set product category: %w", err)
++		}
++		return nil
++	})
++}
++
++// DeleteProduct removes a product and records a tombstone in the same
++// transaction.
++//
++// Its batches go with it (inventory_batches.product_id is ON DELETE CASCADE)
++// and so do its logs; that is the model's choice, not this function's.
++func (s *Store) DeleteProduct(ctx context.Context, storageID, id uuid.UUID) error {
++	return s.inTx(ctx, func(tx pgx.Tx) error {
++		if err := requireProductInStorage(ctx, tx, storageID, id); err != nil {
++			return err
++		}
++		if _, err := tx.Exec(ctx, `DELETE FROM products WHERE id = $1 AND storage_id = $2`, id, storageID); err != nil {
++			return fmt.Errorf("store: delete product: %w", err)
++		}
++		return recordTombstones(ctx, tx, storageID, TombstoneProduct, []uuid.UUID{id})
++	})
++}
++
++// CurrentStock is the live sum of a product's batches
++// (docs/specs/10-reorder-and-shopping-export.md). It is computed, never stored:
++// a denormalised counter is a number that can drift away from the rows it
++// claims to summarise.
++func (s *Store) CurrentStock(ctx context.Context, storageID, productID uuid.UUID) (int, error) {
++	var total int
++	err := s.pool.QueryRow(ctx, `
++		SELECT coalesce(sum(b.quantity), 0)
++		  FROM inventory_batches b
++		  JOIN products p ON p.id = b.product_id
++		 WHERE b.product_id = $1 AND p.storage_id = $2`, productID, storageID).Scan(&total)
++	if err != nil {
++		return 0, fmt.Errorf("store: current stock: %w", err)
++	}
++	return total, nil
++}
++
++// requireProductInStorage is the products equivalent of requireSameStorage. A
++// product in another storage returns ErrNotFound.
++func requireProductInStorage(ctx context.Context, q querier, storageID, id uuid.UUID) error {
++	var found bool
++	if err := q.QueryRow(ctx,
++		`SELECT EXISTS (SELECT 1 FROM products WHERE id = $1 AND storage_id = $2)`,
++		id, storageID).Scan(&found); err != nil {
++		return fmt.Errorf("store: check product in storage: %w", err)
++	}
++	if !found {
++		return ErrNotFound
++	}
++	return nil
++}
++
++func scanProduct(row rowScanner) (*Product, error) {
++	var p Product
++	var itemType string
++	err := row.Scan(&p.ID, &p.StorageID, &p.Name, &p.CategoryID, &p.CatalogID, &itemType,
++		&p.DefaultShelfLifeDays, &p.MinStock, &p.ImageURL, &p.IconName, &p.CreatedAt, &p.UpdatedAt)
++	if errors.Is(err, pgx.ErrNoRows) {
++		return nil, ErrNotFound
++	}
++	if err != nil {
++		return nil, fmt.Errorf("store: scan product: %w", err)
++	}
++	p.ItemType = ItemType(itemType)
++	return &p, nil
++}
+diff --git a/internal/store/samestorage_test.go b/internal/store/samestorage_test.go
+new file mode 100644
+index 0000000..8191159
+--- /dev/null
++++ b/internal/store/samestorage_test.go
+@@ -0,0 +1,300 @@
++package store_test
++
++import (
++	"context"
++	"testing"
++
++	"github.com/google/uuid"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++
++	"github.com/CDRO/Inventory/internal/store"
++)
++
++// The rules exercised here are the ones PostgreSQL cannot express. A foreign
++// key proves a referenced row exists; it says nothing about which storage owns
++// it. Every id arriving from a caller — a parent, a category, a location, a
++// move target — must therefore be re-checked against the storage in the URL,
++// and the failure must be indistinguishable from a nonexistent id
++// (docs/specs/03-auth-and-multi-tenancy.md).
++//
++// These are exactly the invariants that pass a unit test suite while being
++// broken, because nothing in the schema complains.
++
++// twoStorages returns two storages that share nothing.
++func twoStorages(t *testing.T, ctx context.Context) (uuid.UUID, uuid.UUID) {
++	t.Helper()
++	return newStorage(t, ctx), newStorage(t, ctx)
++}
++
++func TestCreateLocationRejectsParentFromAnotherStorage(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	storageA, storageB := twoStorages(t, ctx)
++
++	foreign, err := s.CreateLocation(ctx, storageB, store.NewLocation{Name: "Their Cellar"})
++	require.NoError(t, err)
++
++	_, err = s.CreateLocation(ctx, storageA, store.NewLocation{
++		Name:     "Mine",
++		ParentID: &foreign.ID,
++	})
++
++	require.ErrorIs(t, err, store.ErrNotFound)
++	assert.Equal(t, 0, countRows(t, ctx,
++		`SELECT count(*) FROM locations WHERE storage_id = $1`, storageA),
++		"the rejected insert must not have written a row")
++}
++
++// TestCrossStorageAndNonexistentAreIndistinguishable is the security property
++// itself, not just a rejection.
++//
++// If a foreign id produced a different error from a made-up one, a user could
++// probe ids and learn which ones name real rows in storages they cannot see —
++// which is precisely the inference docs/specs/03-auth-and-multi-tenancy.md
++// forbids. The two must be the same error, with the same message.
++func TestCrossStorageAndNonexistentAreIndistinguishable(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	storageA, storageB := twoStorages(t, ctx)
++
++	real, err := s.CreateLocation(ctx, storageB, store.NewLocation{Name: "Real, but theirs"})
++	require.NoError(t, err)
++
++	invented, err := uuid.NewV7()
++	require.NoError(t, err)
++
++	_, foreignErr := s.CreateLocation(ctx, storageA, store.NewLocation{Name: "x", ParentID: &real.ID})
++	_, missingErr := s.CreateLocation(ctx, storageA, store.NewLocation{Name: "x", ParentID: &invented})
++
++	require.ErrorIs(t, foreignErr, store.ErrNotFound)
++	require.ErrorIs(t, missingErr, store.ErrNotFound)
++	assert.Equal(t, missingErr.Error(), foreignErr.Error(),
++		"a foreign id must not be distinguishable from a nonexistent one, even by message")
++}
++
++func TestMoveLocationRejectsForeignEnds(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	storageA, storageB := twoStorages(t, ctx)
++
++	mine, err := s.CreateLocation(ctx, storageA, store.NewLocation{Name: "Mine"})
++	require.NoError(t, err)
++	theirs, err := s.CreateLocation(ctx, storageB, store.NewLocation{Name: "Theirs"})
++	require.NoError(t, err)
++
++	t.Run("target parent in another storage", func(t *testing.T) {
++		err := s.MoveLocation(ctx, storageA, mine.ID, &theirs.ID)
++		require.ErrorIs(t, err, store.ErrNotFound)
++	})
++
++	t.Run("node in another storage", func(t *testing.T) {
++		err := s.MoveLocation(ctx, storageA, theirs.ID, nil)
++		require.ErrorIs(t, err, store.ErrNotFound)
++	})
++
++	// Neither attempt may have moved anything.
++	var parent *uuid.UUID
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT parent_id FROM locations WHERE id = $1`, theirs.ID).Scan(&parent))
++	assert.Nil(t, parent)
++}
++
++func TestCreateProductRejectsCategoryFromAnotherStorage(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	storageA, storageB := twoStorages(t, ctx)
++
++	foreignCat, err := s.CreateCategory(ctx, storageB, store.NewCategory{Name: "Their Dairy"})
++	require.NoError(t, err)
++
++	_, err = s.CreateProduct(ctx, storageA, store.NewProduct{
++		Name:       "Milk",
++		CategoryID: &foreignCat.ID,
++	})
++
++	require.ErrorIs(t, err, store.ErrNotFound)
++	assert.Equal(t, 0, countRows(t, ctx,
++		`SELECT count(*) FROM products WHERE storage_id = $1`, storageA))
++}
++
++func TestSetProductCategoryRejectsForeignCategory(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	storageA, storageB := twoStorages(t, ctx)
++
++	product, err := s.CreateProduct(ctx, storageA, store.NewProduct{Name: "Rice"})
++	require.NoError(t, err)
++	foreignCat, err := s.CreateCategory(ctx, storageB, store.NewCategory{Name: "Their Grains"})
++	require.NoError(t, err)
++
++	err = s.SetProductCategory(ctx, storageA, product.ID, &foreignCat.ID)
++
++	require.ErrorIs(t, err, store.ErrNotFound)
++	var category *uuid.UUID
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT category_id FROM products WHERE id = $1`, product.ID).Scan(&category))
++	assert.Nil(t, category, "the product must keep its own category")
++}
++
++// TestCreateBatchRejectsForeignLocation is the one with physical consequences:
++// inventory_batches.location_id is a plain foreign key, so without the
++// application check a batch could be filed against a shelf in somebody else's
++// house — and it would show up in their per-location analytics.
++func TestCreateBatchRejectsForeignLocation(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	storageA, storageB := twoStorages(t, ctx)
++
++	product, err := s.CreateProduct(ctx, storageA, store.NewProduct{Name: "Passata"})
++	require.NoError(t, err)
++	foreignLoc, err := s.CreateLocation(ctx, storageB, store.NewLocation{Name: "Their Pantry"})
++	require.NoError(t, err)
++
++	_, err = s.CreateBatch(ctx, storageA, store.NewBatch{
++		ProductID:  product.ID,
++		LocationID: foreignLoc.ID,
++		Quantity:   3,
++		Reason:     store.ReasonPurchase,
++	})
++
++	require.ErrorIs(t, err, store.ErrNotFound)
++	assert.Equal(t, 0, countRows(t, ctx,
++		`SELECT count(*) FROM inventory_batches WHERE location_id = $1`, foreignLoc.ID))
++	assert.Equal(t, 0, countRows(t, ctx,
++		`SELECT count(*) FROM inventory_logs WHERE product_id = $1`, product.ID),
++		"a rejected batch must not leave a log row behind")
++}
++
++func TestCreateBatchRejectsForeignProduct(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	storageA, storageB := twoStorages(t, ctx)
++
++	foreignProduct, err := s.CreateProduct(ctx, storageB, store.NewProduct{Name: "Their Beans"})
++	require.NoError(t, err)
++	mine, err := s.CreateLocation(ctx, storageA, store.NewLocation{Name: "My Shelf"})
++	require.NoError(t, err)
++
++	_, err = s.CreateBatch(ctx, storageA, store.NewBatch{
++		ProductID:  foreignProduct.ID,
++		LocationID: mine.ID,
++		Quantity:   1,
++		Reason:     store.ReasonPurchase,
++	})
++
++	require.ErrorIs(t, err, store.ErrNotFound)
++}
++
++func TestSplitBatchRejectsForeignTargetLocation(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	storageA, storageB := twoStorages(t, ctx)
++
++	product, err := s.CreateProduct(ctx, storageA, store.NewProduct{Name: "Jars"})
++	require.NoError(t, err)
++	cellar, err := s.CreateLocation(ctx, storageA, store.NewLocation{Name: "Cellar"})
++	require.NoError(t, err)
++	batch, err := s.CreateBatch(ctx, storageA, store.NewBatch{
++		ProductID: product.ID, LocationID: cellar.ID, Quantity: 3, Reason: store.ReasonPurchase,
++	})
++	require.NoError(t, err)
++
++	foreignKitchen, err := s.CreateLocation(ctx, storageB, store.NewLocation{Name: "Their Kitchen"})
++	require.NoError(t, err)
++
++	_, err = s.SplitBatch(ctx, storageA, batch.ID, 1, foreignKitchen.ID, nil)
++
++	require.ErrorIs(t, err, store.ErrNotFound)
++
++	// The whole split must have rolled back: the source keeps its three units
++	// and no move was logged.
++	var quantity int
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT quantity FROM inventory_batches WHERE id = $1`, batch.ID).Scan(&quantity))
++	assert.Equal(t, 3, quantity, "a rejected split must not debit the source")
++	assert.Equal(t, 0, countRows(t, ctx,
++		`SELECT count(*) FROM inventory_logs WHERE reason = 'move' AND product_id = $1`, product.ID))
++}
++
++func TestAdjustBatchRejectsBatchFromAnotherStorage(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	storageA, storageB := twoStorages(t, ctx)
++
++	product, err := s.CreateProduct(ctx, storageB, store.NewProduct{Name: "Theirs"})
++	require.NoError(t, err)
++	loc, err := s.CreateLocation(ctx, storageB, store.NewLocation{Name: "Their Shelf"})
++	require.NoError(t, err)
++	batch, err := s.CreateBatch(ctx, storageB, store.NewBatch{
++		ProductID: product.ID, LocationID: loc.ID, Quantity: 5, Reason: store.ReasonPurchase,
++	})
++	require.NoError(t, err)
++
++	// Storage A knows the id — ids are guessable in a report, a screenshot, a
++	// shared link — and must still be refused.
++	err = s.AdjustBatch(ctx, storageA, batch.ID, -5, store.ReasonConsumption, nil)
++
++	require.ErrorIs(t, err, store.ErrNotFound)
++	var quantity int
++	require.NoError(t, testPool.QueryRow(ctx,
++		`SELECT quantity FROM inventory_batches WHERE id = $1`, batch.ID).Scan(&quantity))
++	assert.Equal(t, 5, quantity, "another storage must not be able to consume this stock")
++}
++
++func TestDeleteRejectsRowsFromAnotherStorage(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	storageA, storageB := twoStorages(t, ctx)
++
++	loc, err := s.CreateLocation(ctx, storageB, store.NewLocation{Name: "Theirs"})
++	require.NoError(t, err)
++	cat, err := s.CreateCategory(ctx, storageB, store.NewCategory{Name: "Theirs"})
++	require.NoError(t, err)
++	prod, err := s.CreateProduct(ctx, storageB, store.NewProduct{Name: "Theirs"})
++	require.NoError(t, err)
++
++	assert.ErrorIs(t, s.DeleteLocation(ctx, storageA, loc.ID), store.ErrNotFound)
++	assert.ErrorIs(t, s.DeleteCategory(ctx, storageA, cat.ID), store.ErrNotFound)
++	assert.ErrorIs(t, s.DeleteProduct(ctx, storageA, prod.ID), store.ErrNotFound)
++
++	assert.Equal(t, 3, countRows(t, ctx,
++		`SELECT (SELECT count(*) FROM locations WHERE id = $1)
++		      + (SELECT count(*) FROM categories WHERE id = $2)
++		      + (SELECT count(*) FROM products WHERE id = $3)`, loc.ID, cat.ID, prod.ID),
++		"nothing belonging to the other storage may be deleted")
++
++	assert.Equal(t, 0, countRows(t, ctx,
++		`SELECT count(*) FROM tombstones WHERE storage_id = $1`, storageA),
++		"a refused delete must not record a tombstone")
++}
++
++// TestTreeQueriesNeverLeakAnotherStorage covers the read side. A tree query
++// that forgot its storage_id filter would splice another household's shelves
++// into this one's picker.
++func TestTreeQueriesNeverLeakAnotherStorage(t *testing.T) {
++	s := requireDB(t)
++	ctx := context.Background()
++	storageA, storageB := twoStorages(t, ctx)
++
++	_, err := s.CreateLocation(ctx, storageA, store.NewLocation{Name: "Mine"})
++	require.NoError(t, err)
++	_, err = s.CreateLocation(ctx, storageB, store.NewLocation{Name: "Theirs"})
++	require.NoError(t, err)
++	_, err = s.CreateCategory(ctx, storageA, store.NewCategory{Name: "Mine"})
++	require.NoError(t, err)
++	_, err = s.CreateCategory(ctx, storageB, store.NewCategory{Name: "Theirs"})
++	require.NoError(t, err)
++
++	locations, err := s.LocationTree(ctx, storageA)
++	require.NoError(t, err)
++	require.Len(t, locations, 1)
++	assert.Equal(t, "Mine", locations[0].Name)
++	assert.Equal(t, storageA, locations[0].StorageID)
++
++	categories, err := s.CategoryTree(ctx, storageA)
++	require.NoError(t, err)
++	require.Len(t, categories, 1)
++	assert.Equal(t, "Mine", categories[0].Name)
++	assert.Equal(t, storageA, categories[0].StorageID)
++}
+diff --git a/internal/store/sessions.go b/internal/store/sessions.go
+new file mode 100644
+index 0000000..ce30000
+--- /dev/null
++++ b/internal/store/sessions.go
+@@ -0,0 +1,180 @@
++package store
++
++import (
++	"context"
++	"crypto/rand"
++	"encoding/base64"
++	"errors"
++	"fmt"
++	"time"
++
++	"github.com/google/uuid"
++	"github.com/jackc/pgx/v5"
++)
++
++// SessionKind separates a browser login from a paired native client.
++//
++// A device gets its own session row rather than sharing the browser's, which
++// is what makes "revoke my phone" possible without signing the user out of
++// their laptop (docs/specs/12-client-api-contract.md).
++type SessionKind string
++
++const (
++	SessionBrowser SessionKind = "browser"
++	SessionDevice  SessionKind = "device"
++)
++
++// tokenBytes is 256 bits, per docs/specs/02-data-model.md. A session id is a
++// bearer credential, so it is CSPRNG output rather than a UUIDv7 — a v7 embeds
++// a timestamp and is partially predictable, which is a bad property for a
++// secret.
++const tokenBytes = 32
++
++// lastSeenThrottle bounds how often last_seen_at is rewritten. The column
++// exists to show a useful "last active" in the device list; without a throttle
++// it would mean a database write on every single request.
++const lastSeenThrottle = time.Hour
++
++// Session is a server-side session. The client holds only the id.
++type Session struct {
++	ID         string
++	UserID     uuid.UUID
++	Kind       SessionKind
++	Label      *string
++	LastSeenAt *time.Time
++	CreatedAt  time.Time
++	ExpiresAt  time.Time
++}
++
++// NewToken returns a fresh opaque session id: 256 CSPRNG bits, base64url,
++// unpadded.
++func NewToken() (string, error) {
++	buf := make([]byte, tokenBytes)
++	if _, err := rand.Read(buf); err != nil {
++		return "", fmt.Errorf("store: generate token: %w", err)
++	}
++	return base64.RawURLEncoding.EncodeToString(buf), nil
++}
++
++// CreateSession issues a session for a user.
++func (s *Store) CreateSession(ctx context.Context, userID uuid.UUID, kind SessionKind, label *string, ttl time.Duration) (*Session, error) {
++	token, err := NewToken()
++	if err != nil {
++		return nil, err
++	}
++	if kind == "" {
++		kind = SessionBrowser
++	}
++
++	row := s.pool.QueryRow(ctx, `
++		INSERT INTO sessions (id, user_id, kind, label, expires_at)
++		VALUES ($1, $2, $3, $4, now() + $5::interval)
++		RETURNING id, user_id, kind, label, last_seen_at, created_at, expires_at`,
++		token, userID, string(kind), label, ttl.String())
++
++	return scanSession(row)
++}
++
++// LookupSession returns a live session, deleting it if it has expired.
++//
++// Expired rows are cleared lazily on lookup as well as by a periodic sweep, so
++// a credential stops working the moment it lapses rather than whenever the
++// sweep next happens to run.
++func (s *Store) LookupSession(ctx context.Context, id string) (*Session, error) {
++	row := s.pool.QueryRow(ctx, `
++		SELECT id, user_id, kind, label, last_seen_at, created_at, expires_at
++		  FROM sessions WHERE id = $1`, id)
++
++	session, err := scanSession(row)
++	if err != nil {
++		return nil, err
++	}
++
++	if !session.ExpiresAt.After(time.Now()) {
++		if _, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, id); err != nil {
++			return nil, fmt.Errorf("store: delete expired session: %w", err)
++		}
++		return nil, ErrNotFound
++	}
++	return session, nil
++}
++
++// TouchSession records activity, at most once per hour per session.
++//
++// The throttle is in the WHERE clause rather than in Go so that concurrent
++// requests cannot race into two writes: the database decides whether the
++// stored value is already recent enough.
++func (s *Store) TouchSession(ctx context.Context, id string) error {
++	_, err := s.pool.Exec(ctx, `
++		UPDATE sessions
++		   SET last_seen_at = now()
++		 WHERE id = $1
++		   AND (last_seen_at IS NULL OR last_seen_at < now() - $2::interval)`,
++		id, lastSeenThrottle.String())
++	if err != nil {
++		return fmt.Errorf("store: touch session: %w", err)
++	}
++	return nil
++}
++
++// DeleteSession revokes one session immediately.
++func (s *Store) DeleteSession(ctx context.Context, id string) error {
++	tag, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, id)
++	if err != nil {
++		return fmt.Errorf("store: delete session: %w", err)
++	}
++	if tag.RowsAffected() == 0 {
++		return ErrNotFound
++	}
++	return nil
++}
++
++// UserSessions lists a user's live sessions, for the device list they revoke
++// from.
++func (s *Store) UserSessions(ctx context.Context, userID uuid.UUID) ([]Session, error) {
++	rows, err := s.pool.Query(ctx, `
++		SELECT id, user_id, kind, label, last_seen_at, created_at, expires_at
++		  FROM sessions
++		 WHERE user_id = $1 AND expires_at > now()
++		 ORDER BY created_at`, userID)
++	if err != nil {
++		return nil, fmt.Errorf("store: list sessions: %w", err)
++	}
++	defer rows.Close()
++
++	var out []Session
++	for rows.Next() {
++		session, err := scanSession(rows)
++		if err != nil {
++			return nil, err
++		}
++		out = append(out, *session)
++	}
++	if err := rows.Err(); err != nil {
++		return nil, fmt.Errorf("store: list sessions: %w", err)
++	}
++	return out, nil
++}
++
++// SweepSessions deletes expired rows.
++func (s *Store) SweepSessions(ctx context.Context) (int64, error) {
++	tag, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE expires_at <= now()`)
++	if err != nil {
++		return 0, fmt.Errorf("store: sweep sessions: %w", err)
++	}
++	return tag.RowsAffected(), nil
++}
++
++func scanSession(row rowScanner) (*Session, error) {
++	var s Session
++	var kind string
++	err := row.Scan(&s.ID, &s.UserID, &kind, &s.Label, &s.LastSeenAt, &s.CreatedAt, &s.ExpiresAt)
++	if errors.Is(err, pgx.ErrNoRows) {
++		return nil, ErrNotFound
++	}
++	if err != nil {
++		return nil, fmt.Errorf("store: scan session: %w", err)
++	}
++	s.Kind = SessionKind(kind)
++	return &s, nil
++}
+diff --git a/internal/store/store_test.go b/internal/store/store_test.go
+index c075a51..870c766 100644
+--- a/internal/store/store_test.go
++++ b/internal/store/store_test.go
+@@ -22,10 +22,10 @@ func TestSettingErrorClassification(t *testing.T) {
+ 	t.Parallel()
+ 
+ 	tests := []struct {
+-		name            string
+-		err             error
+-		wantNoRows      bool
+-		wantUndefTable  bool
++		name           string
++		err            error
++		wantNoRows     bool
++		wantUndefTable bool
+ 	}{
+ 		{
+ 			name:       "no rows",
+diff --git a/internal/store/testdb_test.go b/internal/store/testdb_test.go
+new file mode 100644
+index 0000000..2fb0392
+--- /dev/null
++++ b/internal/store/testdb_test.go
+@@ -0,0 +1,256 @@
++package store_test
++
++import (
++	"context"
++	"crypto/rand"
++	"database/sql"
++	"encoding/hex"
++	"fmt"
++	"net/url"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/google/uuid"
++	"github.com/jackc/pgx/v5/pgxpool"
++	_ "github.com/jackc/pgx/v5/stdlib"
++	"github.com/pressly/goose/v3"
++	"github.com/stretchr/testify/require"
++
++	"github.com/CDRO/Inventory/internal/store"
++)
++
++// testStore is the shared store for this package's database-backed tests. It
++// points at a disposable database created in TestMain and dropped afterwards —
++// never the production data in the pgdata volume
++// (docs/specs/04-backend-api-conventions.md).
++var testStore *store.Store
++
++// testPool is a raw connection to the same throwaway database, used to build
++// fixtures and to assert against the tables directly.
++//
++// Deliberately separate from testStore: a fixture written through the very
++// writer under test would hide that writer being broken, and an assertion made
++// through its reader would hide a reader that filters away the row it should
++// have found. The tests below therefore set up and check with plain SQL, and
++// use the store only for the operation being exercised.
++var testPool *pgxpool.Pool
++
++// TestMain creates one throwaway database for the whole package, migrates it,
++// and drops it at the end.
++//
++// One database rather than one per test because every table here is
++// storage-scoped: giving each test its own storages isolates them completely
++// while costing one CREATE DATABASE instead of dozens.
++//
++// When DATABASE_URL is unset the database-backed tests skip. That is what lets
++// `go test ./...` run inside the Dockerfile builder stage, which has no
++// database — the pure-logic tests still run and still gate the image. Under
++// `docker compose run --rm app go test ./...` the variable is set and these
++// tests execute.
++func TestMain(m *testing.M) {
++	adminDSN := os.Getenv("DATABASE_URL")
++	if adminDSN == "" {
++		os.Exit(m.Run())
++	}
++
++	dbName := "inventory_test_" + randomSuffix()
++
++	cleanup, dsn, err := createTestDatabase(adminDSN, dbName)
++	if err != nil {
++		fmt.Fprintf(os.Stderr, "store tests: prepare database: %v\n", err)
++		os.Exit(1)
++	}
++
++	if err := migrateTestDatabase(dsn); err != nil {
++		cleanup()
++		fmt.Fprintf(os.Stderr, "store tests: migrate: %v\n", err)
++		os.Exit(1)
++	}
++
++	ctx := context.Background()
++	testStore, err = store.Open(ctx, dsn)
++	if err != nil {
++		cleanup()
++		fmt.Fprintf(os.Stderr, "store tests: open: %v\n", err)
++		os.Exit(1)
++	}
++
++	testPool, err = pgxpool.New(ctx, dsn)
++	if err != nil {
++		testStore.Close()
++		cleanup()
++		fmt.Fprintf(os.Stderr, "store tests: open raw pool: %v\n", err)
++		os.Exit(1)
++	}
++
++	code := m.Run()
++
++	testPool.Close()
++	testStore.Close()
++	cleanup()
++	os.Exit(code)
++}
++
++// execTest runs a fixture statement against the throwaway database.
++func execTest(ctx context.Context, sql string, args ...any) (int64, error) {
++	tag, err := testPool.Exec(ctx, sql, args...)
++	if err != nil {
++		return 0, err
++	}
++	return tag.RowsAffected(), nil
++}
++
++// queryCount runs a single-value count query against the throwaway database.
++func queryCount(ctx context.Context, sql string, args ...any) (int, error) {
++	var n int
++	if err := testPool.QueryRow(ctx, sql, args...).Scan(&n); err != nil {
++		return 0, err
++	}
++	return n, nil
++}
++
++func randomSuffix() string {
++	buf := make([]byte, 8)
++	if _, err := rand.Read(buf); err != nil {
++		panic("store tests: no entropy: " + err.Error())
++	}
++	return hex.EncodeToString(buf)
++}
++
++// createTestDatabase issues CREATE DATABASE on the server named by adminDSN and
++// returns a teardown plus the DSN of the new database.
++func createTestDatabase(adminDSN, dbName string) (func(), string, error) {
++	admin, err := sql.Open("pgx", adminDSN)
++	if err != nil {
++		return nil, "", fmt.Errorf("connect: %w", err)
++	}
++	defer func() { _ = admin.Close() }()
++
++	// CREATE DATABASE cannot run inside a transaction, and the name is
++	// generated here rather than supplied, so quoting it is enough.
++	if _, err := admin.Exec(fmt.Sprintf(`CREATE DATABASE %q`, dbName)); err != nil {
++		return nil, "", fmt.Errorf("create database: %w", err)
++	}
++
++	parsed, err := url.Parse(adminDSN)
++	if err != nil {
++		return nil, "", fmt.Errorf("parse DATABASE_URL: %w", err)
++	}
++	parsed.Path = "/" + dbName
++	dsn := parsed.String()
++
++	cleanup := func() {
++		drop, err := sql.Open("pgx", adminDSN)
++		if err != nil {
++			return
++		}
++		defer func() { _ = drop.Close() }()
++		// FORCE terminates any connection still attached, so a leaked pool
++		// cannot leave the throwaway database behind.
++		_, _ = drop.Exec(fmt.Sprintf(`DROP DATABASE IF EXISTS %q WITH (FORCE)`, dbName))
++	}
++	return cleanup, dsn, nil
++}
++
++// migrateTestDatabase applies the real migrations, so these tests exercise the
++// schema that ships rather than a hand-written copy that could drift from it.
++func migrateTestDatabase(dsn string) error {
++	db, err := sql.Open("pgx", dsn)
++	if err != nil {
++		return fmt.Errorf("connect: %w", err)
++	}
++	defer func() { _ = db.Close() }()
++
++	if err := goose.SetDialect("postgres"); err != nil {
++		return fmt.Errorf("dialect: %w", err)
++	}
++	goose.SetLogger(goose.NopLogger())
++
++	if err := goose.Up(db, "../../migrations"); err != nil {
++		return fmt.Errorf("goose up: %w", err)
++	}
++	return nil
++}
++
++// requireDB skips a test when no database is configured.
++func requireDB(t *testing.T) *store.Store {
++	t.Helper()
++
++	if testStore == nil {
++		t.Skip("DATABASE_URL not set; run via `docker compose run --rm app go test ./...`")
++	}
++	return testStore
++}
++
++// newStorage inserts a storage and returns its id. Each test gets its own, so
++// tests cannot see each other's rows even though they share a database.
++func newStorage(t *testing.T, ctx context.Context) uuid.UUID {
++	t.Helper()
++
++	id, err := uuid.NewV7()
++	require.NoError(t, err)
++
++	_, err = execTest(ctx, `INSERT INTO storages (id, name) VALUES ($1, $2)`, id, "test-"+id.String()[:8])
++	require.NoError(t, err)
++	return id
++}
++
++// newUser inserts a user and returns its id.
++func newUser(t *testing.T, ctx context.Context) uuid.UUID {
++	t.Helper()
++
++	id, err := uuid.NewV7()
++	require.NoError(t, err)
++
++	_, err = execTest(ctx,
++		`INSERT INTO users (id, username, password_hash, display_name) VALUES ($1, $2, 'x', $3)`,
++		id, "u-"+id.String(), "Test User")
++	require.NoError(t, err)
++	return id
++}
++
++// countRows is a small assertion helper for the invariant tests.
++func countRows(t *testing.T, ctx context.Context, sql string, args ...any) int {
++	t.Helper()
++
++	n, err := queryCount(ctx, sql, args...)
++	require.NoError(t, err)
++	return n
++}
++
++func day(y int, m time.Month, d int) *time.Time {
++	t := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
++	return &t
++}
++
++func ptrString(s string) *string { return &s }
++
++func ptrInt(i int) *int { return &i }
++
++// newUUID returns an id that names no row, for the "nonexistent" half of the
++// indistinguishability tests.
++func newUUID(t *testing.T) uuid.UUID {
++	t.Helper()
++
++	id, err := uuid.NewV7()
++	require.NoError(t, err)
++	return id
++}
++
++// timeNow reads the clock from the database rather than the test process, so
++// comparisons line up with the now() that DEFAULT clauses use. A container and
++// its database can disagree by enough to make a boundary test flap.
++func timeNow(t *testing.T, ctx context.Context) time.Time {
++	t.Helper()
++
++	var now time.Time
++	require.NoError(t, testPool.QueryRow(ctx, `SELECT now()`).Scan(&now))
++	return now
++}
++
++// timeZero is a cursor older than any row, standing in for a client that has
++// been offline longer than the tombstone retention window.
++func timeZero() time.Time {
++	return time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
++}
+diff --git a/internal/store/tombstones.go b/internal/store/tombstones.go
+new file mode 100644
+index 0000000..35cdc31
+--- /dev/null
++++ b/internal/store/tombstones.go
+@@ -0,0 +1,117 @@
++package store
++
++import (
++	"context"
++	"fmt"
++	"time"
++
++	"github.com/google/uuid"
++)
++
++// EntityType names a client-cacheable entity kind. The set matches the CHECK
++// on tombstones.entity_type.
++type EntityType string
++
++const (
++	TombstoneProduct          EntityType = "product"
++	TombstoneCategory         EntityType = "category"
++	TombstoneLocation         EntityType = "location"
++	TombstoneShoppingList     EntityType = "shopping_list"
++	TombstoneShoppingListItem EntityType = "shopping_list_item"
++)
++
++// TombstoneRetention is how long a deletion stays visible to a delta sync. A
++// client whose updated_since predates the oldest surviving tombstone cannot be
++// brought up to date safely and must resync
++// (docs/specs/12-client-api-contract.md).
++const TombstoneRetention = 30 * 24 * time.Hour
++
++// Tombstone records that a row was deleted.
++type Tombstone struct {
++	ID         uuid.UUID
++	StorageID  uuid.UUID
++	EntityType EntityType
++	EntityID   uuid.UUID
++	DeletedAt  time.Time
++}
++
++// recordTombstones writes one row per deleted entity.
++//
++// It takes a querier rather than the pool because it must run inside the same
++// transaction as the delete it describes: a tombstone committed separately
++// could be lost while the delete survives, leaving the row gone from the
++// server and present in every client's cache forever.
++func recordTombstones(ctx context.Context, q querier, storageID uuid.UUID, kind EntityType, entityIDs []uuid.UUID) error {
++	for _, entityID := range entityIDs {
++		id, err := newID()
++		if err != nil {
++			return err
++		}
++		if _, err := q.Exec(ctx, `
++			INSERT INTO tombstones (id, storage_id, entity_type, entity_id)
++			VALUES ($1, $2, $3, $4)`,
++			id, storageID, string(kind), entityID); err != nil {
++			return fmt.Errorf("store: record %s tombstone: %w", kind, err)
++		}
++	}
++	return nil
++}
++
++// TombstonesSince returns deletions in this storage after the given instant,
++// for a client catching up.
++func (s *Store) TombstonesSince(ctx context.Context, storageID uuid.UUID, since time.Time) ([]Tombstone, error) {
++	rows, err := s.pool.Query(ctx, `
++		SELECT id, storage_id, entity_type, entity_id, deleted_at
++		  FROM tombstones
++		 WHERE storage_id = $1 AND deleted_at > $2
++		 ORDER BY deleted_at, id`, storageID, since)
++	if err != nil {
++		return nil, fmt.Errorf("store: list tombstones: %w", err)
++	}
++	defer rows.Close()
++
++	var out []Tombstone
++	for rows.Next() {
++		var t Tombstone
++		var kind string
++		if err := rows.Scan(&t.ID, &t.StorageID, &kind, &t.EntityID, &t.DeletedAt); err != nil {
++			return nil, fmt.Errorf("store: scan tombstone: %w", err)
++		}
++		t.EntityType = EntityType(kind)
++		out = append(out, t)
++	}
++	if err := rows.Err(); err != nil {
++		return nil, fmt.Errorf("store: list tombstones: %w", err)
++	}
++	return out, nil
++}
++
++// DeltaIsResumable reports whether a client asking for changes since the given
++// instant can be brought up to date from the surviving tombstones.
++//
++// If the client's cursor predates the oldest tombstone still retained, some
++// deletion has already been swept and answering the delta would silently leave
++// a deleted row in that client's cache. The honest answer is "resync".
++func (s *Store) DeltaIsResumable(ctx context.Context, storageID uuid.UUID, since time.Time) (bool, error) {
++	var oldest *time.Time
++	err := s.pool.QueryRow(ctx, `
++		SELECT min(deleted_at) FROM tombstones WHERE storage_id = $1`, storageID).Scan(&oldest)
++	if err != nil {
++		return false, fmt.Errorf("store: oldest tombstone: %w", err)
++	}
++	if oldest == nil {
++		// No deletions recorded, so nothing can have been swept.
++		return true, nil
++	}
++	return !since.Before(*oldest), nil
++}
++
++// SweepTombstones deletes rows past the retention window. Returns how many
++// went.
++func (s *Store) SweepTombstones(ctx context.Context, now time.Time) (int64, error) {
++	tag, err := s.pool.Exec(ctx, `DELETE FROM tombstones WHERE deleted_at < $1`, now.Add(-TombstoneRetention))
++	if err != nil {
++		return 0, fmt.Errorf("store: sweep tombstones: %w", err)
++	}
++	return tag.RowsAffected(), nil
++}
+diff --git a/internal/store/tree.go b/internal/store/tree.go
+new file mode 100644
+index 0000000..6e8a3f1
+--- /dev/null
++++ b/internal/store/tree.go
+@@ -0,0 +1,132 @@
++package store
++
++import (
++	"context"
++	"errors"
++	"fmt"
++
++	"github.com/google/uuid"
++	"github.com/jackc/pgx/v5"
++	"github.com/jackc/pgx/v5/pgconn"
++)
++
++// treeTable names one of the two self-referencing, storage-scoped trees.
++//
++// It is a closed type with unexported constants rather than a plain string so
++// that a table name can never arrive from a caller and reach SQL. The values
++// below are the only ones that exist.
++type treeTable string
++
++const (
++	treeLocations  treeTable = "locations"
++	treeCategories treeTable = "categories"
++)
++
++// maxTreeDepth bounds the ancestor walk. A correct tree is a handful of levels
++// deep (`Basement → Right Shelf → Layer 2 → Front-Right`); the bound exists so
++// that already-corrupt data cannot turn a cycle check into an unbounded query.
++const maxTreeDepth = 64
++
++// requireSameStorage confirms that id names a row of this tree belonging to
++// storageID.
++//
++// This is the invariant PostgreSQL cannot express: a composite foreign key
++// would pin parent_id to the same storage, but the same rule also applies to
++// products.category_id, inventory_batches.location_id and every id arriving in
++// a request body, so it lives here where every write path shares it.
++//
++// A row in another storage returns ErrNotFound, the same error a nonexistent
++// id returns — see the comment on ErrNotFound.
++func requireSameStorage(ctx context.Context, q querier, table treeTable, storageID, id uuid.UUID) error {
++	var found bool
++	// #nosec G201 -- table is a treeTable constant, never caller-supplied.
++	sql := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s WHERE id = $1 AND storage_id = $2)`, table)
++
++	if err := q.QueryRow(ctx, sql, id, storageID).Scan(&found); err != nil {
++		return fmt.Errorf("store: check %s %s in storage: %w", table, id, err)
++	}
++	if !found {
++		return ErrNotFound
++	}
++	return nil
++}
++
++// wouldCycle reports whether re-parenting node under parent would create a
++// cycle — that is, whether node is parent itself or one of parent's ancestors.
++//
++// Without this a user can detach a subtree from the tree entirely: point a
++// node at its own descendant and the resulting ring is unreachable from any
++// root, so it vanishes from every tree query while its rows still exist and
++// still hold inventory.
++func wouldCycle(ctx context.Context, q querier, table treeTable, node, parent uuid.UUID) (bool, error) {
++	if node == parent {
++		return true, nil
++	}
++
++	// Walk from the proposed parent up towards the root. If node appears on
++	// that path, parent already sits underneath it.
++	// #nosec G201 -- table is a treeTable constant, never caller-supplied.
++	sql := fmt.Sprintf(`
++		WITH RECURSIVE ancestors AS (
++		    SELECT id, parent_id, 1 AS depth
++		      FROM %[1]s
++		     WHERE id = $1
++		    UNION ALL
++		    SELECT t.id, t.parent_id, a.depth + 1
++		      FROM %[1]s t
++		      JOIN ancestors a ON t.id = a.parent_id
++		     WHERE a.depth < %[2]d
++		)
++		SELECT EXISTS (SELECT 1 FROM ancestors WHERE id = $2)`, table, maxTreeDepth)
++
++	var cycles bool
++	if err := q.QueryRow(ctx, sql, parent, node).Scan(&cycles); err != nil {
++		return false, fmt.Errorf("store: cycle check on %s: %w", table, err)
++	}
++	return cycles, nil
++}
++
++// resolveParent validates a proposed parent for a node in this storage.
++//
++// A nil parent is a root node and always valid. Otherwise the parent must live
++// in the same storage, and — when node is non-nil, i.e. this is a move rather
++// than an insert — must not sit beneath node.
++func resolveParent(ctx context.Context, q querier, table treeTable, storageID uuid.UUID, node *uuid.UUID, parent *uuid.UUID) error {
++	if parent == nil {
++		return nil
++	}
++	if err := requireSameStorage(ctx, q, table, storageID, *parent); err != nil {
++		return err
++	}
++	if node == nil {
++		return nil
++	}
++	cycles, err := wouldCycle(ctx, q, table, *node, *parent)
++	if err != nil {
++		return err
++	}
++	if cycles {
++		return fmt.Errorf("%w: re-parenting would create a cycle in %s", ErrConflict, table)
++	}
++	return nil
++}
++
++// querier is the surface shared by *pgxpool.Pool and pgx.Tx, so every helper
++// here works both inside and outside a transaction.
++type querier interface {
++	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
++	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
++	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
++}
++
++// scanCount reads a single-column count query, treating "no rows" as zero.
++func scanCount(ctx context.Context, q querier, sql string, args ...any) (int, error) {
++	var n int
++	if err := q.QueryRow(ctx, sql, args...).Scan(&n); err != nil {
++		if errors.Is(err, pgx.ErrNoRows) {
++			return 0, nil
++		}
++		return 0, err
++	}
++	return n, nil
++}
+diff --git a/internal/store/tx.go b/internal/store/tx.go
+new file mode 100644
+index 0000000..cfd2185
+--- /dev/null
++++ b/internal/store/tx.go
+@@ -0,0 +1,52 @@
++package store
++
++import (
++	"context"
++	"fmt"
++
++	"github.com/google/uuid"
++	"github.com/jackc/pgx/v5"
++)
++
++// inTx runs fn inside a transaction, committing on success and rolling back on
++// any error or panic.
++//
++// Several invariants in docs/specs/02-data-model.md are only true as
++// transactions — most importantly that every write to
++// inventory_batches.quantity is paired with an inventory_logs row, and that a
++// tombstone is written in the same transaction as the delete it records.
++// Routing those writes through one helper is what keeps the pairing from
++// depending on each caller remembering it.
++func (s *Store) inTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
++	tx, err := s.pool.Begin(ctx)
++	if err != nil {
++		return fmt.Errorf("store: begin: %w", err)
++	}
++
++	defer func() {
++		// Rollback after a successful commit is a no-op; this only matters on
++		// the error and panic paths, where it is what prevents a leaked
++		// connection sitting in an open transaction.
++		_ = tx.Rollback(ctx)
++	}()
++
++	if err := fn(tx); err != nil {
++		return err
++	}
++
++	if err := tx.Commit(ctx); err != nil {
++		return fmt.Errorf("store: commit: %w", err)
++	}
++	return nil
++}
++
++// newID returns a UUIDv7. Ids are generated in Go rather than by the database
++// so a multi-row write knows its own keys before it starts
++// (docs/specs/02-data-model.md).
++func newID() (uuid.UUID, error) {
++	id, err := uuid.NewV7()
++	if err != nil {
++		return uuid.Nil, fmt.Errorf("store: generate id: %w", err)
++	}
++	return id, nil
++}
+diff --git a/migrations/00001_extensions.sql b/migrations/00001_extensions.sql
+new file mode 100644
+index 0000000..3cfd139
+--- /dev/null
++++ b/migrations/00001_extensions.sql
+@@ -0,0 +1,10 @@
++-- +goose Up
++-- The trigram extension backs the product matching in
++-- docs/specs/07-shopping-list-reconciliation.md. It has to exist before any
++-- gin_trgm_ops index is declared, which is why it is its own first migration.
++CREATE EXTENSION IF NOT EXISTS pg_trgm;
++
++-- +goose Down
++-- Deliberately not dropped: other schemas in the same database may depend on
++-- the extension, and dropping it would take their indexes with it.
++SELECT 1;
+diff --git a/migrations/00002_core_schema.sql b/migrations/00002_core_schema.sql
+new file mode 100644
+index 0000000..1bec51c
+--- /dev/null
++++ b/migrations/00002_core_schema.sql
+@@ -0,0 +1,198 @@
++-- +goose Up
++
++-- Every id is a UUIDv7 supplied by the application (uuid.NewV7). The columns
++-- carry no DEFAULT on purpose: PostgreSQL 16 has no native v7 generator, and a
++-- missing id must fail loudly rather than fall back to a random v4 that breaks
++-- index locality (docs/specs/02-data-model.md).
++
++CREATE TABLE users (
++    id            UUID PRIMARY KEY,
++    username      VARCHAR(100) NOT NULL UNIQUE,
++    password_hash TEXT NOT NULL,          -- argon2id
++    display_name  VARCHAR(255) NOT NULL,
++    is_admin      BOOLEAN NOT NULL DEFAULT FALSE,
++    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
++);
++
++-- sessions.id is the one deliberate exception to UUIDv7: a session id is a
++-- bearer credential, and a v7 embeds a timestamp and is partially predictable.
++-- 256 CSPRNG bits, base64url-encoded.
++CREATE TABLE sessions (
++    id           TEXT PRIMARY KEY,
++    user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    kind         TEXT NOT NULL DEFAULT 'browser'
++                 CHECK (kind IN ('browser', 'device')),
++    label        VARCHAR(100),            -- device name, e.g. "Pixel 9"; NULL for browser
++    last_seen_at TIMESTAMPTZ,
++    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
++    expires_at   TIMESTAMPTZ NOT NULL
++);
++
++CREATE INDEX idx_sessions_user_id ON sessions(user_id);
++CREATE INDEX idx_sessions_expires_at ON sessions(expires_at);
++
++CREATE TABLE storages (
++    id         UUID PRIMARY KEY,
++    name       VARCHAR(255) NOT NULL,
++    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
++);
++
++-- No role column: every member of a storage has identical read/write rights
++-- over that storage's data (docs/specs/03-auth-and-multi-tenancy.md).
++CREATE TABLE storage_members (
++    storage_id UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
++    user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    added_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
++    PRIMARY KEY (storage_id, user_id)
++);
++
++-- Self-referencing tree, scoped per storage. The CHECK stops a row being its
++-- own parent; the same-storage parent rule and cycle prevention are not
++-- expressible here and are enforced in internal/store.
++CREATE TABLE locations (
++    id          UUID PRIMARY KEY,
++    storage_id  UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
++    parent_id   UUID REFERENCES locations(id) ON DELETE CASCADE,
++    name        VARCHAR(255) NOT NULL,
++    description TEXT,
++    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
++    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
++    CONSTRAINT locations_not_own_parent CHECK (parent_id IS NULL OR parent_id <> id)
++);
++
++CREATE INDEX idx_locations_storage_id ON locations(storage_id);
++CREATE INDEX idx_locations_parent_id ON locations(parent_id);
++
++-- Same shape and same application-level invariants as locations.
++CREATE TABLE categories (
++    id                      UUID PRIMARY KEY,
++    storage_id              UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
++    parent_id               UUID REFERENCES categories(id) ON DELETE CASCADE,
++    name                    VARCHAR(255) NOT NULL,
++    default_shelf_life_days INT,          -- NULL = inherit from ancestor / item_type
++    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
++    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
++    CONSTRAINT categories_not_own_parent CHECK (parent_id IS NULL OR parent_id <> id)
++);
++
++CREATE INDEX idx_categories_storage_id ON categories(storage_id);
++CREATE INDEX idx_categories_parent_id ON categories(parent_id);
++
++-- Global, anonymous and insert-only. It carries no storage_id, user_id,
++-- quantity, location or count of any kind: a catalog row describes what a
++-- product is, never who has it. Created before products because products
++-- references it.
++CREATE TABLE catalog_products (
++    id                      UUID PRIMARY KEY,
++    normalized_name         VARCHAR(255) NOT NULL UNIQUE,  -- lowercased, trimmed, collapsed whitespace
++    display_name            VARCHAR(255) NOT NULL,
++    base_id                 UUID REFERENCES catalog_products(id) ON DELETE SET NULL,
++    category_path           TEXT,          -- denormalized text, e.g. "Food > Dairy > Cheese"
++    item_type               TEXT NOT NULL
++                            CHECK (item_type IN ('perishable', 'long_shelf_life', 'non_perishable')),
++    image_url               TEXT,
++    icon_name               VARCHAR(100),
++    default_shelf_life_days INT,
++    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
++    CONSTRAINT catalog_not_own_base CHECK (base_id IS NULL OR base_id <> id)
++);
++
++CREATE INDEX idx_catalog_products_name_trgm
++    ON catalog_products USING gin (normalized_name gin_trgm_ops);
++CREATE INDEX idx_catalog_products_base_id ON catalog_products(base_id);
++
++CREATE TABLE products (
++    id                      UUID PRIMARY KEY,
++    storage_id              UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
++    name                    VARCHAR(255) NOT NULL,
++    category_id             UUID REFERENCES categories(id) ON DELETE RESTRICT,
++    catalog_id              UUID REFERENCES catalog_products(id) ON DELETE SET NULL,
++    item_type               TEXT NOT NULL DEFAULT 'long_shelf_life'
++                            CHECK (item_type IN ('perishable', 'long_shelf_life', 'non_perishable')),
++    default_shelf_life_days INT,          -- local override; NULL = resolve per spec 08
++    min_stock               INT NOT NULL DEFAULT 0,
++    image_url               TEXT,
++    icon_name               VARCHAR(100),
++    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
++    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
++);
++
++CREATE INDEX idx_products_storage_id ON products(storage_id);
++CREATE INDEX idx_products_category_id ON products(category_id);
++CREATE INDEX idx_products_catalog_id ON products(catalog_id);
++CREATE INDEX idx_products_name_trgm ON products USING gin (name gin_trgm_ops);
++
++-- A batch is a quantity of one product at exactly ONE location; moving part of
++-- one elsewhere is a split into two batches, never a batch with two homes.
++-- location_id belonging to the product's storage is enforced in internal/store.
++CREATE TABLE inventory_batches (
++    id                UUID PRIMARY KEY,
++    product_id        UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
++    location_id       UUID NOT NULL REFERENCES locations(id) ON DELETE RESTRICT,
++    quantity          INT NOT NULL DEFAULT 1 CHECK (quantity >= 0),
++    expiration_date   DATE,
++    expiration_source TEXT NOT NULL DEFAULT 'derived'
++                      CHECK (expiration_source IN ('derived', 'user')),
++    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
++);
++
++CREATE INDEX idx_inventory_batches_product_id ON inventory_batches(product_id);
++CREATE INDEX idx_inventory_batches_location_id ON inventory_batches(location_id);
++
++-- Append-only audit trail. Never updated, never deleted: a wrong quantity is
++-- corrected by a compensating row with reason = 'audit'.
++CREATE TABLE inventory_logs (
++    id         UUID PRIMARY KEY,
++    product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
++    batch_id   UUID REFERENCES inventory_batches(id) ON DELETE SET NULL,
++    change_qty INT NOT NULL,
++    reason     TEXT NOT NULL
++               CHECK (reason IN ('purchase', 'consumption', 'audit',
++                                 'vision_ingestion', 'move')),
++    created_by UUID REFERENCES users(id) ON DELETE SET NULL,
++    timestamp  TIMESTAMPTZ NOT NULL DEFAULT now()
++);
++
++CREATE INDEX idx_inventory_logs_product_id ON inventory_logs(product_id);
++CREATE INDEX idx_inventory_logs_timestamp ON inventory_logs(timestamp);
++
++-- A settings value always overrides the corresponding environment variable.
++CREATE TABLE settings (
++    key        VARCHAR(100) PRIMARY KEY,
++    value      TEXT NOT NULL,
++    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
++    updated_by UUID REFERENCES users(id) ON DELETE SET NULL
++);
++
++-- Listed under Tables in docs/specs/02-data-model.md; its shape and lifecycle
++-- are specified in docs/specs/04-backend-api-conventions.md.
++CREATE TABLE jobs (
++    id           UUID PRIMARY KEY,
++    storage_id   UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
++    kind         TEXT NOT NULL
++                 CHECK (kind IN ('shelf_ingestion', 'product_photo',
++                                 'shopping_list_photo', 'consumption_photo')),
++    status       TEXT NOT NULL
++                 CHECK (status IN ('pending', 'done', 'failed', 'consumed')),
++    payload      JSONB,
++    error        TEXT,
++    created_by   UUID REFERENCES users(id) ON DELETE SET NULL,
++    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
++    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
++);
++
++CREATE INDEX idx_jobs_storage_status ON jobs(storage_id, status);
++
++-- +goose Down
++DROP TABLE IF EXISTS jobs;
++DROP TABLE IF EXISTS settings;
++DROP TABLE IF EXISTS inventory_logs;
++DROP TABLE IF EXISTS inventory_batches;
++DROP TABLE IF EXISTS products;
++DROP TABLE IF EXISTS catalog_products;
++DROP TABLE IF EXISTS categories;
++DROP TABLE IF EXISTS locations;
++DROP TABLE IF EXISTS storage_members;
++DROP TABLE IF EXISTS storages;
++DROP TABLE IF EXISTS sessions;
++DROP TABLE IF EXISTS users;
+diff --git a/migrations/00003_client_sync.sql b/migrations/00003_client_sync.sql
+new file mode 100644
+index 0000000..1cf5a2e
+--- /dev/null
++++ b/migrations/00003_client_sync.sql
+@@ -0,0 +1,60 @@
++-- +goose Up
++
++-- Tables backing the third-party client contract in
++-- docs/specs/12-client-api-contract.md.
++
++-- Short-lived, single-use QR pairing codes. This is the one unauthenticated
++-- endpoint that mints a session, so the code is 256 CSPRNG bits and comparison
++-- is constant-time in application code.
++CREATE TABLE pairing_codes (
++    code       TEXT PRIMARY KEY,          -- 256-bit CSPRNG, base64url
++    user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
++    expires_at TIMESTAMPTZ NOT NULL,      -- created_at + 2 minutes
++    used_at    TIMESTAMPTZ
++);
++
++CREATE INDEX idx_pairing_codes_expires_at ON pairing_codes(expires_at);
++
++-- Makes a client's retried write safe to repeat. A mobile client with an
++-- offline queue will re-send requests whose response it never received;
++-- without this, the second attempt debits the pantry twice.
++--
++-- Keyed by (key, user_id) so one client's key can never collide with another's.
++-- request_hash is what separates a genuine replay from a client bug: the same
++-- key with a different body is a 422, not a silent replay.
++CREATE TABLE idempotency_records (
++    key             TEXT NOT NULL,
++    user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++    storage_id      UUID REFERENCES storages(id) ON DELETE CASCADE,
++    request_hash    TEXT NOT NULL,        -- SHA-256 of method + path + body
++    response_status INT NOT NULL,
++    response_body   JSONB,
++    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
++    PRIMARY KEY (key, user_id)
++);
++
++CREATE INDEX idx_idempotency_records_created_at ON idempotency_records(created_at);
++
++-- Records deletions so a delta sync can tell a client a row is *gone*. A delta
++-- built only from updated_at can never express a deletion, so without this a
++-- deleted product lives in a client's cache forever.
++--
++-- entity_id is deliberately not a foreign key: the row it names has already
++-- been deleted.
++CREATE TABLE tombstones (
++    id          UUID PRIMARY KEY,
++    storage_id  UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
++    entity_type TEXT NOT NULL
++                CHECK (entity_type IN ('product', 'category', 'location',
++                                       'shopping_list', 'shopping_list_item')),
++    entity_id   UUID NOT NULL,
++    deleted_at  TIMESTAMPTZ NOT NULL DEFAULT now()
++);
++
++CREATE INDEX idx_tombstones_storage_deleted ON tombstones(storage_id, deleted_at);
++
++-- +goose Down
++DROP TABLE IF EXISTS tombstones;
++DROP TABLE IF EXISTS idempotency_records;
++DROP TABLE IF EXISTS pairing_codes;

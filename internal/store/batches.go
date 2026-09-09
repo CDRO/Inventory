@@ -63,8 +63,14 @@ type NewBatch struct {
 // foreign key, so without this a batch could be filed against a shelf in
 // somebody else's house.
 func (s *Store) CreateBatch(ctx context.Context, storageID uuid.UUID, in NewBatch) (*Batch, error) {
-	if in.Quantity < 0 {
-		return nil, fmt.Errorf("%w: batch quantity must not be negative", ErrValidation)
+	// A batch is a quantity of something in a place, so it starts at one or
+	// more. Allowing zero would create a row the model says should not exist —
+	// AdjustBatch deletes a batch the moment it reaches zero — and would pair
+	// it with a ledger entry recording that nothing happened. A product with
+	// no stock is a product with no batches, which is what the reorder
+	// dashboard in spec 10 reads.
+	if in.Quantity < 1 {
+		return nil, fmt.Errorf("%w: batch quantity must be at least 1, got %d", ErrValidation, in.Quantity)
 	}
 	if in.Reason == "" {
 		return nil, fmt.Errorf("%w: a batch write needs a log reason", ErrValidation)

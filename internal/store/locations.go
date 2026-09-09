@@ -43,6 +43,9 @@ func (s *Store) CreateLocation(ctx context.Context, storageID uuid.UUID, in NewL
 
 	var out *Location
 	err = s.inTx(ctx, func(tx pgx.Tx) error {
+		if err := lockStorageTree(ctx, tx, storageID); err != nil {
+			return err
+		}
 		if err := resolveParent(ctx, tx, treeLocations, storageID, nil, in.ParentID); err != nil {
 			return err
 		}
@@ -74,6 +77,9 @@ func (s *Store) CreateLocation(ctx context.Context, storageID uuid.UUID, in NewL
 // node in another storage.
 func (s *Store) MoveLocation(ctx context.Context, storageID, id uuid.UUID, parentID *uuid.UUID) error {
 	return s.inTx(ctx, func(tx pgx.Tx) error {
+		if err := lockStorageTree(ctx, tx, storageID); err != nil {
+			return err
+		}
 		if err := requireSameStorage(ctx, tx, treeLocations, storageID, id); err != nil {
 			return err
 		}
@@ -119,6 +125,9 @@ func (s *Store) RenameLocation(ctx context.Context, storageID, id uuid.UUID, nam
 // only its root.
 func (s *Store) DeleteLocation(ctx context.Context, storageID, id uuid.UUID) error {
 	return s.inTx(ctx, func(tx pgx.Tx) error {
+		if err := lockStorageTree(ctx, tx, storageID); err != nil {
+			return err
+		}
 		if err := requireSameStorage(ctx, tx, treeLocations, storageID, id); err != nil {
 			return err
 		}

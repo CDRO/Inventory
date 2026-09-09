@@ -207,6 +207,7 @@ CREATE TABLE categories (
     name                    VARCHAR(255) NOT NULL,
     default_shelf_life_days INT,          -- NULL = inherit from ancestor / item_type
     created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT categories_not_own_parent CHECK (parent_id IS NULL OR parent_id <> id)
 );
 
@@ -237,7 +238,8 @@ CREATE TABLE products (
     min_stock               INT NOT NULL DEFAULT 0,
     image_url               TEXT,
     icon_name               VARCHAR(100),
-    created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_products_storage_id ON products(storage_id);
