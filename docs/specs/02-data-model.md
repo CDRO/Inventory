@@ -178,6 +178,7 @@ CREATE TABLE locations (
     name        VARCHAR(255) NOT NULL,
     description TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT locations_not_own_parent CHECK (parent_id IS NULL OR parent_id <> id)
 );
 
