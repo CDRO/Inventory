@@ -45,11 +45,36 @@ Every command is therefore a Docker invocation:
 |---|---|
 | Interactive first-time setup | `docker compose run --rm setup` |
 | Build everything | `docker compose build` |
-| Run the stack | `docker compose up -d` |
+| Run the stack (dev) | `docker compose up -d` |
+| Run the stack (production) | `docker compose -f docker-compose.yml up -d` |
 | Run unit tests | `docker compose run --rm app go test ./...` |
 | Run E2E tests (deployment gate) | `docker compose -f docker-compose.e2e.yml run --rm e2e` |
-| Run migrations | `docker compose run --rm app /inventory migrate up` |
+| Run migrations | `docker compose -f docker-compose.yml run --rm app migrate up` |
 | Lint / vet | `docker compose run --rm app go vet ./...` |
+
+**Which compose context a command runs in matters, and the table above is
+explicit about it for a reason.** `docker-compose.override.yml` holds the dev
+overrides and Compose loads it automatically, so a bare `docker compose`
+invocation puts the Go-capable `dev` image under the `app` name — which is what
+makes `go test` and `go vet` work at all, since the production image is
+`FROM scratch` and contains no toolchain.
+
+The two commands that need the *production* image therefore pin the base file
+with `-f docker-compose.yml`:
+
+- **Migrations**, because `migrate` is a subcommand of the compiled
+  `/inventory` binary, which exists only in the production image. Note also
+  that the image sets `ENTRYPOINT ["/inventory"]`, so the subcommand is passed
+  on its own — naming the binary again would run `/inventory /inventory migrate`.
+- **Production deployment**, so the NAS never picks up the dev overrides. This
+  pin is load-bearing: without it a bare `up -d` on the NAS would start the
+  `dev` target with `APP_ENV=dev`, which enables `debug_reason` disclosure
+  (`03-auth-and-multi-tenancy.md`), replace the `scratch` binary with a
+  toolchain image, and publish port 8000 past Traefik.
+
+**Minimum Docker Compose version: v2.24.** The compose files use the long-form
+`env_file` with `required: false` (below); older Compose rejects the whole file
+rather than ignoring the key.
 
 The frontend has **no** build, install, or lint command, because it has no
 toolchain — it is plain files. Browser behavior is covered by end-to-end
@@ -83,7 +108,7 @@ build or the dev loop, but **required to pass before deploying**. See
 ├── migrations/                 # goose SQL migrations
 ├── Dockerfile                  # multi-stage: builds and tests everything, outputs scratch image
 ├── docker-compose.yml          # base/production
-├── docker-compose.dev.yml      # dev overrides
+├── docker-compose.override.yml # dev overrides; auto-loaded by Compose
 ├── .env.example
 └── PROJECT_PLAN.md             # original informal notes — superseded by docs/specs/
 ```
@@ -105,7 +130,7 @@ COPY . .
 RUN go test ./... \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/inventory ./cmd/inventory
 
-# ---- dev stage (used by docker-compose.dev.yml) ----
+# ---- dev stage (used by docker-compose.override.yml) ----
 FROM golang:1-alpine AS dev
 RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /src
@@ -162,10 +187,9 @@ $ docker compose run --rm setup      # writes ./.env interactively
 $ docker compose up -d
 ```
 
-**If `docker compose up` is run first (no `.env` yet):** compose aborts on
-the missing `env_file`, which is correct but cryptic. To make the message
-actionable, the `app` container additionally validates its configuration
-at startup and, on missing/empty required variables, exits non-zero with:
+**If `docker compose up` is run first (no `.env` yet):** the `app` container
+starts and validates its configuration, then exits non-zero with an actionable
+message naming the variables and the two commands that fix it:
 
 ```
 No configuration found (DATABASE_URL, SESSION_SECRET, GEMINI_API_KEY are unset).
@@ -177,6 +201,15 @@ Then: docker compose up -d
 config error is a **fatal, non-retryable** exit, so the container exits
 with a distinct code and the message stays readable in
 `docker compose logs app`.
+
+**`.env` is declared optional at the Compose layer** — the long-form
+`env_file: [{path: .env, required: false}]` on `app` and `db`. It has to be:
+`docker compose run --rm setup` is the command that *writes* `.env`, and
+Compose validates the whole project model before running anything, so a
+required `env_file` makes the documented first step fail on a fresh clone. The
+optional declaration is also what lets the container reach its own startup
+check and print the message above, instead of Compose aborting with a parse
+error that names no remedy.
 
 **If setup is run while the stack is already up**, the new `.env` is not
 picked up by running containers. The `setup` command detects this case as
@@ -284,7 +317,9 @@ services:
     build:
       context: .
       target: prod
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false   # setup writes it; see "First-run order"
     depends_on:
       db:
         condition: service_healthy
@@ -310,7 +345,9 @@ services:
 
   db:
     image: postgres:16-alpine
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -334,10 +371,20 @@ the JSON API at `/api`, and the server-rendered admin UI at `/admin`.
 Traefik is the only ingress, which is what makes the remote-access layer
 swappable (below).
 
-## `docker-compose.dev.yml` (local staging overrides)
+## `docker-compose.override.yml` (local staging overrides)
 
-Used as `docker compose -f docker-compose.yml -f docker-compose.dev.yml up`
-on the operator's PC with Docker Desktop.
+Compose loads this file automatically, so a bare `docker compose up` /
+`docker compose run` on the operator's PC with Docker Desktop is already the
+dev stack. That auto-loading is deliberate — it is what puts a Go-capable image
+under the `app` name so the documented `go test` and `go vet` commands work
+against a project whose production image is `FROM scratch`.
+
+The cost is that **production must pin the base file explicitly**
+(`docker compose -f docker-compose.yml up -d`, see "Deployment model"); a bare
+`up -d` on the NAS would otherwise inherit `APP_ENV=dev` and the published
+port. The dev service also carries its own `image:` tag, because both targets
+would otherwise export to `inventory-app:latest` and whichever was built last
+would silently win.
 
 ```yaml
 services:
@@ -345,6 +392,7 @@ services:
     build:
       context: .
       target: dev
+    image: inventory-app-dev    # distinct tag; see above
     environment:
       - APP_ENV=dev
       - STATIC_DIR=/src/web/static
@@ -361,10 +409,23 @@ services:
 - **Staging:** operator's PC, Docker Desktop, dev compose overrides,
   `APP_ENV=dev`, frontend served from disk.
 - **Production:** Synology NAS, Container Manager, base `docker-compose.yml`
-  only. Because the Dockerfile performs the whole build, deploying is
-  `docker compose build && docker compose up -d` on the NAS — or building
-  elsewhere and pulling from a registry; both are supported and require no
-  additional tooling.
+  only — and that has to be stated on the command line, because Compose
+  auto-loads `docker-compose.override.yml` when it is present. Because the
+  Dockerfile performs the whole build, deploying is:
+
+  ```console
+  $ docker compose -f docker-compose.yml build
+  $ docker compose -f docker-compose.yml up -d
+  ```
+
+  Building elsewhere and pulling from a registry is equally supported and
+  requires no additional tooling. **The `-f docker-compose.yml` pin is a
+  security control, not a style preference:** without it the NAS runs the
+  `dev` target, which sets `APP_ENV=dev` and therefore emits `debug_reason`
+  in error responses (`03-auth-and-multi-tenancy.md`), ships a toolchain image
+  instead of the `scratch` binary, and publishes port 8000 past Traefik — on a
+  Tailscale-only host, that is reachable to the whole tailnet without the
+  ingress. A deployment checklist that omits the pin is a broken deployment.
 - **Deployment gate:** the end-to-end browser suite
   (`05-frontend-pwa-foundations.md`) must pass before an image is
   promoted to production. Unit tests already run inside the image build;

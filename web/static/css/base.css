@@ -1,0 +1,26 @@
+/* Reset, typography, and layout primitives. Design tokens land in tokens.css
+   with docs/specs/05-frontend-pwa-foundations.md; nothing here hard-codes a
+   colour that belongs in that file. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.5;
+}
+
+.shell {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace;
+  font-size: 0.9em;
+}

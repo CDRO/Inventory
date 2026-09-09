@@ -1,0 +1,35 @@
+# Local staging / dev overrides (the "docker-compose.dev.yml" of
+# docs/specs/01-architecture-and-deployment.md).
+#
+# Named docker-compose.override.yml rather than docker-compose.dev.yml because
+# Compose auto-loads this filename, and that is what makes the spec's own
+# documented commands work:
+#
+#   docker compose run --rm app go test ./...
+#
+# The production `app` image is FROM scratch and contains no Go toolchain, so
+# that command can only run against the dev target. Auto-loading the override
+# is what puts the dev target under the `app` name locally. Production is
+# unaffected because it pins the base file explicitly:
+#
+#   docker compose -f docker-compose.yml up -d
+
+services:
+  app:
+    build:
+      context: .
+      target: dev
+    # A distinct tag: both targets otherwise export to inventory-app:latest,
+    # and whichever was built last would win — silently running the scratch
+    # image (which has no Go toolchain) for `docker compose run --rm app
+    # go test ./...`.
+    image: inventory-app-dev
+    environment:
+      - APP_ENV=dev
+      - STATIC_DIR=/src/web/static
+    volumes:
+      - ./web:/src/web          # edit frontend files, just refresh the browser
+      - ./internal:/src/internal
+      - ./cmd:/src/cmd
+    ports:
+      - "8000:8000"             # direct access, bypassing Traefik, for debugging

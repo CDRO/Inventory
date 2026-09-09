@@ -183,7 +183,7 @@ unit-testable logic lives in Go and is covered there
 
 | Context | E2E required? |
 |---|---|
-| Editing files in the dev loop (`docker-compose.dev.yml`) | **No.** Never runs automatically; edit-and-refresh stays instant. |
+| Editing files in the dev loop (`docker-compose.override.yml`) | **No.** Never runs automatically; edit-and-refresh stays instant. |
 | `docker compose build` / the image build | **No.** E2E needs a live stack with a database, which a build stage does not have. |
 | **Deploying** (promoting an image to the NAS / cutting a release) | **Yes — must pass first.** A failing E2E run blocks the deployment. |
 

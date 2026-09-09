@@ -9,8 +9,9 @@ multi-tenancy. Every table that holds household data is scoped to a
 reference at all** so that it cannot reveal anything about other storages.
 
 Migrations are goose SQL files under `/migrations`, invoked only through
-Docker (`docker compose run --rm app /inventory migrate up`), per
-`01-architecture-and-deployment.md`. The first migration must enable the
+Docker (`docker compose -f docker-compose.yml run --rm app migrate up`), per
+`01-architecture-and-deployment.md` — the base file is pinned because `migrate`
+lives in the compiled binary, which only the production image carries. The first migration must enable the
 trigram extension used for matching:
 
 ```sql
