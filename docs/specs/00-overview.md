@@ -57,6 +57,15 @@ vanilla JavaScript with no build step — see
   described in [`05-frontend-pwa-foundations.md`](05-frontend-pwa-foundations.md)
   is for installability and camera access, not offline data editing.
 
+  This non-goal is about **reconciliation**, not retries. The server makes a
+  single write safe to repeat (`Idempotency-Key`) and lets a client fetch what
+  changed since a timestamp — both in
+  [`12-client-api-contract.md`](12-client-api-contract.md) — because a native
+  client that queues work offline will inevitably resend requests whose
+  response it never saw. What the server still does not do is merge divergent
+  edits, track client-side revisions, or resolve conflicts: two devices editing
+  the same batch is last-write-wins, exactly as two browser tabs are today.
+
 ## Glossary
 
 | Term | Meaning |
@@ -84,12 +93,16 @@ vanilla JavaScript with no build step — see
 | 5 | Quick consumption logging | `09-consumption-logging.md` |
 | 6 | Reorder & minimum stock management | `10-reorder-and-shopping-export.md` |
 | 7 | Reporting & analytics | `11-reporting-and-analytics.md` |
+| — | API contract for third-party native clients | `12-client-api-contract.md` |
 | — | *Later phase:* gamification of inventory upkeep | `50`, `51`, `52` |
 
-**Numbering:** `00`–`11` are the core system. `12`–`49` are reserved for
-further core work not yet specified. `50`+ is a later, optional phase —
-nothing in `00`–`11` may depend on it, and the system must be complete
+**Numbering:** `00`–`11` are the core system, `12` onward is further core work
+as it is specified (`13`–`49` still free). `50`+ is a later, optional phase —
+nothing in `00`–`12` may depend on it, and the system must be complete
 and shippable with the `50` range unimplemented.
+
+**Candidate work** that has not been accepted lives in `docs/spikes/`, which is
+not a contract and must never be implemented from.
 
 ## Scale expectations
 

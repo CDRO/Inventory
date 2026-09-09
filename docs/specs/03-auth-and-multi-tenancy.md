@@ -45,6 +45,51 @@ are or what they may do.
 All non-auth API routes require a valid, unexpired session; return `401`
 otherwise (see `04-backend-api-conventions.md` for the error envelope).
 
+### Two transports, one session
+
+A native client cannot sensibly hold an `HttpOnly` browser cookie, so the
+session id may also arrive as `Authorization: Bearer <session-id>`. Both
+transports resolve through the **same `sessions` lookup** — there is one
+session concept in this system, not a second auth mechanism with its own
+rules. Everything below applies identically regardless of which transport
+carried the id.
+
+If both a cookie and a Bearer header are present, the **cookie wins** and the
+header is ignored. Preferring the header would let an attacker who can set a
+request header override the session of a logged-in browser.
+
+### Pairing a device (QR)
+
+Native clients obtain a session by scanning a QR code shown in the PWA, rather
+than by typing a password on a phone:
+
+- `POST /api/auth/pairing-codes` — session required. Creates a
+  `pairing_codes` row (`02-data-model.md`) valid for 2 minutes and returns the
+  code, which the browser renders as a QR containing **both the code and this
+  server's base URL**. The URL is required: the server is self-hosted at a
+  Tailscale address the client cannot guess.
+- `POST /api/auth/pair` — **unauthenticated**, body `{code, device_label}`.
+  Validates the code (exists, unexpired, unused; constant-time compare), marks
+  it used, creates a `sessions` row with `kind = 'device'` and the given label,
+  and returns the session id **in the response body** — not as a cookie.
+  Rate-limited per IP and per user.
+
+**The QR never carries a session id.** It carries a single-use code that dies
+in two minutes, so a photograph of the screen, a screenshot pasted into a chat,
+or someone reading it across a room is worthless. A session id in a QR would
+turn a picture of a monitor into a permanent credential.
+
+### Device management
+
+- `GET /api/auth/devices` — the caller's own sessions: `kind`, `label`,
+  `created_at`, `last_seen_at`, and which one is making this request.
+- `DELETE /api/auth/devices/{session_id}` — revoke one, taking effect
+  immediately. A user may revoke only their own sessions; another user's
+  session id returns `404`, like any other inaccessible resource.
+
+This is a user-facing surface, not an admin one. Full contract for third-party
+clients: `12-client-api-contract.md`.
+
 ## Admin status is never client-visible or client-trusted
 
 `is_admin` is a server-side fact, checked against the database on **every

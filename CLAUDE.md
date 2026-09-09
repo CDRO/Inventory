@@ -10,6 +10,10 @@ existing code.
   · `50`–`52` gamification (later phase, nothing in `00`–`11` may depend on it)
 - **`docs/explanations/` is not a contract.** It is human-facing narrative.
   Ignore it when implementing.
+- **`docs/spikes/` is not a contract either.** Candidate features under
+  evaluation, some of which contradict accepted specs on purpose. Never
+  implement from it; a spike becomes work only by being promoted into a
+  numbered spec and then into the issue queue.
 
 ## Resuming work
 

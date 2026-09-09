@@ -52,8 +52,10 @@ handler performs its own check, and no check is duplicated inline.
 
 **`RequireSession`**
 
-1. Read the session cookie. Absent → `401 unauthorized`
-   (`debug_reason: session_missing`).
+1. Read the session id — from the cookie, or from an
+   `Authorization: Bearer <session-id>` header when no cookie is present
+   (`03-auth-and-multi-tenancy.md`; the cookie wins when both are sent).
+   Neither → `401 unauthorized` (`debug_reason: session_missing`).
 2. Look up `sessions` by that id. Missing, or `expires_at <= now()` →
    delete the row if present, then `401` (`session_expired`).
 3. Load the `users` row and place it in the request context.
@@ -131,6 +133,17 @@ non-enumeration rules in `03-auth-and-multi-tenancy.md`.
 Cursor-based, not offset-based (avoids drift under concurrent writes).
 List endpoints accept `?limit=50&cursor=...` and return `next_cursor: null`
 when exhausted. Default `limit` 50, max 200.
+
+## Idempotent writes
+
+Any mutating request may carry an `Idempotency-Key` header. The server records
+the key with its response (`idempotency_records`, `02-data-model.md`) and
+replays that stored response instead of executing again. The same key with a
+different request body is `422 validation_failed`, not a silent replay.
+
+The browser omits the header — a user can see whether their click landed.
+Clients with an offline queue must send it, because they retry requests whose
+response never arrived; the full rules are in `12-client-api-contract.md`.
 
 ## File/image upload handling
 
