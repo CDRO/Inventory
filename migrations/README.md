@@ -18,14 +18,30 @@ Two details in that command are load-bearing:
   `/inventory /inventory migrate up` and fail with
   `unknown command "/inventory"`.
 
-The directory is empty on purpose. The schema is defined by
-[`docs/specs/02-data-model.md`](../docs/specs/02-data-model.md) and lands with
-that spec's issue; this spec ships the runner only, so `migrate up` reports
-that there is nothing to apply rather than failing.
+## What is here
 
-The first migration must enable the trigram extension the product matching
-depends on:
+| File | Contents |
+|---|---|
+| `00001_extensions.sql` | `pg_trgm`, alone and first — the `gin_trgm_ops` indexes in the next migration cannot be declared without it |
+| `00002_core_schema.sql` | The core tables of [`docs/specs/02-data-model.md`](../docs/specs/02-data-model.md) |
+| `00003_client_sync.sql` | `pairing_codes`, `idempotency_records`, `tombstones` — the client contract in [`docs/specs/12-client-api-contract.md`](../docs/specs/12-client-api-contract.md) |
 
-```sql
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
-```
+Every file carries both `-- +goose Up` and `-- +goose Down`, and the down path
+is exercised in CI-equivalent form: `down` three times empties the schema and
+`up` restores all fifteen tables.
+
+`00001`'s down step deliberately does **not** drop the extension. Other schemas
+in the same database may depend on `pg_trgm`, and dropping it would take their
+indexes with it.
+
+## Adding a migration
+
+Number it in sequence and keep it forward-only once merged — a migration that
+has run on the NAS must never be edited, only superseded. The application
+supplies every `id` as a UUIDv7 (`uuid.NewV7`), so new tables declare
+`id UUID PRIMARY KEY` with **no** default: a missing id has to fail loudly
+rather than fall back to a random v4 that breaks index locality.
+
+Note that `migrate status` currently prints nothing — goose reports it through
+a logger the application sets to a no-op. Tracked separately; `migrate up`
+itself is unaffected.
