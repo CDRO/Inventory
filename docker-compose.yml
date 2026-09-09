@@ -1,0 +1,77 @@
+# Base / production stack. See docs/specs/01-architecture-and-deployment.md.
+#
+# Production (Synology NAS) deliberately pins this file only, so the dev
+# overrides in docker-compose.override.yml are not picked up:
+#   docker compose -f docker-compose.yml up -d
+
+services:
+  traefik:
+    image: traefik:v3
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+    ports:
+      - "80:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      target: prod
+    # Optional at the Compose layer on purpose. `docker compose run --rm setup`
+    # is the command that *writes* .env, so a required env_file here aborts the
+    # whole project model before setup can run — the first documented step
+    # would fail on a fresh clone. Keeping it optional also lets `up` without a
+    # .env reach the container, where the startup check prints the actionable
+    # remediation instead of Compose's cryptic parse error
+    # (docs/specs/01-architecture-and-deployment.md).
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      db:
+        condition: service_healthy
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.app.rule=PathPrefix(`/`)
+      - traefik.http.services.app.loadbalancer.server.port=8000
+    volumes:
+      - uploads:/data/uploads
+    restart: unless-stopped
+
+  setup:
+    build:
+      context: .
+      target: prod
+    entrypoint: ["/inventory", "setup"]
+    volumes:
+      - .:/work
+    working_dir: /work
+    stdin_open: true
+    tty: true
+    profiles: ["tools"]      # only runs when invoked explicitly
+
+  db:
+    image: postgres:16-alpine
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  uploads:
