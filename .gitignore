@@ -6,6 +6,7 @@
 # issue or PR comment instead.
 .claude/worklog.md
 .claude/*.log
+.claude/*.diff
 
 # Go build output
 /inventory
