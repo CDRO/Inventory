@@ -22,10 +22,10 @@ func TestSettingErrorClassification(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name            string
-		err             error
-		wantNoRows      bool
-		wantUndefTable  bool
+		name           string
+		err            error
+		wantNoRows     bool
+		wantUndefTable bool
 	}{
 		{
 			name:       "no rows",

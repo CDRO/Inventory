@@ -59,7 +59,11 @@ func Run(ctx context.Context, dsn, action string, out io.Writer) error {
 	if err := goose.SetDialect("postgres"); err != nil {
 		return fmt.Errorf("migrate: set dialect: %w", err)
 	}
-	goose.SetLogger(goose.NopLogger())
+	// goose reports through its logger, not its return value: `status` and
+	// `version` produce their entire output that way. A NopLogger here — which
+	// is what this was until the first migrations existed to report on — makes
+	// those two subcommands print nothing at all and look broken.
+	goose.SetLogger(writerLogger{out: out})
 
 	switch action {
 	case "up":
@@ -84,6 +88,24 @@ func Run(ctx context.Context, dsn, action string, out io.Writer) error {
 		return fmt.Errorf("migrate: unknown action %q (want up, down, status or version)", action)
 	}
 	return nil
+}
+
+// writerLogger adapts an io.Writer to goose's logger interface.
+//
+// Fatalf deliberately does not exit the process: goose calls it for migration
+// failures, and killing the process there would skip the deferred database
+// close and lose the error's place in the caller's own reporting. The
+// corresponding Run call returns an error anyway.
+type writerLogger struct {
+	out io.Writer
+}
+
+func (l writerLogger) Printf(format string, v ...any) {
+	fmt.Fprintf(l.out, format, v...)
+}
+
+func (l writerLogger) Fatalf(format string, v ...any) {
+	fmt.Fprintf(l.out, format, v...)
 }
 
 // resolveDir picks the first candidate directory that exists.
