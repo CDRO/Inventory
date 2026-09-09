@@ -143,6 +143,7 @@ CMD ["go", "run", "./cmd/inventory", "serve"]
 FROM scratch AS prod
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+COPY --from=builder /src/migrations /migrations
 COPY --from=builder /out/inventory /inventory
 EXPOSE 8000
 ENTRYPOINT ["/inventory"]

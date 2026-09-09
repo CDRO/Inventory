@@ -76,9 +76,12 @@ storages ─┬─< storage_members >─┬─ users ─< sessions
           │              └─< inventory_logs (via product_id)
           └─< shopping_lists (see 07) ─< shopping_list_items
 
-catalog_products   (global, anonymous — no storage reference; self-referencing variants)
-settings           (global key/value app configuration)
-jobs               (background job tracking, see 04)
+catalog_products     (global, anonymous — no storage reference; self-referencing variants)
+settings             (global key/value app configuration)
+jobs                 (background job tracking, see 04)
+pairing_codes        (QR device pairing, see 12)
+idempotency_records  (safe retries for offline clients, see 12)
+tombstones           (deletions for delta sync, see 12)
 ```
 
 ## Tables
@@ -112,10 +115,14 @@ tamper with.
 
 ```sql
 CREATE TABLE sessions (
-    id         TEXT PRIMARY KEY,          -- 256-bit CSPRNG token, base64url; NOT a UUID
-    user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at TIMESTAMPTZ NOT NULL
+    id           TEXT PRIMARY KEY,        -- 256-bit CSPRNG token, base64url; NOT a UUID
+    user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind         TEXT NOT NULL DEFAULT 'browser'
+                 CHECK (kind IN ('browser', 'device')),
+    label        VARCHAR(100),            -- device name, e.g. "Pixel 9"; NULL for browser
+    last_seen_at TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at   TIMESTAMPTZ NOT NULL
 );
 
 CREATE INDEX idx_sessions_user_id ON sessions(user_id);
@@ -124,6 +131,16 @@ CREATE INDEX idx_sessions_expires_at ON sessions(expires_at);
 
 Expired rows are deleted lazily on lookup and by a periodic sweep. Deleting
 a row immediately revokes that session.
+
+`kind` and `label` exist so a paired native client
+(`12-client-api-contract.md`) gets **its own session row** rather than sharing
+the browser's. That is what makes "revoke my phone" possible without signing
+the user out of their laptop. `kind = 'device'` rows carry a longer
+`expires_at`; a phone that must re-pair weekly will not be used.
+
+`last_seen_at` is updated at most once per hour per session — enough to show a
+useful "last active" in the device list, without a database write on every
+request.
 
 ### `storages`
 
@@ -470,6 +487,95 @@ variable. Only admins may write this table.
 
 Background job tracking for the asynchronous vision calls; shape and
 lifecycle are defined in `04-backend-api-conventions.md`.
+
+### `pairing_codes`
+
+Short-lived, single-use codes that let a native client obtain a session by
+scanning a QR code instead of typing a password on a phone
+(`12-client-api-contract.md`).
+
+```sql
+CREATE TABLE pairing_codes (
+    code       TEXT PRIMARY KEY,          -- 256-bit CSPRNG, base64url
+    user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL,      -- created_at + 2 minutes
+    used_at    TIMESTAMPTZ
+);
+
+CREATE INDEX idx_pairing_codes_expires_at ON pairing_codes(expires_at);
+```
+
+A code is redeemable exactly once: redemption sets `used_at`, and any later
+attempt fails even inside the TTL. Expired and used rows are swept
+periodically. Comparison is constant-time — this is the one unauthenticated
+endpoint that mints a session, so it is the one worth guessing at.
+
+### `idempotency_records`
+
+Makes a client's retried write safe to repeat (`12-client-api-contract.md`).
+A mobile client with an offline queue *will* re-send requests whose response it
+never received; without this, the second attempt debits the pantry twice.
+
+```sql
+CREATE TABLE idempotency_records (
+    key             TEXT NOT NULL,
+    user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    storage_id      UUID REFERENCES storages(id) ON DELETE CASCADE,
+    request_hash    TEXT NOT NULL,        -- SHA-256 of method + path + body
+    response_status INT NOT NULL,
+    response_body   JSONB,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (key, user_id)
+);
+
+CREATE INDEX idx_idempotency_records_created_at ON idempotency_records(created_at);
+```
+
+Keyed by `(key, user_id)` so one client's key can never collide with another's.
+`request_hash` is what distinguishes a genuine replay from a client bug: the
+same key with a different body is `422`, not a silent replay. Rows are retained
+7 days, then swept.
+
+### `tombstones`
+
+Records deletions of client-cacheable entities so a delta sync can tell a
+client that a row is *gone* (`12-client-api-contract.md`). A delta built only
+from `updated_at` can never express a deletion, so without this a deleted
+product lives in a client's cache forever.
+
+```sql
+CREATE TABLE tombstones (
+    id          UUID PRIMARY KEY,
+    storage_id  UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
+    entity_type TEXT NOT NULL
+                CHECK (entity_type IN ('product', 'category', 'location',
+                                       'shopping_list', 'shopping_list_item')),
+    entity_id   UUID NOT NULL,
+    deleted_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_tombstones_storage_deleted ON tombstones(storage_id, deleted_at);
+```
+
+Written in the same transaction as the delete. Retained **30 days**; a client
+whose `updated_since` predates the oldest surviving tombstone cannot be brought
+up to date safely and is told to resync (`12-client-api-contract.md`).
+
+### `updated_at` on cacheable entities
+
+`products`, `categories`, `locations`, `shopping_lists` and
+`shopping_list_items` each carry:
+
+```sql
+updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+```
+
+set on every write, so a client can ask for "everything changed since X". Set
+it in application code on the same statement as the change rather than with a
+trigger, so the mechanism is visible where the write happens. Rows that only
+these five tables need — not `inventory_logs`, which is append-only, nor
+`inventory_batches`, whose changes are already visible through their product.
 
 ## Cross-references
 
