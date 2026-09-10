@@ -298,3 +298,80 @@ func TestTreeQueriesNeverLeakAnotherStorage(t *testing.T) {
 	assert.Equal(t, "Mine", categories[0].Name)
 	assert.Equal(t, storageA, categories[0].StorageID)
 }
+
+// TestUpdateLocationRejectsForeignEnds is the acceptance criterion "any
+// location id from another storage — as a path parameter, a parent_id, a move
+// target, or a confirm-body field — yields 404" on the combined patch path.
+//
+// Both ends are covered because both are ways in: the node being patched, and
+// the parent it is being pointed at.
+func TestUpdateLocationRejectsForeignEnds(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageA, storageB := twoStorages(t, ctx)
+
+	mine, err := s.CreateLocation(ctx, storageA, store.NewLocation{Name: "Mine"})
+	require.NoError(t, err)
+	theirs, err := s.CreateLocation(ctx, storageB, store.NewLocation{Name: "Theirs"})
+	require.NoError(t, err)
+
+	t.Run("a parent in another storage", func(t *testing.T) {
+		_, err := s.UpdateLocation(ctx, storageA, mine.ID, store.LocationPatch{
+			ParentID: &theirs.ID, SetParentID: true,
+		})
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+
+	t.Run("a node in another storage", func(t *testing.T) {
+		name := "Mine Now"
+		_, err := s.UpdateLocation(ctx, storageA, theirs.ID, store.LocationPatch{Name: &name})
+		assert.ErrorIs(t, err, store.ErrNotFound)
+
+		var stored string
+		require.NoError(t, testPool.QueryRow(ctx,
+			`SELECT name FROM locations WHERE id = $1`, theirs.ID).Scan(&stored))
+		assert.Equal(t, "Theirs", stored, "the refusal must also not have written anything")
+	})
+
+	t.Run("a nonexistent id is the same error", func(t *testing.T) {
+		name := "x"
+		_, foreignErr := s.UpdateLocation(ctx, storageA, theirs.ID, store.LocationPatch{Name: &name})
+		_, missingErr := s.UpdateLocation(ctx, storageA, uuid.New(), store.LocationPatch{Name: &name})
+
+		assert.Equal(t, foreignErr.Error(), missingErr.Error(),
+			"a caller must not be able to tell a real row in another storage from no row at all")
+	})
+}
+
+// TestMoveBatchRejectsForeignEnds covers the whole-batch move the same way
+// TestSplitBatchRejectsForeignTargetLocation covers the split: a batch or a
+// target location belonging to somebody else is a not-found, not a refusal that
+// admits the row exists.
+func TestMoveBatchRejectsForeignEnds(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageB := newStorage(t, ctx)
+
+	storageA, _, _, batchID := stocked(t, ctx, s, 4)
+	mineElsewhere, err := s.CreateLocation(ctx, storageA, store.NewLocation{Name: "Kitchen"})
+	require.NoError(t, err)
+	foreign, err := s.CreateLocation(ctx, storageB, store.NewLocation{Name: "Their Kitchen"})
+	require.NoError(t, err)
+
+	t.Run("a target location in another storage", func(t *testing.T) {
+		_, err := s.MoveBatch(ctx, storageA, batchID, foreign.ID, nil)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+
+	t.Run("a batch in another storage", func(t *testing.T) {
+		_, err := s.MoveBatch(ctx, storageB, batchID, foreign.ID, nil)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+
+	// Nothing above may have moved the batch or written a ledger row.
+	var locationID uuid.UUID
+	require.NoError(t, testPool.QueryRow(ctx,
+		`SELECT location_id FROM inventory_batches WHERE id = $1`, batchID).Scan(&locationID))
+	assert.NotEqual(t, foreign.ID, locationID)
+	assert.NotEqual(t, mineElsewhere.ID, locationID)
+}

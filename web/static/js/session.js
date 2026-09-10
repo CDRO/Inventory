@@ -49,14 +49,22 @@ export function getQueryStorageId() {
 }
 
 /**
- * withStorageParam returns the current path with `storage` set to id, for
- * navigation that must keep the rest of the query string and hash intact.
+ * withStorageParam returns a path with `storage` set to id, for navigation
+ * that must keep the rest of the query string and hash intact.
+ *
+ * With no pathname it rewrites the current page's URL, which is what the
+ * storage switcher needs: switching household must land on the same screen.
+ * Passing one carries the selection across to another page instead — a link
+ * that dropped it would make the target page ask which storage all over again
+ * (docs/specs/05-frontend-pwa-foundations.md).
  *
  * @param {string} id
+ * @param {string} [pathname] - target path; defaults to the current one.
  * @returns {string}
  */
-export function withStorageParam(id) {
+export function withStorageParam(id, pathname) {
   const url = new URL(location.href);
+  if (pathname) url.pathname = pathname;
   url.searchParams.set("storage", id);
   return url.pathname + url.search;
 }

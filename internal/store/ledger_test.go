@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -314,4 +315,86 @@ func TestDeltaIsResumable(t *testing.T) {
 	stale, err := s.DeltaIsResumable(ctx, storageID, timeZero())
 	require.NoError(t, err)
 	assert.False(t, stale, "a cursor older than the oldest tombstone cannot be resumed")
+}
+
+// TestMoveBatchWritesPairedMoveLogs holds the whole-batch move to the same rule
+// the split obeys: two 'move' rows summing to zero, so product totals are
+// untouched while the ledger still records that something happened.
+func TestMoveBatchWritesPairedMoveLogs(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+
+	storageID, productID, cellar, batchID := stocked(t, ctx, s, 5)
+	kitchen, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Kitchen"})
+	require.NoError(t, err)
+
+	before := logCount(t, ctx, productID)
+
+	moved, err := s.MoveBatch(ctx, storageID, batchID, kitchen.ID, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, batchID, moved.ID, "a move keeps the batch's identity; only a split makes a new row")
+	assert.Equal(t, kitchen.ID, moved.LocationID)
+	assert.NotEqual(t, cellar, moved.LocationID)
+	assert.Equal(t, 5, moved.Quantity, "a move changes where stock is, never how much there is")
+
+	assert.Equal(t, before+2, logCount(t, ctx, productID))
+
+	var sum int
+	require.NoError(t, testPool.QueryRow(ctx,
+		`SELECT coalesce(sum(change_qty), 0) FROM inventory_logs WHERE product_id = $1 AND reason = 'move'`,
+		productID).Scan(&sum))
+	assert.Zero(t, sum, "the pair must net to zero or product stock drifts on every move")
+
+	assert.Equal(t, 2, countRows(t, ctx,
+		`SELECT count(*) FROM inventory_logs WHERE product_id = $1 AND reason = 'move'`, productID))
+}
+
+// TestMoveBatchPreservesExpiry — the jars are the same jars. A move that reset
+// the expiry, or downgraded a date a person typed back to a derived one, would
+// let the cascade in docs/specs/08-expiration-and-classification.md overwrite
+// a human decision later.
+func TestMoveBatchPreservesExpiry(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+
+	storageID, productID, _, _ := stocked(t, ctx, s, 2)
+	kitchen, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Kitchen"})
+	require.NoError(t, err)
+	cellar, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Deep Cellar"})
+	require.NoError(t, err)
+
+	expires := time.Date(2027, 5, 4, 0, 0, 0, 0, time.UTC)
+	batch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: productID, LocationID: cellar.ID, Quantity: 3,
+		ExpirationDate: &expires, ExpirationSource: store.ExpirationUser,
+		Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+
+	moved, err := s.MoveBatch(ctx, storageID, batch.ID, kitchen.ID, nil)
+	require.NoError(t, err)
+
+	require.NotNil(t, moved.ExpirationDate)
+	assert.Equal(t, expires.Format(time.DateOnly), moved.ExpirationDate.Format(time.DateOnly))
+	assert.Equal(t, store.ExpirationUser, moved.ExpirationSource,
+		"a date a person typed stays a date a person typed")
+}
+
+// TestMoveBatchToTheSameLocationWritesNothing — a PATCH resending the value a
+// batch already has must succeed without inventing history. Two 'move' rows
+// that explain nothing would be indistinguishable, later, from a real move.
+func TestMoveBatchToTheSameLocationWritesNothing(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+
+	storageID, productID, cellar, batchID := stocked(t, ctx, s, 5)
+	before := logCount(t, ctx, productID)
+
+	moved, err := s.MoveBatch(ctx, storageID, batchID, cellar, nil)
+	require.NoError(t, err, "a no-op move is not an error; a client resending its own state must succeed")
+
+	assert.Equal(t, cellar, moved.LocationID)
+	assert.Equal(t, 5, moved.Quantity)
+	assert.Equal(t, before, logCount(t, ctx, productID), "no move happened, so nothing is logged")
 }

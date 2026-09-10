@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#2563eb">
+  <title>Locations · Inventory</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/css/tokens.css">
+  <link rel="stylesheet" href="/css/base.css">
+  <link rel="stylesheet" href="/css/components.css">
+</head>
+<body>
+  <header class="shell row row--between">
+    <strong>Inventory</strong>
+    <div class="row">
+      <div id="storage-switcher" hidden></div>
+      <a href="/storages.html" class="btn btn--ghost">Back</a>
+    </div>
+  </header>
+
+  <main id="main" class="shell" aria-live="polite">
+    <h2>Locations</h2>
+
+    <!-- Errors land here rather than in an alert(): a rejected move needs to
+         stay on screen next to the tree it refers to. -->
+    <div id="error" class="alert" role="alert" hidden></div>
+
+    <div class="row row--between">
+      <p class="empty-state" id="hint">
+        Drag a location onto another to move it, or use its “Move to…” button.
+      </p>
+      <button id="add-root" type="button" class="btn">Add top-level location</button>
+    </div>
+
+    <div id="tree"></div>
+  </main>
+
+  <script type="module" src="/js/pages/locations.js"></script>
+</body>
+</html>

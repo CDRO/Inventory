@@ -13,7 +13,8 @@ internal/
 │   ├── router.go          # route registration
 │   ├── middleware.go      # session lookup, storage scoping, request logging
 │   ├── errors.go          # THE single error-envelope serializer (see below)
-│   └── *_handler.go       # one file per resource
+│   ├── respond.go         # success serialization + request-body decoding
+│   └── <resource>.go      # one file per resource: locations.go, batches.go…
 ├── admin/                # server-rendered admin handlers (html/template)
 ├── store/                # pgx queries, one file per table group
 ├── vision/               # Gemini client, prompts, parsing, model resilience

@@ -10,7 +10,13 @@
 // Bump this on every release that changes a cached file. The old cache is
 // deleted in `activate` below, so a stale version never lingers once a client
 // picks up the new service worker.
-const CACHE_VERSION = "v1";
+//
+// Nothing outside this file hardcodes the resulting name: e2e/specs/pwa.spec.js
+// discovers it through caches.keys() precisely so that a bump here cannot leave
+// a test opening a cache the service worker never uses — caches.open() creates
+// a missing cache rather than failing, which would have made that test pass
+// while checking nothing.
+const CACHE_VERSION = "v2";
 const CACHE_NAME = `inventory-shell-${CACHE_VERSION}`;
 
 // The app shell: everything a cold load needs before the network is asked
@@ -29,6 +35,7 @@ const SHELL_ASSETS = [
   // out at 30s with no console error to point at the cause.
   "/",
   "/storages.html",
+  "/locations.html",
   "/manifest.json",
   "/css/tokens.css",
   "/css/base.css",

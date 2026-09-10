@@ -98,6 +98,81 @@ func (s *Store) MoveLocation(ctx context.Context, storageID, id uuid.UUID, paren
 	})
 }
 
+// LocationPatch is a partial update to one node.
+//
+// Each field has to separate "leave this alone" from "set it to this", which a
+// plain struct of pointers cannot express: parent_id must be able to say "make
+// this a root", and that is an explicit null rather than an absence. The paired
+// booleans carry the presence, so a nil ParentID with SetParentID means root
+// and a nil ParentID without it means untouched.
+type LocationPatch struct {
+	// Name nil leaves the name unchanged.
+	Name *string
+	// Description is applied only when SetDescription is true.
+	Description    *string
+	SetDescription bool
+	// ParentID is applied only when SetParentID is true.
+	ParentID    *uuid.UUID
+	SetParentID bool
+}
+
+// UpdateLocation applies a partial update to one node and returns the result.
+//
+// The PATCH in docs/specs/06-vision-shelf-ingestion.md can rename and re-parent
+// in a single call. Serving that as RenameLocation followed by MoveLocation
+// would be two transactions, and a failure between them would leave the node
+// renamed but not moved — a half-applied PATCH the caller cannot detect and the
+// server cannot undo. Both changes therefore share this transaction, and the
+// cycle check runs under the same tree lock as the write it guards.
+//
+// A parent in another storage is ErrNotFound, and so is a node in another
+// storage: cross-storage moves stay impossible by construction because both
+// ends are resolved against storageID, never against anything in the request.
+func (s *Store) UpdateLocation(ctx context.Context, storageID, id uuid.UUID, patch LocationPatch) (*Location, error) {
+	var out *Location
+	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		if err := lockStorageTree(ctx, tx, storageID); err != nil {
+			return err
+		}
+		if err := requireSameStorage(ctx, tx, treeLocations, storageID, id); err != nil {
+			return err
+		}
+		if patch.SetParentID {
+			if err := resolveParent(ctx, tx, treeLocations, storageID, &id, patch.ParentID); err != nil {
+				return err
+			}
+		}
+
+		// The casts pin each parameter's type in the SQL itself, so the CASE
+		// arms have an unambiguous common type with the column they fall back
+		// to. pgx already derives parameter types from the Go argument, so
+		// they are belt-and-braces rather than load-bearing — kept because
+		// they state the intended type at the point a reader is working out
+		// what an untyped NULL in one of these arms would mean.
+		row := tx.QueryRow(ctx, `
+			UPDATE locations SET
+			    name        = COALESCE($1::varchar, name),
+			    description = CASE WHEN $2::bool THEN $3::text ELSE description END,
+			    parent_id   = CASE WHEN $4::bool THEN $5::uuid ELSE parent_id END,
+			    updated_at  = now()
+			 WHERE id = $6 AND storage_id = $7
+			RETURNING id, storage_id, parent_id, name, description, created_at, updated_at`,
+			patch.Name, patch.SetDescription, patch.Description,
+			patch.SetParentID, patch.ParentID, id, storageID)
+
+		loc, err := scanLocation(row)
+		if err != nil {
+			return err
+		}
+		out = loc
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RenameLocation updates the display fields, touching updated_at so a client
 // delta picks the change up.
 func (s *Store) RenameLocation(ctx context.Context, storageID, id uuid.UUID, name string, description *string) error {

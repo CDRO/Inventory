@@ -159,6 +159,9 @@ func serve() error {
 			// decides whether an internal reason is ever disclosed.
 			Errors:   httpapi.NewErrorWriter(cfg.IsDev(), slog.Default()),
 			StaticFS: assets,
+			// The same store backs the authorization gates and the handlers
+			// behind them, so the two cannot be wired out of step.
+			Store: db,
 		}),
 		ReadHeaderTimeout: readHeaderTimeout,
 		WriteTimeout:      writeTimeout,
