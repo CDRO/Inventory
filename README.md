@@ -80,6 +80,11 @@ docker compose -f docker-compose.yml build
 docker compose -f docker-compose.yml up -d
 ```
 
+Before deploying, run the E2E gate
+(`docker-compose.e2e.yml`, [`docs/specs/05-frontend-pwa-foundations.md`](docs/specs/05-frontend-pwa-foundations.md)):
+[`docs/specs/01-architecture-and-deployment.md`](docs/specs/01-architecture-and-deployment.md)
+calls a deployment that skips it invalid, not merely discouraged.
+
 **The pin is a security control.** Without it the NAS runs the `dev` target,
 which sets `APP_ENV=dev` — enabling `debug_reason` disclosure in error
 responses ([`docs/specs/03-auth-and-multi-tenancy.md`](docs/specs/03-auth-and-multi-tenancy.md))

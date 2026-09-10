@@ -28,7 +28,7 @@ export class ApiError extends Error {
   }
 }
 
-// login.html is the one page that never redirects itself away on 401 — every
+// index.html is the one page that never redirects itself away on 401 — every
 // other page does, which is why the constant lives here rather than being
 // repeated at each call site.
 const LOGIN_PAGE = "/index.html";
@@ -88,11 +88,15 @@ export async function apiFetch(path, { skipAuthRedirect = false, ...options } = 
   if (response.status === 401 && !skipAuthRedirect) {
     if (!location.pathname.endsWith(LOGIN_PAGE)) {
       location.assign(LOGIN_PAGE);
+      // Deliberately never resolves: the page is navigating away, and a
+      // caller acting on stale data during that navigation would be a bug
+      // waiting to happen, not a feature.
+      return new Promise(() => {});
     }
-    // Deliberately never resolves: the page is navigating away, and a caller
-    // acting on stale data during that navigation would be a bug waiting to
-    // happen, not a feature.
-    return new Promise(() => {});
+    // Already on the login page: there is no navigation to hide behind, so
+    // hanging forever here would just freeze the tab with nothing to show
+    // for it. Fall through and let the caller see the 401 as a normal
+    // ApiError instead.
   }
 
   if (!response.ok) {

@@ -9,8 +9,12 @@
 //     is produced and the only place debug_reason can be attached. A handler
 //     describes a Failure and hands it over; it has no way to write an
 //     envelope itself, so it cannot leak an internal reason in production.
-//     chi's own 404 and 405 are routed through it too, so the system has one
-//     error format rather than two.
+//     chi's own 404 and 405 are routed through it too, for any request chi
+//     itself resolves as unmatched or wrong-method. The one exception is a GET
+//     to an /api/... path that has no route registered yet: it still falls
+//     through to the static file server's own plain-text 404, not this
+//     serializer — see the comment beside the "/*" mount below for why, and
+//     why that gap closes itself as each real route lands.
 //   - **Three authorization gates, and nowhere else.** RequireSession,
 //     RequireAdmin and RequireStorageMember in middleware.go decide access. No
 //     handler performs its own check. RequireAdmin re-reads is_admin from the
@@ -118,6 +122,15 @@ func NewRouter(d Deps) http.Handler {
 		// serializer — and that residual gap closes itself as each real
 		// GET /api/... route is registered, since a registered route always
 		// takes precedence over the "/*" catch-all.
+		//
+		// One side effect worth knowing about: because "/*" now answers only
+		// GET and HEAD, chi's MethodNotAllowed (not NotFound) fires for every
+		// other verb against any unregistered path — POST /nonexistent gets a
+		// 405, not a 404, even though nothing by that name exists at all. 405
+		// technically means "this resource exists but rejects this verb",
+		// which isn't quite true here; it is an inherent limitation of
+		// registering a catch-all on a single pattern rather than a defect,
+		// and no client in this codebase branches on the distinction today.
 		fileServer := http.FileServer(http.FS(d.StaticFS)).ServeHTTP
 		r.Get("/*", fileServer)
 		// chi does not imply HEAD from a GET registration the way stdlib's

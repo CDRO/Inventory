@@ -20,6 +20,16 @@
 # External services (Gemini/SerpAPI/Iconify) are not stubbed here yet: no code
 # in the repository calls any of them. A local fake for that arrives with
 # specs 06/07, which are what actually need one.
+#
+# `name:` below pins an isolated Compose project. Without it this file shares
+# the default "inventory" project with docker-compose.yml/override.yml, and
+# Compose recreates containers by name across configs — `db` here would reuse
+# the dev stack's own `inventory-db-1` and its data directory instead of
+# starting fresh, silently defeating the "disposable by definition" anonymous
+# volume below. Confirmed live: running the dev stack first, then this file
+# without an isolated name, left the `e2e` Postgres role missing because the
+# dev volume's data directory was already initialized under a different role.
+name: inventory-e2e
 
 services:
   traefik:
