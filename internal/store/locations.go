@@ -143,9 +143,12 @@ func (s *Store) UpdateLocation(ctx context.Context, storageID, id uuid.UUID, pat
 			}
 		}
 
-		// The casts are not decoration: without them the CASE arms give the
-		// driver no type to infer a parameter from, and it cannot guess from an
-		// untyped NULL.
+		// The casts pin each parameter's type in the SQL itself, so the CASE
+		// arms have an unambiguous common type with the column they fall back
+		// to. pgx already derives parameter types from the Go argument, so
+		// they are belt-and-braces rather than load-bearing — kept because
+		// they state the intended type at the point a reader is working out
+		// what an untyped NULL in one of these arms would mean.
 		row := tx.QueryRow(ctx, `
 			UPDATE locations SET
 			    name        = COALESCE($1::varchar, name),

@@ -637,6 +637,26 @@ func TestDeleteLocationAnswers204WithNoBody(t *testing.T) {
 	assert.Equal(t, []uuid.UUID{id}, f.locations.deleted)
 }
 
+// TestOversizedJSONBodyIs413 covers decodeJSON's size cap, the one path in
+// respond.go that nothing else exercises. Without the cap a caller can make the
+// server buffer a body of their choosing, which is a denial of service costing
+// the attacker a single request; without this test, the cap could be removed
+// and every other test would still pass.
+func TestOversizedJSONBodyIs413(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	// Comfortably past the 64 KiB cap, and valid JSON, so a rejection can only
+	// come from the size limit rather than from the decoder giving up.
+	body := `{"name":"` + strings.Repeat("x", 128<<10) + `"}`
+
+	rec := f.do(http.MethodPost, f.base()+"/locations", body)
+
+	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+	assert.Equal(t, "payload_too_large", errorCode(t, rec))
+	assert.Nil(t, f.locations.created, "an oversized body must not reach the store")
+}
+
 func TestMalformedJSONBodyIs422(t *testing.T) {
 	t.Parallel()
 

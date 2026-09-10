@@ -24,12 +24,19 @@ const maxJSONBody = 64 << 10 // 64 KiB
 var errNoStorageInContext = errors.New("httpapi: storage id missing from request context")
 
 // collection is the shape docs/specs/04-backend-api-conventions.md gives list
-// endpoints. NextCursor stays absent for collections that are returned whole —
-// the location tree is one of them, since a tree paginated by cursor would
-// arrive as fragments a client could not assemble.
+// endpoints: items, plus a next_cursor that is null once the collection is
+// exhausted.
+//
+// next_cursor is serialized even when nil, rather than omitted. The spec
+// documents the key as part of the envelope, and a client written against
+// "read next_cursor, stop when it is null" would see an absent key as
+// undefined and could not tell a finished collection from a malformed
+// response. Collections returned whole — the location tree is one, since a
+// tree delivered as cursor-paginated fragments is not something a client can
+// reassemble — simply always report null.
 type collection[T any] struct {
 	Items      []T     `json:"items"`
-	NextCursor *string `json:"next_cursor,omitempty"`
+	NextCursor *string `json:"next_cursor"`
 }
 
 // writeJSON renders a success response.
