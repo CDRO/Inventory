@@ -204,3 +204,85 @@ func TestStaticMountDoesNotShadowHealthz(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	assert.Equal(t, "ok", got.Status)
 }
+
+// TestNonGETOnAnUnregisteredPathGetsTheJSONEnvelope is the regression for a
+// bug this package's own doc comment claimed did not exist: "chi's own 404
+// and 405 are routed through [the single serializer] too, so the system has
+// one error format rather than two."
+//
+// That was false for any non-GET request. The static mount used to be
+// registered with r.Handle, which claims "/*" for every method — including
+// POST, PUT and DELETE — not only GET. Since "/*" matches every path, chi's
+// own r.NotFound can only ever fire when no pattern matches at all, which
+// r.Handle("/*", ...) guarantees never happens; the request went to
+// http.FileServer instead, which answered its own plain-text 404 before the
+// JSON serializer ever saw it. Verified live before the fix:
+// `curl -X POST .../api/auth/login` returned "404 page not found" in
+// text/plain, not the error envelope.
+//
+// The route most immediately affected was POST /api/auth/login, before spec
+// 03's HTTP surface registers it for real — exactly the request a login form
+// sends the moment it exists.
+func TestNonGETOnAnUnregisteredPathGetsTheJSONEnvelope(t *testing.T) {
+	t.Parallel()
+
+	router := httpapi.NewRouter(httpapi.Deps{
+		DB:       stubPinger{},
+		Vision:   stubVision{status: vision.StatusOK},
+		StaticFS: fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html></html>")}},
+	})
+
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/api/auth/login"},
+		{http.MethodPost, "/api/auth/logout"},
+		{http.MethodDelete, "/some/path"},
+		{http.MethodPut, "/"},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			t.Parallel()
+
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+
+			assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+			assert.Equal(t, "application/json; charset=utf-8", rec.Header().Get("Content-Type"),
+				"a non-GET request to any unregistered path must get the JSON error envelope, never the static file server's plain text")
+
+			var body map[string]map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			assert.Equal(t, "method_not_allowed", body["error"]["code"])
+		})
+	}
+}
+
+// TestHeadIsServedForStaticAssets is the regression for a second bug the fix
+// above introduced and this test caught before it shipped: chi does not
+// imply HEAD from a GET registration the way stdlib's http.ServeMux does, so
+// restricting the static mount to r.Get alone made every HEAD request —
+// `curl -I`, a link checker, anything that asks for headers without a body —
+// answer 405 instead of serving the asset's headers.
+func TestHeadIsServedForStaticAssets(t *testing.T) {
+	t.Parallel()
+
+	router := httpapi.NewRouter(httpapi.Deps{
+		DB:     stubPinger{},
+		Vision: stubVision{status: vision.StatusOK},
+		// Not "index.html": http.FileServer canonicalises that name to "/"
+		// with a 301 (docs/specs/01…, and pinned by this file's own
+		// TestRouterServesStaticAssets), which would make this test fail for
+		// an unrelated reason before it ever exercised the HEAD path.
+		StaticFS: fstest.MapFS{
+			"style.css": &fstest.MapFile{Data: []byte("body{color:red}")},
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodHead, "/style.css", nil))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, rec.Body.Bytes(), "HEAD must return no body")
+	assert.NotEmpty(t, rec.Header().Get("Content-Type"), "but headers must still be populated")
+}

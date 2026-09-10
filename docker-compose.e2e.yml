@@ -1,0 +1,112 @@
+# The E2E deployment gate (docs/specs/05-frontend-pwa-foundations.md).
+#
+# Brings up the full stack — traefik, app, db — against a disposable
+# database, and runs the browser suite from a pulled Playwright image. Run
+# explicitly and on demand, never as part of the dev loop or the image build:
+#
+#   docker compose -f docker-compose.e2e.yml up -d --build
+#   docker compose -f docker-compose.e2e.yml exec -T db \
+#     psql -U e2e -d e2e -f /fixtures/seed.sql
+#   docker compose -f docker-compose.e2e.yml run --rm e2e
+#   docker compose -f docker-compose.e2e.yml down -v
+#
+# This does not violate the no-host-toolchain rule
+# (docs/specs/01-architecture-and-deployment.md): the Playwright image is
+# pulled from a registry, nothing is installed on the host, and the
+# application image — built from the same Dockerfile as production — still
+# contains no Node.js. The browser runtime exists only inside the `e2e`
+# service, and only while tests run.
+#
+# External services (Gemini/SerpAPI/Iconify) are not stubbed here yet: no code
+# in the repository calls any of them. A local fake for that arrives with
+# specs 06/07, which are what actually need one.
+
+services:
+  traefik:
+    image: traefik:v3
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.websecure.address=:443
+    ports:
+      - "8443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  app:
+    build:
+      context: .
+      target: prod
+    environment:
+      # A fixed, non-production configuration for a throwaway database.
+      # APP_ENV=prod deliberately — the E2E suite validates the deployment
+      # posture (debug_reason hidden, 404-not-403), not the dev-friendly one.
+      - APP_ENV=prod
+      - DATABASE_URL=postgres://e2e:e2e@db:5432/e2e?sslmode=disable
+      - SESSION_SECRET=e2e-fixture-session-secret-not-for-real-use
+      - ADMIN_INITIAL_USERNAME=e2e-admin
+      - ADMIN_INITIAL_PASSWORD=e2e-fixture-password
+      - GEMINI_API_KEY=e2e-fixture-unused-key
+    depends_on:
+      db:
+        condition: service_healthy
+    labels:
+      - traefik.enable=true
+      # HTTPS only, on Traefik's own auto-generated self-signed default
+      # certificate (no certresolver, no cert files — Traefik v3 always has
+      # one to fall back to). Service workers, and every other
+      # secure-context-gated browser API, are unavailable over plain HTTP
+      # unless the origin is literally "localhost" — which a Docker service
+      # name never is. `--unsafely-treat-insecure-origin-as-secure` is the
+      # documented Chromium flag for the plain-HTTP case, and it was tried
+      # first; verified live via a raw Playwright script (bypassing this
+      # compose file and playwright.config.js entirely) that it does not
+      # make `window.isSecureContext` true in this Playwright/Chromium
+      # build, with or without `channel: "chromium"`. Real HTTPS, even on an
+      # untrusted cert accepted via Playwright's ignoreHTTPSErrors, is what
+      # actually works.
+      - traefik.http.routers.app.rule=PathPrefix(`/`)
+      - traefik.http.routers.app.entrypoints=websecure
+      - traefik.http.routers.app.tls=true
+      - traefik.http.services.app.loadbalancer.server.port=8000
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: e2e
+      POSTGRES_PASSWORD: e2e
+      POSTGRES_DB: e2e
+    volumes:
+      - ./e2e/fixtures:/fixtures:ro
+    # No named volume for the data directory itself: an E2E database is
+    # disposable by definition. An anonymous volume is torn down with the
+    # container instead of persisting — reusing a stale fixture across runs,
+    # or colliding with the dev pgdata volume, would both be worse than
+    # losing the data on every `down`.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U e2e -d e2e"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  e2e:
+    image: mcr.microsoft.com/playwright:v1.48.0-noble
+    working_dir: /e2e
+    volumes:
+      - ./e2e:/e2e
+    environment:
+      - BASE_URL=https://traefik
+    depends_on:
+      - app
+    # `npm install` runs on every invocation rather than baking @playwright/test
+    # into a custom image: the Playwright image is the throwaway artifact the
+    # spec asks for, and e2e/package.json pins the exact version — matching
+    # the image tag above — so the browser binaries already in the image and
+    # the test runner installed here stay in lockstep without a Dockerfile of
+    # our own to maintain. (An earlier version of this tried `npx -p
+    # @playwright/test@1.48.0 playwright test`: npx installs into its own
+    # isolated cache, which playwright.config.js's `import "@playwright/test"`
+    # cannot see, so the config failed to load. `npm install` puts the package
+    # in /e2e/node_modules, where Node's normal resolution actually looks.)
+    entrypoint: ["sh", "-c", "npm install --no-audit --no-fund && npx playwright test --config=/e2e/playwright.config.js"]
+    profiles: ["tools"] # only runs when invoked explicitly, like `setup`

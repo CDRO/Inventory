@@ -3,18 +3,41 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#2563eb">
   <title>Inventory</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/css/tokens.css">
   <link rel="stylesheet" href="/css/base.css">
+  <link rel="stylesheet" href="/css/components.css">
 </head>
 <body>
   <main class="shell">
     <h1>Inventory</h1>
-    <p>
-      The deployment skeleton is running. The login screen and the rest of the
-      app are built in
-      <code>docs/specs/05-frontend-pwa-foundations.md</code>.
+
+    <form id="login-form" class="card stack" autocomplete="on">
+      <div id="login-error" class="alert" role="alert" hidden></div>
+
+      <div class="field">
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" autocomplete="username" required autofocus>
+      </div>
+
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+      </div>
+
+      <button type="submit" class="btn btn--primary btn--block">Sign in</button>
+    </form>
+
+    <p class="empty-state">
+      No account? There is no self-service sign-up — ask an admin to create
+      one for you.
     </p>
-    <p><a href="/healthz">/healthz</a></p>
   </main>
+
+  <script type="module" src="/js/pages/index.js"></script>
 </body>
 </html>

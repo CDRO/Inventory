@@ -14,3 +14,13 @@
 
 # Local data volumes
 /data/
+
+# E2E test runner artifacts (docs/specs/05-frontend-pwa-foundations.md).
+# npm install runs inside the throwaway Playwright container on every
+# invocation (see docker-compose.e2e.yml), writing into e2e/ through the bind
+# mount; node_modules is never meant to persist on the host, and its symlinks
+# have broken the app image's Docker build context when left behind.
+e2e/node_modules/
+e2e/package-lock.json
+e2e/test-results/
+e2e/playwright-report/

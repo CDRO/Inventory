@@ -5,3 +5,11 @@ docs
 *.md
 .env
 data
+
+# The E2E harness and its runtime artifacts never belong in the application
+# image: it is a separate, throwaway test container, not something the
+# Dockerfile builds or ships (docs/specs/05-frontend-pwa-foundations.md).
+# node_modules in particular has broken this build before — npm's symlinks,
+# written through the e2e/ bind mount, are not something Docker's tar-based
+# build context reader tolerates.
+e2e/

@@ -96,7 +96,37 @@ func NewRouter(d Deps) http.Handler {
 	r.Get("/healthz", HealthHandler(d.DB, d.Vision))
 
 	if d.StaticFS != nil {
-		r.Handle("/*", http.FileServer(http.FS(d.StaticFS)))
+		// GET only, deliberately — not r.Handle, which would register the
+		// file server for every method.
+		//
+		// chi's r.NotFound only fires when no registered pattern matches a
+		// request at all, and "/*" matches every path. Registered for every
+		// method, it would swallow POST/PUT/DELETE requests to routes that do
+		// not exist yet — most immediately POST /api/auth/login, before spec
+		// 03's HTTP surface (#27) registers it — handing them to
+		// http.FileServer, which answers its own plain-text 404 before chi's
+		// r.NotFound, and this package's single JSON serializer, ever see the
+		// request. That silently contradicts the "one error format" rule
+		// stated above; verified live (`curl -X POST .../api/auth/login`
+		// returned "404 page not found" in text/plain) before this fix and
+		// the JSON envelope after it.
+		//
+		// GET (and HEAD, below) closes it for every method that actually
+		// mutates anything. A GET to a not-yet-registered /api/... path still
+		// falls through to the file server today — there is no static file
+		// there either, so it is still a 404, just not yet through the JSON
+		// serializer — and that residual gap closes itself as each real
+		// GET /api/... route is registered, since a registered route always
+		// takes precedence over the "/*" catch-all.
+		fileServer := http.FileServer(http.FS(d.StaticFS)).ServeHTTP
+		r.Get("/*", fileServer)
+		// chi does not imply HEAD from a GET registration the way stdlib's
+		// http.ServeMux does — caught live: `curl -I` against a real asset
+		// answered 405 until this line was added. http.FileServer's handler
+		// already branches on r.Method internally (writing headers only for
+		// HEAD), so the same handler value is correct for both routes; only
+		// the registration was missing.
+		r.Head("/*", fileServer)
 	}
 	return r
 }
