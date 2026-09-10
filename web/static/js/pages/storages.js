@@ -93,10 +93,12 @@ function renderLanding(me, storage) {
     el("div", { class: "card stack" }, [
       el("h2", {}, [storage.name]),
       el("p", {}, [`Signed in as ${me.display_name}.`]),
+      el("a", { class: "btn", href: withStorageParam(storage.id, "/locations.html") }, [
+        text("Locations"),
+      ]),
       el("p", { class: "empty-state" }, [
-        "Locations, products, shelf scanning, shopping lists, consumption " +
-          "logging, and the reorder dashboard each ship with their own spec " +
-          "issue.",
+        "Products, shelf scanning, shopping lists, consumption logging, and " +
+          "the reorder dashboard each ship with their own spec issue.",
       ]),
     ]),
   );

@@ -52,7 +52,7 @@ test("the service worker never serves a cached response for /api/*", async ({ pa
     // ever stopped excluding /api/* before calling cacheFirst(), this planted
     // response is exactly what a request for the same URL would come back
     // with instead of reaching the network.
-    const cache = await caches.open("inventory-shell-v1");
+    const cache = await caches.open("inventory-shell-v2");
     await cache.put(
       "/api/__e2e_probe__",
       new Response(JSON.stringify({ planted: true }), {

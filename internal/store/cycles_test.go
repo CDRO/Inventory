@@ -185,3 +185,50 @@ func TestRenameRejectsForeignRow(t *testing.T) {
 		`SELECT name FROM locations WHERE id = $1`, theirs.ID).Scan(&name))
 	assert.Equal(t, "Theirs", name)
 }
+
+// TestUpdateLocationRejectsCycles keeps the cycle guard on the combined patch
+// path. UpdateLocation runs its own check rather than delegating to
+// MoveLocation — it has to, since it applies the rename in the same
+// transaction — so the guard that already covers MoveLocation proves nothing
+// here.
+func TestUpdateLocationRejectsCycles(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+
+	root, child, grandchild := locationChain(t, ctx, s, storageID)
+
+	tests := []struct {
+		name   string
+		node   uuid.UUID
+		parent uuid.UUID
+	}{
+		{"under itself", root, root},
+		{"under its own child", root, child},
+		{"under its own grandchild", root, grandchild},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := s.UpdateLocation(ctx, storageID, tc.node, store.LocationPatch{
+				ParentID: &tc.parent, SetParentID: true,
+			})
+
+			require.ErrorIs(t, err, store.ErrConflict)
+		})
+	}
+
+	// The rename in the same patch must not have landed either: a rejected
+	// move that still renamed the node would be the half-applied write this
+	// single transaction exists to prevent.
+	name := "Basement"
+	_, err := s.UpdateLocation(ctx, storageID, root, store.LocationPatch{
+		Name: &name, ParentID: &child, SetParentID: true,
+	})
+	require.ErrorIs(t, err, store.ErrConflict)
+
+	var stored string
+	require.NoError(t, testPool.QueryRow(ctx,
+		`SELECT name FROM locations WHERE id = $1`, root).Scan(&stored))
+	assert.Equal(t, "Basement", stored, "the fixture's original name, unchanged by the rejected patch")
+}

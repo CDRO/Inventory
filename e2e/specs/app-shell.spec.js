@@ -49,6 +49,7 @@ test("every shared JS module is reachable and served as JavaScript", async ({ re
     "/js/register-sw.js",
     "/js/pages/index.js",
     "/js/pages/storages.js",
+    "/js/pages/locations.js",
   ];
 
   for (const path of modules) {

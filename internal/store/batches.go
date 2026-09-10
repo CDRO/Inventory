@@ -251,6 +251,88 @@ func (s *Store) SplitBatch(ctx context.Context, storageID, batchID uuid.UUID, qu
 	return out, nil
 }
 
+// MoveBatch relocates an entire batch, the whole-batch counterpart to
+// SplitBatch (docs/specs/06-vision-shelf-ingestion.md).
+//
+// Moving everything is deliberately not a split: SplitBatch refuses a quantity
+// equal to the whole batch, because the result would be an emptied row the
+// model says should not exist. Here the row keeps its identity — same id, same
+// created_at, same expiry, same provenance — and only its shelf changes.
+//
+// The paired 'move' log rows are written as the spec requires, and it is worth
+// being honest about what they can and cannot tell you afterwards:
+// inventory_logs has no location column, so a log's location is whatever its
+// batch points at *now*. For a split that is exact, because the two halves are
+// separate rows at separate locations. For a whole-batch move both rows resolve
+// to the destination, so the pair records that a move happened, when, and by
+// whom — not a per-location before-and-after. Reconstructing that would need a
+// location column on the ledger, which is a data-model change and belongs to
+// docs/specs/02-data-model.md, not here.
+func (s *Store) MoveBatch(ctx context.Context, storageID, batchID, targetLocationID uuid.UUID, userID *uuid.UUID) (*Batch, error) {
+	var out *Batch
+	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		var productID, currentLocation uuid.UUID
+		var quantity int
+		err := tx.QueryRow(ctx, `
+			SELECT b.product_id, b.location_id, b.quantity
+			  FROM inventory_batches b
+			  JOIN products p ON p.id = b.product_id
+			 WHERE b.id = $1 AND p.storage_id = $2
+			 FOR UPDATE OF b`, batchID, storageID).Scan(&productID, &currentLocation, &quantity)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("store: load batch to move: %w", err)
+		}
+
+		if err := requireSameStorage(ctx, tx, treeLocations, storageID, targetLocationID); err != nil {
+			return err
+		}
+
+		// Moving a batch to the shelf it is already on is a no-op, not an
+		// error: PATCH with the current value has to succeed, or a client that
+		// resends its own state gets a failure for changing nothing. The two
+		// log rows are skipped because they would explain nothing — the same
+		// reason AdjustBatch refuses a zero delta.
+		if currentLocation == targetLocationID {
+			row := tx.QueryRow(ctx, `
+				SELECT id, product_id, location_id, quantity, expiration_date, expiration_source, created_at
+				  FROM inventory_batches WHERE id = $1`, batchID)
+			batch, err := scanBatch(row)
+			if err != nil {
+				return err
+			}
+			out = batch
+			return nil
+		}
+
+		row := tx.QueryRow(ctx, `
+			UPDATE inventory_batches SET location_id = $1 WHERE id = $2
+			RETURNING id, product_id, location_id, quantity, expiration_date, expiration_source, created_at`,
+			targetLocationID, batchID)
+
+		moved, err := scanBatch(row)
+		if err != nil {
+			return err
+		}
+
+		if err := writeLog(ctx, tx, productID, &batchID, -quantity, ReasonMove, userID); err != nil {
+			return err
+		}
+		if err := writeLog(ctx, tx, productID, &batchID, quantity, ReasonMove, userID); err != nil {
+			return err
+		}
+
+		out = moved
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // writeLog appends the inventory_logs row that explains a quantity change.
 //
 // It is unexported and takes a transaction because of the rule in

@@ -24,8 +24,15 @@
 //   - **One upload path.** ReadImageUpload in upload.go strips metadata from
 //     every image entering the system and generates the filename itself.
 //
+// The storage-scoped routes — the location tree and the batch operations of
+// docs/specs/06-vision-shelf-ingestion.md — are registered on one sub-router
+// carrying the gate chain, so a new route under /api/storages/{storage_id} is
+// protected by the act of being added.
+//
 // The auth, admin, pairing and device routes that mount behind these gates are
-// spec 03's surface and land separately.
+// spec 03's surface and land separately. Until they do, nothing can create a
+// session, so the storage-scoped API answers 401 to every caller — it is wired
+// and guarded, not yet reachable.
 package httpapi
 
 import (
@@ -50,6 +57,20 @@ type VisionReporter interface {
 	Status(ctx context.Context) string
 }
 
+// APIStore is everything the storage-scoped API needs: the authorization
+// lookups the gates perform, and the reads and writes the handlers behind them
+// perform. *store.Store satisfies it.
+//
+// It is one interface rather than a field per resource so that the gates and
+// the handlers they protect cannot be wired independently. A router that has
+// the location handlers but not the session lookups would be a router serving
+// a storage's tree to anyone who asked.
+type APIStore interface {
+	AuthStore
+	LocationStore
+	BatchStore
+}
+
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
 // case no static assets are served — useful in tests.
 type Deps struct {
@@ -60,6 +81,10 @@ type Deps struct {
 	// writer is used, so a router built without one still cannot emit
 	// debug_reason.
 	Errors *ErrorWriter
+	// Store backs the storage-scoped API. When nil those routes are not
+	// registered at all — the failure mode of forgetting to pass one is
+	// "the API is absent", never "the API is unguarded".
+	Store APIStore
 }
 
 // NewRouter builds the application's HTTP handler.
@@ -98,6 +123,30 @@ func NewRouter(d Deps) http.Handler {
 	})
 
 	r.Get("/healthz", HealthHandler(d.DB, d.Vision))
+
+	if d.Store != nil {
+		// One sub-router carries the gate chain, and every storage-scoped route
+		// is registered on it (docs/specs/04-backend-api-conventions.md). That
+		// is what makes adding a route the same act as protecting it: there is
+		// no way to hang a new /api/storages/... handler somewhere that skips
+		// RequireStorageMember, because the pattern itself lives here.
+		mw := NewMiddleware(d.Store, errs)
+		locations := NewLocationHandler(d.Store, errs)
+		batches := NewBatchHandler(d.Store, errs)
+
+		r.Route("/api/storages/{storage_id}", func(sr chi.Router) {
+			sr.Use(mw.RequireSession)
+			sr.Use(mw.RequireStorageMember)
+
+			sr.Get("/locations", locations.List)
+			sr.Post("/locations", locations.Create)
+			sr.Patch("/locations/{id}", locations.Update)
+			sr.Delete("/locations/{id}", locations.Delete)
+
+			sr.Patch("/inventory-batches/{id}", batches.Update)
+			sr.Post("/inventory-batches/{id}/split", batches.Split)
+		})
+	}
 
 	if d.StaticFS != nil {
 		// GET only, deliberately — not r.Handle, which would register the
