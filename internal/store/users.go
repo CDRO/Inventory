@@ -24,11 +24,20 @@ var ErrDuplicate = errors.New("store: already exists")
 // depends on it — the admin area is server-rendered precisely so there is
 // nothing in the shipped frontend to unlock (docs/specs/03-auth-and-multi-tenancy.md).
 type User struct {
-	ID           uuid.UUID
-	Username     string
-	PasswordHash string
+	ID       uuid.UUID
+	Username string
+	// PasswordHash and IsAdmin carry json:"-" as defence in depth.
+	//
+	// Without a tag, Go's encoder emits an exported field under its own name:
+	// json.Encode of a *User — the obvious shortcut for a first cut of
+	// GET /api/auth/me, working from the value already in the request context —
+	// would put "IsAdmin":true and the argon2 hash straight into the response.
+	// Handlers are expected to serialize a DTO instead, but "expected to" is
+	// what this project keeps learning not to rely on, and the cost of the tag
+	// is nothing.
+	PasswordHash string `json:"-"`
 	DisplayName  string
-	IsAdmin      bool
+	IsAdmin      bool `json:"-"`
 	CreatedAt    time.Time
 }
 
