@@ -86,6 +86,11 @@ func (s *Store) UserByID(ctx context.Context, id uuid.UUID) (*User, error) {
 // does not take effect until their session expires — and if it were ever read
 // from something the client supplies, it would not mean anything at all
 // (docs/specs/03-auth-and-multi-tenancy.md).
+//
+// This is the data-layer half. The other half — that RequireAdmin calls this
+// on every single admin-gated request, and that is_admin never appears in any
+// JSON response — belongs to the middleware and the error envelope in
+// docs/specs/04-backend-api-conventions.md.
 func (s *Store) IsAdmin(ctx context.Context, userID uuid.UUID) (bool, error) {
 	var isAdmin bool
 	err := s.pool.QueryRow(ctx, `SELECT is_admin FROM users WHERE id = $1`, userID).Scan(&isAdmin)
@@ -177,7 +182,9 @@ func scanUser(row rowScanner) (*User, error) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
-		return nil, err
+		// Wrapped, so a caller can still reach a *pgconn.PgError underneath —
+		// CreateUser uses that to turn a unique violation into ErrDuplicate.
+		return nil, fmt.Errorf("store: scan user: %w", err)
 	}
 	return &u, nil
 }

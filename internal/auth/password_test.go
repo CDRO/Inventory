@@ -165,3 +165,37 @@ func mustDigest(t *testing.T, password, saltB64 string, memory, time uint32, thr
 	digest := argon2.IDKey([]byte(password), salt, time, memory, threads, 32)
 	return base64.RawStdEncoding.EncodeToString(digest)
 }
+
+// TestVerifyRejectsTrailingRubbishInParameters — Sscanf stops at the first
+// thing it cannot read and reports success for what it got, so "v=19junk"
+// parses as 19. These fields come out of a stored value; a parser willing to
+// misread them is one an attacker gets to choose the ignored half of.
+func TestVerifyRejectsTrailingRubbishInParameters(t *testing.T) {
+	t.Parallel()
+
+	valid, err := auth.HashPassword("x")
+	require.NoError(t, err)
+	parts := strings.Split(valid, "$")
+
+	tests := map[string]string{
+		"version with suffix":     "$argon2id$v=19junk$m=19456,t=2,p=1$" + parts[4] + "$" + parts[5],
+		"params with suffix":      "$argon2id$v=19$m=19456,t=2,p=1extra$" + parts[4] + "$" + parts[5],
+		"params in wrong order":   "$argon2id$v=19$t=2,m=19456,p=1$" + parts[4] + "$" + parts[5],
+		"zero memory would panic": "$argon2id$v=19$m=0,t=2,p=1$" + parts[4] + "$" + parts[5],
+		"zero time would panic":   "$argon2id$v=19$m=19456,t=0,p=1$" + parts[4] + "$" + parts[5],
+	}
+
+	for name, encoded := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// The zero cases must be refused rather than reaching argon2.IDKey,
+			// which panics on them — a crash a stored value could trigger.
+			assert.NotPanics(t, func() {
+				ok, err := auth.VerifyPassword(encoded, "x")
+				assert.False(t, ok)
+				assert.ErrorIs(t, err, auth.ErrInvalidHash)
+			})
+		})
+	}
+}

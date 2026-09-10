@@ -47,6 +47,11 @@ func (s *Store) CreateStorage(ctx context.Context, name string) (*Storage, error
 }
 
 // DeleteStorage removes a storage and everything scoped to it.
+//
+// Its memberships, locations, categories, products and jobs go with it: every
+// one of those tables carries storage_id ... ON DELETE CASCADE
+// (migrations/00002_core_schema.sql), so a membership row can never outlive
+// the thing it grants access to.
 func (s *Store) DeleteStorage(ctx context.Context, id uuid.UUID) error {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM storages WHERE id = $1`, id)
 	if err != nil {

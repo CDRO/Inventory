@@ -89,8 +89,14 @@ func decodeHash(encoded string) (argonParams, []byte, []byte, error) {
 		return argonParams{}, nil, nil, ErrInvalidHash
 	}
 
+	// Sscanf alone would accept trailing rubbish — "v=19junk" parses as 19 —
+	// so each segment is re-rendered and compared against the input. A field
+	// this code is willing to misread is a field an attacker gets to choose.
 	var version int
 	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil {
+		return argonParams{}, nil, nil, ErrInvalidHash
+	}
+	if fmt.Sprintf("v=%d", version) != parts[2] {
 		return argonParams{}, nil, nil, ErrInvalidHash
 	}
 	if version != argon2.Version {
@@ -100,6 +106,14 @@ func decodeHash(encoded string) (argonParams, []byte, []byte, error) {
 	var p argonParams
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &p.memory, &p.time, &p.threads); err != nil {
 		return argonParams{}, nil, nil, ErrInvalidHash
+	}
+	if fmt.Sprintf("m=%d,t=%d,p=%d", p.memory, p.time, p.threads) != parts[3] {
+		return argonParams{}, nil, nil, ErrInvalidHash
+	}
+	// argon2.IDKey panics on a zero memory, time or thread count, so a hash
+	// claiming any of them is refused here rather than taking the process down.
+	if p.memory == 0 || p.time == 0 || p.threads == 0 {
+		return argonParams{}, nil, nil, fmt.Errorf("%w: zero argon2 parameter", ErrInvalidHash)
 	}
 
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])

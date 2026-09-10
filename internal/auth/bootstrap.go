@@ -39,7 +39,7 @@ func EnsureInitialAdmin(ctx context.Context, users UserStore, username, password
 
 	count, err := users.CountUsers(ctx)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("auth: count users for bootstrap: %w", err)
 	}
 	if count > 0 {
 		return false, nil
@@ -47,7 +47,7 @@ func EnsureInitialAdmin(ctx context.Context, users UserStore, username, password
 
 	hash, err := HashPassword(password)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("auth: hash initial admin password: %w", err)
 	}
 
 	if _, err := users.CreateUser(ctx, store.NewUser{
@@ -82,7 +82,7 @@ func Authenticate(ctx context.Context, users LoginStore, username, password stri
 
 	ok, err := VerifyPassword(user.PasswordHash, password)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("auth: verify password for %q: %w", username, err)
 	}
 	if !ok {
 		return nil, ErrBadCredentials
