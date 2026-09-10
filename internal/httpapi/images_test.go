@@ -108,7 +108,13 @@ func TestServedImagesCarryTheHardeningHeaders(t *testing.T) {
 	rec := f.do(http.MethodGet, f.base()+"/images/"+hash, "")
 
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Contains(t, rec.Header().Get("Content-Security-Policy"), "default-src 'none'")
+	csp := rec.Header().Get("Content-Security-Policy")
+	assert.Contains(t, csp, "default-src 'none'")
+	// `sandbox` is the directive the sanitizer's own comment leans on as the
+	// layer that stops a directly-opened SVG executing anything a regex pass
+	// missed — SMIL attribute hijacking, for one. Asserting only on
+	// default-src would let it be dropped silently.
+	assert.Contains(t, csp, "sandbox")
 	assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
 	assert.Equal(t, "image/svg+xml", rec.Header().Get("Content-Type"))
 	assert.Contains(t, rec.Header().Get("Cache-Control"), "private",

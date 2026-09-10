@@ -386,6 +386,44 @@ func TestSweepOrphansRemovesFilesNoRowPointsAt(t *testing.T) {
 	assert.NoError(t, err, "a concurrent write's temp file is not an orphan yet")
 }
 
+// TestRunSweepsCleansUpAtStartupAndStopsWithItsContext covers the scheduling
+// wiring rather than the eviction logic, which is tested directly above.
+//
+// The distinction matters: if the ticker were never started or the ctx.Done
+// case were inverted, the 1GB cap and orphan collection would simply stop
+// running in production and every other test here would stay green.
+func TestRunSweepsCleansUpAtStartupAndStopsWithItsContext(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mem := newMemStore()
+	cache := imagesearch.NewCache(dir, mem, nil, discardLogger())
+
+	// An orphan left behind by a crashed write. The startup sweep is what
+	// collects it — waiting an hour for the first tick would leave the disk
+	// dirty exactly when a crash has just made it dirtiest.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "orphan"), []byte("x"), 0o644))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		cache.RunSweeps(ctx)
+		close(done)
+	}()
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(dir, "orphan"))
+		return os.IsNotExist(err)
+	}, 2*time.Second, 10*time.Millisecond, "the startup sweep must run before the first tick")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunSweeps must return when its context is cancelled, or shutdown hangs")
+	}
+}
+
 // TestFetchRefetchesWhenTheRowSurvivedButTheFileDidNot — otherwise the cache
 // serves a 404 for something it believes it has.
 func TestFetchRefetchesWhenTheRowSurvivedButTheFileDidNot(t *testing.T) {

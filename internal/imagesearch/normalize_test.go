@@ -81,6 +81,29 @@ func TestSanitizeSVGStripsExecutableConstructs(t *testing.T) {
 			absent: []string{"tracker.example"},
 		},
 		{
+			// SMIL rewrites an attribute after load, so the href is not present
+			// at sanitize time and every check on href values sees nothing to
+			// object to. Caught in review; the whole animation family is now
+			// removed rather than trying to decide which attributeName values
+			// are safe to animate.
+			name:    "SMIL animate hijacking an href",
+			svg:     `<svg xmlns="http://www.w3.org/2000/svg"><a><animate attributeName="href" values="javascript:alert(1)"/></a><rect/></svg>`,
+			absent:  []string{"animate", "javascript:", "alert"},
+			present: []string{"<rect"},
+		},
+		{
+			name:    "SMIL set hijacking an href",
+			svg:     `<svg xmlns="http://www.w3.org/2000/svg"><a><set attributeName="href" to="javascript:alert(1)"/></a><rect/></svg>`,
+			absent:  []string{"<set", "javascript:", "alert"},
+			present: []string{"<rect"},
+		},
+		{
+			name:    "paired animateTransform with content",
+			svg:     `<svg xmlns="http://www.w3.org/2000/svg"><animateTransform attributeName="href"><desc>x</desc></animateTransform><rect/></svg>`,
+			absent:  []string{"animateTransform"},
+			present: []string{"<rect"},
+		},
+		{
 			name:   "entity declaration",
 			svg:    `<!DOCTYPE svg [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>`,
 			absent: []string{"ENTITY", "etc/passwd"},

@@ -167,6 +167,78 @@ func TestCatalogResponsesCarryDisplayFieldsOnly(t *testing.T) {
 		"the uniqueness key is an internal detail of how rows are matched")
 }
 
+// TestNeedsImageSearchTracksTheStagedLookup covers the wire-level signal that
+// carries the spec's "a line already described in catalog_products never
+// triggers a Gemini or SerpAPI request" rule out to the client.
+//
+// It matters more than it looks. The image-suggestions endpoint has no
+// matching awareness at all — it will call the providers for any query string
+// it is handed — so this field is the only thing telling the frontend not to
+// ask. Hardcoding it either way, or deriving it from status alone, would pass
+// every other test in the suite while quietly spending an API call on a
+// product the catalog already describes.
+func TestNeedsImageSearchTracksTheStagedLookup(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		result matching.Result
+		want   bool
+	}{
+		{
+			name: "a catalog hit needs no external lookup",
+			result: matching.Result{
+				Status:  matching.StatusNewItem,
+				Catalog: &matching.CatalogMatch{DisplayName: "Tomatoes"},
+			},
+			want: false,
+		},
+		{
+			name:   "a genuine stage-3 miss is the only case that does",
+			result: matching.Result{Status: matching.StatusNewItem},
+			want:   true,
+		},
+		{
+			name: "an exact local match never does",
+			result: matching.Result{
+				Status:  matching.StatusExactMatch,
+				Product: &matching.LocalCandidate{ProductID: uuid.New(), Name: "Whole Milk", Similarity: 0.95},
+			},
+			want: false,
+		},
+		{
+			name: "nor does an ambiguous one",
+			result: matching.Result{
+				Status:     matching.StatusAmbiguous,
+				Candidates: []matching.LocalCandidate{{ProductID: uuid.New(), Name: "Cream", Similarity: 0.5}},
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newAPIFixture(t)
+			f.matcher.result = tc.result
+
+			rec := f.do(http.MethodPost, f.base()+"/shopping-lists", `{"raw_text":"something"}`)
+			require.Equal(t, http.StatusCreated, rec.Code)
+
+			var body struct {
+				Items []struct {
+					NeedsImageSearch bool `json:"needs_image_search"`
+				} `json:"items"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			require.Len(t, body.Items, 1)
+
+			assert.Equal(t, tc.want, body.Items[0].NeedsImageSearch)
+		})
+	}
+}
+
 // TestVariantsAreNamesNotObjects keeps the same rule for the alternatives: a
 // variant is offered as something to click, not as a catalog handle.
 func TestVariantsAreNamesNotObjects(t *testing.T) {

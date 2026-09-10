@@ -125,6 +125,14 @@ One shape for every error, produced by **exactly one serializer** in
 | Payload validation failure | 422 | `validation_failed` |
 | Upload exceeds size limit | 413 | `payload_too_large` |
 | Configured Gemini model unavailable | 503 | `model_unavailable` |
+| A documented route whose backing capability has not shipped yet | 501 | `not_implemented` |
+
+`501` is deliberately distinct from `404`: the route exists and the spec
+describes it, but the machinery behind it is not built. Answering `404`
+would tell a client the endpoint is wrong, which is the one thing it is
+not — the first use is the photo-sourced shopping list in
+[`07-shopping-list-reconciliation.md`](07-shopping-list-reconciliation.md),
+which waits on the background job runner.
 
 `403` is deliberately unused for storage and admin scoping — see the
 non-enumeration rules in `03-auth-and-multi-tenancy.md`.

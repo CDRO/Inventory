@@ -234,6 +234,20 @@ var (
 	svgScriptTag      = regexp.MustCompile(`(?is)</?\s*script\b[^>]*>`)
 	svgForeignBlock   = regexp.MustCompile(`(?is)<\s*foreignObject\b[^>]*>.*?</\s*foreignObject\s*>`)
 	svgForeignTag     = regexp.MustCompile(`(?is)</?\s*foreignObject\b[^>]*>`)
+
+	// SMIL animation elements are removed outright.
+	//
+	// They are a way to rewrite another element's attribute *after* the
+	// document has loaded, which walks straight around every check above:
+	//
+	//   <a><animate attributeName="href" values="javascript:alert(1)"/></a>
+	//
+	// The href passes the allow-list at sanitize time because it is not there
+	// yet — the animation installs it later. Nothing about a static product
+	// icon needs animation, so the whole family goes rather than trying to
+	// decide which attributeName values are safe to animate.
+	svgAnimateBlock = regexp.MustCompile(`(?is)<\s*(?:animate|animateTransform|animateMotion|animateColor|set)\b[^>]*>.*?</\s*(?:animate|animateTransform|animateMotion|animateColor|set)\s*>`)
+	svgAnimateTag   = regexp.MustCompile(`(?is)</?\s*(?:animate|animateTransform|animateMotion|animateColor|set)\b[^>]*>`)
 	svgEventAttr      = regexp.MustCompile(`(?is)\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)`)
 	svgHrefAttr       = regexp.MustCompile(`(?is)\s(?:xlink:)?href\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)`)
 	svgCSSExternalURL = regexp.MustCompile(`(?is)url\(\s*['"]?\s*(?:https?:|//|javascript:)[^)]*\)`)
@@ -304,6 +318,8 @@ func SanitizeSVG(data []byte) ([]byte, error) {
 	out = svgScriptTag.ReplaceAll(out, nil)
 	out = svgForeignBlock.ReplaceAll(out, nil)
 	out = svgForeignTag.ReplaceAll(out, nil)
+	out = svgAnimateBlock.ReplaceAll(out, nil)
+	out = svgAnimateTag.ReplaceAll(out, nil)
 	out = svgEventAttr.ReplaceAll(out, nil)
 	out = stripRemoteRefs(out)
 	out = svgCSSExternalURL.ReplaceAll(out, []byte("none"))
