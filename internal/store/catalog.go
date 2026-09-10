@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/CDRO/Inventory/internal/matching"
 )
 
 // CatalogProduct is a row of the global, anonymous product catalogue.
@@ -46,11 +47,14 @@ type NewCatalogProduct struct {
 	ShownID              *uuid.UUID
 }
 
-// NormalizeCatalogName lowercases, trims and collapses whitespace. It is the
-// uniqueness key, so it has to be deterministic and is exported for the
-// matching service to reuse rather than re-derive.
+// NormalizeCatalogName is the uniqueness key for a catalog row.
+//
+// It delegates to matching.NormalizeQuery, which owns the rule, so that the
+// form a row is written under and the form a lookup is compared against are
+// the same function rather than two implementations that agree until one of
+// them is edited (docs/specs/07-shopping-list-reconciliation.md).
 func NormalizeCatalogName(name string) string {
-	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(name))), " ")
+	return matching.NormalizeQuery(name)
 }
 
 // InsertCatalogProduct adds a row if its normalized name is not already
