@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -150,8 +151,15 @@ func serve() error {
 	checker := vision.NewChecker(db, vision.NewAPILister(cfg.GeminiAPIKey), cfg.GeminiModel)
 
 	srv := &http.Server{
-		Addr:              net.JoinHostPort("", cfg.HTTPPort),
-		Handler:           httpapi.NewRouter(httpapi.Deps{DB: db, Vision: checker, StaticFS: assets}),
+		Addr: net.JoinHostPort("", cfg.HTTPPort),
+		Handler: httpapi.NewRouter(httpapi.Deps{
+			DB:     db,
+			Vision: checker,
+			// The one error serializer. cfg.IsDev() is the only thing that
+			// decides whether an internal reason is ever disclosed.
+			Errors:   httpapi.NewErrorWriter(cfg.IsDev(), slog.Default()),
+			StaticFS: assets,
+		}),
 		ReadHeaderTimeout: readHeaderTimeout,
 		WriteTimeout:      writeTimeout,
 		IdleTimeout:       idleTimeout,

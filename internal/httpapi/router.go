@@ -35,6 +35,10 @@ type Deps struct {
 	DB       DBPinger
 	Vision   VisionReporter
 	StaticFS fs.FS
+	// Errors serializes every error the API returns. When nil a production
+	// writer is used, so a router built without one still cannot emit
+	// debug_reason.
+	Errors *ErrorWriter
 }
 
 // NewRouter builds the application's HTTP handler.
@@ -43,10 +47,34 @@ type Deps struct {
 // unauthenticated because it is consumed by the compose healthcheck and by
 // Traefik, and "/" serves the static frontend.
 func NewRouter(d Deps) http.Handler {
+	errs := d.Errors
+	if errs == nil {
+		// Defaulting to a production writer rather than panicking keeps a
+		// misconfigured router safe: the failure mode of forgetting to pass
+		// one must be "no reasons disclosed", never "all of them".
+		errs = NewErrorWriter(false, nil)
+	}
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
+
+	// chi's defaults answer with plain text ("404 page not found"), which is
+	// neither the API's error shape nor something a client can switch on. Both
+	// go through the one serializer instead, so there is exactly one error
+	// format in the system.
+	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
+		errs.WriteError(w, req, NotFound("no route matches "+req.URL.Path))
+	})
+	r.MethodNotAllowed(func(w http.ResponseWriter, req *http.Request) {
+		errs.WriteError(w, req, &Failure{
+			Status:  http.StatusMethodNotAllowed,
+			Code:    "method_not_allowed",
+			Message: "That method is not allowed here.",
+			Reason:  req.Method + " on " + req.URL.Path,
+		})
+	})
 
 	r.Get("/healthz", HealthHandler(d.DB, d.Vision))
 
