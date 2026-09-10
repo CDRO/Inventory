@@ -65,7 +65,7 @@ type Cache struct {
 // NewCache returns a cache rooted at dir.
 func NewCache(dir string, s CacheStore, client *http.Client, log *slog.Logger) *Cache {
 	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+		client = SafeHTTPClient(15 * time.Second)
 	}
 	if log == nil {
 		log = slog.Default()

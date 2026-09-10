@@ -73,7 +73,7 @@ func NewIconify(client *http.Client) *Iconify {
 // would make the suite depend on the internet.
 func NewIconifyWithEndpoints(client *http.Client, searchURL, svgHost string) *Iconify {
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = SafeHTTPClient(10 * time.Second)
 	}
 	return &Iconify{client: client, searchURL: searchURL, svgHost: svgHost}
 }
@@ -187,7 +187,7 @@ func NewSerpAPI(apiKey string, client *http.Client) *SerpAPI {
 // the API key goes to the provider and appears nowhere else.
 func NewSerpAPIWithEndpoint(apiKey string, client *http.Client, endpoint string) *SerpAPI {
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = SafeHTTPClient(10 * time.Second)
 	}
 	return &SerpAPI{client: client, endpoint: endpoint, apiKey: apiKey}
 }

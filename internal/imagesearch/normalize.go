@@ -230,10 +230,16 @@ var (
 	// So: remove properly paired blocks including their content, then sweep up
 	// any residual tag of that name, which covers the self-closing form, an
 	// unclosed opening tag, and an orphaned closing tag alike.
-	svgScriptBlock    = regexp.MustCompile(`(?is)<\s*script\b[^>]*>.*?</\s*script\s*>`)
-	svgScriptTag      = regexp.MustCompile(`(?is)</?\s*script\b[^>]*>`)
-	svgForeignBlock   = regexp.MustCompile(`(?is)<\s*foreignObject\b[^>]*>.*?</\s*foreignObject\s*>`)
-	svgForeignTag     = regexp.MustCompile(`(?is)</?\s*foreignObject\b[^>]*>`)
+	// `(?:[\w.-]+:)?` on every element pattern is not decoration. XML lets a
+	// document bind any prefix to the SVG namespace, so `<s:script>` is a
+	// script element by every parser that matters while matching none of a
+	// pattern anchored on a bare `<script`. Caught in review with a working
+	// proof of concept; the CSP on the serving route contains it there, but a
+	// copy of the file saved and reopened from disk has no such protection.
+	svgScriptBlock  = regexp.MustCompile(`(?is)<\s*(?:[\w.-]+:)?script\b[^>]*>.*?</\s*(?:[\w.-]+:)?script\s*>`)
+	svgScriptTag    = regexp.MustCompile(`(?is)</?\s*(?:[\w.-]+:)?script\b[^>]*>`)
+	svgForeignBlock = regexp.MustCompile(`(?is)<\s*(?:[\w.-]+:)?foreignObject\b[^>]*>.*?</\s*(?:[\w.-]+:)?foreignObject\s*>`)
+	svgForeignTag   = regexp.MustCompile(`(?is)</?\s*(?:[\w.-]+:)?foreignObject\b[^>]*>`)
 
 	// SMIL animation elements are removed outright.
 	//
@@ -246,8 +252,8 @@ var (
 	// yet — the animation installs it later. Nothing about a static product
 	// icon needs animation, so the whole family goes rather than trying to
 	// decide which attributeName values are safe to animate.
-	svgAnimateBlock = regexp.MustCompile(`(?is)<\s*(?:animate|animateTransform|animateMotion|animateColor|set)\b[^>]*>.*?</\s*(?:animate|animateTransform|animateMotion|animateColor|set)\s*>`)
-	svgAnimateTag   = regexp.MustCompile(`(?is)</?\s*(?:animate|animateTransform|animateMotion|animateColor|set)\b[^>]*>`)
+	svgAnimateBlock   = regexp.MustCompile(`(?is)<\s*(?:[\w.-]+:)?(?:animate|animateTransform|animateMotion|animateColor|set)\b[^>]*>.*?</\s*(?:[\w.-]+:)?(?:animate|animateTransform|animateMotion|animateColor|set)\s*>`)
+	svgAnimateTag     = regexp.MustCompile(`(?is)</?\s*(?:[\w.-]+:)?(?:animate|animateTransform|animateMotion|animateColor|set)\b[^>]*>`)
 	svgEventAttr      = regexp.MustCompile(`(?is)\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)`)
 	svgHrefAttr       = regexp.MustCompile(`(?is)\s(?:xlink:)?href\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)`)
 	svgCSSExternalURL = regexp.MustCompile(`(?is)url\(\s*['"]?\s*(?:https?:|//|javascript:)[^)]*\)`)

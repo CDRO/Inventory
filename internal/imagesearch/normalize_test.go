@@ -81,6 +81,36 @@ func TestSanitizeSVGStripsExecutableConstructs(t *testing.T) {
 			absent: []string{"tracker.example"},
 		},
 		{
+			// Found in review with a working proof of concept. XML lets a
+			// document bind any prefix to the SVG namespace, so <s:script> is a
+			// script element to every parser that matters while matching none
+			// of a pattern anchored on a bare "<script". The CSP on the serving
+			// route contains it there, but a copy saved and reopened from disk
+			// has no such protection.
+			name:    "namespace-prefixed script",
+			svg:     `<svg xmlns:s="http://www.w3.org/2000/svg" xmlns="http://www.w3.org/2000/svg"><s:script>steal()</s:script><rect/></svg>`,
+			absent:  []string{"script", "steal"},
+			present: []string{"<rect"},
+		},
+		{
+			name:    "namespace-prefixed self-closing script",
+			svg:     `<svg xmlns="http://www.w3.org/2000/svg"><ns0:script src="https://evil.example/x.js"/><rect/></svg>`,
+			absent:  []string{"script", "evil.example"},
+			present: []string{"<rect"},
+		},
+		{
+			name:    "namespace-prefixed foreignObject",
+			svg:     `<svg xmlns="http://www.w3.org/2000/svg"><x:foreignObject><b onload="alert(1)"/></x:foreignObject><rect/></svg>`,
+			absent:  []string{"foreignObject", "onload", "alert"},
+			present: []string{"<rect"},
+		},
+		{
+			name:    "namespace-prefixed SMIL animate",
+			svg:     `<svg xmlns="http://www.w3.org/2000/svg"><a><svg:animate attributeName="href" values="javascript:alert(1)"/></a><rect/></svg>`,
+			absent:  []string{"animate", "javascript:", "alert"},
+			present: []string{"<rect"},
+		},
+		{
 			// SMIL rewrites an attribute after load, so the href is not present
 			// at sanitize time and every check on href values sees nothing to
 			// object to. Caught in review; the whole animation family is now
