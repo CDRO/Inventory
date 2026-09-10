@@ -99,7 +99,10 @@ func ReadImageUpload(w http.ResponseWriter, r *http.Request, field string) (*Upl
 		)
 	}
 
-	if _, err := images.Decode(raw, MaxImagePixels); err != nil {
+	// Header only. A full decode here would cost the very 50MP decode that the
+	// upright segment-surgery path exists to avoid, and then discard the
+	// pixels.
+	if err := images.CheckDimensions(raw, MaxImagePixels); err != nil {
 		return nil, ValidationFailed(
 			map[string][]string{field: {"The image is too large or could not be read."}},
 			err,

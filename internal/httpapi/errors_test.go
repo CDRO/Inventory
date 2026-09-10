@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -131,20 +132,78 @@ func TestDebugReasonLivesInExactlyOneFile(t *testing.T) {
 	assert.Emptyf(t, offenders, "debug_reason may only be written by the single serializer; also found in: %v", offenders)
 }
 
-// TestIsAdminIsNeverSerialized covers the other half of the admin invariant:
-// the flag is a server-side fact and must not appear in any response shape.
+// TestEncodingAUserLeaksNothing is the behavioural half of the admin
+// invariant, and the one that matters.
+//
+// An earlier version of this test only grepped for a `json:"is_admin` tag. It
+// passed because no such tag existed — which proved nothing: Go's encoder
+// emits an exported field under its own name when there is no tag at all, so
+// json.Encode of the *store.User already sitting in the request context (the
+// obvious shortcut for a first cut of GET /api/auth/me) would have put
+// "IsAdmin":true straight into the response, and the grep would still have
+// been green. The same applied to the argon2 hash.
+//
+// So this marshals the real struct and reads the bytes.
+func TestEncodingAUserLeaksNothing(t *testing.T) {
+	t.Parallel()
+
+	user := store.User{
+		ID:           uuid.New(),
+		Username:     "tizian",
+		PasswordHash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$ZGlnZXN0",
+		DisplayName:  "Tizian",
+		IsAdmin:      true,
+	}
+
+	encoded, err := json.Marshal(user)
+	require.NoError(t, err)
+	body := string(encoded)
+
+	assert.NotContains(t, body, "IsAdmin", "the field name must not survive encoding")
+	assert.NotContains(t, body, "is_admin")
+	assert.NotContains(t, body, "true", "nor its value under any name")
+	assert.NotContains(t, body, "argon2", "and the password hash least of all")
+	assert.NotContains(t, body, "PasswordHash")
+
+	// The harmless fields are still there, so this is not passing because the
+	// struct encodes to nothing.
+	assert.Contains(t, body, "tizian")
+}
+
+// TestIsAdminIsNeverSerialized is the structural half: no declaration
+// anywhere may name the field on the wire.
 //
 // Scanning the source rather than a sample of responses is deliberate. A test
 // that checked three known endpoints would say nothing about the fourth one
-// somebody adds next month.
+// somebody adds next month. The patterns cover a struct tag and a map literal,
+// which are the two ways a field reaches JSON under a chosen name.
 func TestIsAdminIsNeverSerialized(t *testing.T) {
 	t.Parallel()
 
-	// store.User carries the field because the server needs it; the store is
-	// the one place allowed to name it.
-	offenders := grepGoSources(t, []string{`json:"is_admin`}, "")
+	offenders := grepGoSources(t, []string{`json:"is_admin`, `"is_admin"`}, "")
 
-	assert.Emptyf(t, offenders, "is_admin must never carry a JSON tag; found in: %v", offenders)
+	assert.Emptyf(t, offenders, "is_admin must never be put on the wire; found in: %v", offenders)
+}
+
+// TestRouterWithoutAnErrorWriterStillHidesReasons — the fail-safe default.
+//
+// Forgetting to pass an ErrorWriter must mean "no reasons disclosed", never
+// "all of them". A default that opened up disclosure would make the safest
+// configuration the one nobody wrote down.
+func TestRouterWithoutAnErrorWriterStillHidesReasons(t *testing.T) {
+	t.Parallel()
+
+	router := httpapi.NewRouter(httpapi.Deps{}) // no Errors, no DB, no assets
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/no/such/route", nil))
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "debug_reason")
+	assert.NotContains(t, rec.Body.String(), "/no/such/route",
+		"the reason names the path; it must not be disclosed by default")
+	assert.Contains(t, rec.Body.String(), `"not_found"`,
+		"and it must still be the API error shape, not chi plain text")
 }
 
 // TestFromStoreErrorMapsDomainErrors checks the status-code table.

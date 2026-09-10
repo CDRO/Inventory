@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -152,6 +153,15 @@ func (w *ErrorWriter) WriteError(rw http.ResponseWriter, r *http.Request, failur
 	// An encode failure here means the client hung up; there is nothing left
 	// to tell them.
 	_ = json.NewEncoder(rw).Encode(body)
+}
+
+// Log records a failure that does not become a response.
+//
+// Best-effort work — activity tracking, say — must not fail a request, but it
+// must not vanish either. Routing it through the same writer keeps one place
+// responsible for what the server says about itself.
+func (w *ErrorWriter) Log(ctx context.Context, msg string, err error) {
+	w.log.LogAttrs(ctx, slog.LevelWarn, msg, slog.Any("err", err))
 }
 
 // NotFound is the answer to an unknown resource **and** to one the caller may

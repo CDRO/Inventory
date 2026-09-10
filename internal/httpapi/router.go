@@ -2,9 +2,26 @@
 // and the middleware that decides authorization
 // (docs/specs/04-backend-api-conventions.md).
 //
-// At this stage it carries the deployment skeleton only — the readiness
-// endpoint and the static-asset mount. Sessions, storage scoping, and the
-// single error-envelope serializer arrive with specs 03 and 04.
+// Three rules of the package are structural rather than conventional, because
+// each of them fails silently when it is left to a handler to remember:
+//
+//   - **One error serializer.** errors.go is the only place an error envelope
+//     is produced and the only place debug_reason can be attached. A handler
+//     describes a Failure and hands it over; it has no way to write an
+//     envelope itself, so it cannot leak an internal reason in production.
+//     chi's own 404 and 405 are routed through it too, so the system has one
+//     error format rather than two.
+//   - **Three authorization gates, and nowhere else.** RequireSession,
+//     RequireAdmin and RequireStorageMember in middleware.go decide access. No
+//     handler performs its own check. RequireAdmin re-reads is_admin from the
+//     database on every request, and every refusal — unknown storage,
+//     inaccessible storage, malformed id, the whole admin area — is the same
+//     404, byte for byte.
+//   - **One upload path.** ReadImageUpload in upload.go strips metadata from
+//     every image entering the system and generates the filename itself.
+//
+// The auth, admin, pairing and device routes that mount behind these gates are
+// spec 03's surface and land separately.
 package httpapi
 
 import (

@@ -130,8 +130,13 @@ func (m *Middleware) RequireSession(next http.Handler) http.Handler {
 		}
 
 		// Best-effort activity tracking; throttled to at most hourly in the
-		// store. A failure here must not fail the request.
-		_ = m.store.TouchSession(r.Context(), session.ID)
+		// store. A failure here must not fail the request — but it must not be
+		// invisible either: a persistently failing touch (a bad migration on
+		// sessions, say) would otherwise be the one store error in this file
+		// nobody ever hears about.
+		if err := m.store.TouchSession(r.Context(), session.ID); err != nil {
+			m.errors.Log(r.Context(), "touch session failed", err)
+		}
 
 		ctx := context.WithValue(r.Context(), ctxUser, user)
 		ctx = context.WithValue(ctx, ctxSession, session)

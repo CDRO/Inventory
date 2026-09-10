@@ -29,6 +29,16 @@ var ErrUnsupportedFormat = errors.New("images: unsupported format")
 // that a re-encoded shelf photo is not visibly worse than the original.
 const jpegQuality = 92
 
+// MaxPixels bounds any decode this package performs.
+//
+// Strip enforces it itself rather than trusting the caller to have checked
+// first. A small file can claim enormous dimensions, and the cost of decoding
+// is in pixels rather than bytes; relying on every future caller — a
+// reprocessing job, an admin backfill, a helper someone lifts into production
+// code — to remember a guard is the same mistake the single error serializer
+// exists to avoid.
+const MaxPixels = 50_000_000
+
 // Format names the container of a stripped image.
 type Format string
 
@@ -160,6 +170,9 @@ func stripJPEG(data []byte) (*Result, error) {
 	// Rotation first, when there is one. The re-encode drops the metadata by
 	// construction — nothing is copied across but pixels.
 	if orientation.NeedsTransform() {
+		if err := CheckDimensions(data, MaxPixels); err != nil {
+			return nil, err
+		}
 		src, err := jpeg.Decode(bytes.NewReader(data))
 		if err != nil {
 			return nil, fmt.Errorf("images: decode jpeg for rotation: %w", err)
@@ -304,6 +317,9 @@ func stripPNG(data []byte) (*Result, error) {
 	}
 
 	if orientation.NeedsTransform() {
+		if err := CheckDimensions(data, MaxPixels); err != nil {
+			return nil, err
+		}
 		src, err := png.Decode(bytes.NewReader(data))
 		if err != nil {
 			return nil, fmt.Errorf("images: decode png for rotation: %w", err)
@@ -394,15 +410,28 @@ func dropPNGMetadataChunks(data []byte) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// Decode is a bounded decode used where pixel dimensions matter. It exists so
-// callers do not reach for image.Decode directly and forget the guard.
-func Decode(data []byte, maxPixels int) (image.Image, error) {
+// CheckDimensions rejects an image whose pixel count exceeds maxPixels,
+// reading only the header.
+//
+// This is the guard to use for validation. It costs a header parse rather than
+// a full decode, which matters because the upright path exists precisely to
+// avoid decoding a 50MP shelf photo at all — validating with a full decode
+// would pay that cost anyway and throw the pixels away.
+func CheckDimensions(data []byte, maxPixels int) error {
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
-		return nil, fmt.Errorf("images: read dimensions: %w", err)
+		return fmt.Errorf("images: read dimensions: %w", err)
 	}
 	if maxPixels > 0 && cfg.Width*cfg.Height > maxPixels {
-		return nil, fmt.Errorf("images: %dx%d exceeds the %d pixel limit", cfg.Width, cfg.Height, maxPixels)
+		return fmt.Errorf("images: %dx%d exceeds the %d pixel limit", cfg.Width, cfg.Height, maxPixels)
+	}
+	return nil
+}
+
+// Decode is a bounded decode, for callers that actually need the pixels.
+func Decode(data []byte, maxPixels int) (image.Image, error) {
+	if err := CheckDimensions(data, maxPixels); err != nil {
+		return nil, err
 	}
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {

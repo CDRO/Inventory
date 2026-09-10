@@ -75,6 +75,12 @@ func (f *fakeAuth) addMember(storageID, userID uuid.UUID) {
 	f.members[storageID.String()+userID.String()] = true
 }
 
+func (f *fakeAuth) removeMember(storageID, userID uuid.UUID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.members, storageID.String()+userID.String())
+}
+
 func (f *fakeAuth) adminCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -311,7 +317,7 @@ func TestSessionTransports(t *testing.T) {
 
 	t.Run("bearer alone is accepted", func(t *testing.T) {
 		auth.addMember(storageID, bearerUser.ID)
-		defer func() { auth.members[storageID.String()+bearerUser.ID.String()] = false }()
+		defer auth.removeMember(storageID, bearerUser.ID)
 
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("Authorization", "Bearer "+bearerSession.ID)
