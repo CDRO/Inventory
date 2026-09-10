@@ -9,8 +9,12 @@
 //     is produced and the only place debug_reason can be attached. A handler
 //     describes a Failure and hands it over; it has no way to write an
 //     envelope itself, so it cannot leak an internal reason in production.
-//     chi's own 404 and 405 are routed through it too, so the system has one
-//     error format rather than two.
+//     chi's own 404 and 405 are routed through it too, for any request chi
+//     itself resolves as unmatched or wrong-method. The one exception is a GET
+//     to an /api/... path that has no route registered yet: it still falls
+//     through to the static file server's own plain-text 404, not this
+//     serializer — see the comment beside the "/*" mount below for why, and
+//     why that gap closes itself as each real route lands.
 //   - **Three authorization gates, and nowhere else.** RequireSession,
 //     RequireAdmin and RequireStorageMember in middleware.go decide access. No
 //     handler performs its own check. RequireAdmin re-reads is_admin from the
@@ -96,7 +100,46 @@ func NewRouter(d Deps) http.Handler {
 	r.Get("/healthz", HealthHandler(d.DB, d.Vision))
 
 	if d.StaticFS != nil {
-		r.Handle("/*", http.FileServer(http.FS(d.StaticFS)))
+		// GET only, deliberately — not r.Handle, which would register the
+		// file server for every method.
+		//
+		// chi's r.NotFound only fires when no registered pattern matches a
+		// request at all, and "/*" matches every path. Registered for every
+		// method, it would swallow POST/PUT/DELETE requests to routes that do
+		// not exist yet — most immediately POST /api/auth/login, before spec
+		// 03's HTTP surface (#27) registers it — handing them to
+		// http.FileServer, which answers its own plain-text 404 before chi's
+		// r.NotFound, and this package's single JSON serializer, ever see the
+		// request. That silently contradicts the "one error format" rule
+		// stated above; verified live (`curl -X POST .../api/auth/login`
+		// returned "404 page not found" in text/plain) before this fix and
+		// the JSON envelope after it.
+		//
+		// GET (and HEAD, below) closes it for every method that actually
+		// mutates anything. A GET to a not-yet-registered /api/... path still
+		// falls through to the file server today — there is no static file
+		// there either, so it is still a 404, just not yet through the JSON
+		// serializer — and that residual gap closes itself as each real
+		// GET /api/... route is registered, since a registered route always
+		// takes precedence over the "/*" catch-all.
+		//
+		// One side effect worth knowing about: because "/*" now answers only
+		// GET and HEAD, chi's MethodNotAllowed (not NotFound) fires for every
+		// other verb against any unregistered path — POST /nonexistent gets a
+		// 405, not a 404, even though nothing by that name exists at all. 405
+		// technically means "this resource exists but rejects this verb",
+		// which isn't quite true here; it is an inherent limitation of
+		// registering a catch-all on a single pattern rather than a defect,
+		// and no client in this codebase branches on the distinction today.
+		fileServer := http.FileServer(http.FS(d.StaticFS)).ServeHTTP
+		r.Get("/*", fileServer)
+		// chi does not imply HEAD from a GET registration the way stdlib's
+		// http.ServeMux does — caught live: `curl -I` against a real asset
+		// answered 405 until this line was added. http.FileServer's handler
+		// already branches on r.Method internally (writing headers only for
+		// HEAD), so the same handler value is correct for both routes; only
+		// the registration was missing.
+		r.Head("/*", fileServer)
 	}
 	return r
 }

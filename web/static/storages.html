@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#2563eb">
+  <title>Inventory</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/css/tokens.css">
+  <link rel="stylesheet" href="/css/base.css">
+  <link rel="stylesheet" href="/css/components.css">
+</head>
+<body>
+  <header class="shell row row--between">
+    <strong>Inventory</strong>
+    <div class="row">
+      <div id="storage-switcher" hidden></div>
+      <button id="logout" type="button" class="btn btn--ghost">Log out</button>
+    </div>
+  </header>
+
+  <main id="main" class="shell" aria-live="polite">
+    <p class="empty-state">Loading…</p>
+  </main>
+
+  <script type="module" src="/js/pages/storages.js"></script>
+</body>
+</html>
