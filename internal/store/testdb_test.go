@@ -254,3 +254,17 @@ func timeNow(t *testing.T, ctx context.Context) time.Time {
 func timeZero() time.Time {
 	return time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
 }
+
+// countRowsIn runs a count against a database other than the package one, for
+// tests that need their own empty schema.
+func countRowsIn(t *testing.T, ctx context.Context, dsn, sql string, args ...any) int {
+	t.Helper()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	defer pool.Close()
+
+	var n int
+	require.NoError(t, pool.QueryRow(ctx, sql, args...).Scan(&n))
+	return n
+}
