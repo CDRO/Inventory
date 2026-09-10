@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#2563eb">
+  <title>Shopping list · Inventory</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/css/tokens.css">
+  <link rel="stylesheet" href="/css/base.css">
+  <link rel="stylesheet" href="/css/components.css">
+</head>
+<body>
+  <header class="shell row row--between">
+    <strong>Inventory</strong>
+    <div class="row">
+      <div id="storage-switcher" hidden></div>
+      <a href="/storages.html" class="btn btn--ghost">Back</a>
+    </div>
+  </header>
+
+  <main id="main" class="shell" aria-live="polite">
+    <h2>Shopping list</h2>
+
+    <div id="error" class="alert" role="alert" hidden></div>
+
+    <section id="compose" class="card stack">
+      <label for="raw-text">One item per line</label>
+      <textarea id="raw-text" rows="8" placeholder="milk&#10;eggs x2&#10;cherry tomatoes"></textarea>
+      <p class="empty-state">
+        A photographed list is not available yet — it needs the background job
+        runner. Typing or pasting works today.
+      </p>
+      <button id="submit" type="button" class="btn">Match this list</button>
+    </section>
+
+    <section id="results" class="stack" hidden>
+      <h3>Resolve each line</h3>
+      <div id="items" class="stack"></div>
+    </section>
+  </main>
+
+  <!-- One row per line. Cloned rather than built from a template string, so
+       every piece of server text goes through textContent. -->
+  <template id="item-template">
+    <div class="card stack item">
+      <div class="row row--between">
+        <strong data-field="raw_text"></strong>
+        <span class="badge" data-field="status"></span>
+      </div>
+      <div data-field="detail" class="stack"></div>
+      <div class="row">
+        <label>
+          Quantity
+          <input type="number" data-field="quantity" min="0" step="1" value="1">
+        </label>
+        <button type="button" class="btn" data-action="resolve">Confirm</button>
+      </div>
+    </div>
+  </template>
+
+  <script type="module" src="/js/pages/shopping-list.js"></script>
+</body>
+</html>

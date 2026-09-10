@@ -28,6 +28,8 @@ import (
 
 	"github.com/CDRO/Inventory/internal/config"
 	"github.com/CDRO/Inventory/internal/httpapi"
+	"github.com/CDRO/Inventory/internal/imagesearch"
+	"github.com/CDRO/Inventory/internal/matching"
 	"github.com/CDRO/Inventory/internal/migrate"
 	"github.com/CDRO/Inventory/internal/store"
 	"github.com/CDRO/Inventory/internal/vision"
@@ -126,6 +128,16 @@ func runMigrate(ctx context.Context, args []string) error {
 	return migrate.Run(ctx, cfg.DatabaseURL, action, os.Stdout)
 }
 
+// suggestionCacheDir is where downloaded image suggestions live
+// (docs/specs/07-shopping-list-reconciliation.md).
+//
+// It is a constant rather than a configuration knob because it is a container
+// path, not a deployment choice: docker-compose.yml mounts a volume there, and
+// making it settable would invite a value the compose file does not mount, at
+// which point the cache silently lives in the container's writable layer and
+// disappears on the next deploy.
+const suggestionCacheDir = "/data/cache/imagesearch"
+
 func serve() error {
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
@@ -150,6 +162,23 @@ func serve() error {
 
 	checker := vision.NewChecker(db, vision.NewAPILister(cfg.GeminiAPIKey), cfg.GeminiModel)
 
+	// The suggestion-image cache and the providers behind it
+	// (docs/specs/07-shopping-list-reconciliation.md). SerpAPI is optional:
+	// without a key the New Item flow degrades to icon-only suggestions rather
+	// than failing, which is the documented behaviour for an unavailable
+	// provider.
+	imageCache := imagesearch.NewCache(suggestionCacheDir, db, nil, slog.Default())
+	suggester := imagesearch.NewService(
+		imagesearch.NewIconify(nil),
+		imagesearch.NewSerpAPI(cfg.SerpAPIKey, nil),
+		imageCache,
+		slog.Default(),
+	)
+
+	// Cap enforcement and orphan collection. Started before the listener so a
+	// crash's leftovers are cleaned at boot rather than up to an hour later.
+	go imageCache.RunSweeps(ctx)
+
 	srv := &http.Server{
 		Addr: net.JoinHostPort("", cfg.HTTPPort),
 		Handler: httpapi.NewRouter(httpapi.Deps{
@@ -162,6 +191,11 @@ func serve() error {
 			// The same store backs the authorization gates and the handlers
 			// behind them, so the two cannot be wired out of step.
 			Store: db,
+			// The matching service is shared with specs 06 and 09; it is
+			// constructed once here so all of them use the same thresholds.
+			Matcher:    matching.New(db),
+			Images:     suggester,
+			ImageCache: imageCache,
 		}),
 		ReadHeaderTimeout: readHeaderTimeout,
 		WriteTimeout:      writeTimeout,
