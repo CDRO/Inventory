@@ -124,9 +124,20 @@ not a pass.
    reasoning (`gh pr comment`) instead of ignoring it. A disputed finding that
    is argued in the open is resolved; one that is silently skipped is not.
 3. Re-run tests, push, increment the round, and re-review from step 5.
-4. **Round cap: 3.** After three rounds with unresolved blocks, stop and ask
-   the user. Grinding on a finding you cannot resolve wastes tokens and usually
-   means the spec is ambiguous — which is a question for a human.
+4. **Round cap: 2.** After two review passes, stop. Do not run a third.
+   Open a GitHub issue for whatever is still outstanding — the finding, its
+   file and line, a reproduction if there is one, and why it was deferred —
+   then merge and flag it in the report.
+
+   This is a budget rule, not a quality judgement. It exists because
+   "every round found a real bug" is not a reason to keep going: spec 07
+   (PR #32) produced a genuine, proof-of-concept-verified security finding
+   in five consecutive rounds, every fix was correct, and it still cost far
+   more than the feature was worth.
+
+   When deferring a security finding, say so plainly in the report along
+   with the risk, so a human can overrule. The cap limits the review loop,
+   not the honesty about what is shipping.
 
 ## 8. Merge
 
