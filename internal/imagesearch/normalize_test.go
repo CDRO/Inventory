@@ -76,15 +76,12 @@ func TestSanitizeSVGStripsExecutableConstructs(t *testing.T) {
 			absent: []string{"javascript:", "alert"},
 		},
 		{
-			name:   "css url() pulling a remote resource",
-			svg:    `<svg xmlns="http://www.w3.org/2000/svg"><rect style="fill:url('https://tracker.example/p.svg')"/></svg>`,
-			absent: []string{"tracker.example"},
+			name:    "css url() pulling a remote resource",
+			svg:     `<svg xmlns="http://www.w3.org/2000/svg"><rect style="fill:url('https://tracker.example/p.svg')"/><rect/></svg>`,
+			absent:  []string{"tracker.example"},
+			present: []string{"<rect"},
 		},
 		{
-			// The CSS side was a deny-list of schemes while href had already
-			// become an allow-list, so the identical nested-document payload
-			// was refused on one attribute and honoured one attribute away.
-			// mask, fill, clip-path, filter and background all take a url().
 			name:    "css url() carrying a nested SVG data URI",
 			svg:     `<svg xmlns="http://www.w3.org/2000/svg"><rect style="mask:url(data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9ImFsZXJ0KDEpIi8+)"/><rect/></svg>`,
 			absent:  []string{"svg+xml", "PHN2ZyBvbmxvYWQ"},
@@ -100,6 +97,48 @@ func TestSanitizeSVGStripsExecutableConstructs(t *testing.T) {
 			name:    "css url() in a style block, not just an attribute",
 			svg:     `<svg xmlns="http://www.w3.org/2000/svg"><style>rect{mask:url("data:image/svg+xml,%3Csvg onload%3Dalert(1)%2F%3E")}</style><rect/></svg>`,
 			absent:  []string{"svg+xml", "onload"},
+			present: []string{"<rect"},
+		},
+		{
+			// The finding that ended the route-by-route approach: @import
+			// takes a bare string, so it is not url()-shaped and matched
+			// nothing. Opening a stored copy fires an outbound request the
+			// instant it is parsed — no click, no script — leaking IP, UA and
+			// Referer to an attacker-controlled origin.
+			name:    "bare-string @import in a style block",
+			svg:     `<svg xmlns="http://www.w3.org/2000/svg"><style>@import "https://tracker.example/x.css";</style><rect/></svg>`,
+			absent:  []string{"@import", "tracker.example"},
+			present: []string{"<rect"},
+		},
+		{
+			name:    "@import in its url() form",
+			svg:     `<svg xmlns="http://www.w3.org/2000/svg"><style>@import url("https://tracker.example/x.css");</style><rect/></svg>`,
+			absent:  []string{"@import", "tracker.example"},
+			present: []string{"<rect"},
+		},
+		{
+			// image-set() would have been the next route along: another CSS
+			// function that names a resource with a bare string.
+			name:    "image-set naming a remote resource",
+			svg:     `<svg xmlns="http://www.w3.org/2000/svg"><rect style="background:image-set('https://tracker.example/a.png' 1x)"/><rect/></svg>`,
+			absent:  []string{"tracker.example", "image-set"},
+			present: []string{"<rect"},
+		},
+		{
+			// A namespace-prefixed <style> is still a stylesheet.
+			name:    "namespace-prefixed style block",
+			svg:     `<svg xmlns="http://www.w3.org/2000/svg"><s:style>@import "https://tracker.example/x.css";</s:style><rect/></svg>`,
+			absent:  []string{"@import", "tracker.example"},
+			present: []string{"<rect"},
+		},
+		{
+			// CSS escaping: cssURLValue stops at the first ")" while a
+			// spec-compliant parser consumes past "\)", so the classification
+			// would be made against a truncated prefix. Anything escaped is
+			// refused rather than guessed at.
+			name:    "unquoted url() hiding a second reference behind an escaped paren",
+			svg:     `<svg xmlns="http://www.w3.org/2000/svg"><rect fill="url(data:image/png,A\)https://tracker.example/track.png)"/><rect/></svg>`,
+			absent:  []string{"tracker.example"},
 			present: []string{"<rect"},
 		},
 		{
@@ -203,17 +242,23 @@ func TestSanitizeSVGKeepsInlineRasterImages(t *testing.T) {
 	}
 }
 
-// TestSanitizeSVGKeepsInternalCSSReferences — url(#id) is how gradients,
-// masks and <use> actually work. Stripping it would break the majority of real
-// icons while protecting nothing: it names something inside this same,
+// TestSanitizeSVGKeepsPresentationAttributeReferences — `fill="url(#grad)"` is
+// how gradients and masks are actually referenced, and it is a presentation
+// attribute rather than CSS: no stylesheet parsing, just an attribute whose
+// value uses the url token. Stripping it would break the majority of real
+// icons while protecting nothing, since it names something inside this same,
 // already-sanitized document.
-func TestSanitizeSVGKeepsInternalCSSReferences(t *testing.T) {
+//
+// This is what survives the decision to drop CSS entirely, and the reason that
+// decision costs less than it looks.
+func TestSanitizeSVGKeepsPresentationAttributeReferences(t *testing.T) {
 	t.Parallel()
 
 	svg := `<svg xmlns="http://www.w3.org/2000/svg">` +
-		`<linearGradient id="g"/><rect style="fill:url(#g)"/>` +
-		`<rect style="mask:url('#g')"/>` +
-		`<rect style="fill:url(data:image/png;base64,iVBORw0KGgo=)"/></svg>`
+		`<linearGradient id="g"/>` +
+		`<rect fill="url(#g)" stroke="#333" opacity="0.5"/>` +
+		`<rect mask="url('#g')"/>` +
+		`<rect fill="url(data:image/png;base64,iVBORw0KGgo=)"/></svg>`
 
 	clean, err := imagesearch.SanitizeSVG([]byte(svg))
 	require.NoError(t, err)
@@ -221,7 +266,33 @@ func TestSanitizeSVGKeepsInternalCSSReferences(t *testing.T) {
 	assert.Contains(t, string(clean), "url(#g)", "an internal fragment reference must survive")
 	assert.Contains(t, string(clean), "#g", "including the quoted form")
 	assert.Contains(t, string(clean), "data:image/png", "as must an inline raster")
-	assert.NotContains(t, string(clean), "none", "nothing here needed neutralising")
+	assert.Contains(t, string(clean), `stroke="#333"`, "and ordinary presentation attributes")
+	assert.Contains(t, string(clean), `opacity="0.5"`)
+}
+
+// TestSanitizeSVGDropsStylesheetsEntirely states the trade-off as a test: a
+// stored icon has no CSS at all, so the whole family of "some CSS construct
+// names a remote resource" bypasses cannot apply. Four review rounds each
+// found a different member of that family; this is what ended it.
+func TestSanitizeSVGDropsStylesheetsEntirely(t *testing.T) {
+	t.Parallel()
+
+	svg := `<svg xmlns="http://www.w3.org/2000/svg">` +
+		`<style>rect{fill:red}</style>` +
+		`<rect style="fill:blue" fill="green"/></svg>`
+
+	clean, err := imagesearch.SanitizeSVG([]byte(svg))
+	require.NoError(t, err)
+
+	assert.NotContains(t, string(clean), "<style", "no stylesheet element")
+	assert.NotContains(t, string(clean), "style=", "no style attribute")
+	assert.NotContains(t, string(clean), "fill:red", "nor its contents")
+	assert.NotContains(t, string(clean), "fill:blue")
+
+	// The presentation attribute is untouched, which is what keeps most icons
+	// looking like themselves.
+	assert.Contains(t, string(clean), `fill="green"`)
+	assert.Contains(t, string(clean), "<rect")
 }
 
 // TestSanitizeSVGRejectsNestedSVGDataURIs is the deepest bypass found in

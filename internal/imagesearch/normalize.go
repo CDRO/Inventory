@@ -263,13 +263,45 @@ var (
 	svgAnimateTag   = regexp.MustCompile(`(?is)</?\s*(?:[^\s<>/"'=:]+:)?(?:animate|animateTransform|animateMotion|animateColor|set)\b[^>]*>`)
 	svgEventAttr    = regexp.MustCompile(`(?is)\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)`)
 	svgHrefAttr     = regexp.MustCompile(`(?is)\s(?:xlink:)?href\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)`)
-	// Every url() in CSS, not just the ones with a scheme that looks
-	// dangerous. This was a deny-list of https?:/javascript:— and a deny-list
-	// missed exactly what the comment on stripRemoteRefs says a deny-list
-	// always misses: `mask:url(data:image/svg+xml;base64,…)` names no listed
-	// scheme, carries a whole document, and sailed through while the same
-	// payload was being correctly refused one attribute away on href.
-	svgCSSURL     = regexp.MustCompile(`(?is)url\(\s*(?:"[^"]*"|'[^']*'|[^)]*)\s*\)`)
+
+	// CSS goes entirely: <style> elements and style="" attributes alike.
+	//
+	// This is deliberately blunt, and it is the lesson of four review rounds
+	// on this function. Each round closed one route a stylesheet uses to
+	// reference something external, and each time a different one was still
+	// open — first `url(https://…)`, then `url(data:image/svg+xml,…)` in a
+	// style attribute, then a bare-string `@import "https://…"` which is not
+	// url()-shaped at all and so matched nothing. `image-set("a.png" 1x)` is
+	// the next one along, and CSS will keep adding more.
+	//
+	// The common factor is that CSS is a second language with its own
+	// grammar, its own escaping rules and its own set of ways to name a
+	// remote resource, being scanned with regexes that only understand the
+	// shapes someone thought of. Rather than enumerate them forever, the
+	// stored icon simply does not get a stylesheet: a product suggestion is a
+	// small static picture, and presentation attributes (fill, stroke,
+	// opacity) express everything one needs without a CSS parser in the loop.
+	//
+	// The cost is real and worth stating: an icon that set its colours in a
+	// <style> block renders in the default colours instead. That is a visual
+	// downgrade on a thumbnail, against closing a class of bypass that has
+	// produced a finding in every round it was left open.
+	svgStyleBlock = regexp.MustCompile(`(?is)<\s*(?:[^\s<>/"'=:]+:)?style\b[^>]*>.*?</\s*(?:[^\s<>/"'=:]+:)?style\s*>`)
+	svgStyleTag   = regexp.MustCompile(`(?is)</?\s*(?:[^\s<>/"'=:]+:)?style\b[^>]*>`)
+	svgStyleAttr  = regexp.MustCompile(`(?is)\sstyle\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)`)
+
+	// url() survives as a *presentation attribute* value — `fill="url(#grad)"`
+	// is how gradients and masks are actually referenced, and that is not CSS
+	// parsing, just an attribute whose value happens to use the url token.
+	// The allow-list below still governs it.
+	// The unquoted branch consumes `\)` as part of the token rather than
+	// stopping at it. CSS's "consume a url token" does the same, and the
+	// difference is not cosmetic: matching only as far as the first bare `)`
+	// left the tail — `…A\)https://tracker.example/x.png)` — sitting in the
+	// output as trailing text after the neutralised url(). Harmless to a
+	// browser, since the result is not a valid value, but the whole point of
+	// this function is that a remote address does not survive it.
+	svgCSSURL     = regexp.MustCompile(`(?is)url\(\s*(?:"[^"]*"|'[^']*'|(?:\\.|[^)\\])*)\s*\)`)
 	svgEntityDecl = regexp.MustCompile(`(?is)<!ENTITY\b[^>]*>`)
 )
 
@@ -326,6 +358,17 @@ func stripRemoteRefs(in []byte) []byte {
 func stripUnsafeCSSURLs(in []byte) []byte {
 	return svgCSSURL.ReplaceAllFunc(in, func(match []byte) []byte {
 		value := strings.ToLower(cssURLValue(string(match)))
+
+		// A backslash means CSS escaping, and this code does not implement the
+		// "consume an escaped code point" algorithm. An unquoted url() may
+		// carry a literal `)` as `\)`, so a spec-compliant parser keeps reading
+		// past where this one stops — meaning the classification would be made
+		// against a truncated prefix while the untruncated bytes are what get
+		// written back. Refusing anything escaped keeps the decision and the
+		// data the same thing.
+		if strings.ContainsAny(value, `\`) {
+			return []byte("none")
+		}
 
 		if strings.HasPrefix(value, "#") || isInlineRasterImage(value) {
 			return match
@@ -425,6 +468,13 @@ func SanitizeSVG(data []byte) ([]byte, error) {
 	out = svgAnimateBlock.ReplaceAll(out, nil)
 	out = svgAnimateTag.ReplaceAll(out, nil)
 	out = svgEventAttr.ReplaceAll(out, nil)
+
+	// CSS first, so that anything the url() allow-list would otherwise have to
+	// reason about inside a stylesheet is simply gone by the time it runs.
+	out = svgStyleBlock.ReplaceAll(out, nil)
+	out = svgStyleTag.ReplaceAll(out, nil)
+	out = svgStyleAttr.ReplaceAll(out, nil)
+
 	out = stripRemoteRefs(out)
 	out = stripUnsafeCSSURLs(out)
 
