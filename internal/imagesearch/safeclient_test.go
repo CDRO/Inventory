@@ -1,6 +1,7 @@
 package imagesearch_test
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/CDRO/Inventory/internal/imagesearch"
+	"github.com/CDRO/Inventory/internal/store"
 )
 
 // This server fetches URLs that came from a third-party API, from inside the
@@ -138,6 +140,40 @@ func TestSafeClientRefusesARedirectIntoTheInternalNetwork(t *testing.T) {
 
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "secrets", "the internal body must never be read")
+}
+
+// TestTheDefaultCacheClientIsGuarded closes the gap review-go named: every
+// other test in this package injects its own plain client via httptest, so
+// until this one nothing proved that a Cache built the way production builds
+// it — with no client supplied — actually gets the guarded transport.
+//
+// A wiring mistake in NewCache would leave the whole SSRF guard inert while
+// safeclient_test.go stayed green, because that file tests SafeHTTPClient
+// directly rather than the path Fetch takes.
+func TestTheDefaultCacheClientIsGuarded(t *testing.T) {
+	t.Parallel()
+
+	// Stands in for anything on the internal network. It is running and would
+	// answer; the point is that Fetch never reaches it.
+	internal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("secrets"))
+	}))
+	defer internal.Close()
+
+	mem := newMemStore()
+	// nil client: exactly how cmd/inventory builds it.
+	cache := imagesearch.NewCache(t.TempDir(), mem, nil, discardLogger())
+
+	_, err := cache.Fetch(context.Background(), internal.URL+"/photo.png")
+
+	require.Error(t, err, "the default client must refuse a private address")
+	assert.Contains(t, err.Error(), "refusing to connect")
+
+	// And the refusal is not recorded as a permanent verdict, since the
+	// candidate itself was never shown to be unusable.
+	_, lookupErr := mem.CachedImageByHash(context.Background(),
+		imagesearch.HashURL(internal.URL+"/photo.png"))
+	assert.ErrorIs(t, lookupErr, store.ErrNotFound)
 }
 
 // TestSafeClientStopsRedirectLoops keeps a hostile or broken CDN from tying up

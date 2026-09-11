@@ -160,18 +160,105 @@ func TestSanitizeSVGStripsExecutableConstructs(t *testing.T) {
 	}
 }
 
-// TestSanitizeSVGKeepsInlineDataImages — a data: image URI is self-contained
-// and reaches no network, so stripping it would break legitimate icons for no
-// security gain.
-func TestSanitizeSVGKeepsInlineDataImages(t *testing.T) {
+// TestSanitizeSVGKeepsInlineRasterImages — a data: raster URI is
+// self-contained and reaches no network, so stripping it would break
+// legitimate icons for no security gain.
+func TestSanitizeSVGKeepsInlineRasterImages(t *testing.T) {
 	t.Parallel()
 
-	svg := `<svg xmlns="http://www.w3.org/2000/svg"><image href="data:image/png;base64,iVBORw0KGgo="/></svg>`
+	for _, mediaType := range []string{"image/png", "image/jpeg", "image/gif", "image/webp"} {
+		t.Run(mediaType, func(t *testing.T) {
+			t.Parallel()
+
+			svg := `<svg xmlns="http://www.w3.org/2000/svg"><image href="data:` +
+				mediaType + `;base64,iVBORw0KGgo="/></svg>`
+
+			clean, err := imagesearch.SanitizeSVG([]byte(svg))
+			require.NoError(t, err)
+
+			assert.Contains(t, string(clean), "data:"+mediaType)
+		})
+	}
+}
+
+// TestSanitizeSVGRejectsNestedSVGDataURIs is the deepest bypass found in
+// review, and the reason the allow-list names raster types instead of testing
+// for a "data:image/" prefix.
+//
+// `data:image/svg+xml;base64,…` is an image by that prefix and a complete
+// document with its own onload= once decoded. After base64 none of the
+// dangerous substrings appear in any literal form, so every regex in this file
+// looks straight past it.
+func TestSanitizeSVGRejectsNestedSVGDataURIs(t *testing.T) {
+	t.Parallel()
+
+	// <svg onload="alert(1)"/> — nothing in here reads as dangerous.
+	const payload = "PHN2ZyBvbmxvYWQ9ImFsZXJ0KDEpIi8+"
+
+	hostile := []string{
+		`<svg xmlns="http://www.w3.org/2000/svg"><image href="data:image/svg+xml;base64,` + payload + `"/><rect/></svg>`,
+		`<svg xmlns="http://www.w3.org/2000/svg"><image xlink:href="data:image/svg+xml;base64,` + payload + `"/><rect/></svg>`,
+		// Not base64 at all, and still a nested document.
+		`<svg xmlns="http://www.w3.org/2000/svg"><image href="data:image/svg+xml,%3Csvg onload%3D%22alert(1)%22%2F%3E"/><rect/></svg>`,
+		// A media type that merely shares a prefix with an allowed one.
+		`<svg xmlns="http://www.w3.org/2000/svg"><image href="data:image/png+xml;base64,` + payload + `"/><rect/></svg>`,
+	}
+
+	for i, svg := range hostile {
+		t.Run(string(rune('a'+i)), func(t *testing.T) {
+			t.Parallel()
+
+			clean, err := imagesearch.SanitizeSVG([]byte(svg))
+			require.NoError(t, err)
+
+			assert.NotContains(t, string(clean), payload,
+				"a nested document must not survive just because its payload is encoded")
+			assert.NotContains(t, strings.ToLower(string(clean)), "svg+xml")
+			assert.Contains(t, string(clean), "<rect", "the rest of the icon still survives")
+		})
+	}
+}
+
+// TestSanitizeSVGHandlesNonASCIINamespacePrefixes — Go's `\w` is ASCII-only,
+// but an XML namespace prefix is an NCName and may be any Unicode letter. An
+// ASCII-only prefix class left the same bypass one keystroke away.
+func TestSanitizeSVGHandlesNonASCIINamespacePrefixes(t *testing.T) {
+	t.Parallel()
+
+	for _, svg := range []string{
+		`<svg xmlns="http://www.w3.org/2000/svg"><ñ:script>steal()</ñ:script><rect/></svg>`,
+		`<svg xmlns="http://www.w3.org/2000/svg"><日本:script>steal()</日本:script><rect/></svg>`,
+		`<svg xmlns="http://www.w3.org/2000/svg"><ñ:foreignObject><b onload="alert(1)"/></ñ:foreignObject><rect/></svg>`,
+	} {
+		t.Run(svg[:60], func(t *testing.T) {
+			t.Parallel()
+
+			clean, err := imagesearch.SanitizeSVG([]byte(svg))
+			require.NoError(t, err)
+
+			lowered := strings.ToLower(string(clean))
+			assert.NotContains(t, lowered, "steal")
+			assert.NotContains(t, lowered, "onload")
+			assert.NotContains(t, lowered, "alert")
+			assert.Contains(t, string(clean), "<rect")
+		})
+	}
+}
+
+// TestSanitizeSVGRemovesMismatchedPrefixPairs — `<s:script>…</t:script>` is
+// malformed XML, but a browser's error recovery is not something to rely on
+// for safety.
+func TestSanitizeSVGRemovesMismatchedPrefixPairs(t *testing.T) {
+	t.Parallel()
+
+	svg := `<svg xmlns="http://www.w3.org/2000/svg"><s:script>steal()</t:script><rect/></svg>`
 
 	clean, err := imagesearch.SanitizeSVG([]byte(svg))
 	require.NoError(t, err)
 
-	assert.Contains(t, string(clean), "data:image/png")
+	lowered := strings.ToLower(string(clean))
+	assert.NotContains(t, lowered, "script")
+	assert.NotContains(t, lowered, "steal")
 }
 
 // TestSanitizeSVGRejectsWhatIsLeftWithNothing — an "icon" whose entire content

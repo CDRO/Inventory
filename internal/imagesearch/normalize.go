@@ -230,16 +230,23 @@ var (
 	// So: remove properly paired blocks including their content, then sweep up
 	// any residual tag of that name, which covers the self-closing form, an
 	// unclosed opening tag, and an orphaned closing tag alike.
-	// `(?:[\w.-]+:)?` on every element pattern is not decoration. XML lets a
-	// document bind any prefix to the SVG namespace, so `<s:script>` is a
-	// script element by every parser that matters while matching none of a
-	// pattern anchored on a bare `<script`. Caught in review with a working
-	// proof of concept; the CSP on the serving route contains it there, but a
-	// copy of the file saved and reopened from disk has no such protection.
-	svgScriptBlock  = regexp.MustCompile(`(?is)<\s*(?:[\w.-]+:)?script\b[^>]*>.*?</\s*(?:[\w.-]+:)?script\s*>`)
-	svgScriptTag    = regexp.MustCompile(`(?is)</?\s*(?:[\w.-]+:)?script\b[^>]*>`)
-	svgForeignBlock = regexp.MustCompile(`(?is)<\s*(?:[\w.-]+:)?foreignObject\b[^>]*>.*?</\s*(?:[\w.-]+:)?foreignObject\s*>`)
-	svgForeignTag   = regexp.MustCompile(`(?is)</?\s*(?:[\w.-]+:)?foreignObject\b[^>]*>`)
+	// The optional prefix group on every element pattern is not decoration.
+	// XML lets a document bind any prefix to the SVG namespace, so
+	// `<s:script>` is a script element by every parser that matters while
+	// matching none of a pattern anchored on a bare `<script`. Caught in
+	// review with a working proof of concept; the CSP on the serving route
+	// contains it there, but a copy of the file saved and reopened from disk
+	// has no such protection.
+	//
+	// The class is "anything that is not a delimiter" rather than `[\w.-]`,
+	// because Go's `\w` is ASCII-only while an XML namespace prefix is an
+	// NCName and may be any Unicode letter. `<ñ:script>` is as valid as
+	// `<s:script>`, and an ASCII class would have left the same hole one
+	// keystroke further away.
+	svgScriptBlock  = regexp.MustCompile(`(?is)<\s*(?:[^\s<>/"'=:]+:)?script\b[^>]*>.*?</\s*(?:[^\s<>/"'=:]+:)?script\s*>`)
+	svgScriptTag    = regexp.MustCompile(`(?is)</?\s*(?:[^\s<>/"'=:]+:)?script\b[^>]*>`)
+	svgForeignBlock = regexp.MustCompile(`(?is)<\s*(?:[^\s<>/"'=:]+:)?foreignObject\b[^>]*>.*?</\s*(?:[^\s<>/"'=:]+:)?foreignObject\s*>`)
+	svgForeignTag   = regexp.MustCompile(`(?is)</?\s*(?:[^\s<>/"'=:]+:)?foreignObject\b[^>]*>`)
 
 	// SMIL animation elements are removed outright.
 	//
@@ -252,8 +259,8 @@ var (
 	// yet — the animation installs it later. Nothing about a static product
 	// icon needs animation, so the whole family goes rather than trying to
 	// decide which attributeName values are safe to animate.
-	svgAnimateBlock   = regexp.MustCompile(`(?is)<\s*(?:[\w.-]+:)?(?:animate|animateTransform|animateMotion|animateColor|set)\b[^>]*>.*?</\s*(?:[\w.-]+:)?(?:animate|animateTransform|animateMotion|animateColor|set)\s*>`)
-	svgAnimateTag     = regexp.MustCompile(`(?is)</?\s*(?:[\w.-]+:)?(?:animate|animateTransform|animateMotion|animateColor|set)\b[^>]*>`)
+	svgAnimateBlock   = regexp.MustCompile(`(?is)<\s*(?:[^\s<>/"'=:]+:)?(?:animate|animateTransform|animateMotion|animateColor|set)\b[^>]*>.*?</\s*(?:[^\s<>/"'=:]+:)?(?:animate|animateTransform|animateMotion|animateColor|set)\s*>`)
+	svgAnimateTag     = regexp.MustCompile(`(?is)</?\s*(?:[^\s<>/"'=:]+:)?(?:animate|animateTransform|animateMotion|animateColor|set)\b[^>]*>`)
 	svgEventAttr      = regexp.MustCompile(`(?is)\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)`)
 	svgHrefAttr       = regexp.MustCompile(`(?is)\s(?:xlink:)?href\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)`)
 	svgCSSExternalURL = regexp.MustCompile(`(?is)url\(\s*['"]?\s*(?:https?:|//|javascript:)[^)]*\)`)
@@ -274,10 +281,20 @@ func stripRemoteRefs(in []byte) []byte {
 		value := strings.ToLower(strings.TrimSpace(attrValue(string(attr))))
 
 		switch {
-		// An inline image is self-contained: it reaches no network and
-		// executes nothing, so stripping it would break legitimate icons for
-		// no gain.
-		case strings.HasPrefix(value, "data:image/"):
+		// An inline *raster* image is self-contained: it reaches no network
+		// and executes nothing, so stripping it would break legitimate icons
+		// for no gain.
+		//
+		// The media type is checked against a fixed list rather than by the
+		// "data:image/" prefix, and that distinction is the whole finding:
+		// `data:image/svg+xml;base64,…` is an image by that prefix and a
+		// complete document with its own `onload=` once decoded. None of the
+		// patterns in this file can see it, because after base64 the
+		// dangerous substrings are not present in any literal form. Decoding
+		// and recursively sanitizing would be the other way out; refusing a
+		// nested document instead is smaller, and an icon that needs one
+		// embedded inside an attribute is not an icon worth keeping.
+		case isInlineRasterImage(value):
 			return attr
 		// A fragment points inside this same document — how <use> and gradient
 		// references work, which most real icons rely on.
@@ -287,6 +304,39 @@ func stripRemoteRefs(in []byte) []byte {
 			return nil
 		}
 	})
+}
+
+// inlineRasterTypes are the data: media types that cannot carry a document.
+//
+// Every one of these decodes to pixels. Anything XML-shaped — svg+xml, and
+// any other `+xml` type a browser might learn to render — decodes to markup
+// with its own script and event handlers, which is the thing this file exists
+// to remove.
+var inlineRasterTypes = []string{
+	"data:image/png",
+	"data:image/jpeg",
+	"data:image/jpg",
+	"data:image/gif",
+	"data:image/webp",
+	"data:image/bmp",
+}
+
+// isInlineRasterImage reports whether value is a data: URI holding a raster
+// image and nothing else.
+func isInlineRasterImage(value string) bool {
+	for _, prefix := range inlineRasterTypes {
+		if !strings.HasPrefix(value, prefix) {
+			continue
+		}
+		// The next character must end the media type, so that
+		// "data:image/png+xml" or "data:image/pngx" cannot pass by sharing a
+		// prefix with a type that is allowed.
+		rest := value[len(prefix):]
+		if rest == "" || rest[0] == ';' || rest[0] == ',' {
+			return true
+		}
+	}
+	return false
 }
 
 // attrValue pulls the value out of an `attr="value"` match, tolerating single

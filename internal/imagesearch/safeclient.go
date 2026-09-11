@@ -41,7 +41,21 @@ func SafeHTTPClient(timeout time.Duration) *http.Client {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 
 	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		// No proxy, deliberately — not even from the environment.
+		//
+		// The guarantee below is "the IP this dials is an IP that was
+		// checked". A proxy breaks it at the root: the dial goes to the
+		// proxy's address, the proxy is the thing that resolves and connects
+		// to the real target, and the check above it inspects the wrong host
+		// entirely. With HTTPS_PROXY set, an attacker's redirect to
+		// 169.254.169.254 would be honoured by the proxy and this code would
+		// never see the address.
+		//
+		// Nothing here needs a proxy: these are fetches of public images from
+		// the open internet. A deployment that genuinely requires one to reach
+		// the internet needs this guard rewritten to validate the *target*
+		// rather than the connection, which is a different design.
+		Proxy: nil,
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			host, port, err := net.SplitHostPort(address)
 			if err != nil {
