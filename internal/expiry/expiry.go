@@ -11,8 +11,10 @@
 // days" is an opinion about someone's fridge, not a fact to compile in.
 //
 // The one exception is the item-type fallback at the end of the chain, which
-// exists only so that a product with no category and no rule anywhere still
-// gets a sensible date instead of none.
+// exists so that a product with no category and no rule anywhere still gets a
+// sensible answer rather than an arbitrary one. For a perishable or a
+// long-shelf-life item that answer is a date; for a non-perishable it is "no
+// expiration", which is equally an answer — a plush toy does not go off.
 //
 // # Derived versus user, and why the distinction carries the package
 //

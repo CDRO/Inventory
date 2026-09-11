@@ -418,3 +418,161 @@ func TestAFailedSeedRollsBackTheStorage(t *testing.T) {
 func starterCategoryNames() []string {
 	return []string{"Food", "Dairy", "Produce", "Meat", "Canned", "Household", "Collectibles"}
 }
+
+// TestCreateBatchAppliesTheResolvedDefault is acceptance criterion 1:
+// "Creating a batch without an explicit expiration date always applies the
+// resolved default (or NULL when the resolution yields 'no expiration'), never
+// leaves it unset by omission."
+//
+// Found missing in review — ResolveExpiryFor existed with no callers, so the
+// rules were computable and never actually applied.
+func TestCreateBatchAppliesTheResolvedDefault(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID, productID, locationID, _, _ := expiryFixture(t, ctx, s)
+
+	batch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: productID, LocationID: locationID, Quantity: 1,
+		Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+
+	require.NotNil(t, batch.ExpirationDate, "a batch created with no date must not be left without one")
+	assert.Equal(t, store.ExpirationDerived, batch.ExpirationSource)
+
+	// Dairy's 10-day rule, from the fixture.
+	expected := batch.CreatedAt.UTC().Truncate(24*time.Hour).AddDate(0, 0, 10)
+	assert.Equal(t, expected.Format(time.DateOnly), batch.ExpirationDate.Format(time.DateOnly))
+}
+
+// TestCreateBatchResolvesToNoExpiryForNonPerishables — "or NULL when the
+// resolution yields 'no expiration'". A plush toy does not go off, and that is
+// a resolved answer rather than a missing one.
+func TestCreateBatchResolvesToNoExpiryForNonPerishables(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+
+	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{
+		Name: "Plush Dinosaur", ItemType: store.ItemNonPerishable,
+	})
+	require.NoError(t, err)
+	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Shelf"})
+	require.NoError(t, err)
+
+	batch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: product.ID, LocationID: location.ID, Quantity: 1,
+		Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+
+	assert.Nil(t, batch.ExpirationDate)
+	assert.Equal(t, store.ExpirationDerived, batch.ExpirationSource,
+		"no rule produced a date, which is different from a person saying there is none")
+}
+
+// TestCreateBatchDoesNotOverrideADeliberateNoExpiry — the guard is on the
+// source, not on the date being nil, because nil means two different things. A
+// caller stating ExpirationUser with no date is saying "this has no expiry",
+// and resolving over the top of that is the exact behaviour the whole
+// derived/user distinction exists to prevent.
+func TestCreateBatchDoesNotOverrideADeliberateNoExpiry(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID, productID, locationID, _, _ := expiryFixture(t, ctx, s)
+
+	batch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: productID, LocationID: locationID, Quantity: 1,
+		ExpirationSource: store.ExpirationUser,
+		Reason:           store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+
+	assert.Nil(t, batch.ExpirationDate,
+		"a person said this has no expiry; the Dairy rule must not fill it in")
+	assert.Equal(t, store.ExpirationUser, batch.ExpirationSource)
+}
+
+// TestRefilingAProductRecomputesItsDerivedDates is acceptance criterion 4:
+// "'derived' means 'follows the current rules', and a stale derived date is
+// simply a wrong one." Also found missing in review.
+func TestRefilingAProductRecomputesItsDerivedDates(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID, productID, locationID, food, _ := expiryFixture(t, ctx, s)
+
+	// Starts in Dairy (10 days).
+	batch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: productID, LocationID: locationID, Quantity: 1,
+		Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+
+	canned, err := s.CreateCategory(ctx, storageID, store.NewCategory{
+		Name: "Canned", ParentID: &food, DefaultShelfLifeDays: shelfLife(730),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, s.SetProductCategory(ctx, storageID, productID, &canned.ID))
+
+	date, source := batchExpiry(t, ctx, batch.ID)
+	require.NotNil(t, date)
+	assert.Equal(t, "derived", source)
+
+	expected := batch.CreatedAt.UTC().Truncate(24*time.Hour).AddDate(0, 0, 730)
+	assert.Equal(t, expected.Format(time.DateOnly), date.Format(time.DateOnly),
+		"the date follows the rule that now applies, not the one that used to")
+}
+
+// TestRefilingAProductLeavesUserDatesAlone — the same protection as every
+// other recompute path, checked on this one too because it is a separate entry
+// point into the same machinery.
+func TestRefilingAProductLeavesUserDatesAlone(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID, productID, locationID, food, _ := expiryFixture(t, ctx, s)
+
+	typed := time.Date(2027, 8, 9, 0, 0, 0, 0, time.UTC)
+	batch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: productID, LocationID: locationID, Quantity: 1,
+		ExpirationDate: &typed, ExpirationSource: store.ExpirationUser,
+		Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+
+	canned, err := s.CreateCategory(ctx, storageID, store.NewCategory{
+		Name: "Canned", ParentID: &food, DefaultShelfLifeDays: shelfLife(730),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, s.SetProductCategory(ctx, storageID, productID, &canned.ID))
+
+	date, source := batchExpiry(t, ctx, batch.ID)
+	require.NotNil(t, date)
+	assert.Equal(t, "2027-08-09", date.Format(time.DateOnly))
+	assert.Equal(t, "user", source)
+}
+
+// TestRefilingToNoCategoryFallsBackToItemType — clearing the category is a
+// re-file too, and the chain has to land on the item-type fallback rather than
+// leaving a date computed from a rule that no longer applies.
+func TestRefilingToNoCategoryFallsBackToItemType(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID, productID, locationID, _, _ := expiryFixture(t, ctx, s)
+
+	batch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: productID, LocationID: locationID, Quantity: 1,
+		Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, s.SetProductCategory(ctx, storageID, productID, nil))
+
+	date, _ := batchExpiry(t, ctx, batch.ID)
+	require.NotNil(t, date)
+
+	// perishable → 7 days, the fallback map's value.
+	expected := batch.CreatedAt.UTC().Truncate(24*time.Hour).AddDate(0, 0, 7)
+	assert.Equal(t, expected.Format(time.DateOnly), date.Format(time.DateOnly))
+}

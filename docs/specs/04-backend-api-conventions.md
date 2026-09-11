@@ -20,6 +20,7 @@ internal/
 ├── vision/               # Gemini client, prompts, parsing, model resilience
 ├── imagesearch/          # SerpAPI + Iconify clients
 ├── matching/             # shared product matching (catalog-first, then trigram)
+├── expiry/               # shelf-life resolution chain (08-expiration-and-classification.md)
 ├── jobs/                 # background job runner + job store
 └── export/               # CSV/PDF generation
 web/

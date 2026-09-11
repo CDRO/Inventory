@@ -120,6 +120,27 @@ func (s *Store) RecomputeDerivedExpiry(ctx context.Context, storageID, productID
 	var affected int
 
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		n, err := recomputeDerivedExpiry(ctx, tx, storageID, productID)
+		affected = n
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return affected, nil
+}
+
+// recomputeDerivedExpiry is the transaction-scoped body.
+//
+// It exists so that a caller already inside a transaction — re-filing a
+// product into a different category, say — recomputes in the *same*
+// transaction as the change that caused it. Opening a second one would leave a
+// window where the product's category and its batches' dates disagree, and a
+// failure in between would make that permanent.
+func recomputeDerivedExpiry(ctx context.Context, tx pgx.Tx, storageID, productID uuid.UUID) (int, error) {
+	affected := 0
+
+	err := func() error {
 		rules, err := expiryRulesFor(ctx, tx, storageID, productID)
 		if err != nil {
 			return err
@@ -172,7 +193,7 @@ func (s *Store) RecomputeDerivedExpiry(ctx context.Context, storageID, productID
 			affected += int(tag.RowsAffected())
 		}
 		return nil
-	})
+	}()
 	if err != nil {
 		return 0, err
 	}
