@@ -259,12 +259,18 @@ var (
 	// yet — the animation installs it later. Nothing about a static product
 	// icon needs animation, so the whole family goes rather than trying to
 	// decide which attributeName values are safe to animate.
-	svgAnimateBlock   = regexp.MustCompile(`(?is)<\s*(?:[^\s<>/"'=:]+:)?(?:animate|animateTransform|animateMotion|animateColor|set)\b[^>]*>.*?</\s*(?:[^\s<>/"'=:]+:)?(?:animate|animateTransform|animateMotion|animateColor|set)\s*>`)
-	svgAnimateTag     = regexp.MustCompile(`(?is)</?\s*(?:[^\s<>/"'=:]+:)?(?:animate|animateTransform|animateMotion|animateColor|set)\b[^>]*>`)
-	svgEventAttr      = regexp.MustCompile(`(?is)\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)`)
-	svgHrefAttr       = regexp.MustCompile(`(?is)\s(?:xlink:)?href\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)`)
-	svgCSSExternalURL = regexp.MustCompile(`(?is)url\(\s*['"]?\s*(?:https?:|//|javascript:)[^)]*\)`)
-	svgEntityDecl     = regexp.MustCompile(`(?is)<!ENTITY\b[^>]*>`)
+	svgAnimateBlock = regexp.MustCompile(`(?is)<\s*(?:[^\s<>/"'=:]+:)?(?:animate|animateTransform|animateMotion|animateColor|set)\b[^>]*>.*?</\s*(?:[^\s<>/"'=:]+:)?(?:animate|animateTransform|animateMotion|animateColor|set)\s*>`)
+	svgAnimateTag   = regexp.MustCompile(`(?is)</?\s*(?:[^\s<>/"'=:]+:)?(?:animate|animateTransform|animateMotion|animateColor|set)\b[^>]*>`)
+	svgEventAttr    = regexp.MustCompile(`(?is)\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)`)
+	svgHrefAttr     = regexp.MustCompile(`(?is)\s(?:xlink:)?href\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)`)
+	// Every url() in CSS, not just the ones with a scheme that looks
+	// dangerous. This was a deny-list of https?:/javascript:— and a deny-list
+	// missed exactly what the comment on stripRemoteRefs says a deny-list
+	// always misses: `mask:url(data:image/svg+xml;base64,…)` names no listed
+	// scheme, carries a whole document, and sailed through while the same
+	// payload was being correctly refused one attribute away on href.
+	svgCSSURL     = regexp.MustCompile(`(?is)url\(\s*(?:"[^"]*"|'[^']*'|[^)]*)\s*\)`)
+	svgEntityDecl = regexp.MustCompile(`(?is)<!ENTITY\b[^>]*>`)
 )
 
 // stripRemoteRefs removes every href/xlink:href that could reach the network or
@@ -304,6 +310,48 @@ func stripRemoteRefs(in []byte) []byte {
 			return nil
 		}
 	})
+}
+
+// stripUnsafeCSSURLs neutralises every CSS url() that is not provably inert.
+//
+// It applies the same allow-list as stripRemoteRefs, for the same reason: CSS
+// can load a document too. `mask`, `fill`, `clip-path`, `filter` and
+// `background` all take a url(), and a browser will honour a data: URI there
+// exactly as it would in an href.
+//
+// An internal fragment is kept because it is how gradients, masks and <use>
+// actually work — stripping `url(#grad)` would break the majority of real
+// icons while protecting nothing, since it names something inside this same
+// already-sanitized document.
+func stripUnsafeCSSURLs(in []byte) []byte {
+	return svgCSSURL.ReplaceAllFunc(in, func(match []byte) []byte {
+		value := strings.ToLower(cssURLValue(string(match)))
+
+		if strings.HasPrefix(value, "#") || isInlineRasterImage(value) {
+			return match
+		}
+		// `none` rather than deletion: these appear as property values, and
+		// removing one outright leaves `mask:;` — valid enough that browsers
+		// shrug, but harder to read when debugging a stored icon.
+		return []byte("none")
+	})
+}
+
+// cssURLValue pulls the target out of a `url( "…" )` match, tolerating either
+// quote style and the unquoted form.
+func cssURLValue(match string) string {
+	open := strings.Index(match, "(")
+	if open < 0 {
+		return ""
+	}
+	inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(match[open+1:]), ")"))
+
+	if len(inner) >= 2 && (inner[0] == '"' || inner[0] == '\'') {
+		if end := strings.IndexByte(inner[1:], inner[0]); end >= 0 {
+			inner = inner[1 : 1+end]
+		}
+	}
+	return strings.TrimSpace(inner)
 }
 
 // inlineRasterTypes are the data: media types that cannot carry a document.
@@ -378,7 +426,7 @@ func SanitizeSVG(data []byte) ([]byte, error) {
 	out = svgAnimateTag.ReplaceAll(out, nil)
 	out = svgEventAttr.ReplaceAll(out, nil)
 	out = stripRemoteRefs(out)
-	out = svgCSSExternalURL.ReplaceAll(out, []byte("none"))
+	out = stripUnsafeCSSURLs(out)
 
 	if !bytes.Contains(bytes.ToLower(out), []byte("<svg")) {
 		return nil, fmt.Errorf("%w: nothing left after sanitizing", ErrUnusable)

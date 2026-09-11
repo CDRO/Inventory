@@ -81,6 +81,28 @@ func TestSanitizeSVGStripsExecutableConstructs(t *testing.T) {
 			absent: []string{"tracker.example"},
 		},
 		{
+			// The CSS side was a deny-list of schemes while href had already
+			// become an allow-list, so the identical nested-document payload
+			// was refused on one attribute and honoured one attribute away.
+			// mask, fill, clip-path, filter and background all take a url().
+			name:    "css url() carrying a nested SVG data URI",
+			svg:     `<svg xmlns="http://www.w3.org/2000/svg"><rect style="mask:url(data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9ImFsZXJ0KDEpIi8+)"/><rect/></svg>`,
+			absent:  []string{"svg+xml", "PHN2ZyBvbmxvYWQ"},
+			present: []string{"<rect"},
+		},
+		{
+			name:    "css url() with a javascript scheme",
+			svg:     `<svg xmlns="http://www.w3.org/2000/svg"><rect style="fill:url(javascript:alert(1))"/><rect/></svg>`,
+			absent:  []string{"javascript:", "alert"},
+			present: []string{"<rect"},
+		},
+		{
+			name:    "css url() in a style block, not just an attribute",
+			svg:     `<svg xmlns="http://www.w3.org/2000/svg"><style>rect{mask:url("data:image/svg+xml,%3Csvg onload%3Dalert(1)%2F%3E")}</style><rect/></svg>`,
+			absent:  []string{"svg+xml", "onload"},
+			present: []string{"<rect"},
+		},
+		{
 			// Found in review with a working proof of concept. XML lets a
 			// document bind any prefix to the SVG namespace, so <s:script> is a
 			// script element to every parser that matters while matching none
@@ -179,6 +201,27 @@ func TestSanitizeSVGKeepsInlineRasterImages(t *testing.T) {
 			assert.Contains(t, string(clean), "data:"+mediaType)
 		})
 	}
+}
+
+// TestSanitizeSVGKeepsInternalCSSReferences — url(#id) is how gradients,
+// masks and <use> actually work. Stripping it would break the majority of real
+// icons while protecting nothing: it names something inside this same,
+// already-sanitized document.
+func TestSanitizeSVGKeepsInternalCSSReferences(t *testing.T) {
+	t.Parallel()
+
+	svg := `<svg xmlns="http://www.w3.org/2000/svg">` +
+		`<linearGradient id="g"/><rect style="fill:url(#g)"/>` +
+		`<rect style="mask:url('#g')"/>` +
+		`<rect style="fill:url(data:image/png;base64,iVBORw0KGgo=)"/></svg>`
+
+	clean, err := imagesearch.SanitizeSVG([]byte(svg))
+	require.NoError(t, err)
+
+	assert.Contains(t, string(clean), "url(#g)", "an internal fragment reference must survive")
+	assert.Contains(t, string(clean), "#g", "including the quoted form")
+	assert.Contains(t, string(clean), "data:image/png", "as must an inline raster")
+	assert.NotContains(t, string(clean), "none", "nothing here needed neutralising")
 }
 
 // TestSanitizeSVGRejectsNestedSVGDataURIs is the deepest bypass found in
