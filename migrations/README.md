@@ -25,10 +25,11 @@ Two details in that command are load-bearing:
 | `00001_extensions.sql` | `pg_trgm`, alone and first — the `gin_trgm_ops` indexes in the next migration cannot be declared without it |
 | `00002_core_schema.sql` | The core tables of [`docs/specs/02-data-model.md`](../docs/specs/02-data-model.md) |
 | `00003_client_sync.sql` | `pairing_codes`, `idempotency_records`, `tombstones` — the client contract in [`docs/specs/12-client-api-contract.md`](../docs/specs/12-client-api-contract.md) |
+| `00004_shopping_and_image_cache.sql` | `shopping_lists`, `shopping_list_items`, `cached_images` — the reconciliation flow and its suggestion-image cache in [`docs/specs/07-shopping-list-reconciliation.md`](../docs/specs/07-shopping-list-reconciliation.md) |
 
 Every file carries both `-- +goose Up` and `-- +goose Down`, and the down path
-is exercised in CI-equivalent form: `down` three times empties the schema and
-`up` restores all fifteen tables.
+is exercised in CI-equivalent form: `down` four times empties the schema and
+`up` restores all eighteen tables.
 
 `00001`'s down step deliberately does **not** drop the extension. Other schemas
 in the same database may depend on `pg_trgm`, and dropping it would take their

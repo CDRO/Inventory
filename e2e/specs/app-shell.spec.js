@@ -50,6 +50,7 @@ test("every shared JS module is reachable and served as JavaScript", async ({ re
     "/js/pages/index.js",
     "/js/pages/storages.js",
     "/js/pages/locations.js",
+    "/js/pages/shopping-list.js",
   ];
 
   for (const path of modules) {

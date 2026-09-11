@@ -69,6 +69,7 @@ type APIStore interface {
 	AuthStore
 	LocationStore
 	BatchStore
+	ShoppingListStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -85,6 +86,15 @@ type Deps struct {
 	// registered at all — the failure mode of forgetting to pass one is
 	// "the API is absent", never "the API is unguarded".
 	Store APIStore
+	// Matcher resolves free text to a product
+	// (docs/specs/07-shopping-list-reconciliation.md). Required for the
+	// shopping-list routes; when nil they are not registered.
+	Matcher Matcher
+	// Images produces image suggestions, and ImageCache serves the bytes they
+	// point at. Both nil means the image routes are absent, which is the
+	// honest state for a deployment with no provider configured.
+	Images     ImageSuggester
+	ImageCache ImageCache
 }
 
 // NewRouter builds the application's HTTP handler.
@@ -145,6 +155,20 @@ func NewRouter(d Deps) http.Handler {
 
 			sr.Patch("/inventory-batches/{id}", batches.Update)
 			sr.Post("/inventory-batches/{id}/split", batches.Split)
+
+			if d.Matcher != nil {
+				lists := NewShoppingListHandler(d.Store, d.Matcher, errs)
+				sr.Post("/shopping-lists", lists.Create)
+				sr.Get("/shopping-lists/{id}", lists.Get)
+				sr.Post("/shopping-lists/{id}/items/{item_id}/rematch", lists.Rematch)
+				sr.Post("/shopping-lists/{id}/items/{item_id}/resolve", lists.Resolve)
+			}
+
+			if d.Images != nil && d.ImageCache != nil {
+				images := NewImageHandler(d.Images, d.ImageCache, errs)
+				sr.Get("/image-suggestions", images.Suggest)
+				sr.Get("/images/{hash}", images.Serve)
+			}
 		})
 	}
 

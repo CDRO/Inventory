@@ -31,5 +31,11 @@ services:
       - ./web:/src/web          # edit frontend files, just refresh the browser
       - ./internal:/src/internal
       - ./cmd:/src/cmd
+      # Without this, /src/migrations is whatever was baked into the image, so
+      # a newly added migration is invisible to `docker compose run --rm app go
+      # test ./...` until someone rebuilds — and the failure is a confusing
+      # "relation does not exist" from a test suite that migrates its own
+      # throwaway database, not an obvious "your migration is missing".
+      - ./migrations:/src/migrations
     ports:
       - "8000:8000"             # direct access, bypassing Traefik, for debugging

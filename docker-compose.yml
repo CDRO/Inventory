@@ -40,6 +40,14 @@ services:
       - traefik.http.services.app.loadbalancer.server.port=8000
     volumes:
       - uploads:/data/uploads
+      # The suggestion-image cache (docs/specs/07-shopping-list-reconciliation.md).
+      # A separate volume from uploads because the two tiers have opposite
+      # lifetimes: this one is evictable and re-fetchable by definition, while
+      # a promoted product image is permanent. Without a volume at all the
+      # cache would live in the container's writable layer and be discarded on
+      # every deploy, which turns "spend one API call per product, ever" into
+      # "spend one per product per release".
+      - imagecache:/data/cache
     restart: unless-stopped
 
   setup:
@@ -96,3 +104,4 @@ services:
 volumes:
   pgdata:
   uploads:
+  imagecache:

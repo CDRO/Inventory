@@ -330,6 +330,14 @@ services:
       - traefik.http.services.app.loadbalancer.server.port=8000
     volumes:
       - uploads:/data/uploads
+      # The suggestion-image cache (07-shopping-list-reconciliation.md). A
+      # separate volume from uploads because the tiers have opposite
+      # lifetimes: this one is evictable and re-fetchable by definition,
+      # a promoted product image is permanent. Without a volume the cache
+      # lives in the container's writable layer and is discarded on every
+      # deploy, turning "one provider call per product, ever" into one per
+      # product per release.
+      - imagecache:/data/cache
     restart: unless-stopped
 
   setup:
@@ -365,6 +373,7 @@ services:
 volumes:
   pgdata:
   uploads:
+  imagecache:
 ```
 
 The single `app` service serves everything: the static frontend at `/`,
@@ -401,6 +410,12 @@ services:
       - ./web:/src/web          # edit frontend files, just refresh the browser
       - ./internal:/src/internal
       - ./cmd:/src/cmd
+      # Without this, /src/migrations is whatever was baked into the image,
+      # so a newly added migration is invisible to
+      # `docker compose run --rm app go test ./...` until someone rebuilds —
+      # and the symptom is a confusing "relation does not exist" from a
+      # suite that migrates its own throwaway database.
+      - ./migrations:/src/migrations
     ports:
       - "8000:8000"             # direct access, bypassing Traefik, for debugging
 ```
