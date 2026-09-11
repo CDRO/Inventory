@@ -106,10 +106,14 @@ The same cascade runs, scoped to one storage, when a user changes
 `categories.default_shelf_life_days` or `products.default_shelf_life_days`,
 or re-files a product into a different category: derived dates are
 recomputed, user-set dates are left alone. Those run **inline, before the
-response**, and return the number of batches they touched. They are bounded
-by one household's rows, and running them inline means a user who changes a
-rule and then looks at their inventory sees the new dates rather than the
-old ones.
+response**, because they are bounded by one household's rows and because a
+user who changes a rule and then looks at their inventory should see the new
+dates rather than the old ones.
+
+Only the category-rule change reports a count, since it is the one a user
+performs *in order to* change dates. Re-filing a product is a change of
+category that happens to move dates as a consequence, so the recompute is
+silent. Changing `products.default_shelf_life_days` has no endpoint yet.
 
 ## Editing / removing expiry
 
