@@ -39,11 +39,95 @@ func (s *Store) CreateStorage(ctx context.Context, name string) (*Storage, error
 		return nil, err
 	}
 
-	row := s.pool.QueryRow(ctx, `
-		INSERT INTO storages (id, name) VALUES ($1, $2)
-		RETURNING id, name, created_at`, id, name)
+	var out *Storage
+	err = s.inTx(ctx, func(tx pgx.Tx) error {
+		row := tx.QueryRow(ctx, `
+			INSERT INTO storages (id, name) VALUES ($1, $2)
+			RETURNING id, name, created_at`, id, name)
 
-	return scanStorage(row)
+		storage, err := scanStorage(row)
+		if err != nil {
+			return err
+		}
+		if err := seedStarterCategories(ctx, tx, storage.ID); err != nil {
+			return err
+		}
+		out = storage
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// starterCategories is the tree a new storage begins with
+// (docs/specs/08-expiration-and-classification.md).
+//
+// The spec calls these "a starting default the operator should review and
+// adjust in-app — they are not a hard requirement". They exist so that the
+// very first batch somebody adds gets a sensible expiry date instead of
+// falling all the way through to the item-type fallback, and so that the
+// category tree is something to edit rather than something to invent.
+//
+// A NULL shelf life means "inherit", not "no expiry": Household and
+// Collectibles leave the decision to whatever a user files underneath them.
+var starterCategories = []struct {
+	name   string
+	parent string // empty for a root
+	days   *int
+}{
+	{name: "Food", days: intPtr(365)},
+	{name: "Dairy", parent: "Food", days: intPtr(10)},
+	{name: "Produce", parent: "Food", days: intPtr(7)},
+	{name: "Meat", parent: "Food", days: intPtr(4)},
+	{name: "Canned", parent: "Food", days: intPtr(730)},
+	{name: "Household", days: nil},
+	{name: "Collectibles", days: nil},
+}
+
+func intPtr(n int) *int { return &n }
+
+// seedStarterCategories writes the starter tree for a newly created storage.
+//
+// It runs in the same transaction as the storage insert, so a storage never
+// exists without its categories — a half-seeded storage would present the user
+// with a partial tree and no way to tell it apart from one they had edited
+// themselves.
+//
+// The spec describes this as something "the initial migration creates ... per
+// new storage", which a migration cannot do: storages are created at runtime,
+// long after migrations have run. Creation is the only place it can live.
+func seedStarterCategories(ctx context.Context, tx pgx.Tx, storageID uuid.UUID) error {
+	ids := make(map[string]uuid.UUID, len(starterCategories))
+
+	for _, category := range starterCategories {
+		id, err := newID()
+		if err != nil {
+			return err
+		}
+
+		var parentID *uuid.UUID
+		if category.parent != "" {
+			parent, ok := ids[category.parent]
+			if !ok {
+				// The table above is ordered parents-first; a miss means it
+				// was edited into an order that cannot be built.
+				return fmt.Errorf("store: starter category %q names unknown parent %q",
+					category.name, category.parent)
+			}
+			parentID = &parent
+		}
+
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO categories (id, storage_id, parent_id, name, default_shelf_life_days)
+			VALUES ($1, $2, $3, $4, $5)`,
+			id, storageID, parentID, category.name, category.days); err != nil {
+			return fmt.Errorf("store: seed starter category %q: %w", category.name, err)
+		}
+		ids[category.name] = id
+	}
+	return nil
 }
 
 // DeleteStorage removes a storage and everything scoped to it.

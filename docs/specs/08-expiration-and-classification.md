@@ -45,12 +45,17 @@ var itemTypeFallbackDays = map[string]*int{
 }
 ```
 
-**Seed data:** the initial migration creates a starter category tree per
-new storage with sensible values (`Food` → 365; `Food → Dairy` → 10;
-`Food → Produce` → 7; `Food → Meat` → 4; `Food → Canned` → 730;
-`Household` → NULL; `Collectibles` → NULL). These durations are a starting
+**Seed data:** creating a storage seeds it with a starter category tree with
+sensible values (`Food` → 365; `Food → Dairy` → 10; `Food → Produce` → 7;
+`Food → Meat` → 4; `Food → Canned` → 730; `Household` → NULL;
+`Collectibles` → NULL), written in the same transaction as the storage row
+so a storage never exists without its tree. These durations are a starting
 default the operator should review and adjust in-app — they are not a hard
 requirement, and editing them is expected.
+
+The seeding lives at storage creation rather than in a migration, because a
+migration cannot do it: storages are created at runtime, long after
+migrations have run, and the tree is per storage.
 
 `expiration_date = batch.created_at (date) + resolved_days`, computed
 server-side at batch-creation time (in the confirm endpoints of
@@ -94,10 +99,21 @@ database, not only to future batches:
    admin gets a count of affected batches, and the work is logged. It
    writes no `inventory_logs` rows: quantities do not change.
 
+The background job applies to **this** cascade, the admin one, because it
+crosses every storage and is unbounded in size.
+
 The same cascade runs, scoped to one storage, when a user changes
-`categories.default_shelf_life_days` or
-`products.default_shelf_life_days`: derived dates are recomputed,
-user-set dates are left alone.
+`categories.default_shelf_life_days` or `products.default_shelf_life_days`,
+or re-files a product into a different category: derived dates are
+recomputed, user-set dates are left alone. Those run **inline, before the
+response**, because they are bounded by one household's rows and because a
+user who changes a rule and then looks at their inventory should see the new
+dates rather than the old ones.
+
+Only the category-rule change reports a count, since it is the one a user
+performs *in order to* change dates. Re-filing a product is a change of
+category that happens to move dates as a consequence, so the recompute is
+silent. Changing `products.default_shelf_life_days` has no endpoint yet.
 
 ## Editing / removing expiry
 

@@ -100,6 +100,14 @@ func (s *Store) CreateProduct(ctx context.Context, storageID uuid.UUID, in NewPr
 
 // SetProductCategory re-categorises a product, rejecting a category from
 // another storage with ErrNotFound.
+// Re-filing a product recomputes its derived expiry dates.
+//
+// docs/specs/08-expiration-and-classification.md is explicit that this is not
+// optional: "'derived' means 'follows the current rules', and a stale derived
+// date is simply a wrong one". Moving cheese out of Dairy and into Canned
+// changes which rule applies to it, so the dates that came from the old rule
+// have to follow — while dates a person typed stay exactly where they are,
+// like everywhere else.
 func (s *Store) SetProductCategory(ctx context.Context, storageID, id uuid.UUID, categoryID *uuid.UUID) error {
 	return s.inTx(ctx, func(tx pgx.Tx) error {
 		if err := requireProductInStorage(ctx, tx, storageID, id); err != nil {
@@ -116,7 +124,11 @@ func (s *Store) SetProductCategory(ctx context.Context, storageID, id uuid.UUID,
 			 WHERE id = $2 AND storage_id = $3`, categoryID, id, storageID); err != nil {
 			return fmt.Errorf("store: set product category: %w", err)
 		}
-		return nil
+
+		// In the same transaction as the move, so the product's category and
+		// its batches' dates can never be seen disagreeing.
+		_, err := recomputeDerivedExpiry(ctx, tx, storageID, id)
+		return err
 	})
 }
 

@@ -100,4 +100,8 @@ Anything that must survive a reboot goes in the **issue or the PR**, not here.
 - Never commit directly to `main`.
 - Never mark a reviewer's finding resolved without changing code or arguing
   the point in a PR reply.
-- If the same finding survives three rounds, stop and ask the user.
+- **Two review passes per PR, then stop.** Do not run a third. Open an issue
+  for whatever is still outstanding, merge, and flag it in the report. This is
+  a budget rule, not a quality one — see the same cap in the `ship` skill for
+  why. When deferring a security finding, state the risk plainly so a human
+  can overrule.

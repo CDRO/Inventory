@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/CDRO/Inventory/internal/expiry"
 )
 
 // LogReason is why a quantity changed. The set matches the CHECK on
@@ -91,6 +93,27 @@ func (s *Store) CreateBatch(ctx context.Context, storageID uuid.UUID, in NewBatc
 		}
 		if err := requireSameStorage(ctx, tx, treeLocations, storageID, in.LocationID); err != nil {
 			return err
+		}
+
+		// A batch created without an explicit date gets the resolved default
+		// rather than no date at all
+		// (docs/specs/08-expiration-and-classification.md): "never leaves it
+		// unset by omission".
+		//
+		// The guard is on the *source*, not on the date being nil, because nil
+		// means two different things. A caller that says ExpirationUser is
+		// making a deliberate statement — including "this has no expiry" — and
+		// resolving over the top of that would be the exact behaviour the
+		// derived/user distinction exists to prevent. Anything else is an
+		// omission, and an omission is what the rules are for.
+		if in.ExpirationDate == nil && in.ExpirationSource != ExpirationUser {
+			rules, err := expiryRulesFor(ctx, tx, storageID, in.ProductID)
+			if err != nil {
+				return err
+			}
+			// created_at defaults to now() in the same statement below, so the
+			// date is computed from the same clock the row will carry.
+			in.ExpirationDate = expiry.DateFor(time.Now(), expiry.Resolve(rules))
 		}
 
 		row := tx.QueryRow(ctx, `
