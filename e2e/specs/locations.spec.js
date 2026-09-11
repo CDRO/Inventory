@@ -91,3 +91,22 @@ test("every location route is behind the session gate", async ({ request }) => {
     expect(body.error.debug_reason, `${method.toUpperCase()} ${path} debug_reason`).toBeUndefined();
   }
 });
+
+test("the expiry routes are behind the session gate", async ({ request }) => {
+  // Spec 08's writes are the ones that can silently rewrite a date somebody
+  // typed, so they get the same gate check as every other storage-scoped
+  // route (docs/specs/08-expiration-and-classification.md).
+  const routes = [
+    `${BASE}/inventory-batches/${STORAGE_ID}/expiry`,
+    `${BASE}/categories/${STORAGE_ID}/shelf-life`,
+  ];
+
+  for (const path of routes) {
+    const response = await request.patch(path, { data: {} });
+
+    expect(response.status(), `PATCH ${path}`).toBe(401);
+    const body = await response.json();
+    expect(body.error.code).toBe("unauthorized");
+    expect(body.error.debug_reason).toBeUndefined();
+  }
+});

@@ -70,6 +70,7 @@ type APIStore interface {
 	LocationStore
 	BatchStore
 	ShoppingListStore
+	ExpiryStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -155,6 +156,10 @@ func NewRouter(d Deps) http.Handler {
 
 			sr.Patch("/inventory-batches/{id}", batches.Update)
 			sr.Post("/inventory-batches/{id}/split", batches.Split)
+
+			expiry := NewExpiryHandler(d.Store, errs)
+			sr.Patch("/inventory-batches/{id}/expiry", expiry.PatchBatchExpiry)
+			sr.Patch("/categories/{id}/shelf-life", expiry.PatchCategoryShelfLife)
 
 			if d.Matcher != nil {
 				lists := NewShoppingListHandler(d.Store, d.Matcher, errs)

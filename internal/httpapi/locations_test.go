@@ -124,6 +124,7 @@ type fakeAPI struct {
 	*fakeLocations
 	*fakeBatches
 	*fakeShoppingLists
+	*fakeExpiry
 }
 
 // apiFixture builds a router with a member session already established, and
@@ -134,6 +135,7 @@ type apiFixture struct {
 	locations *fakeLocations
 	batches   *fakeBatches
 	lists     *fakeShoppingLists
+	expiry    *fakeExpiry
 	matcher   *fakeMatcher
 	images    *fakeSuggester
 	imageData *fakeImageCache
@@ -149,6 +151,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	locations := &fakeLocations{}
 	batches := &fakeBatches{}
 	lists := &fakeShoppingLists{}
+	expiry := &fakeExpiry{}
 	matcher := &fakeMatcher{}
 	images := &fakeSuggester{}
 	imageData := &fakeImageCache{}
@@ -162,7 +165,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		Errors: httpapi.NewErrorWriter(false, discardLogger()),
 		Store: fakeAPI{
 			fakeAuth: auth, fakeLocations: locations,
-			fakeBatches: batches, fakeShoppingLists: lists,
+			fakeBatches: batches, fakeShoppingLists: lists, fakeExpiry: expiry,
 		},
 		Matcher:    matcher,
 		Images:     images,
@@ -171,7 +174,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 
 	return &apiFixture{
 		router: router, auth: auth, locations: locations, batches: batches,
-		lists: lists, matcher: matcher, images: images, imageData: imageData,
+		lists: lists, expiry: expiry, matcher: matcher, images: images, imageData: imageData,
 		storageID: storageID, user: user, session: session,
 	}
 }
