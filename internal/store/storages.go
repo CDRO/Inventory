@@ -174,10 +174,17 @@ func (s *Store) IsStorageMember(ctx context.Context, storageID, userID uuid.UUID
 
 // AddMember grants a user access to a storage. Re-adding an existing member is
 // not an error: the end state the admin asked for is already true.
+//
+// A storage or user that does not exist is ErrNotFound, not a driver error: the
+// foreign keys are what notice, and an admin mistyping an id deserves a 404
+// rather than a 500.
 func (s *Store) AddMember(ctx context.Context, storageID, userID uuid.UUID) error {
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO storage_members (storage_id, user_id) VALUES ($1, $2)
 		ON CONFLICT (storage_id, user_id) DO NOTHING`, storageID, userID)
+	if isForeignKeyViolation(err) {
+		return ErrNotFound
+	}
 	if err != nil {
 		return fmt.Errorf("store: add storage member: %w", err)
 	}

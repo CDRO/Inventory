@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -163,6 +164,19 @@ func TestAddMemberIsIdempotent(t *testing.T) {
 
 	assert.Equal(t, 1, countRows(t, ctx,
 		`SELECT count(*) FROM storage_members WHERE storage_id = $1 AND user_id = $2`, storageID, userID))
+}
+
+// TestAddMemberReportsAMissingUserOrStorage — the admin API turns this into a
+// 404; left as a raw foreign-key error it would be a 500 for a mistyped id.
+func TestAddMemberReportsAMissingUserOrStorage(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+
+	err := s.AddMember(ctx, uuid.New(), newUser(t, ctx))
+	require.ErrorIs(t, err, store.ErrNotFound, "unknown storage")
+
+	err = s.AddMember(ctx, newStorage(t, ctx), uuid.New())
+	require.ErrorIs(t, err, store.ErrNotFound, "unknown user")
 }
 
 // TestRemoveMemberRevokesAccessButNotSessions — membership is not a

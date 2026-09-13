@@ -34,6 +34,12 @@ type fakeAuth struct {
 	admins   map[uuid.UUID]bool
 	members  map[string]bool // storageID+userID
 
+	// pairing holds outstanding pairing codes, code → user.
+	pairing map[string]uuid.UUID
+
+	// storages backs the admin routes; nil until the first one is created.
+	storages map[uuid.UUID]*store.Storage
+
 	isAdminCalls int
 	touchCalls   int
 }

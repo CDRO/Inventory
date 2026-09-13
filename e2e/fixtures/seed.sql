@@ -2,10 +2,19 @@
 -- inventory (docs/specs/05-frontend-pwa-foundations.md).
 --
 -- Applied directly to the disposable E2E database after migrations, NOT
--- through the application layer: as of this fixture's authoring, there is no
--- API to create the first user, so this is the only way to seed one. Run via
+-- through the application layer, so fixed ids can be referenced by name from
+-- the test files. Run via
 --   docker compose -f docker-compose.e2e.yml exec -T db \
 --     psql -U e2e -d e2e -f /fixtures/seed.sql
+--
+-- The admin row usually already exists by then. `migrate up` and `serve` both
+-- bootstrap the initial admin from ADMIN_INITIAL_USERNAME/PASSWORD
+-- (docs/specs/03-auth-and-multi-tenancy.md), which docker-compose.e2e.yml sets
+-- to this same username and password — under a real UUIDv7 rather than the
+-- placeholder below. The users insert therefore ignores *any* conflict, not
+-- just an id conflict: `ON CONFLICT (id)` would let the username's unique
+-- constraint abort this whole transaction. Nothing below references the
+-- admin's id, so which row wins does not matter.
 --
 -- Every id below is a fixed, memorable placeholder — not a real uuid.NewV7()
 -- output — because a fixture has to be the same value on every run to be
@@ -24,7 +33,7 @@ INSERT INTO users (id, username, password_hash, display_name, is_admin) VALUES
   ('00000000-0000-7000-8000-000000000001', 'e2e-admin', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Admin', true),
   ('00000000-0000-7000-8000-000000000002', 'e2e-alice',  '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Alice',     false),
   ('00000000-0000-7000-8000-000000000003', 'e2e-bob',    '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Bob',       false)
-ON CONFLICT (id) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
 -- Two storages, so the "member of storage A gets 404 for storage B"
 -- required journey (docs/specs/05-frontend-pwa-foundations.md) has a second

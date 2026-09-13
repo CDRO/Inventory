@@ -14,6 +14,9 @@ import (
 // uniqueViolation is PostgreSQL's SQLSTATE for a duplicate key.
 const uniqueViolation = "23505"
 
+// foreignKeyViolation is PostgreSQL's SQLSTATE for a reference to a missing row.
+const foreignKeyViolation = "23503"
+
 // ErrDuplicate means a uniquely-constrained value already exists.
 var ErrDuplicate = errors.New("store: already exists")
 
@@ -182,6 +185,11 @@ func (s *Store) CountUsers(ctx context.Context) (int, error) {
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == uniqueViolation
+}
+
+func isForeignKeyViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolation
 }
 
 func scanUser(row rowScanner) (*User, error) {

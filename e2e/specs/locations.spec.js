@@ -1,65 +1,47 @@
-// The location tree of docs/specs/06-vision-shelf-ingestion.md, covering what
-// is genuinely live today.
+// The location tree of docs/specs/06-vision-shelf-ingestion.md.
 //
-// The full journey — log in, create a location, drag it onto another — is one
-// of the deferred journeys tracked in issue #30: it needs a session, and
-// POST /api/auth/login does not exist until issue #27 lands. What can be
-// verified right now is stronger than a smoke test, though: the API routes are
-// registered, they are behind the authorization gates, and the page fails
-// honestly instead of hanging.
+// The full create-and-drag journey is tracked in issue #30. What this file
+// verifies: the page loads cleanly for a real member, a visitor without a
+// session is sent to the login page, and every API route is behind the gates.
 
 import { test, expect } from "@playwright/test";
 
-// Any well-formed storage id will do: the session check runs before the
-// membership check, so the request never gets far enough for the id to matter.
+// Any well-formed storage id will do for the gate checks: the session check
+// runs before the membership check, so the request never gets far enough for
+// the id to matter.
 const STORAGE_ID = "00000000-0000-4000-8000-000000000000";
 const BASE = `/api/storages/${STORAGE_ID}`;
 
-test("locations.html loads with no console errors of its own", async ({ page }) => {
+test("locations.html loads a member's tree with no console errors", async ({ page }) => {
   const consoleErrors = [];
   page.on("pageerror", (err) => consoleErrors.push(String(err)));
   page.on("console", (msg) => {
-    if (msg.type() !== "error") return;
-
-    // This page, unlike the login page, calls the API on load — and
-    // GET /api/auth/me does not exist until issue #27, so the browser logs a
-    // failed-resource error every time. That one is expected; everything else
-    // is not.
-    //
-    // The filter is by URL rather than by message, and that distinction is the
-    // whole point: a JS module that 404s (the wrong relative import path this
-    // suite caught once already) logs the *identical* "Failed to load
-    // resource… 404" text. Matching on the message would mask exactly the bug
-    // this check exists to find. Matching on the URL keeps it caught, and the
-    // exemption disappears on its own once /api/auth/me is real.
-    const url = msg.location()?.url ?? "";
-    if (url.endsWith("/api/auth/me")) return;
-
-    consoleErrors.push(`${msg.text()} (${url})`);
+    // No exemptions: with a real session every load-time call succeeds, so any
+    // error at all — including a JS module that 404s — is a finding.
+    if (msg.type() === "error") consoleErrors.push(`${msg.text()} (${msg.location()?.url ?? ""})`);
   });
+
+  const login = await page.request.post("/api/auth/login", {
+    data: { username: "e2e-bob", password: "e2e-fixture-password" },
+  });
+  expect(login.status()).toBe(200);
 
   await page.goto("/locations.html");
   await expect(page).toHaveTitle(/Locations/);
 
-  // Wait for the page's own load-time API call to have settled, so a late
-  // error cannot slip in after the assertion.
-  await expect(page.locator("#error")).toBeVisible();
+  // The seeded Pantry appearing means the load-time API calls have settled, so
+  // a late error cannot slip in after the assertion.
+  await expect(page.locator("#tree")).toContainText("Pantry");
+  await expect(page.locator("#error")).toBeHidden();
 
   expect(consoleErrors, `unexpected console errors: ${consoleErrors.join("; ")}`).toEqual([]);
 });
 
-test("locations.html reports a problem rather than hanging when the session API is unavailable", async ({
-  page,
-}) => {
+test("locations.html without a session redirects to the login page", async ({ page }) => {
   await page.goto("/locations.html");
 
-  // GET /api/auth/me does not exist yet (issue #27). The page must say so
-  // rather than sitting on an empty tree that looks like an empty storage —
-  // "you have no locations" and "we could not ask" are very different
-  // statements to make to someone who just filled three shelves.
-  const error = page.locator("#error");
-  await expect(error).toBeVisible();
-  await expect(error).not.toBeEmpty();
+  await expect(page).toHaveURL(/\/$/); // index.html, canonicalised to "/" by the file server
+  await expect(page.locator("#login-form")).toBeVisible();
 });
 
 test("every location route is behind the session gate", async ({ request }) => {

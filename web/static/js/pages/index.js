@@ -29,8 +29,7 @@ async function handleSubmit(event) {
   try {
     // skipAuthRedirect: a wrong password is a 401 this form must display, not
     // a dead session api.js should bounce to /index.html — which is this
-    // page (docs/specs/03-auth-and-multi-tenancy.md defines the endpoint;
-    // its route lands with the spec 03 HTTP surface work).
+    // page (docs/specs/03-auth-and-multi-tenancy.md defines the endpoint).
     await post("/api/auth/login", { username, password }, { skipAuthRedirect: true });
     location.assign("/storages.html");
   } catch (err) {

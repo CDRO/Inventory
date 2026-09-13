@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/CDRO/Inventory/internal/auth"
 	"github.com/CDRO/Inventory/internal/config"
 	"github.com/CDRO/Inventory/internal/httpapi"
 	"github.com/CDRO/Inventory/internal/imagesearch"
@@ -125,7 +126,42 @@ func runMigrate(ctx context.Context, args []string) error {
 	if len(args) > 0 {
 		action = args[0]
 	}
-	return migrate.Run(ctx, cfg.DatabaseURL, action, os.Stdout)
+	if err := migrate.Run(ctx, cfg.DatabaseURL, action, os.Stdout); err != nil {
+		return err
+	}
+	if action != "up" {
+		return nil
+	}
+
+	// Bootstrapping here as well as at serve is what makes first-deploy order
+	// irrelevant. On a fresh install the server usually starts *before*
+	// migrations have run, so its own bootstrap attempt meets a users table
+	// that does not exist yet and can only log a warning. This is the step
+	// that brings the schema into existence, so it is the one place the
+	// bootstrap is guaranteed to have somewhere to write.
+	db, err := store.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return bootstrapAdmin(ctx, db, cfg)
+}
+
+// bootstrapAdmin creates the first admin on an install with no users at all
+// (docs/specs/03-auth-and-multi-tenancy.md).
+//
+// It is idempotent — a no-op once any user exists — so running it from both
+// `migrate up` and `serve` is safe, and whichever runs first on a fresh
+// install does the work.
+func bootstrapAdmin(ctx context.Context, db *store.Store, cfg *config.Config) error {
+	created, err := auth.EnsureInitialAdmin(ctx, db, cfg.AdminInitialUsername, cfg.AdminInitialPassword)
+	if err != nil {
+		return fmt.Errorf("bootstrap initial admin: %w", err)
+	}
+	if created {
+		fmt.Printf("inventory: created initial admin %q\n", cfg.AdminInitialUsername)
+	}
+	return nil
 }
 
 // suggestionCacheDir is where downloaded image suggestions live
@@ -179,6 +215,15 @@ func serve() error {
 	// crash's leftovers are cleaned at boot rather than up to an hour later.
 	go imageCache.RunSweeps(ctx)
 
+	// Non-fatal here, unlike in `migrate up`. On a fresh install the server
+	// often starts before migrations have run, so this can legitimately meet a
+	// users table that does not exist yet; refusing to start would make the
+	// documented deploy order a crash loop. `migrate up` repeats the bootstrap
+	// once the schema exists, so the admin is created either way.
+	if err := bootstrapAdmin(ctx, db, cfg); err != nil {
+		slog.Warn("initial admin not created yet; `migrate up` will retry it", slog.Any("err", err))
+	}
+
 	srv := &http.Server{
 		Addr: net.JoinHostPort("", cfg.HTTPPort),
 		Handler: httpapi.NewRouter(httpapi.Deps{
@@ -196,6 +241,9 @@ func serve() error {
 			Matcher:    matching.New(db),
 			Images:     suggester,
 			ImageCache: imageCache,
+			// Dev serves over plain http://localhost, where a Secure cookie
+			// would never be sent back. Everywhere else Traefik terminates TLS.
+			InsecureCookies: cfg.IsDev(),
 		}),
 		ReadHeaderTimeout: readHeaderTimeout,
 		WriteTimeout:      writeTimeout,
