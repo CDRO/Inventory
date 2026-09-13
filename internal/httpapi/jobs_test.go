@@ -81,15 +81,15 @@ func (f *fakeJobs) ListJobs(_ context.Context, storageID uuid.UUID, statuses []s
 	return out, nil
 }
 
-func (f *fakeJobs) DeleteJob(_ context.Context, storageID, id uuid.UUID) error {
+func (f *fakeJobs) DeleteJob(_ context.Context, storageID, id uuid.UUID) (*string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	j, ok := f.jobs[id]
 	if !ok || j.StorageID != storageID {
-		return store.ErrNotFound
+		return nil, store.ErrNotFound
 	}
 	delete(f.jobs, id)
-	return nil
+	return j.ImageFilename, nil
 }
 
 type jobsPage struct {

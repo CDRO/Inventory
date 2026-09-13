@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -26,6 +27,10 @@ const IdempotentReplayHeader = "Idempotent-Replayed"
 // room for multipart framing, since an upload is the largest write a client
 // can queue offline and retry.
 const maxIdempotentBody = MaxUploadBytes + 1<<20
+
+// recordTimeout bounds the write of a response record, which runs after the
+// response has been sent and so outside the request's own deadline.
+const recordTimeout = 10 * time.Second
 
 // IdempotencyStore is the slice of the store the middleware uses.
 type IdempotencyStore interface {
@@ -152,7 +157,10 @@ func (m *Idempotency) Middleware(next http.Handler) http.Handler {
 		// hidden. A request context cancelled by the client hanging up must
 		// not stop the record being written — that client is precisely the
 		// one about to retry.
-		ctx := context.WithoutCancel(r.Context())
+		// Bounded all the same: detached from the client is not the same as
+		// allowed to hang this goroutine on a stalled database forever.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), recordTimeout)
+		defer cancel()
 		if err := m.store.RecordIdempotent(ctx, key, user.ID, storageID, hash, rec.status, recorded); err != nil {
 			m.errors.Log(r.Context(), "recording idempotent response failed", err)
 		}

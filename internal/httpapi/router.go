@@ -79,6 +79,7 @@ type APIStore interface {
 	ExpiryStore
 	JobStore
 	IdempotencyStore
+	IngestStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -113,6 +114,12 @@ type Deps struct {
 	// this field has to be the safe one — the same reasoning that makes a nil
 	// Errors writer default to production mode rather than dev.
 	InsecureCookies bool
+	// Ingester starts photo ingestion (docs/specs/06-vision-shelf-ingestion.md),
+	// and Photos holds the photos behind review jobs. With no Ingester the
+	// upload routes are absent; confirming and discarding existing jobs still
+	// work.
+	Ingester Ingester
+	Photos   PhotoStore
 }
 
 // NewRouter builds the application's HTTP handler.
@@ -253,10 +260,19 @@ func NewRouter(d Deps) http.Handler {
 
 			// Background jobs (docs/specs/04-backend-api-conventions.md). The
 			// endpoints that create them are the upload routes of spec 06.
-			jobsAPI := NewJobHandler(d.Store, errs)
+			jobsAPI := NewJobHandler(d.Store, d.Photos, errs)
 			sr.Get("/jobs", jobsAPI.List)
 			sr.Get("/jobs/{id}", jobsAPI.Get)
+			sr.Get("/jobs/{id}/image", jobsAPI.Image)
 			sr.Delete("/jobs/{id}", jobsAPI.Delete)
+
+			// Photo ingestion (docs/specs/06-vision-shelf-ingestion.md).
+			ingestAPI := NewIngestHandler(d.Ingester, d.Store, errs)
+			if d.Ingester != nil {
+				sr.Post("/ingest/shelf-photos", ingestAPI.ShelfPhoto)
+				sr.Post("/ingest/product-photos", ingestAPI.ProductPhoto)
+			}
+			sr.Post("/ingest/{job_id}/confirm", ingestAPI.Confirm)
 
 			if d.Matcher != nil {
 				lists := NewShoppingListHandler(d.Store, d.Matcher, errs)

@@ -133,6 +133,7 @@ type fakeAPI struct {
 	*fakeExpiry
 	*fakeJobs
 	*fakeIdempotency
+	*fakeIngestStore
 }
 
 // newFakeAPI builds the whole fake store around an auth fake, with every other
@@ -141,7 +142,7 @@ func newFakeAPI(auth *fakeAuth) fakeAPI {
 	return fakeAPI{
 		fakeAuth: auth, fakeLocations: &fakeLocations{}, fakeBatches: &fakeBatches{},
 		fakeShoppingLists: &fakeShoppingLists{}, fakeExpiry: &fakeExpiry{},
-		fakeJobs: newFakeJobs(), fakeIdempotency: newFakeIdempotency(),
+		fakeJobs: newFakeJobs(), fakeIdempotency: newFakeIdempotency(), fakeIngestStore: &fakeIngestStore{},
 	}
 }
 
@@ -156,6 +157,9 @@ type apiFixture struct {
 	expiry    *fakeExpiry
 	jobs      *fakeJobs
 	idem      *fakeIdempotency
+	ingest    *fakeIngestStore
+	ingester  *fakeIngester
+	photos    *fakePhotoStore
 	matcher   *fakeMatcher
 	images    *fakeSuggester
 	imageData *fakeImageCache
@@ -181,6 +185,9 @@ func newAPIFixture(t *testing.T) *apiFixture {
 
 	jobs := newFakeJobs()
 	idem := newFakeIdempotency()
+	ingestStore := &fakeIngestStore{}
+	ingester := &fakeIngester{available: true}
+	photos := &fakePhotoStore{files: map[string][]byte{}}
 
 	router := httpapi.NewRouter(httpapi.Deps{
 		DB:     stubPinger{},
@@ -189,16 +196,19 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		Store: fakeAPI{
 			fakeAuth: auth, fakeLocations: locations,
 			fakeBatches: batches, fakeShoppingLists: lists, fakeExpiry: expiry,
-			fakeJobs: jobs, fakeIdempotency: idem,
+			fakeJobs: jobs, fakeIdempotency: idem, fakeIngestStore: ingestStore,
 		},
 		Matcher:    matcher,
 		Images:     images,
 		ImageCache: imageData,
+		Ingester:   ingester,
+		Photos:     photos,
 	})
 
 	return &apiFixture{
 		router: router, auth: auth, locations: locations, batches: batches,
 		lists: lists, expiry: expiry, jobs: jobs, idem: idem,
+		ingest: ingestStore, ingester: ingester, photos: photos,
 		matcher: matcher, images: images, imageData: imageData,
 		storageID: storageID, user: user, session: session,
 	}
