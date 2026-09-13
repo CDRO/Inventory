@@ -110,7 +110,8 @@ function renderLanding(me, storage) {
         ]),
       ]),
       el("p", { class: "empty-state" }, [
-        "Products and consumption logging each ship with their own spec issue.",
+        "Browsing and managing products directly ships with its own spec issue " +
+          '— use "Scan photos" to stock up, use up, or scan a shelf in the meantime.',
       ]),
     ]),
   );

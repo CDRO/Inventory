@@ -113,4 +113,5 @@ func TestUpdateProductMinStockAdjustsWithoutTouchingBatches(t *testing.T) {
 	batches, err := s.ListProductBatches(ctx, storageID, product.ID)
 	require.NoError(t, err)
 	assert.Empty(t, batches)
+	assert.Zero(t, logCount(t, ctx, product.ID), "no inventory_logs row for a min_stock-only change")
 }

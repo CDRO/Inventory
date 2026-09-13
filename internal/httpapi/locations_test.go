@@ -227,7 +227,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		ingest: ingestStore, ingester: ingester, photos: photos,
 		matcher: matcher, images: images, imageData: imageData,
 		consume: consumeStore, consumer: consumer, products: products,
-		reorder:   reorder,
+		reorder: reorder,
 		storageID: storageID, user: user, session: session,
 	}
 }
@@ -303,6 +303,10 @@ func storageRoutes(base string) []struct {
 		{http.MethodDelete, base + "/locations/" + id, ""},
 		{http.MethodPatch, base + "/inventory-batches/" + id, `{"location_id":"` + id + `"}`},
 		{http.MethodPost, base + "/inventory-batches/" + id + "/split", `{"quantity":1,"target_location_id":"` + id + `"}`},
+		{http.MethodGet, base + "/dashboard/reorder", ""},
+		{http.MethodGet, base + "/dashboard/reorder/export", ""},
+		{http.MethodPost, base + "/dashboard/reorder/items/match", `{"name":"Butter"}`},
+		{http.MethodPost, base + "/dashboard/reorder/items", `{"name":"Butter"}`},
 	}
 }
 

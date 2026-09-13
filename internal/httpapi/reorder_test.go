@@ -19,15 +19,15 @@ import (
 
 // fakeReorderStore is an in-memory ReorderStore.
 type fakeReorderStore struct {
-	rows       []store.ReorderProduct
-	rowsErr    error
-	updateErr  error
-	createErr  error
-	updated    *store.Product
-	created    *store.Product
-	lastMin    int
-	lastID     uuid.UUID
-	lastNew    store.NewProduct
+	rows        []store.ReorderProduct
+	rowsErr     error
+	updateErr   error
+	createErr   error
+	updated     *store.Product
+	created     *store.Product
+	lastMin     int
+	lastID      uuid.UUID
+	lastNew     store.NewProduct
 	createCalls int
 	updateCalls int
 }
