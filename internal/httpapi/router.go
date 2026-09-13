@@ -82,6 +82,7 @@ type APIStore interface {
 	IngestStore
 	ConsumeStore
 	ProductStore
+	ReorderStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -307,6 +308,19 @@ func NewRouter(d Deps) http.Handler {
 				images := NewImageHandler(d.Images, d.ImageCache, errs)
 				sr.Get("/image-suggestions", images.Suggest)
 				sr.Get("/images/{hash}", images.Serve)
+			}
+
+			// Reorder dashboard and export (docs/specs/10-reorder-and-shopping-export.md).
+			// The dashboard and export need only the store; the "Add item" flow
+			// additionally needs the matcher, so those two routes follow the same
+			// "absent collaborator, absent route" rule as the shopping-list group
+			// above.
+			reorder := NewReorderHandler(d.Store, d.Matcher, errs)
+			sr.Get("/dashboard/reorder", reorder.Dashboard)
+			sr.Get("/dashboard/reorder/export", reorder.Export)
+			if d.Matcher != nil {
+				sr.Post("/dashboard/reorder/items/match", reorder.Match)
+				sr.Post("/dashboard/reorder/items", reorder.AddItem)
 			}
 		})
 	}
