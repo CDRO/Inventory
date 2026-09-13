@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/uuid"
@@ -43,6 +44,10 @@ type fakeLocations struct {
 	deleted   []uuid.UUID
 
 	lastStorageID uuid.UUID
+
+	// creates counts CreateLocation calls, which is how the idempotency tests
+	// tell a replay from a second execution.
+	creates atomic.Int32
 }
 
 func (f *fakeLocations) LocationTree(_ context.Context, storageID uuid.UUID) ([]store.Location, error) {
@@ -51,6 +56,7 @@ func (f *fakeLocations) LocationTree(_ context.Context, storageID uuid.UUID) ([]
 }
 
 func (f *fakeLocations) CreateLocation(_ context.Context, storageID uuid.UUID, in store.NewLocation) (*store.Location, error) {
+	f.creates.Add(1)
 	f.lastStorageID = storageID
 	f.lastCreate = in
 	if f.createErr != nil {
@@ -125,6 +131,18 @@ type fakeAPI struct {
 	*fakeBatches
 	*fakeShoppingLists
 	*fakeExpiry
+	*fakeJobs
+	*fakeIdempotency
+}
+
+// newFakeAPI builds the whole fake store around an auth fake, with every other
+// resource empty.
+func newFakeAPI(auth *fakeAuth) fakeAPI {
+	return fakeAPI{
+		fakeAuth: auth, fakeLocations: &fakeLocations{}, fakeBatches: &fakeBatches{},
+		fakeShoppingLists: &fakeShoppingLists{}, fakeExpiry: &fakeExpiry{},
+		fakeJobs: newFakeJobs(), fakeIdempotency: newFakeIdempotency(),
+	}
 }
 
 // apiFixture builds a router with a member session already established, and
@@ -136,6 +154,8 @@ type apiFixture struct {
 	batches   *fakeBatches
 	lists     *fakeShoppingLists
 	expiry    *fakeExpiry
+	jobs      *fakeJobs
+	idem      *fakeIdempotency
 	matcher   *fakeMatcher
 	images    *fakeSuggester
 	imageData *fakeImageCache
@@ -159,6 +179,9 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	storageID := uuid.New()
 	auth.addMember(storageID, user.ID)
 
+	jobs := newFakeJobs()
+	idem := newFakeIdempotency()
+
 	router := httpapi.NewRouter(httpapi.Deps{
 		DB:     stubPinger{},
 		Vision: stubVision{status: "ok"},
@@ -166,6 +189,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		Store: fakeAPI{
 			fakeAuth: auth, fakeLocations: locations,
 			fakeBatches: batches, fakeShoppingLists: lists, fakeExpiry: expiry,
+			fakeJobs: jobs, fakeIdempotency: idem,
 		},
 		Matcher:    matcher,
 		Images:     images,
@@ -174,7 +198,8 @@ func newAPIFixture(t *testing.T) *apiFixture {
 
 	return &apiFixture{
 		router: router, auth: auth, locations: locations, batches: batches,
-		lists: lists, expiry: expiry, matcher: matcher, images: images, imageData: imageData,
+		lists: lists, expiry: expiry, jobs: jobs, idem: idem,
+		matcher: matcher, images: images, imageData: imageData,
 		storageID: storageID, user: user, session: session,
 	}
 }

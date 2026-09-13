@@ -203,10 +203,7 @@ func TestNonAdminCannotTellTheAdminAreaExists(t *testing.T) {
 		DB:     stubPinger{},
 		Vision: stubVision{status: "ok"},
 		Errors: httpapi.NewErrorWriter(false, discardLogger()),
-		Store: fakeAPI{
-			fakeAuth: auth, fakeLocations: &fakeLocations{}, fakeBatches: &fakeBatches{},
-			fakeShoppingLists: &fakeShoppingLists{}, fakeExpiry: &fakeExpiry{},
-		},
+		Store:  newFakeAPI(auth),
 		StaticFS: fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html></html>")}},
 	})
 

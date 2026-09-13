@@ -506,10 +506,7 @@ func TestDevCookiesDropSecure(t *testing.T) {
 	router := httpapi.NewRouter(httpapi.Deps{
 		DB:     stubPinger{},
 		Vision: stubVision{status: "ok"},
-		Store: fakeAPI{
-			fakeAuth: auth, fakeLocations: &fakeLocations{}, fakeBatches: &fakeBatches{},
-			fakeShoppingLists: &fakeShoppingLists{}, fakeExpiry: &fakeExpiry{},
-		},
+		Store:  newFakeAPI(auth),
 		InsecureCookies: true,
 	})
 
