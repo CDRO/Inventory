@@ -95,7 +95,11 @@ func (s *Store) ConfirmIngestion(ctx context.Context, storageID, jobID uuid.UUID
 			return fmt.Errorf("%w: job is %s, not done", ErrConflict, status)
 		}
 
-		if err := matchRowIDs(payload, decisions); err != nil {
+		ids := make([]string, len(decisions))
+		for i, d := range decisions {
+			ids[i] = d.RowID
+		}
+		if err := matchRowIDs(payload, ids); err != nil {
 			return err
 		}
 
@@ -161,9 +165,14 @@ func (s *Store) ConfirmIngestion(ctx context.Context, storageID, jobID uuid.UUID
 	return result, nil
 }
 
-// matchRowIDs checks that decisions name every row of the stored proposal
+// matchRowIDs checks that rowIDs names every row of the stored proposal
 // exactly once, and nothing else.
-func matchRowIDs(payload []byte, decisions []IngestDecision) error {
+//
+// Shared by ConfirmIngestion and ConfirmConsumption
+// (docs/specs/09-consumption-logging.md): both proposals are a job payload
+// with a top-level "rows" array of {row_id, ...}, and both confirm bodies must
+// decide every row exactly once.
+func matchRowIDs(payload []byte, rowIDs []string) error {
 	var proposal struct {
 		Rows []struct {
 			RowID string `json:"row_id"`
@@ -178,15 +187,15 @@ func matchRowIDs(payload []byte, decisions []IngestDecision) error {
 		issued[r.RowID] = true
 	}
 
-	seen := make(map[string]bool, len(decisions))
-	for _, d := range decisions {
-		if !issued[d.RowID] {
-			return fmt.Errorf("%w: row %q is not part of this proposal", ErrValidation, d.RowID)
+	seen := make(map[string]bool, len(rowIDs))
+	for _, id := range rowIDs {
+		if !issued[id] {
+			return fmt.Errorf("%w: row %q is not part of this proposal", ErrValidation, id)
 		}
-		if seen[d.RowID] {
-			return fmt.Errorf("%w: row %q is decided twice", ErrValidation, d.RowID)
+		if seen[id] {
+			return fmt.Errorf("%w: row %q is decided twice", ErrValidation, id)
 		}
-		seen[d.RowID] = true
+		seen[id] = true
 	}
 	if len(seen) != len(issued) {
 		return fmt.Errorf("%w: every row needs a decision; %d of %d were decided", ErrValidation, len(seen), len(issued))

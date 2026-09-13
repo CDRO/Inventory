@@ -63,12 +63,16 @@ async function init() {
   qs("#scan-link").setAttribute("href", withStorageParam(storageId, "/ingest.html"));
 
   const confirmed = params.get("confirmed");
+  const consumed = params.get("consumed");
   if (confirmed !== null) {
     notice.textContent = confirmationText(
       Number(confirmed),
       Number(params.get("products") || 0),
       Number(params.get("locations") || 0),
     );
+    notice.hidden = false;
+  } else if (consumed !== null) {
+    notice.textContent = consumptionText(Number(consumed));
     notice.hidden = false;
   }
 
@@ -127,7 +131,12 @@ function renderJob(job) {
 
   const actions = qs('[data-role="actions"]', card);
   if (job.status === "done") {
-    const href = new URL(withStorageParam(storageId, "/review.html"), location.origin);
+    // Consumption jobs review on their own screen
+    // (docs/specs/09-consumption-logging.md): the row shape — batches to
+    // decrement, not a location to place into — differs enough that they
+    // need a different page while still sharing js/review.js underneath.
+    const page = job.kind === "consumption_photo" ? "/consume-review.html" : "/review.html";
+    const href = new URL(withStorageParam(storageId, page), location.origin);
     href.searchParams.set("job", job.id);
     actions.append(el("a", { class: "btn btn--primary", href: href.pathname + href.search }, [text("Review")]));
   }
@@ -162,6 +171,15 @@ function confirmationText(batches, products, locations) {
   if (products > 0) parts.push(plural(products, "new product", "new products"));
   if (locations > 0) parts.push(plural(locations, "new location", "new locations"));
   return `Proposal applied: ${parts.join(", ")}.`;
+}
+
+// consumptionText summarises a consumption confirm from the batch count the
+// server returned, arriving through the URL and read as a number.
+function consumptionText(batches) {
+  if (!Number.isInteger(batches) || batches <= 0) {
+    return "Proposal applied. Nothing was removed from your inventory.";
+  }
+  return `Proposal applied: ${batches} ${batches === 1 ? "batch" : "batches"} updated.`;
 }
 
 function age(iso) {

@@ -151,6 +151,33 @@ func (s *Store) DeleteProduct(ctx context.Context, storageID, id uuid.UUID) erro
 	})
 }
 
+// ListProducts returns a storage's products, alphabetical by name — the whole
+// list, for the manual-correction picker in
+// docs/specs/09-consumption-logging.md. Browsing or paginating products at
+// scale belongs to specs 10 and 11; nothing here is a substitute for that.
+func (s *Store) ListProducts(ctx context.Context, storageID uuid.UUID) ([]Product, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, storage_id, name, category_id, catalog_id, item_type,
+		       default_shelf_life_days, min_stock, image_url, icon_name, created_at, updated_at
+		  FROM products
+		 WHERE storage_id = $1
+		 ORDER BY name`, storageID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list products: %w", err)
+	}
+	defer rows.Close()
+
+	out := []Product{}
+	for rows.Next() {
+		p, err := scanProduct(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *p)
+	}
+	return out, rows.Err()
+}
+
 // CurrentStock is the live sum of a product's batches
 // (docs/specs/10-reorder-and-shopping-export.md). It is computed, never stored:
 // a denormalised counter is a number that can drift away from the rows it

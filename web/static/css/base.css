@@ -8,6 +8,16 @@
   box-sizing: border-box;
 }
 
+/* Every flex/grid layout class below (`.field`, `.row`, `.stack`, …) sets its
+   own `display`, at the same specificity as the UA stylesheet's `[hidden] {
+   display: none }`. CSS breaks that tie by source order — an author
+   stylesheet always wins — so `element.hidden = true` silently stops hiding
+   anything once a layout class is added on the same element. `!important` is
+   what keeps `hidden` authoritative everywhere the app toggles it from JS. */
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;

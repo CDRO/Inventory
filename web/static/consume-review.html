@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#2563eb">
+  <title>Review consumption · Inventory</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/css/tokens.css">
+  <link rel="stylesheet" href="/css/base.css">
+  <link rel="stylesheet" href="/css/components.css">
+</head>
+<body>
+  <header class="shell row row--between">
+    <strong>Inventory</strong>
+    <div class="row">
+      <div id="storage-switcher" hidden></div>
+      <a id="back" href="/inbox.html" class="btn btn--ghost">Inbox</a>
+    </div>
+  </header>
+
+  <main id="main" class="shell stack" aria-live="polite">
+    <h2>Review · using up</h2>
+
+    <div id="error" class="alert" role="alert" hidden></div>
+    <p id="status" class="empty-state">Loading…</p>
+
+    <section id="proposal" class="stack" hidden>
+      <p class="muted">
+        Nothing is removed from your inventory until you confirm. Reject
+        anything that is not really there; correct anything the photo got
+        wrong to an existing product — consumption never creates a new one.
+      </p>
+      <div id="rows" class="review-list"></div>
+      <div class="row">
+        <button id="confirm" type="button" class="btn btn--primary">Confirm</button>
+        <button id="discard" type="button" class="btn btn--ghost">Discard</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- One product name per option, filled into a row's search input on pick.
+       Shared by every row's [data-role="product-input"] below. -->
+  <datalist id="product-datalist"></datalist>
+
+  <!-- One proposed row. Every value from the model goes in through textContent
+       or a form control's value, never as markup. -->
+  <template id="row-template">
+    <div class="review-row">
+      <div class="review-crop" data-role="crop" role="img"></div>
+      <div class="review-row__fields">
+        <div class="row row--between">
+          <strong data-field="label"></strong>
+          <span class="badge" data-role="confidence"></span>
+        </div>
+
+        <div class="field">
+          <label>Product
+            <select data-role="product"></select>
+          </label>
+        </div>
+        <div class="field" data-role="product-search" hidden>
+          <label>Search your products
+            <input type="text" data-role="product-input" list="product-datalist" placeholder="Start typing a product name…">
+          </label>
+        </div>
+        <p class="empty-state" data-role="unrecognized" hidden>
+          Not recognized. Pick a product above before accepting this row.
+        </p>
+
+        <div class="stack" data-role="batches"></div>
+
+        <p class="review-row__error" data-role="row-error" role="alert" hidden></p>
+      </div>
+      <div class="review-row__actions">
+        <button type="button" class="btn btn--ghost" data-action="accept">Accept</button>
+        <button type="button" class="btn btn--ghost" data-action="correct">Correct</button>
+        <button type="button" class="btn btn--ghost" data-action="reject">Reject</button>
+      </div>
+    </div>
+  </template>
+
+  <script type="module" src="/js/pages/consume-review.js"></script>
+</body>
+</html>
