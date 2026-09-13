@@ -30,10 +30,12 @@ import (
 	"github.com/CDRO/Inventory/internal/config"
 	"github.com/CDRO/Inventory/internal/httpapi"
 	"github.com/CDRO/Inventory/internal/imagesearch"
+	"github.com/CDRO/Inventory/internal/ingest"
 	"github.com/CDRO/Inventory/internal/jobs"
 	"github.com/CDRO/Inventory/internal/matching"
 	"github.com/CDRO/Inventory/internal/migrate"
 	"github.com/CDRO/Inventory/internal/store"
+	"github.com/CDRO/Inventory/internal/uploads"
 	"github.com/CDRO/Inventory/internal/vision"
 	"github.com/CDRO/Inventory/web"
 )
@@ -235,7 +237,28 @@ func serve() error {
 		slog.Warn("could not recover interrupted jobs", slog.Any("err", err))
 	}
 
-	go runStoreSweeps(ctx, db)
+	// The matching service is shared with specs 06, 07 and 09; it is
+	// constructed once here so all of them use the same thresholds.
+	matcher := matching.New(db)
+
+	// Photo ingestion (docs/specs/06-vision-shelf-ingestion.md). Typed as the
+	// router's interfaces and assigned only on success: a nil *Service stored
+	// in an interface would be non-nil, register the upload routes, and panic
+	// on the first photo. An unusable upload volume disables uploads and
+	// nothing else.
+	var (
+		ingester    httpapi.Ingester
+		photoStore  httpapi.PhotoStore
+		ingestSweep func(context.Context, time.Time) (int, error)
+	)
+	if photos, err := uploads.NewDir(uploads.IngestDir); err != nil {
+		slog.Error("photo uploads disabled: upload volume unusable", slog.Any("err", err))
+	} else {
+		service := ingest.NewService(jobRunner, vision.NewClient(cfg.GeminiAPIKey), checker, matcher, db, photos, slog.Default())
+		ingester, photoStore, ingestSweep = service, photos, service.SweepImages
+	}
+
+	go runStoreSweeps(ctx, db, ingestSweep)
 
 	srv := &http.Server{
 		Addr: net.JoinHostPort("", cfg.HTTPPort),
@@ -249,14 +272,15 @@ func serve() error {
 			// The same store backs the authorization gates and the handlers
 			// behind them, so the two cannot be wired out of step.
 			Store: db,
-			// The matching service is shared with specs 06 and 09; it is
-			// constructed once here so all of them use the same thresholds.
-			Matcher:    matching.New(db),
+			// One matcher, shared by every flow that resolves text to products.
+			Matcher:    matcher,
 			Images:     suggester,
 			ImageCache: imageCache,
 			// Dev serves over plain http://localhost, where a Secure cookie
 			// would never be sent back. Everywhere else Traefik terminates TLS.
 			InsecureCookies: cfg.IsDev(),
+			Ingester:        ingester,
+			Photos:          photoStore,
 		}),
 		ReadHeaderTimeout: readHeaderTimeout,
 		WriteTimeout:      writeTimeout,
@@ -300,11 +324,21 @@ const sweepInterval = time.Hour
 
 // runStoreSweeps deletes rows past their retention: expired sessions and
 // pairing codes, idempotency records older than their 7-day replay window
-// (docs/specs/12-client-api-contract.md), and old tombstones. Once at start,
-// then every sweepInterval until ctx ends.
-func runStoreSweeps(ctx context.Context, db *store.Store) {
+// (docs/specs/12-client-api-contract.md), old tombstones, and — when photo
+// ingestion is enabled — the photos of jobs reviewed more than 30 days ago.
+// Once at start, then every sweepInterval until ctx ends.
+func runStoreSweeps(ctx context.Context, db *store.Store, ingestSweep func(context.Context, time.Time) (int, error)) {
 	sweep := func() {
 		now := time.Now()
+		if ingestSweep != nil {
+			if n, err := ingestSweep(ctx, now); err != nil {
+				if ctx.Err() == nil {
+					slog.Warn("sweep failed", slog.String("table", "job photos"), slog.Any("err", err))
+				}
+			} else if n > 0 {
+				slog.Info("swept expired job photos", slog.Int("count", n))
+			}
+		}
 		for name, run := range map[string]func() (int64, error){
 			"sessions":            func() (int64, error) { return db.SweepSessions(ctx) },
 			"pairing codes":       func() (int64, error) { return db.SweepPairingCodes(ctx) },

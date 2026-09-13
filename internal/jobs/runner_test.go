@@ -26,10 +26,10 @@ type fakeStore struct {
 
 func newFakeStore() *fakeStore { return &fakeStore{jobs: map[uuid.UUID]*store.Job{}} }
 
-func (f *fakeStore) CreateJob(_ context.Context, storageID uuid.UUID, kind store.JobKind, createdBy *uuid.UUID) (*store.Job, error) {
+func (f *fakeStore) CreateJob(_ context.Context, in store.NewJob) (*store.Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	j := &store.Job{ID: uuid.New(), StorageID: storageID, Kind: kind, Status: store.JobPending, CreatedBy: createdBy}
+	j := &store.Job{ID: uuid.New(), StorageID: in.StorageID, Kind: in.Kind, Status: store.JobPending, CreatedBy: in.CreatedBy, ImageFilename: in.ImageFilename}
 	f.jobs[j.ID] = j
 	copied := *j
 	return &copied, nil
@@ -105,7 +105,7 @@ func TestSubmitReturnsPendingAndRecordsTheProposal(t *testing.T) {
 	r := New(s, quietLogger())
 	release := make(chan struct{})
 
-	job, err := r.Submit(context.Background(), uuid.New(), store.JobShelfIngestion, nil,
+	job, err := r.Submit(context.Background(), store.NewJob{StorageID: uuid.New(), Kind: store.JobShelfIngestion},
 		func(context.Context) (json.RawMessage, error) {
 			<-release
 			return json.RawMessage(`{"items":[]}`), nil
@@ -131,7 +131,7 @@ func TestSubmitDoesNotTieWorkToTheRequest(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 
-	job, err := r.Submit(reqCtx, uuid.New(), store.JobProductPhoto, nil,
+	job, err := r.Submit(reqCtx, store.NewJob{StorageID: uuid.New(), Kind: store.JobProductPhoto},
 		func(ctx context.Context) (json.RawMessage, error) {
 			close(started)
 			<-release
@@ -157,12 +157,12 @@ func TestFailureMessagesAreWrittenForTheUser(t *testing.T) {
 	s := newFakeStore()
 	r := New(s, quietLogger())
 
-	internal, err := r.Submit(context.Background(), uuid.New(), store.JobShelfIngestion, nil,
+	internal, err := r.Submit(context.Background(), store.NewJob{StorageID: uuid.New(), Kind: store.JobShelfIngestion},
 		func(context.Context) (json.RawMessage, error) {
 			return nil, errors.New("gemini: 403 API key AIza... invalid")
 		})
 	require.NoError(t, err)
-	user, err := r.Submit(context.Background(), uuid.New(), store.JobShelfIngestion, nil,
+	user, err := r.Submit(context.Background(), store.NewJob{StorageID: uuid.New(), Kind: store.JobShelfIngestion},
 		func(context.Context) (json.RawMessage, error) {
 			return nil, &UserError{Message: "The photo is too dark to read.", Err: errors.New("low confidence")}
 		})
@@ -185,10 +185,10 @@ func TestAPanickingJobFailsAloneInsteadOfCrashing(t *testing.T) {
 	s := newFakeStore()
 	r := New(s, quietLogger())
 
-	bad, err := r.Submit(context.Background(), uuid.New(), store.JobShelfIngestion, nil,
+	bad, err := r.Submit(context.Background(), store.NewJob{StorageID: uuid.New(), Kind: store.JobShelfIngestion},
 		func(context.Context) (json.RawMessage, error) { panic("decoder exploded") })
 	require.NoError(t, err)
-	good, err := r.Submit(context.Background(), uuid.New(), store.JobShelfIngestion, nil,
+	good, err := r.Submit(context.Background(), store.NewJob{StorageID: uuid.New(), Kind: store.JobShelfIngestion},
 		func(context.Context) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
 	require.NoError(t, err)
 
@@ -202,7 +202,7 @@ func TestInvalidPayloadFailsTheJob(t *testing.T) {
 	s := newFakeStore()
 	r := New(s, quietLogger())
 
-	job, err := r.Submit(context.Background(), uuid.New(), store.JobShelfIngestion, nil,
+	job, err := r.Submit(context.Background(), store.NewJob{StorageID: uuid.New(), Kind: store.JobShelfIngestion},
 		func(context.Context) (json.RawMessage, error) { return json.RawMessage(`{not json`), nil })
 	require.NoError(t, err)
 
@@ -217,7 +217,7 @@ func TestAJobThatOutlivesItsTimeoutFails(t *testing.T) {
 	r := New(s, quietLogger())
 	r.timeout = 20 * time.Millisecond
 
-	job, err := r.Submit(context.Background(), uuid.New(), store.JobShelfIngestion, nil,
+	job, err := r.Submit(context.Background(), store.NewJob{StorageID: uuid.New(), Kind: store.JobShelfIngestion},
 		func(ctx context.Context) (json.RawMessage, error) {
 			<-ctx.Done()
 			return nil, ctx.Err()
@@ -240,7 +240,7 @@ func TestShutdownRecordsInterruptedWork(t *testing.T) {
 	r := New(s, quietLogger())
 	started := make(chan struct{})
 
-	job, err := r.Submit(context.Background(), uuid.New(), store.JobShelfIngestion, nil,
+	job, err := r.Submit(context.Background(), store.NewJob{StorageID: uuid.New(), Kind: store.JobShelfIngestion},
 		func(ctx context.Context) (json.RawMessage, error) {
 			close(started)
 			<-ctx.Done()
@@ -259,7 +259,7 @@ func TestShutdownRecordsInterruptedWork(t *testing.T) {
 	require.NotNil(t, got.Error)
 	assert.Equal(t, store.InterruptedJobError, *got.Error)
 
-	_, err = r.Submit(context.Background(), uuid.New(), store.JobShelfIngestion, nil,
+	_, err = r.Submit(context.Background(), store.NewJob{StorageID: uuid.New(), Kind: store.JobShelfIngestion},
 		func(context.Context) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
 	assert.ErrorIs(t, err, ErrShutDown)
 }
@@ -276,7 +276,7 @@ func TestAJobDiscardedMidFlightStaysDiscarded(t *testing.T) {
 	release := make(chan struct{})
 	finished := make(chan struct{})
 
-	job, err := r.Submit(context.Background(), uuid.New(), store.JobShelfIngestion, nil,
+	job, err := r.Submit(context.Background(), store.NewJob{StorageID: uuid.New(), Kind: store.JobShelfIngestion},
 		func(context.Context) (json.RawMessage, error) {
 			close(started)
 			<-release
@@ -312,7 +312,7 @@ func TestConcurrencyIsBounded(t *testing.T) {
 
 	var ids []uuid.UUID
 	for range 6 {
-		job, err := r.Submit(context.Background(), uuid.New(), store.JobShelfIngestion, nil,
+		job, err := r.Submit(context.Background(), store.NewJob{StorageID: uuid.New(), Kind: store.JobShelfIngestion},
 			func(context.Context) (json.RawMessage, error) {
 				mu.Lock()
 				running++
@@ -347,7 +347,7 @@ func TestRecoverFailsWhatThePreviousProcessLeftPending(t *testing.T) {
 	t.Parallel()
 
 	s := newFakeStore()
-	orphan, err := s.CreateJob(context.Background(), uuid.New(), store.JobShelfIngestion, nil)
+	orphan, err := s.CreateJob(context.Background(), store.NewJob{StorageID: uuid.New(), Kind: store.JobShelfIngestion})
 	require.NoError(t, err)
 
 	require.NoError(t, New(s, quietLogger()).Recover(context.Background()))

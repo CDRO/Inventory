@@ -1,6 +1,14 @@
-// Package vision owns the Gemini client and, at this stage, the model
-// resilience rules from docs/specs/01-architecture-and-deployment.md.
+// Package vision owns everything that talks to Gemini: the photo analysis
+// itself, and the model-resilience rules around it.
 //
+// Analysis (gemini.go) sends a photo to generateContent with structured output
+// and validates the reply against the GeminiShelfAnalysis contract of
+// docs/specs/06-vision-shelf-ingestion.md. A reply that cannot be read fails
+// with ErrMalformedResponse rather than passing for an empty shelf; secondary
+// fields the model got wrong, like a box off the edge of the image, are
+// repaired without dropping the item.
+//
+// Resilience (this file) follows docs/specs/01-architecture-and-deployment.md.
 // Pinned model ids get deprecated and then simply stop working. The rule this
 // package enforces is that such a deployment degrades visibly rather than
 // opaquely: the application still starts, every non-vision feature keeps

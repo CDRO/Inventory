@@ -46,27 +46,27 @@ func (s *Store) CreateLocation(ctx context.Context, storageID uuid.UUID, in NewL
 		if err := lockStorageTree(ctx, tx, storageID); err != nil {
 			return err
 		}
-		if err := resolveParent(ctx, tx, treeLocations, storageID, nil, in.ParentID); err != nil {
-			return err
-		}
-
-		row := tx.QueryRow(ctx, `
-			INSERT INTO locations (id, storage_id, parent_id, name, description)
-			VALUES ($1, $2, $3, $4, $5)
-			RETURNING id, storage_id, parent_id, name, description, created_at, updated_at`,
-			id, storageID, in.ParentID, in.Name, in.Description)
-
-		loc, err := scanLocation(row)
-		if err != nil {
-			return err
-		}
+		loc, err := insertLocation(ctx, tx, storageID, id, in)
 		out = loc
-		return nil
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// insertLocation writes one node inside a caller's transaction. The caller
+// holds the storage's tree lock.
+func insertLocation(ctx context.Context, tx pgx.Tx, storageID, id uuid.UUID, in NewLocation) (*Location, error) {
+	if err := resolveParent(ctx, tx, treeLocations, storageID, nil, in.ParentID); err != nil {
+		return nil, err
+	}
+	return scanLocation(tx.QueryRow(ctx, `
+		INSERT INTO locations (id, storage_id, parent_id, name, description)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, storage_id, parent_id, name, description, created_at, updated_at`,
+		id, storageID, in.ParentID, in.Name, in.Description))
 }
 
 // MoveLocation re-parents a node.

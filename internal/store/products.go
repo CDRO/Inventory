@@ -60,6 +60,20 @@ type NewProduct struct {
 // categories and products both carry storage_id, but a plain foreign key only
 // checks that the category exists, not that it belongs here.
 func (s *Store) CreateProduct(ctx context.Context, storageID uuid.UUID, in NewProduct) (*Product, error) {
+	var out *Product
+	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		p, err := createProduct(ctx, tx, storageID, in)
+		out = p
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// createProduct is CreateProduct inside a caller's transaction.
+func createProduct(ctx context.Context, tx pgx.Tx, storageID uuid.UUID, in NewProduct) (*Product, error) {
 	id, err := newID()
 	if err != nil {
 		return nil, err
@@ -68,34 +82,22 @@ func (s *Store) CreateProduct(ctx context.Context, storageID uuid.UUID, in NewPr
 		in.ItemType = ItemLongShelfLife
 	}
 
-	var out *Product
-	err = s.inTx(ctx, func(tx pgx.Tx) error {
-		if in.CategoryID != nil {
-			if err := requireSameStorage(ctx, tx, treeCategories, storageID, *in.CategoryID); err != nil {
-				return err
-			}
+	if in.CategoryID != nil {
+		if err := requireSameStorage(ctx, tx, treeCategories, storageID, *in.CategoryID); err != nil {
+			return nil, err
 		}
-
-		row := tx.QueryRow(ctx, `
-			INSERT INTO products (id, storage_id, name, category_id, catalog_id, item_type,
-			                      default_shelf_life_days, min_stock, image_url, icon_name)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-			RETURNING id, storage_id, name, category_id, catalog_id, item_type,
-			          default_shelf_life_days, min_stock, image_url, icon_name, created_at, updated_at`,
-			id, storageID, in.Name, in.CategoryID, in.CatalogID, string(in.ItemType),
-			in.DefaultShelfLifeDays, in.MinStock, in.ImageURL, in.IconName)
-
-		p, err := scanProduct(row)
-		if err != nil {
-			return err
-		}
-		out = p
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
-	return out, nil
+
+	row := tx.QueryRow(ctx, `
+		INSERT INTO products (id, storage_id, name, category_id, catalog_id, item_type,
+		                      default_shelf_life_days, min_stock, image_url, icon_name)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		RETURNING id, storage_id, name, category_id, catalog_id, item_type,
+		          default_shelf_life_days, min_stock, image_url, icon_name, created_at, updated_at`,
+		id, storageID, in.Name, in.CategoryID, in.CatalogID, string(in.ItemType),
+		in.DefaultShelfLifeDays, in.MinStock, in.ImageURL, in.IconName)
+
+	return scanProduct(row)
 }
 
 // SetProductCategory re-categorises a product, rejecting a category from

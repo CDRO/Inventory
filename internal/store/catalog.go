@@ -70,6 +70,20 @@ func NormalizeCatalogName(name string) string {
 // A conflict is therefore not an error — it means another storage described
 // this product first, and their description stands.
 func (s *Store) InsertCatalogProduct(ctx context.Context, in NewCatalogProduct) (*CatalogProduct, error) {
+	var out *CatalogProduct
+	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		cp, err := insertCatalogProduct(ctx, tx, in)
+		out = cp
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// insertCatalogProduct is InsertCatalogProduct inside a caller's transaction.
+func insertCatalogProduct(ctx context.Context, tx pgx.Tx, in NewCatalogProduct) (*CatalogProduct, error) {
 	normalized := NormalizeCatalogName(in.DisplayName)
 	if normalized == "" {
 		return nil, fmt.Errorf("%w: catalog name must not be blank", ErrValidation)
@@ -83,42 +97,30 @@ func (s *Store) InsertCatalogProduct(ctx context.Context, in NewCatalogProduct) 
 		return nil, err
 	}
 
-	var out *CatalogProduct
-	err = s.inTx(ctx, func(tx pgx.Tx) error {
-		baseID, err := resolveVariantBase(ctx, tx, in.ShownID)
-		if err != nil {
-			return err
-		}
-
-		_, err = tx.Exec(ctx, `
-			INSERT INTO catalog_products (id, normalized_name, display_name, base_id, category_path,
-			                              item_type, image_url, icon_name, default_shelf_life_days)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			ON CONFLICT (normalized_name) DO NOTHING`,
-			id, normalized, in.DisplayName, baseID, in.CategoryPath,
-			string(in.ItemType), in.ImageURL, in.IconName, in.DefaultShelfLifeDays)
-		if err != nil {
-			return fmt.Errorf("store: insert catalog product: %w", err)
-		}
-
-		// Read back by name, not by id: on conflict the surviving row is the
-		// one written first, and that is the row callers must be given.
-		row := tx.QueryRow(ctx, `
-			SELECT id, normalized_name, display_name, base_id, category_path, item_type,
-			       image_url, icon_name, default_shelf_life_days, created_at
-			  FROM catalog_products WHERE normalized_name = $1`, normalized)
-
-		cp, err := scanCatalogProduct(row)
-		if err != nil {
-			return err
-		}
-		out = cp
-		return nil
-	})
+	baseID, err := resolveVariantBase(ctx, tx, in.ShownID)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO catalog_products (id, normalized_name, display_name, base_id, category_path,
+		                              item_type, image_url, icon_name, default_shelf_life_days)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (normalized_name) DO NOTHING`,
+		id, normalized, in.DisplayName, baseID, in.CategoryPath,
+		string(in.ItemType), in.ImageURL, in.IconName, in.DefaultShelfLifeDays)
+	if err != nil {
+		return nil, fmt.Errorf("store: insert catalog product: %w", err)
+	}
+
+	// Read back by name, not by id: on conflict the surviving row is the one
+	// written first, and that is the row callers must be given.
+	row := tx.QueryRow(ctx, `
+		SELECT id, normalized_name, display_name, base_id, category_path, item_type,
+		       image_url, icon_name, default_shelf_life_days, created_at
+		  FROM catalog_products WHERE normalized_name = $1`, normalized)
+
+	return scanCatalogProduct(row)
 }
 
 // resolveVariantBase turns "the row the user was shown" into the base a new

@@ -26,9 +26,10 @@ Two details in that command are load-bearing:
 | `00002_core_schema.sql` | The core tables of [`docs/specs/02-data-model.md`](../docs/specs/02-data-model.md) |
 | `00003_client_sync.sql` | `pairing_codes`, `idempotency_records`, `tombstones` — the client contract in [`docs/specs/12-client-api-contract.md`](../docs/specs/12-client-api-contract.md) |
 | `00004_shopping_and_image_cache.sql` | `shopping_lists`, `shopping_list_items`, `cached_images` — the reconciliation flow and its suggestion-image cache in [`docs/specs/07-shopping-list-reconciliation.md`](../docs/specs/07-shopping-list-reconciliation.md) |
+| `00005_ingestion.sql` | `jobs.image_filename` and `jobs.location_hint_id` — the photo and shelf hint behind a review job in [`docs/specs/06-vision-shelf-ingestion.md`](../docs/specs/06-vision-shelf-ingestion.md) |
 
 Every file carries both `-- +goose Up` and `-- +goose Down`, and the down path
-is exercised in CI-equivalent form: `down` four times empties the schema and
+is exercised in CI-equivalent form: `down` five times empties the schema and
 `up` restores all eighteen tables.
 
 `00001`'s down step deliberately does **not** drop the extension. Other schemas
