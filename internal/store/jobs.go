@@ -62,15 +62,31 @@ type Job struct {
 	Payload   json.RawMessage
 	Error     *string
 	CreatedBy *uuid.UUID
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	// ImageFilename is the photo behind a photo job, under the ingest upload
+	// area. Nil for a job with no image, or once retention removed it.
+	ImageFilename *string
+	// LocationHintID is the shelf the photo was taken for, if the user was
+	// scoped into one.
+	LocationHintID *uuid.UUID
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
-const jobColumns = `id, storage_id, kind, status, payload, error, created_by, created_at, updated_at`
+// NewJob is the input to CreateJob.
+type NewJob struct {
+	StorageID      uuid.UUID
+	Kind           JobKind
+	CreatedBy      *uuid.UUID
+	ImageFilename  *string
+	LocationHintID *uuid.UUID
+}
+
+const jobColumns = `id, storage_id, kind, status, payload, error, created_by, image_filename, location_hint_id, created_at, updated_at`
 
 func scanJob(row rowScanner) (*Job, error) {
 	var j Job
-	err := row.Scan(&j.ID, &j.StorageID, &j.Kind, &j.Status, &j.Payload, &j.Error, &j.CreatedBy, &j.CreatedAt, &j.UpdatedAt)
+	err := row.Scan(&j.ID, &j.StorageID, &j.Kind, &j.Status, &j.Payload, &j.Error, &j.CreatedBy,
+		&j.ImageFilename, &j.LocationHintID, &j.CreatedAt, &j.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -81,19 +97,75 @@ func scanJob(row rowScanner) (*Job, error) {
 }
 
 // CreateJob inserts a pending job.
-func (s *Store) CreateJob(ctx context.Context, storageID uuid.UUID, kind JobKind, createdBy *uuid.UUID) (*Job, error) {
+//
+// A location hint is validated against the job's storage: a shelf in another
+// storage is ErrNotFound, exactly like one that does not exist
+// (docs/specs/06-vision-shelf-ingestion.md). So is a storage that does not
+// exist.
+func (s *Store) CreateJob(ctx context.Context, in NewJob) (*Job, error) {
 	id, err := newID()
 	if err != nil {
 		return nil, err
 	}
-	job, err := scanJob(s.pool.QueryRow(ctx, `
-		INSERT INTO jobs (id, storage_id, kind, status, created_by)
-		VALUES ($1, $2, $3, 'pending', $4)
-		RETURNING `+jobColumns, id, storageID, kind, createdBy))
-	if isForeignKeyViolation(err) {
-		return nil, ErrNotFound
+
+	var out *Job
+	err = s.inTx(ctx, func(tx pgx.Tx) error {
+		if in.LocationHintID != nil {
+			if err := requireSameStorage(ctx, tx, treeLocations, in.StorageID, *in.LocationHintID); err != nil {
+				return err
+			}
+		}
+		job, err := scanJob(tx.QueryRow(ctx, `
+			INSERT INTO jobs (id, storage_id, kind, status, created_by, image_filename, location_hint_id)
+			VALUES ($1, $2, $3, 'pending', $4, $5, $6)
+			RETURNING `+jobColumns, id, in.StorageID, in.Kind, in.CreatedBy, in.ImageFilename, in.LocationHintID))
+		if isForeignKeyViolation(err) {
+			return ErrNotFound
+		}
+		out = job
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
-	return job, err
+	return out, nil
+}
+
+// ExpiredJobImages returns the image filenames of consumed jobs last touched
+// before cutoff — the photos whose review is over and whose 30-day grace has
+// passed (docs/specs/04-backend-api-conventions.md).
+//
+// Only consumed jobs. A done job waits for review indefinitely, and its photo
+// has to be there when it does; a discarded job's photo is deleted with it.
+func (s *Store) ExpiredJobImages(ctx context.Context, cutoff time.Time, limit int) (map[uuid.UUID]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, image_filename FROM jobs
+		 WHERE status = 'consumed' AND image_filename IS NOT NULL AND updated_at < $1
+		 ORDER BY updated_at
+		 LIMIT $2`, cutoff, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: expired job images: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[uuid.UUID]string{}
+	for rows.Next() {
+		var id uuid.UUID
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, fmt.Errorf("store: scan expired job image: %w", err)
+		}
+		out[id] = name
+	}
+	return out, rows.Err()
+}
+
+// ClearJobImage records that a job's photo is gone from disk.
+func (s *Store) ClearJobImage(ctx context.Context, id uuid.UUID) error {
+	if _, err := s.pool.Exec(ctx, `UPDATE jobs SET image_filename = NULL WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("store: clear job image: %w", err)
+	}
+	return nil
 }
 
 // CompleteJob records a proposal and moves a pending job to done.
@@ -190,15 +262,23 @@ func (s *Store) ListJobs(ctx context.Context, storageID uuid.UUID, statuses []Jo
 }
 
 // DeleteJob discards a job, scoped to a storage.
-func (s *Store) DeleteJob(ctx context.Context, storageID, id uuid.UUID) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM jobs WHERE id = $1 AND storage_id = $2`, id, storageID)
+//
+// It returns the job's image filename, if it had one, so the caller can delete
+// the photo too: discarding a job "drops the proposal and its image"
+// (docs/specs/06-vision-shelf-ingestion.md). The row goes first, so a failure
+// to remove the file leaves an orphan on disk rather than a job pointing at a
+// missing photo.
+func (s *Store) DeleteJob(ctx context.Context, storageID, id uuid.UUID) (*string, error) {
+	var image *string
+	err := s.pool.QueryRow(ctx,
+		`DELETE FROM jobs WHERE id = $1 AND storage_id = $2 RETURNING image_filename`, id, storageID).Scan(&image)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
 	if err != nil {
-		return fmt.Errorf("store: delete job: %w", err)
+		return nil, fmt.Errorf("store: delete job: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return image, nil
 }
 
 // ConsumeJob marks a done job consumed, so its proposal cannot be applied twice.

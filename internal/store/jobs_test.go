@@ -25,7 +25,7 @@ func TestJobLifecyclePendingToDone(t *testing.T) {
 	storageID := newStorage(t, ctx)
 	userID := newUser(t, ctx)
 
-	job, err := s.CreateJob(ctx, storageID, store.JobShelfIngestion, &userID)
+	job, err := s.CreateJob(ctx, store.NewJob{StorageID: storageID, Kind: store.JobShelfIngestion, CreatedBy: &userID})
 	require.NoError(t, err)
 	assert.Equal(t, store.JobPending, job.Status)
 	assert.Equal(t, "pending", jobStatus(t, ctx, job.ID))
@@ -47,16 +47,17 @@ func TestOnlyAPendingJobCanFinish(t *testing.T) {
 	ctx := context.Background()
 	storageID := newStorage(t, ctx)
 
-	job, err := s.CreateJob(ctx, storageID, store.JobProductPhoto, nil)
+	job, err := s.CreateJob(ctx, store.NewJob{StorageID: storageID, Kind: store.JobProductPhoto})
 	require.NoError(t, err)
 	require.NoError(t, s.FailJob(ctx, job.ID, "nope"))
 
 	assert.ErrorIs(t, s.CompleteJob(ctx, job.ID, json.RawMessage(`{}`)), store.ErrNotFound)
 	assert.Equal(t, "failed", jobStatus(t, ctx, job.ID), "a late result must not overwrite the failure")
 
-	discarded, err := s.CreateJob(ctx, storageID, store.JobProductPhoto, nil)
+	discarded, err := s.CreateJob(ctx, store.NewJob{StorageID: storageID, Kind: store.JobProductPhoto})
 	require.NoError(t, err)
-	require.NoError(t, s.DeleteJob(ctx, storageID, discarded.ID))
+	_, err = s.DeleteJob(ctx, storageID, discarded.ID)
+	require.NoError(t, err)
 	assert.ErrorIs(t, s.CompleteJob(ctx, discarded.ID, json.RawMessage(`{}`)), store.ErrNotFound)
 }
 
@@ -67,9 +68,9 @@ func TestFailInterruptedJobsLeavesFinishedOnesAlone(t *testing.T) {
 	ctx := context.Background()
 	storageID := newStorage(t, ctx)
 
-	pending, err := s.CreateJob(ctx, storageID, store.JobShelfIngestion, nil)
+	pending, err := s.CreateJob(ctx, store.NewJob{StorageID: storageID, Kind: store.JobShelfIngestion})
 	require.NoError(t, err)
-	done, err := s.CreateJob(ctx, storageID, store.JobShelfIngestion, nil)
+	done, err := s.CreateJob(ctx, store.NewJob{StorageID: storageID, Kind: store.JobShelfIngestion})
 	require.NoError(t, err)
 	require.NoError(t, s.CompleteJob(ctx, done.ID, json.RawMessage(`{"ok":true}`)))
 
@@ -92,20 +93,21 @@ func TestJobsAreStorageScoped(t *testing.T) {
 	mine := newStorage(t, ctx)
 	theirs := newStorage(t, ctx)
 
-	job, err := s.CreateJob(ctx, theirs, store.JobShelfIngestion, nil)
+	job, err := s.CreateJob(ctx, store.NewJob{StorageID: theirs, Kind: store.JobShelfIngestion})
 	require.NoError(t, err)
 
 	_, err = s.Job(ctx, mine, job.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 
-	assert.ErrorIs(t, s.DeleteJob(ctx, mine, job.ID), store.ErrNotFound)
+	_, err = s.DeleteJob(ctx, mine, job.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
 	assert.Equal(t, "pending", jobStatus(t, ctx, job.ID), "a refused delete must not delete")
 
 	listed, err := s.ListJobs(ctx, mine, []store.JobStatus{store.JobPending}, nil, 50)
 	require.NoError(t, err)
 	assert.Empty(t, listed)
 
-	_, err = s.CreateJob(ctx, uuid.New(), store.JobShelfIngestion, nil)
+	_, err = s.CreateJob(ctx, store.NewJob{StorageID: uuid.New(), Kind: store.JobShelfIngestion})
 	assert.ErrorIs(t, err, store.ErrNotFound, "a job for a storage that does not exist")
 }
 
@@ -118,11 +120,11 @@ func TestListJobsPagesNewestFirstWithoutDrift(t *testing.T) {
 
 	var ids []uuid.UUID
 	for range 5 {
-		job, err := s.CreateJob(ctx, storageID, store.JobShelfIngestion, nil)
+		job, err := s.CreateJob(ctx, store.NewJob{StorageID: storageID, Kind: store.JobShelfIngestion})
 		require.NoError(t, err)
 		ids = append(ids, job.ID)
 	}
-	consumed, err := s.CreateJob(ctx, storageID, store.JobShelfIngestion, nil)
+	consumed, err := s.CreateJob(ctx, store.NewJob{StorageID: storageID, Kind: store.JobShelfIngestion})
 	require.NoError(t, err)
 	_, err = execTest(ctx, `UPDATE jobs SET status = 'consumed' WHERE id = $1`, consumed.ID)
 	require.NoError(t, err)
@@ -136,7 +138,7 @@ func TestListJobsPagesNewestFirstWithoutDrift(t *testing.T) {
 	assert.Equal(t, ids[3], first[1].ID)
 
 	// Arrives between page requests.
-	_, err = s.CreateJob(ctx, storageID, store.JobShelfIngestion, nil)
+	_, err = s.CreateJob(ctx, store.NewJob{StorageID: storageID, Kind: store.JobShelfIngestion})
 	require.NoError(t, err)
 
 	second, err := s.ListJobs(ctx, storageID, inbox, &first[1].ID, 2)
@@ -164,7 +166,7 @@ func TestConsumeJobAppliesAProposalOnce(t *testing.T) {
 	ctx := context.Background()
 	storageID := newStorage(t, ctx)
 
-	job, err := s.CreateJob(ctx, storageID, store.JobShelfIngestion, nil)
+	job, err := s.CreateJob(ctx, store.NewJob{StorageID: storageID, Kind: store.JobShelfIngestion})
 	require.NoError(t, err)
 
 	consume := func(storage uuid.UUID) error {

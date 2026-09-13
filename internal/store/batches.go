@@ -65,6 +65,21 @@ type NewBatch struct {
 // foreign key, so without this a batch could be filed against a shelf in
 // somebody else's house.
 func (s *Store) CreateBatch(ctx context.Context, storageID uuid.UUID, in NewBatch) (*Batch, error) {
+	var out *Batch
+	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		batch, err := createBatch(ctx, tx, storageID, in)
+		out = batch
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// createBatch is CreateBatch inside a caller's transaction, for writes that
+// must land together with others — a confirmed ingestion proposal, say.
+func createBatch(ctx context.Context, tx pgx.Tx, storageID uuid.UUID, in NewBatch) (*Batch, error) {
 	// A batch is a quantity of something in a place, so it starts at one or
 	// more. Allowing zero would create a row the model says should not exist —
 	// AdjustBatch deletes a batch the moment it reaches zero — and would pair
@@ -86,57 +101,49 @@ func (s *Store) CreateBatch(ctx context.Context, storageID uuid.UUID, in NewBatc
 		return nil, err
 	}
 
-	var out *Batch
-	err = s.inTx(ctx, func(tx pgx.Tx) error {
-		if err := requireProductInStorage(ctx, tx, storageID, in.ProductID); err != nil {
-			return err
-		}
-		if err := requireSameStorage(ctx, tx, treeLocations, storageID, in.LocationID); err != nil {
-			return err
-		}
+	if err := requireProductInStorage(ctx, tx, storageID, in.ProductID); err != nil {
+		return nil, err
+	}
+	if err := requireSameStorage(ctx, tx, treeLocations, storageID, in.LocationID); err != nil {
+		return nil, err
+	}
 
-		// A batch created without an explicit date gets the resolved default
-		// rather than no date at all
-		// (docs/specs/08-expiration-and-classification.md): "never leaves it
-		// unset by omission".
-		//
-		// The guard is on the *source*, not on the date being nil, because nil
-		// means two different things. A caller that says ExpirationUser is
-		// making a deliberate statement — including "this has no expiry" — and
-		// resolving over the top of that would be the exact behaviour the
-		// derived/user distinction exists to prevent. Anything else is an
-		// omission, and an omission is what the rules are for.
-		if in.ExpirationDate == nil && in.ExpirationSource != ExpirationUser {
-			rules, err := expiryRulesFor(ctx, tx, storageID, in.ProductID)
-			if err != nil {
-				return err
-			}
-			// created_at defaults to now() in the same statement below, so the
-			// date is computed from the same clock the row will carry.
-			in.ExpirationDate = expiry.DateFor(time.Now(), expiry.Resolve(rules))
-		}
-
-		row := tx.QueryRow(ctx, `
-			INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_date, expiration_source)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			RETURNING id, product_id, location_id, quantity, expiration_date, expiration_source, created_at`,
-			id, in.ProductID, in.LocationID, in.Quantity, in.ExpirationDate, string(in.ExpirationSource))
-
-		batch, err := scanBatch(row)
+	// A batch created without an explicit date gets the resolved default
+	// rather than no date at all
+	// (docs/specs/08-expiration-and-classification.md): "never leaves it
+	// unset by omission".
+	//
+	// The guard is on the *source*, not on the date being nil, because nil
+	// means two different things. A caller that says ExpirationUser is
+	// making a deliberate statement — including "this has no expiry" — and
+	// resolving over the top of that would be the exact behaviour the
+	// derived/user distinction exists to prevent. Anything else is an
+	// omission, and an omission is what the rules are for.
+	if in.ExpirationDate == nil && in.ExpirationSource != ExpirationUser {
+		rules, err := expiryRulesFor(ctx, tx, storageID, in.ProductID)
 		if err != nil {
-			return err
+			return nil, err
 		}
+		// created_at defaults to now() in the same statement below, so the
+		// date is computed from the same clock the row will carry.
+		in.ExpirationDate = expiry.DateFor(time.Now(), expiry.Resolve(rules))
+	}
 
-		if err := writeLog(ctx, tx, in.ProductID, &batch.ID, in.Quantity, in.Reason, in.CreatedBy); err != nil {
-			return err
-		}
-		out = batch
-		return nil
-	})
+	row := tx.QueryRow(ctx, `
+		INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_date, expiration_source)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, product_id, location_id, quantity, expiration_date, expiration_source, created_at`,
+		id, in.ProductID, in.LocationID, in.Quantity, in.ExpirationDate, string(in.ExpirationSource))
+
+	batch, err := scanBatch(row)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+
+	if err := writeLog(ctx, tx, in.ProductID, &batch.ID, in.Quantity, in.Reason, in.CreatedBy); err != nil {
+		return nil, err
+	}
+	return batch, nil
 }
 
 // AdjustBatch changes a batch's quantity by delta and writes the paired log

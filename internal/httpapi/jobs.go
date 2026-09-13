@@ -3,7 +3,9 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -16,7 +18,14 @@ import (
 type JobStore interface {
 	Job(ctx context.Context, storageID, id uuid.UUID) (*store.Job, error)
 	ListJobs(ctx context.Context, storageID uuid.UUID, statuses []store.JobStatus, after *uuid.UUID, limit int) ([]store.Job, error)
-	DeleteJob(ctx context.Context, storageID, id uuid.UUID) error
+	DeleteJob(ctx context.Context, storageID, id uuid.UUID) (imageFilename *string, err error)
+}
+
+// PhotoStore holds the photos behind review jobs. *uploads.Dir satisfies it.
+type PhotoStore interface {
+	Save(name string, data []byte) error
+	Read(name string) ([]byte, error)
+	Remove(name string) error
 }
 
 // inboxStatuses are the jobs a review inbox shows when no status is asked for:
@@ -31,12 +40,66 @@ var inboxStatuses = []store.JobStatus{store.JobPending, store.JobDone, store.Job
 // who photographed it.
 type JobHandler struct {
 	store  JobStore
+	photos PhotoStore
 	errors *ErrorWriter
 }
 
-// NewJobHandler wires the job routes.
-func NewJobHandler(s JobStore, errs *ErrorWriter) *JobHandler {
-	return &JobHandler{store: s, errors: errs}
+// NewJobHandler wires the job routes. photos may be nil for a deployment with
+// no photo jobs; the image route then answers 404 and discards remove no files.
+func NewJobHandler(s JobStore, photos PhotoStore, errs *ErrorWriter) *JobHandler {
+	return &JobHandler{store: s, photos: photos, errors: errs}
+}
+
+// Image serves GET /api/storages/{storage_id}/jobs/{id}/image — the photo a
+// review renders its crops from.
+//
+// Storage-scoped through the job lookup, so one storage's members cannot fetch
+// another's photos by guessing a job id. The filename comes from the job row,
+// never from the request.
+func (h *JobHandler) Image(w http.ResponseWriter, r *http.Request) {
+	storageID, ok := StorageIDFrom(r.Context())
+	if !ok {
+		h.errors.WriteError(w, r, Internal(errNoStorageInContext))
+		return
+	}
+	id, failure := idFromPath(r, "id", "malformed job id")
+	if failure != nil {
+		h.errors.WriteError(w, r, failure)
+		return
+	}
+
+	job, err := h.store.Job(r.Context(), storageID, id)
+	if err != nil {
+		h.errors.WriteError(w, r, FromStoreError(err, "job not found in storage"))
+		return
+	}
+	if job.ImageFilename == nil || h.photos == nil {
+		h.errors.WriteError(w, r, NotFound("job has no image"))
+		return
+	}
+
+	data, err := h.photos.Read(*job.ImageFilename)
+	if errors.Is(err, os.ErrNotExist) {
+		h.errors.WriteError(w, r, NotFound("job image missing on disk"))
+		return
+	}
+	if err != nil {
+		h.errors.WriteError(w, r, Internal(err))
+		return
+	}
+
+	header := w.Header()
+	contentType := "image/jpeg"
+	if strings.HasSuffix(*job.ImageFilename, ".png") {
+		contentType = "image/png"
+	}
+	header.Set("Content-Type", contentType)
+	header.Set("X-Content-Type-Options", "nosniff")
+	// A photo taken inside someone's home: private to the browser, never a
+	// shared cache, and never for longer than the job that holds it may live.
+	header.Set("Cache-Control", "private, max-age=3600")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 // jobResponse is one job, with its proposal once it has one. This is the shape
@@ -153,9 +216,18 @@ func (h *JobHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.DeleteJob(r.Context(), storageID, id); err != nil {
+	image, err := h.store.DeleteJob(r.Context(), storageID, id)
+	if err != nil {
 		h.errors.WriteError(w, r, FromStoreError(err, "job not found in storage"))
 		return
+	}
+	// The photo goes with the proposal. The row is already gone, so a failure
+	// here leaves an unreferenced file, not a broken job — logged, and not a
+	// reason to tell the user their discard failed.
+	if image != nil && h.photos != nil {
+		if err := h.photos.Remove(*image); err != nil {
+			h.errors.Log(r.Context(), "removing a discarded job's photo failed", err)
+		}
 	}
 	writeJSON(w, http.StatusNoContent, nil)
 }
