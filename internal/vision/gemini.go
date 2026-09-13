@@ -38,6 +38,12 @@ const (
 	ModeShelf Mode = "shelf"
 	// ModeProduct identifies one product and does no spatial inference.
 	ModeProduct Mode = "product"
+	// ModeConsumption finds every item being used up or discarded in one
+	// photo (docs/specs/09-consumption-logging.md). Like ModeShelf it may
+	// return several items with a bounding box each, for the review screen's
+	// crop; unlike ModeShelf it infers no location path, since consumption
+	// never places anything.
+	ModeConsumption Mode = "consumption"
 )
 
 var (
@@ -234,10 +240,12 @@ func ParseAnalysis(mode Mode, text []byte) (*Analysis, error) {
 		if w.Confidence != nil && !math.IsNaN(*w.Confidence) {
 			item.Confidence = math.Max(0, math.Min(1, *w.Confidence))
 		}
-		if mode == ModeShelf {
+		if mode == ModeShelf || mode == ModeConsumption {
 			if validBox(w.BoundingBox) {
 				item.BoundingBox = w.BoundingBox
 			}
+		}
+		if mode == ModeShelf {
 			for _, segment := range w.ProposedLocationPath {
 				if s := strings.TrimSpace(segment); s != "" {
 					item.ProposedLocationPath = append(item.ProposedLocationPath, s)
@@ -286,6 +294,13 @@ var prompts = map[Mode]string{
 		`product, size if legible), quantity 1 unless several identical units are clearly shown, and ` +
 		`your confidence from 0 to 1. Return exactly one item. Do not return a bounding box or a ` +
 		`location path.`,
+	ModeConsumption: `You are the vision system of a household inventory app. The photo shows one or more ` +
+		`items someone has just used up, consumed or is discarding — for example an empty carton, an ` +
+		`emptied jar, or packaging being thrown away. For each distinct product: a short label naming it ` +
+		`as printed on it (brand, product, size if legible); how many units are being used up or ` +
+		`discarded; your confidence from 0 to 1; and a bounding box around all units, as fractions of the ` +
+		`image width and height. Do not return a location path. Do not list things that are not products, ` +
+		`such as a bin or the shelf itself.`,
 }
 
 // analysisSchema is GeminiShelfAnalysis in Gemini's schema dialect.

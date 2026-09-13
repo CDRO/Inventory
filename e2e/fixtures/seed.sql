@@ -51,15 +51,22 @@ INSERT INTO storage_members (storage_id, user_id) VALUES
 ON CONFLICT DO NOTHING;
 
 INSERT INTO locations (id, storage_id, name, description) VALUES
-  ('00000000-0000-7000-8000-000000000020', '00000000-0000-7000-8000-000000000010', 'Pantry', 'Kitchen pantry shelf')
+  ('00000000-0000-7000-8000-000000000020', '00000000-0000-7000-8000-000000000010', 'Pantry', 'Kitchen pantry shelf'),
+  ('00000000-0000-7000-8000-000000000021', '00000000-0000-7000-8000-000000000010', 'Fridge', 'Kitchen fridge')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO categories (id, storage_id, name, default_shelf_life_days) VALUES
   ('00000000-0000-7000-8000-000000000030', '00000000-0000-7000-8000-000000000010', 'Canned Goods', 730)
 ON CONFLICT (id) DO NOTHING;
 
+-- Greek Yogurt is a second product, dedicated to the consumption suite
+-- (docs/specs/09-consumption-logging.md) so its batches stay exactly as
+-- seeded: ingestion.spec.js's "reviewed and confirmed" test also files a new
+-- batch of Canned Tomatoes, and fullyParallel (playwright.config.js) gives no
+-- guarantee that test runs before or after this one.
 INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
-  ('00000000-0000-7000-8000-000000000040', '00000000-0000-7000-8000-000000000010', 'Canned Tomatoes', '00000000-0000-7000-8000-000000000030', 'long_shelf_life', 2)
+  ('00000000-0000-7000-8000-000000000040', '00000000-0000-7000-8000-000000000010', 'Canned Tomatoes', '00000000-0000-7000-8000-000000000030', 'long_shelf_life', 2),
+  ('00000000-0000-7000-8000-000000000041', '00000000-0000-7000-8000-000000000010', 'Greek Yogurt', NULL, 'perishable', 0)
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_source) VALUES
@@ -68,6 +75,19 @@ ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
   ('00000000-0000-7000-8000-000000000060', '00000000-0000-7000-8000-000000000040', '00000000-0000-7000-8000-000000000050', 4, 'purchase', '00000000-0000-7000-8000-000000000002')
+ON CONFLICT (id) DO NOTHING;
+
+-- Two batches of Greek Yogurt at different locations, one nearer expiration
+-- than the other, for the consumption review screen's batch picker to have
+-- something to pick and split across.
+INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_date, expiration_source) VALUES
+  ('00000000-0000-7000-8000-000000000052', '00000000-0000-7000-8000-000000000041', '00000000-0000-7000-8000-000000000020', 4, NULL, 'derived'),
+  ('00000000-0000-7000-8000-000000000053', '00000000-0000-7000-8000-000000000041', '00000000-0000-7000-8000-000000000021', 3, '2030-01-01', 'user')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
+  ('00000000-0000-7000-8000-000000000062', '00000000-0000-7000-8000-000000000041', '00000000-0000-7000-8000-000000000052', 4, 'purchase', '00000000-0000-7000-8000-000000000002'),
+  ('00000000-0000-7000-8000-000000000063', '00000000-0000-7000-8000-000000000041', '00000000-0000-7000-8000-000000000053', 3, 'purchase', '00000000-0000-7000-8000-000000000002')
 ON CONFLICT (id) DO NOTHING;
 
 -- Two ingestion proposals ready for review (docs/specs/06-vision-shelf-ingestion.md),
@@ -108,6 +128,22 @@ INSERT INTO jobs (id, storage_id, kind, status, payload, created_by) VALUES
        "match":{"status":"new_item","product":null,"candidates":[],"catalog":null},"location":{"path":[],"location_id":null}},
       {"row_id":"1","label":"Lentils 500g","confidence":0.9,"quantity":2,"bounding_box":null,
        "match":{"status":"new_item","product":null,"candidates":[],"catalog":null},"location":{"path":[],"location_id":null}}
+   ]}',
+   '00000000-0000-7000-8000-000000000003')
+ON CONFLICT (id) DO NOTHING;
+
+-- One consumption proposal (docs/specs/09-consumption-logging.md), in the
+-- shape internal/consume writes: no location placement, a stage-1-only match
+-- against this storage's own products. Row 0 matches Greek Yogurt, which has
+-- two batches (Pantry and Fridge, above) for the review screen's batch
+-- picker; row 1 is unrecognized, for the manual-correction search path.
+INSERT INTO jobs (id, storage_id, kind, status, payload, created_by) VALUES
+  ('00000000-0000-7000-8000-000000000073', '00000000-0000-7000-8000-000000000010', 'consumption_photo', 'done',
+   '{"rows":[
+      {"row_id":"0","label":"Empty Yogurt Pot","confidence":0.88,"quantity":1,"bounding_box":null,
+       "match":{"status":"exact_match","product":{"id":"00000000-0000-7000-8000-000000000041","name":"Greek Yogurt"},"candidates":[]}},
+      {"row_id":"1","label":"Unlabeled Empty Jar","confidence":0.3,"quantity":1,"bounding_box":null,
+       "match":{"status":"new_item","product":null,"candidates":[]}}
    ]}',
    '00000000-0000-7000-8000-000000000003')
 ON CONFLICT (id) DO NOTHING;

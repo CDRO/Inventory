@@ -201,6 +201,54 @@ func TestEmptyTextIsAnError(t *testing.T) {
 	require.Error(t, err, "an empty line is a caller bug; answering new_item would hide it")
 }
 
+// TestMatchLocalProductNeverReachesTheCatalog is
+// docs/specs/09-consumption-logging.md's rule stated directly: consumption
+// logging matches stage 1 only, and must never reach the catalog or an
+// external image search, even on a full local miss — the one case where
+// MatchProductCandidates itself would have gone on to stage 2.
+func TestMatchLocalProductNeverReachesTheCatalog(t *testing.T) {
+	t.Parallel()
+
+	store := &recordingStore{
+		local:   nil,
+		catalog: &matching.CatalogMatch{ID: uuid.New(), DisplayName: "Would have matched"},
+	}
+
+	result, err := matching.New(store).MatchLocalProduct(context.Background(), uuid.New(), "obscure jar")
+	require.NoError(t, err)
+
+	assert.Equal(t, matching.StatusNewItem, result.Status)
+	assert.Nil(t, result.Catalog, "stage 1 alone never learns what the catalog knows")
+	assert.Equal(t, 1, store.localCalls)
+	assert.Zero(t, store.catalogCalls, "consumption logging must never query the catalog")
+	assert.Zero(t, store.variantsCalls)
+}
+
+// TestMatchLocalProductSharesStage1Behaviour pins that the exact/ambiguous
+// rules are identical to MatchProductCandidates' — matchLocal is the one
+// implementation both exported methods share.
+func TestMatchLocalProductSharesStage1Behaviour(t *testing.T) {
+	t.Parallel()
+
+	store := &recordingStore{
+		local: []matching.LocalCandidate{{ProductID: uuid.New(), Name: "Whole Milk", Similarity: 0.92}},
+	}
+
+	result, err := matching.New(store).MatchLocalProduct(context.Background(), uuid.New(), "whole milk")
+	require.NoError(t, err)
+
+	assert.Equal(t, matching.StatusExactMatch, result.Status)
+	require.NotNil(t, result.Product)
+	assert.Equal(t, "Whole Milk", result.Product.Name)
+}
+
+func TestMatchLocalProductRejectsEmptyText(t *testing.T) {
+	t.Parallel()
+
+	_, err := matching.New(&recordingStore{}).MatchLocalProduct(context.Background(), uuid.New(), "   ")
+	require.Error(t, err)
+}
+
 func TestStoreFailuresAreReportedNotSwallowed(t *testing.T) {
 	t.Parallel()
 

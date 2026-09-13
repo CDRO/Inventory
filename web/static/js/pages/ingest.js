@@ -1,7 +1,8 @@
 import "../register-sw.js";
 
-// Page module for ingest.html — the upload half of
-// docs/specs/06-vision-shelf-ingestion.md.
+// Page module for ingest.html — the one camera entry point of
+// docs/specs/09-consumption-logging.md, shared by shelf ingestion and product
+// ingestion (docs/specs/06-vision-shelf-ingestion.md).
 //
 // Each selected photo is its own request and its own job, fired one after
 // another as soon as the form is submitted. The page never waits for analysis:
@@ -9,6 +10,11 @@ import "../register-sw.js";
 // lives in the inbox whether or not anyone stays here. Waiting for a result on
 // this screen is offered per photo, as a convenience, never as the only way to
 // get one.
+//
+// The mode — stocking up, using up, or shelf scan — is chosen before capture
+// and persists across photos, pages and sessions via localStorage, defaulting
+// to the last one used: a run of many photos in one direction asks zero
+// questions.
 
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
@@ -16,11 +22,24 @@ import { renderInboxLink } from "../inbox-badge.js";
 import { fetchLocations, appendLocationOptions } from "../location-options.js";
 import { postForm, ApiError } from "../api.js";
 import { pollJob, JobFailedError } from "../jobs.js";
-import { el, fromTemplate, qs, text } from "../dom.js";
+import { el, fromTemplate, qs, qsa, text } from "../dom.js";
+
+// The endpoint each mode uploads to (docs/specs/09-consumption-logging.md's
+// capture-mode table) and, for the ones docs/specs/06-vision-shelf-ingestion.md
+// already defines, the location hint they accept. Using-up has neither: a
+// consumption photo decrements batches that already have a location.
+const MODES = {
+  stocking_up: { endpoint: "ingest/product-photos", hasLocation: true },
+  using_up: { endpoint: "consume/photos", hasLocation: false },
+  shelf_scan: { endpoint: "ingest/shelf-photos", hasLocation: true },
+};
+const MODE_STORAGE_KEY = "inventory:capture-mode";
+const DEFAULT_MODE = "shelf_scan";
 
 const form = qs("#upload-form");
 const submitButton = qs("#submit");
 const photosInput = qs("#photos");
+const locationField = qs("#location-field");
 const locationSelect = qs("#location");
 const uploadsList = qs("#uploads");
 const uploadTemplate = qs("#upload-template");
@@ -65,7 +84,53 @@ async function init() {
     showError(err);
   }
 
+  setUpModeSelector();
   form.addEventListener("submit", onSubmit);
+}
+
+// setUpModeSelector restores the last-used mode (defaulting on a first visit),
+// persists a change immediately, and shows the location field only for the
+// two modes that place something.
+function setUpModeSelector() {
+  const radios = qsa('input[name="mode"]', form);
+  const stored = safeGetItem(MODE_STORAGE_KEY);
+  const initial = MODES[stored] ? stored : DEFAULT_MODE;
+  for (const radio of radios) {
+    radio.checked = radio.value === initial;
+    radio.addEventListener("change", () => {
+      if (radio.checked) {
+        safeSetItem(MODE_STORAGE_KEY, radio.value);
+        syncLocationField(radio.value);
+      }
+    });
+  }
+  syncLocationField(initial);
+}
+
+function syncLocationField(mode) {
+  locationField.hidden = !MODES[mode]?.hasLocation;
+}
+
+function currentMode() {
+  return new FormData(form).get("mode");
+}
+
+// localStorage can throw (a private window, blocked site data); the mode
+// selector still has to work without it, just without the stickiness.
+function safeGetItem(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeSetItem(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // A viewer without storage just re-picks the mode next visit.
+  }
 }
 
 async function onSubmit(event) {
@@ -75,32 +140,33 @@ async function onSubmit(event) {
   const files = [...photosInput.files];
   if (files.length === 0) return;
 
-  const mode = new FormData(form).get("mode");
-  const endpoint = mode === "product" ? "product-photos" : "shelf-photos";
-  const hint = locationSelect.value;
+  const mode = currentMode();
+  const { endpoint, hasLocation } = MODES[mode] || MODES[DEFAULT_MODE];
+  const hint = hasLocation ? locationSelect.value : "";
 
   submitButton.disabled = true;
   // One after another rather than all at once: a phone on a weak connection
   // uploading six 8MB photos in parallel finishes none of them.
   for (const file of files) {
     const card = addUploadCard(file.name);
-    await upload(card, endpoint, file, hint);
+    await upload(card, endpoint, file, hint, mode);
   }
   submitButton.disabled = false;
   form.reset();
+  setUpModeSelector();
 }
 
-async function upload(card, endpoint, file, hint) {
+async function upload(card, endpoint, file, hint, mode) {
   setStatus(card, "Uploading…", "");
   const body = new FormData();
   body.append("image", file);
   if (hint) body.append("location_id", hint);
 
   try {
-    const { job_id: jobId } = await postForm(`/api/storages/${storageId}/ingest/${endpoint}`, body);
+    const { job_id: jobId } = await postForm(`/api/storages/${storageId}/${endpoint}`, body);
     setStatus(card, "Uploaded", "Being analysed. It will be waiting in your inbox.");
     setActions(card, [
-      el("button", { type: "button", class: "btn btn--ghost", onclick: () => waitFor(card, jobId) }, [
+      el("button", { type: "button", class: "btn btn--ghost", onclick: () => waitFor(card, jobId, mode) }, [
         text("Wait here for the result"),
       ]),
     ]);
@@ -109,14 +175,14 @@ async function upload(card, endpoint, file, hint) {
   }
 }
 
-async function waitFor(card, jobId) {
+async function waitFor(card, jobId, mode) {
   setActions(card, [el("span", { class: "spinner", "aria-hidden": "true" })]);
   try {
     const payload = await pollJob(storageId, jobId);
     const count = Array.isArray(payload?.rows) ? payload.rows.length : 0;
     setStatus(card, "Ready", count === 1 ? "1 item found." : `${count} items found.`);
     setActions(card, [
-      el("a", { class: "btn btn--primary", href: reviewHref(jobId) }, [text("Review now")]),
+      el("a", { class: "btn btn--primary", href: reviewHref(jobId, mode) }, [text("Review now")]),
     ]);
   } catch (err) {
     if (err instanceof JobFailedError) {
@@ -144,8 +210,9 @@ function uploadErrorMessage(err) {
   }
 }
 
-function reviewHref(jobId) {
-  const url = new URL(withStorageParam(storageId, "/review.html"), location.origin);
+function reviewHref(jobId, mode) {
+  const page = mode === "using_up" ? "/consume-review.html" : "/review.html";
+  const url = new URL(withStorageParam(storageId, page), location.origin);
   url.searchParams.set("job", jobId);
   return url.pathname + url.search;
 }

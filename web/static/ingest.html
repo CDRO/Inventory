@@ -28,13 +28,17 @@
     <div id="error" class="alert" role="alert" hidden></div>
 
     <form id="upload-form" class="card stack">
+      <!-- The capture mode is chosen before the photo and persists across
+           photos, pages and sessions (docs/specs/09-consumption-logging.md):
+           a run of many photos in one direction asks zero questions. -->
       <fieldset class="stack">
-        <legend>What is in the photo?</legend>
-        <label class="row"><input type="radio" name="mode" value="shelf" checked> A shelf, cupboard or fridge</label>
-        <label class="row"><input type="radio" name="mode" value="product"> One product I just bought</label>
+        <legend>What are you doing?</legend>
+        <label class="row"><input type="radio" name="mode" value="stocking_up"> Stocking up — I'm adding this (+)</label>
+        <label class="row"><input type="radio" name="mode" value="using_up"> Using up — I'm removing this (−)</label>
+        <label class="row"><input type="radio" name="mode" value="shelf_scan"> Shelf scan — index everything visible (+)</label>
       </fieldset>
 
-      <div class="field">
+      <div id="location-field" class="field">
         <label for="location">Where was it taken? (optional)</label>
         <select id="location">
           <option value="">Let the photo tell</option>

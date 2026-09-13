@@ -197,9 +197,61 @@ func (s *Service) MatchProductCandidates(ctx context.Context, storageID uuid.UUI
 		return Result{}, fmt.Errorf("matching: cannot match empty text")
 	}
 
+	result, err := s.matchLocal(ctx, storageID, query)
+	if err != nil {
+		return Result{}, err
+	}
+	if result.Status != StatusNewItem {
+		return result, nil
+	}
+
+	// Stage 2 — the anonymous catalog. Reached only when this storage has
+	// nothing resembling the text.
+	catalog, err := s.store.SimilarCatalogProduct(ctx, query, AmbiguousThreshold)
+	if err != nil {
+		return Result{}, fmt.Errorf("matching: catalog: %w", err)
+	}
+	if catalog == nil {
+		// Stage 3 is this: no pre-filled data. The caller decides whether the
+		// line is worth an external image search; this package does not make
+		// that call itself.
+		return result, nil
+	}
+
+	// Stage 2b — the variants around the hit.
+	variants, err := s.store.CatalogVariantsOf(ctx, catalog.ID, query, MaxVariants)
+	if err != nil {
+		return Result{}, fmt.Errorf("matching: catalog variants: %w", err)
+	}
+	catalog.Variants = variants
+	result.Catalog = catalog
+
+	return result, nil
+}
+
+// MatchLocalProduct resolves text against only this storage's own products —
+// stage 1, and stage 1 alone.
+//
+// docs/specs/09-consumption-logging.md is explicit that consumption logging
+// must never reach the catalog or an external image search: it only ever
+// decrements a batch this storage already has, so there is nothing for a
+// catalog hit or a provider photo to attach to. Exposing that as its own
+// method, rather than a flag on MatchProductCandidates, keeps the omission
+// visible at the call site instead of a branch a later change could widen by
+// accident.
+func (s *Service) MatchLocalProduct(ctx context.Context, storageID uuid.UUID, text string) (Result, error) {
+	query := NormalizeQuery(text)
+	if query == "" {
+		return Result{}, fmt.Errorf("matching: cannot match empty text")
+	}
+	return s.matchLocal(ctx, storageID, query)
+}
+
+// matchLocal is stage 1: this storage's own products, against an
+// already-normalized query. Shared by both exported entry points.
+func (s *Service) matchLocal(ctx context.Context, storageID uuid.UUID, query string) (Result, error) {
 	result := Result{Query: query}
 
-	// Stage 1 — this storage's own products.
 	local, err := s.store.SimilarProducts(ctx, storageID, query, AmbiguousThreshold, MaxLocalCandidates)
 	if err != nil {
 		return Result{}, fmt.Errorf("matching: local products: %w", err)
@@ -222,28 +274,6 @@ func (s *Service) MatchProductCandidates(ctx context.Context, storageID uuid.UUI
 		return result, nil
 	}
 
-	// Stage 2 — the anonymous catalog. Reached only when this storage has
-	// nothing resembling the text.
 	result.Status = StatusNewItem
-
-	catalog, err := s.store.SimilarCatalogProduct(ctx, query, AmbiguousThreshold)
-	if err != nil {
-		return Result{}, fmt.Errorf("matching: catalog: %w", err)
-	}
-	if catalog == nil {
-		// Stage 3 is this: no pre-filled data. The caller decides whether the
-		// line is worth an external image search; this package does not make
-		// that call itself.
-		return result, nil
-	}
-
-	// Stage 2b — the variants around the hit.
-	variants, err := s.store.CatalogVariantsOf(ctx, catalog.ID, query, MaxVariants)
-	if err != nil {
-		return Result{}, fmt.Errorf("matching: catalog variants: %w", err)
-	}
-	catalog.Variants = variants
-	result.Catalog = catalog
-
 	return result, nil
 }

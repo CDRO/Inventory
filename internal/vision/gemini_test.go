@@ -111,6 +111,30 @@ func TestProductModeKeepsOneItemWithoutSpatialFields(t *testing.T) {
 	assert.Empty(t, got.Items[0].ProposedLocationPath)
 }
 
+// TestConsumptionModeKeepsBoundingBoxesButNoLocationPath — like ModeShelf,
+// several items with crops; unlike ModeShelf, a proposed_location_path is
+// never kept, since consumption never places anything
+// (docs/specs/09-consumption-logging.md).
+func TestConsumptionModeKeepsBoundingBoxesButNoLocationPath(t *testing.T) {
+	t.Parallel()
+
+	got, err := vision.ParseAnalysis(vision.ModeConsumption, []byte(`{"items": [
+	  {"label": "Empty Bean Can", "confidence": 0.88, "quantity": 1,
+	   "bounding_box": {"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.2},
+	   "proposed_location_path": ["Pantry"]},
+	  {"label": "Empty Jar", "confidence": 0.4, "quantity": 1}
+	]}`))
+	require.NoError(t, err)
+	require.Len(t, got.Items, 2, "unlike ModeProduct, every item is kept")
+
+	first := got.Items[0]
+	require.NotNil(t, first.BoundingBox, "the crop is kept, like shelf ingestion")
+	assert.Equal(t, 0.1, first.BoundingBox.X)
+	assert.Empty(t, first.ProposedLocationPath, "a location path is never kept — consumption places nothing")
+
+	assert.Nil(t, got.Items[1].BoundingBox, "a box the model did not send stays nil")
+}
+
 func TestLongLabelsAreTruncatedByCharacter(t *testing.T) {
 	t.Parallel()
 

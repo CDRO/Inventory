@@ -80,6 +80,8 @@ type APIStore interface {
 	JobStore
 	IdempotencyStore
 	IngestStore
+	ConsumeStore
+	ProductStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -120,6 +122,11 @@ type Deps struct {
 	// work.
 	Ingester Ingester
 	Photos   PhotoStore
+	// Consumer starts consumption-photo ingestion
+	// (docs/specs/09-consumption-logging.md), the same way Ingester starts
+	// shelf and product ingestion. With no Consumer the upload route is
+	// absent; confirming and discarding existing consumption jobs still work.
+	Consumer Consumer
 }
 
 // NewRouter builds the application's HTTP handler.
@@ -273,6 +280,20 @@ func NewRouter(d Deps) http.Handler {
 				sr.Post("/ingest/product-photos", ingestAPI.ProductPhoto)
 			}
 			sr.Post("/ingest/{job_id}/confirm", ingestAPI.Confirm)
+
+			// Consumption logging (docs/specs/09-consumption-logging.md), the
+			// same upload-then-confirm shape as ingestion above.
+			consumeAPI := NewConsumeHandler(d.Consumer, d.Store, errs)
+			if d.Consumer != nil {
+				sr.Post("/consume/photos", consumeAPI.Upload)
+			}
+			sr.Post("/consume/photos/{job_id}/confirm", consumeAPI.Confirm)
+
+			// Read-only product lookups consumption logging's manual-correction
+			// and batch-picker need (docs/specs/09-consumption-logging.md).
+			products := NewProductHandler(d.Store, errs)
+			sr.Get("/products", products.List)
+			sr.Get("/products/{product_id}/batches", products.Batches)
 
 			if d.Matcher != nil {
 				lists := NewShoppingListHandler(d.Store, d.Matcher, errs)

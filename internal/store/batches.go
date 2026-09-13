@@ -166,41 +166,87 @@ func (s *Store) AdjustBatch(ctx context.Context, storageID, batchID uuid.UUID, d
 	}
 
 	return s.inTx(ctx, func(tx pgx.Tx) error {
-		var productID uuid.UUID
-		var quantity int
-		err := tx.QueryRow(ctx, `
-			SELECT b.product_id, b.quantity
-			  FROM inventory_batches b
-			  JOIN products p ON p.id = b.product_id
-			 WHERE b.id = $1 AND p.storage_id = $2
-			 FOR UPDATE OF b`, batchID, storageID).Scan(&productID, &quantity)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrNotFound
-		}
-		if err != nil {
-			return fmt.Errorf("store: load batch: %w", err)
-		}
-
-		updated := quantity + delta
-		if updated < 0 {
-			return fmt.Errorf("%w: batch holds %d, cannot apply %d", ErrValidation, quantity, delta)
-		}
-
-		if updated == 0 {
-			if _, err := tx.Exec(ctx, `DELETE FROM inventory_batches WHERE id = $1`, batchID); err != nil {
-				return fmt.Errorf("store: delete emptied batch: %w", err)
-			}
-			// batch_id is ON DELETE SET NULL, so the log keeps its meaning
-			// after the row it pointed at is gone.
-			return writeLog(ctx, tx, productID, nil, delta, reason, userID)
-		}
-
-		if _, err := tx.Exec(ctx,
-			`UPDATE inventory_batches SET quantity = $1 WHERE id = $2`, updated, batchID); err != nil {
-			return fmt.Errorf("store: update batch quantity: %w", err)
-		}
-		return writeLog(ctx, tx, productID, &batchID, delta, reason, userID)
+		_, err := adjustBatch(ctx, tx, storageID, batchID, delta, reason, userID)
+		return err
 	})
+}
+
+// adjustBatch is AdjustBatch inside a caller's transaction, for writes that
+// must land together with others — a confirmed consumption proposal, say
+// (docs/specs/09-consumption-logging.md). It returns the batch's product id,
+// so a caller that must also confirm the batch belongs to a particular
+// product does not need a second query.
+func adjustBatch(ctx context.Context, tx pgx.Tx, storageID, batchID uuid.UUID, delta int, reason LogReason, userID *uuid.UUID) (uuid.UUID, error) {
+	var productID uuid.UUID
+	var quantity int
+	err := tx.QueryRow(ctx, `
+		SELECT b.product_id, b.quantity
+		  FROM inventory_batches b
+		  JOIN products p ON p.id = b.product_id
+		 WHERE b.id = $1 AND p.storage_id = $2
+		 FOR UPDATE OF b`, batchID, storageID).Scan(&productID, &quantity)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, ErrNotFound
+	}
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("store: load batch: %w", err)
+	}
+
+	updated := quantity + delta
+	if updated < 0 {
+		return uuid.Nil, fmt.Errorf("%w: batch holds %d, cannot apply %d", ErrValidation, quantity, delta)
+	}
+
+	if updated == 0 {
+		if _, err := tx.Exec(ctx, `DELETE FROM inventory_batches WHERE id = $1`, batchID); err != nil {
+			return uuid.Nil, fmt.Errorf("store: delete emptied batch: %w", err)
+		}
+		// batch_id is ON DELETE SET NULL, so the log keeps its meaning
+		// after the row it pointed at is gone.
+		if err := writeLog(ctx, tx, productID, nil, delta, reason, userID); err != nil {
+			return uuid.Nil, err
+		}
+		return productID, nil
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE inventory_batches SET quantity = $1 WHERE id = $2`, updated, batchID); err != nil {
+		return uuid.Nil, fmt.Errorf("store: update batch quantity: %w", err)
+	}
+	if err := writeLog(ctx, tx, productID, &batchID, delta, reason, userID); err != nil {
+		return uuid.Nil, err
+	}
+	return productID, nil
+}
+
+// ListProductBatches returns a product's batches, nearest expiration first —
+// the default first-out order for the decrement picker in
+// docs/specs/09-consumption-logging.md. A batch with no expiration date sorts
+// last: it is not the one a reviewer should be steered towards using first.
+func (s *Store) ListProductBatches(ctx context.Context, storageID, productID uuid.UUID) ([]Batch, error) {
+	if err := requireProductInStorage(ctx, s.pool, storageID, productID); err != nil {
+		return nil, err
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, product_id, location_id, quantity, expiration_date, expiration_source, created_at
+		  FROM inventory_batches
+		 WHERE product_id = $1
+		 ORDER BY expiration_date NULLS LAST, created_at`, productID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list product batches: %w", err)
+	}
+	defer rows.Close()
+
+	out := []Batch{}
+	for rows.Next() {
+		b, err := scanBatch(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *b)
+	}
+	return out, rows.Err()
 }
 
 // SplitBatch moves quantity units of a batch to another location.

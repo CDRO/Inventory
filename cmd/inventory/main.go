@@ -28,6 +28,7 @@ import (
 
 	"github.com/CDRO/Inventory/internal/auth"
 	"github.com/CDRO/Inventory/internal/config"
+	"github.com/CDRO/Inventory/internal/consume"
 	"github.com/CDRO/Inventory/internal/httpapi"
 	"github.com/CDRO/Inventory/internal/imagesearch"
 	"github.com/CDRO/Inventory/internal/ingest"
@@ -248,6 +249,7 @@ func serve() error {
 	// nothing else.
 	var (
 		ingester    httpapi.Ingester
+		consumer    httpapi.Consumer
 		photoStore  httpapi.PhotoStore
 		ingestSweep func(context.Context, time.Time) (int, error)
 	)
@@ -256,6 +258,12 @@ func serve() error {
 	} else {
 		service := ingest.NewService(jobRunner, vision.NewClient(cfg.GeminiAPIKey), checker, matcher, db, photos, slog.Default())
 		ingester, photoStore, ingestSweep = service, photos, service.SweepImages
+		// Consumption photos share the same upload volume as shelf and
+		// product photos (docs/specs/09-consumption-logging.md), so
+		// ingestSweep above already covers their retention: its query is
+		// kind-agnostic, matching every consumed job's image regardless of
+		// which service created it.
+		consumer = consume.NewService(jobRunner, vision.NewClient(cfg.GeminiAPIKey), checker, matcher, photos, slog.Default())
 	}
 
 	go runStoreSweeps(ctx, db, ingestSweep)
@@ -281,6 +289,7 @@ func serve() error {
 			InsecureCookies: cfg.IsDev(),
 			Ingester:        ingester,
 			Photos:          photoStore,
+			Consumer:        consumer,
 		}),
 		ReadHeaderTimeout: readHeaderTimeout,
 		WriteTimeout:      writeTimeout,
