@@ -66,7 +66,7 @@ type VisionReporter interface {
 // the location handlers but not the session lookups would be a router serving
 // a storage's tree to anyone who asked.
 type APIStore interface {
-	AuthStore
+	AuthStoreFull
 	LocationStore
 	BatchStore
 	ShoppingListStore
@@ -96,6 +96,15 @@ type Deps struct {
 	// honest state for a deployment with no provider configured.
 	Images     ImageSuggester
 	ImageCache ImageCache
+	// InsecureCookies drops the Secure attribute from the session cookie. Set
+	// it only for a dev deployment served over plain HTTP, where Secure would
+	// stop the cookie working at all.
+	//
+	// Named for the exception rather than the rule, deliberately: a Deps built
+	// without mentioning it gets Secure cookies. The failure mode of forgetting
+	// this field has to be the safe one — the same reasoning that makes a nil
+	// Errors writer default to production mode rather than dev.
+	InsecureCookies bool
 }
 
 // NewRouter builds the application's HTTP handler.
@@ -144,6 +153,28 @@ func NewRouter(d Deps) http.Handler {
 		mw := NewMiddleware(d.Store, errs)
 		locations := NewLocationHandler(d.Store, errs)
 		batches := NewBatchHandler(d.Store, errs)
+
+		// The session lifecycle (docs/specs/03-auth-and-multi-tenancy.md).
+		//
+		// Login and pair are deliberately outside the session gate — they are
+		// how a caller gets a session in the first place. Everything else here
+		// sits behind RequireSession, including logout: revoking a session you
+		// cannot prove you hold is not a thing to offer.
+		authHandler := NewAuthHandler(d.Store, errs, !d.InsecureCookies)
+		devices := NewDeviceHandler(d.Store, errs)
+
+		r.Post("/api/auth/login", authHandler.Login)
+		r.Post("/api/auth/pair", devices.Pair)
+
+		r.Group(func(ar chi.Router) {
+			ar.Use(mw.RequireSession)
+
+			ar.Post("/api/auth/logout", authHandler.Logout)
+			ar.Get("/api/auth/me", authHandler.Me)
+			ar.Post("/api/auth/pairing-codes", devices.CreatePairingCode)
+			ar.Get("/api/auth/devices", devices.ListDevices)
+			ar.Delete("/api/auth/devices/{session_id}", devices.RevokeDevice)
+		})
 
 		r.Route("/api/storages/{storage_id}", func(sr chi.Router) {
 			sr.Use(mw.RequireSession)

@@ -34,6 +34,9 @@ type fakeAuth struct {
 	admins   map[uuid.UUID]bool
 	members  map[string]bool // storageID+userID
 
+	// pairing holds outstanding pairing codes, code → user.
+	pairing map[string]uuid.UUID
+
 	isAdminCalls int
 	touchCalls   int
 }
