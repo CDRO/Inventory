@@ -94,9 +94,10 @@ func (f *fakeJobs) DeleteJob(_ context.Context, storageID, id uuid.UUID) (*strin
 
 type jobsPage struct {
 	Items []struct {
-		ID      uuid.UUID       `json:"id"`
-		Status  string          `json:"status"`
-		Payload json.RawMessage `json:"payload"`
+		ID        uuid.UUID       `json:"id"`
+		Status    string          `json:"status"`
+		Payload   json.RawMessage `json:"payload"`
+		ItemCount *int            `json:"item_count"`
 	} `json:"items"`
 	NextCursor *string `json:"next_cursor"`
 }
@@ -182,12 +183,20 @@ func TestJobInboxExcludesAppliedJobsByDefault(t *testing.T) {
 	assert.NotContains(t, ids, consumed.ID)
 	assert.Nil(t, page.NextCursor)
 
+	for _, item := range page.Items {
+		assert.Nil(t, item.ItemCount, "a payload with no rows array has no count")
+	}
+
+	withRows := f.jobs.add(t, f.storageID, store.JobDone, `{"rows":[{"row_id":"0"},{"row_id":"1"}]}`)
 	onlyDone := decodeJobsPage(t, f.do(http.MethodGet, f.base()+"/jobs?status=done", "").Body.Bytes())
-	require.Len(t, onlyDone.Items, 1)
-	assert.Equal(t, done.ID, onlyDone.Items[0].ID)
+	require.Len(t, onlyDone.Items, 2)
+	assert.Equal(t, withRows.ID, onlyDone.Items[0].ID)
+	require.NotNil(t, onlyDone.Items[0].ItemCount)
+	assert.Equal(t, 2, *onlyDone.Items[0].ItemCount, "the inbox shows how many items a proposal holds")
+	assert.Equal(t, done.ID, onlyDone.Items[1].ID)
 
 	two := decodeJobsPage(t, f.do(http.MethodGet, f.base()+"/jobs?status=done,consumed", "").Body.Bytes())
-	assert.Len(t, two.Items, 2)
+	assert.Len(t, two.Items, 3)
 
 	bad := f.do(http.MethodGet, f.base()+"/jobs?status=finished", "")
 	assert.Equal(t, http.StatusUnprocessableEntity, bad.Code)

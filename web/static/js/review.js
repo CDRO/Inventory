@@ -138,6 +138,19 @@ export class ReviewList {
   }
 
   /**
+   * decisionOf reports a row's current decision, "accept" or "reject". For
+   * pages whose rows carry structured fields — ids, numbers, nested objects —
+   * that getPayload's string form values cannot express, and which therefore
+   * assemble their own confirm body around these decisions.
+   *
+   * @param {string} rowId
+   * @returns {"accept"|"reject"|null}
+   */
+  decisionOf(rowId) {
+    return this.rows.get(rowId)?.decision ?? null;
+  }
+
+  /**
    * getPayload assembles the confirm-endpoint body: one entry per row, each
    * carrying row_id and an explicit decision
    * (docs/specs/09-consumption-logging.md) — a missing row is a validation

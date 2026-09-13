@@ -105,25 +105,33 @@ func (h *JobHandler) Image(w http.ResponseWriter, r *http.Request) {
 // jobResponse is one job, with its proposal once it has one. This is the shape
 // js/jobs.js polls for.
 type jobResponse struct {
-	ID        uuid.UUID       `json:"id"`
-	Kind      store.JobKind   `json:"kind"`
-	Status    store.JobStatus `json:"status"`
-	Payload   json.RawMessage `json:"payload"`
-	Error     *string         `json:"error"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
+	ID      uuid.UUID       `json:"id"`
+	Kind    store.JobKind   `json:"kind"`
+	Status  store.JobStatus `json:"status"`
+	Payload json.RawMessage `json:"payload"`
+	Error   *string         `json:"error"`
+	// HasImage says whether GET .../image will serve a photo, so a review
+	// screen does not request one that is not there.
+	HasImage  bool      `json:"has_image"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // jobSummary is a job as the inbox lists it. No payload: a proposal can hold a
 // whole shelf's worth of items, and the list needs none of them until the
 // user opens one.
 type jobSummary struct {
-	ID        uuid.UUID       `json:"id"`
-	Kind      store.JobKind   `json:"kind"`
-	Status    store.JobStatus `json:"status"`
-	Error     *string         `json:"error"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
+	ID     uuid.UUID       `json:"id"`
+	Kind   store.JobKind   `json:"kind"`
+	Status store.JobStatus `json:"status"`
+	// ItemCount is how many rows the proposal holds, for the inbox
+	// (docs/specs/06-vision-shelf-ingestion.md). Null until the job has a
+	// proposal.
+	ItemCount *int      `json:"item_count"`
+	HasImage  bool      `json:"has_image"`
+	Error     *string   `json:"error"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // Get serves GET /api/storages/{storage_id}/jobs/{id}.
@@ -147,7 +155,8 @@ func (h *JobHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, jobResponse{
 		ID: job.ID, Kind: job.Kind, Status: job.Status, Payload: job.Payload,
-		Error: job.Error, CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt,
+		Error: job.Error, HasImage: job.ImageFilename != nil,
+		CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt,
 	})
 }
 
@@ -194,10 +203,28 @@ func (h *JobHandler) List(w http.ResponseWriter, r *http.Request) {
 	for _, j := range jobs {
 		summaries = append(summaries, jobSummary{
 			ID: j.ID, Kind: j.Kind, Status: j.Status, Error: j.Error,
+			ItemCount: countRows(j.Payload), HasImage: j.ImageFilename != nil,
 			CreatedAt: j.CreatedAt, UpdatedAt: j.UpdatedAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, pageOf(summaries, page.Limit, func(s jobSummary) uuid.UUID { return s.ID }))
+}
+
+// countRows reads the size of a proposal without decoding the rows themselves.
+// A payload with no rows array — no proposal yet, or a job kind whose payload
+// has another shape — has no count.
+func countRows(payload json.RawMessage) *int {
+	if len(payload) == 0 {
+		return nil
+	}
+	var p struct {
+		Rows *[]json.RawMessage `json:"rows"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil || p.Rows == nil {
+		return nil
+	}
+	n := len(*p.Rows)
+	return &n
 }
 
 // Delete serves DELETE /api/storages/{storage_id}/jobs/{id}: discard a job.

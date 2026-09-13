@@ -21,6 +21,7 @@ import "../register-sw.js";
 
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
+import { renderInboxLink } from "../inbox-badge.js";
 import { get, post, ApiError } from "../api.js";
 import { el, text, clearChildren, qs } from "../dom.js";
 
@@ -62,6 +63,7 @@ async function init() {
   }
 
   renderStorageSwitcher(switcherContainer, { storages: me.storages, currentId: storageId });
+  renderInboxLink(document.querySelector("#inbox-link"), storageId);
   submitButton.addEventListener("click", submitList);
 }
 
