@@ -1,10 +1,9 @@
 // Shopping list reconciliation (docs/specs/07-shopping-list-reconciliation.md),
-// covering what is live without a session.
+// covering the page load and the gates.
 //
-// The full journey — paste a list, resolve each line — needs a login, which
-// does not exist until issue #27. What is checkable today is the part with the
-// sharpest consequences if it were wrong: the routes are gated, and the image
-// endpoints never hand a provider URL to the browser.
+// The full paste-and-resolve journey is tracked in issue #30. What is checked
+// here is the part with the sharpest consequences if it were wrong: the routes
+// are gated, and the image endpoints never hand a provider URL to the browser.
 
 import { test, expect } from "@playwright/test";
 
@@ -12,24 +11,33 @@ const STORAGE_ID = "00000000-0000-4000-8000-000000000000";
 const BASE = `/api/storages/${STORAGE_ID}`;
 const HASH = "a".repeat(64);
 
-test("shopping-list.html loads with no console errors of its own", async ({ page }) => {
+test("shopping-list.html loads for a member with no console errors", async ({ page }) => {
   const consoleErrors = [];
   page.on("pageerror", (err) => consoleErrors.push(String(err)));
   page.on("console", (msg) => {
-    if (msg.type() !== "error") return;
-    // GET /api/auth/me does not exist until #27; that one failure is expected.
-    // Matched by URL rather than message text because a missing JS module logs
-    // the identical "Failed to load resource… 404" line.
-    const url = msg.location()?.url ?? "";
-    if (url.endsWith("/api/auth/me")) return;
-    consoleErrors.push(`${msg.text()} (${url})`);
+    if (msg.type() === "error") consoleErrors.push(`${msg.text()} (${msg.location()?.url ?? ""})`);
   });
+
+  const login = await page.request.post("/api/auth/login", {
+    data: { username: "e2e-bob", password: "e2e-fixture-password" },
+  });
+  expect(login.status()).toBe(200);
 
   await page.goto("/shopping-list.html");
   await expect(page).toHaveTitle(/Shopping list/);
-  await expect(page.locator("#error")).toBeVisible();
+  // The page writes the resolved storage into the URL once /api/auth/me has
+  // answered, which is the signal that its load-time work is done.
+  await expect(page).toHaveURL(/storage=00000000-0000-7000-8000-000000000010/);
+  await expect(page.locator("#error")).toBeHidden();
 
   expect(consoleErrors, `unexpected console errors: ${consoleErrors.join("; ")}`).toEqual([]);
+});
+
+test("shopping-list.html without a session redirects to the login page", async ({ page }) => {
+  await page.goto("/shopping-list.html");
+
+  await expect(page).toHaveURL(/\/$/); // index.html, canonicalised to "/" by the file server
+  await expect(page.locator("#login-form")).toBeVisible();
 });
 
 test("every shopping list and image route is behind the session gate", async ({ request }) => {

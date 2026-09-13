@@ -39,6 +39,20 @@ Starting without a `.env` is not fatal to Compose, but the `app` container
 exits immediately with the variables it needs and the two commands that fix
 it.
 
+### The first account
+
+There is no sign-up. Once migrations have run (`migrate up`, below), the
+server creates one admin from `ADMIN_INITIAL_USERNAME` and
+`ADMIN_INITIAL_PASSWORD` — only while the users table is empty, so changing
+those values later does nothing. Log in with them, then open `/admin` to
+create the household's accounts and storages and decide who can see which.
+An admin is not automatically a member of any storage; add yourself to one to
+use it.
+
+`/admin` is reached by typing the URL — the app never links to it — and to
+anyone who is not an admin it is an ordinary 404
+([`docs/specs/03-auth-and-multi-tenancy.md`](docs/specs/03-auth-and-multi-tenancy.md)).
+
 ## Everyday commands
 
 | Task | Command | Image |

@@ -1,12 +1,6 @@
-// docs/specs/05-frontend-pwa-foundations.md's first required journey is
-// "Log in, land in a storage; log out" — not testable end to end until
-// POST /api/auth/login exists (issue #27). What this file proves instead is
-// narrower but real: the login form, talking to the actual backend as it
-// exists today, degrades honestly rather than hanging or failing silently.
-// Once #27 lands this spec keeps working unchanged — the assertions below
-// check that an error is shown and is non-empty, not its exact wording,
-// specifically so the switch from today's 405 to a real 401 does not require
-// touching this file.
+// The login form's failure path: an unknown account must produce a visible,
+// non-empty error and a form that can be retried, never a hang or a silent
+// no-op. The successful journey lives in auth-journeys.spec.js.
 
 import { test, expect } from "@playwright/test";
 

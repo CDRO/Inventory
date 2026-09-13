@@ -1,13 +1,6 @@
-// Smoke coverage for the parts of docs/specs/05-frontend-pwa-foundations.md
-// that are live today.
-//
-// This PR's own scope note (issue #10 on GitHub) explains why: the 8
-// "required coverage" journeys in the spec's Testing section all depend on
-// POST /api/auth/login, which does not exist until spec 03's HTTP surface
-// (issue #27) lands — no fixture can route around an unregistered handler.
-// What follows instead verifies the app shell that does exist, including a
-// regression check for a routing bug this PR found and fixed along the way
-// (see internal/httpapi/router.go and its test).
+// Smoke coverage for the app shell of docs/specs/05-frontend-pwa-foundations.md.
+// The required journeys live in their own files (auth-journeys.spec.js,
+// non-disclosure.spec.js); the rest are tracked in issue #30.
 
 import { test, expect } from "@playwright/test";
 
@@ -60,20 +53,25 @@ test("every shared JS module is reachable and served as JavaScript", async ({ re
   }
 });
 
-test("a non-GET request to an unregistered API path gets the JSON error envelope, not plain text", async ({
+test("an unregistered path gets the JSON error envelope, not plain text, for any method", async ({
   request,
 }) => {
-  // The regression this PR fixed in internal/httpapi/router.go: the static
-  // file mount used to claim every method, not just GET, so POST
-  // /api/auth/login — the request the login form is about to start sending
-  // the moment issue #27 lands — got http.FileServer's plain-text 404
-  // instead of the one JSON error format the rest of the API promises
-  // (docs/specs/04-backend-api-conventions.md).
-  const response = await request.post("/api/auth/login", { data: {} });
+  // The static file mount once handed misses to http.FileServer, whose
+  // plain-text "404 page not found" bypassed the one JSON error format the
+  // API promises (docs/specs/04-backend-api-conventions.md). Every miss now
+  // goes through the serializer — which also keeps the admin area
+  // indistinguishable from a path that does not exist (see
+  // non-disclosure.spec.js).
+  for (const [method, path] of [
+    ["post", "/api/not-a-route"],
+    ["get", "/api/not-a-route"],
+    ["get", "/no/such/asset.js"],
+  ]) {
+    const response = await request[method](path, { data: method === "get" ? undefined : {} });
 
-  expect(response.status()).toBe(405);
-  expect(response.headers()["content-type"]).toContain("application/json");
-
-  const body = await response.json();
-  expect(body.error.code).toBe("method_not_allowed");
+    expect(response.status(), `${method} ${path}`).toBe(404);
+    expect(response.headers()["content-type"]).toContain("application/json");
+    const body = await response.json();
+    expect(body.error.code).toBe("not_found");
+  }
 });
