@@ -31,6 +31,13 @@ const (
 )
 
 // DeviceHandler serves pairing and device management.
+//
+// Pairing is rate-limited "per IP and per user", as spec 03 puts it, and the
+// two halves necessarily sit on different endpoints. POST /api/auth/pair is
+// unauthenticated — until a code is redeemed there is no user to count
+// against — so it is limited by address. The user-side limit lives where the
+// user is known: minting codes, since every outstanding code is a live way into
+// that account for the next two minutes.
 type DeviceHandler struct {
 	store   AuthStoreFull
 	errors  *ErrorWriter
@@ -40,6 +47,16 @@ type DeviceHandler struct {
 // NewDeviceHandler wires the pairing and device routes.
 func NewDeviceHandler(s AuthStoreFull, errs *ErrorWriter) *DeviceHandler {
 	return &DeviceHandler{store: s, errors: errs, limiter: newRateLimiter(pairAttemptsPerWindow, pairWindow)}
+}
+
+// rateLimited is the refusal both pairing limits share.
+func rateLimited(reason string) *Failure {
+	return &Failure{
+		Status:  http.StatusTooManyRequests,
+		Code:    "rate_limited",
+		Message: "Too many pairing attempts. Wait a moment and try again.",
+		Reason:  reason,
+	}
 }
 
 // CreatePairingCode serves POST /api/auth/pairing-codes.
@@ -55,6 +72,13 @@ func (h *DeviceHandler) CreatePairingCode(w http.ResponseWriter, r *http.Request
 	user, ok := UserFrom(r.Context())
 	if !ok {
 		h.errors.WriteError(w, r, Unauthorized(ReasonSessionMissing))
+		return
+	}
+
+	// Keyed apart from the address keys Pair uses, so one cannot exhaust the
+	// other.
+	if !h.limiter.allow("user:" + user.ID.String()) {
+		h.errors.WriteError(w, r, rateLimited("pairing-code rate limit for user "+user.ID.String()))
 		return
 	}
 
@@ -77,13 +101,8 @@ func (h *DeviceHandler) CreatePairingCode(w http.ResponseWriter, r *http.Request
 // caller is a native client, which cannot hold an HttpOnly browser cookie and
 // will send the id as a Bearer header from here on.
 func (h *DeviceHandler) Pair(w http.ResponseWriter, r *http.Request) {
-	if !h.limiter.allow(clientIP(r)) {
-		h.errors.WriteError(w, r, &Failure{
-			Status:  http.StatusTooManyRequests,
-			Code:    "rate_limited",
-			Message: "Too many pairing attempts. Wait a moment and try again.",
-			Reason:  "pairing rate limit for " + clientIP(r),
-		})
+	if !h.limiter.allow("ip:" + clientIP(r)) {
+		h.errors.WriteError(w, r, rateLimited("pairing rate limit for "+clientIP(r)))
 		return
 	}
 
@@ -100,8 +119,10 @@ func (h *DeviceHandler) Pair(w http.ResponseWriter, r *http.Request) {
 	if label == "" {
 		label = "Paired device"
 	}
-	if len(label) > maxDeviceLabel {
-		label = label[:maxDeviceLabel]
+	// Truncated by character, not byte: a byte cut can land inside a
+	// multi-byte character and store a label that is not valid UTF-8.
+	if runes := []rune(label); len(runes) > maxDeviceLabel {
+		label = string(runes[:maxDeviceLabel])
 	}
 
 	userID, err := h.store.RedeemPairingCode(r.Context(), body.Code)

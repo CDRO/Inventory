@@ -315,6 +315,50 @@ func TestPairingIsRateLimited(t *testing.T) {
 		})
 	}
 	assert.Equal(t, http.StatusTooManyRequests, last.Code)
+
+	// Per address, not global: another client is unaffected.
+	other := postJSON(f.router, "/api/auth/pair", `{"code":"guess"}`, func(r *http.Request) {
+		r.RemoteAddr = "198.51.100.9:5555"
+	})
+	assert.Equal(t, http.StatusUnauthorized, other.Code)
+}
+
+// TestPairingCodeCreationIsRateLimitedPerUser — the "per user" half of spec
+// 03's limit, on the endpoint where the user is known.
+func TestPairingCodeCreationIsRateLimitedPerUser(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+
+	var last *httptest.ResponseRecorder
+	for range 15 {
+		last = f.do(http.MethodPost, "/api/auth/pairing-codes", "")
+	}
+	assert.Equal(t, http.StatusTooManyRequests, last.Code)
+
+	_, otherSession := f.auth.addUser(t, false)
+	other := sendAs(f.router, otherSession.ID, http.MethodPost, "/api/auth/pairing-codes", "")
+	assert.Equal(t, http.StatusCreated, other.Code, "one user's limit is not another's")
+}
+
+// TestPairLabelIsTruncatedByCharacter — a byte cut inside a multi-byte
+// character would store invalid UTF-8.
+func TestPairLabelIsTruncatedByCharacter(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	code, err := f.auth.CreatePairingCode(context.Background(), f.user.ID)
+	require.NoError(t, err)
+
+	label := strings.Repeat("ä", 100)
+	rec := postJSON(f.router, "/api/auth/pair", `{"code":"`+code+`","device_label":"`+label+`"}`, nil)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var body struct {
+		Label string `json:"label"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, strings.Repeat("ä", 64), body.Label)
 }
 
 // TestPairingCodeURLFollowsTheForwardedScheme — Traefik terminates TLS, so
