@@ -21,6 +21,8 @@ import (
 type fakeReorderStore struct {
 	rows        []store.ReorderProduct
 	rowsErr     error
+	minStocks   map[uuid.UUID]int
+	minStockErr error
 	updateErr   error
 	createErr   error
 	updated     *store.Product
@@ -34,6 +36,13 @@ type fakeReorderStore struct {
 
 func (f *fakeReorderStore) ReorderProducts(_ context.Context, _ uuid.UUID) ([]store.ReorderProduct, error) {
 	return f.rows, f.rowsErr
+}
+
+func (f *fakeReorderStore) ProductMinStock(_ context.Context, _, id uuid.UUID) (int, error) {
+	if f.minStockErr != nil {
+		return 0, f.minStockErr
+	}
+	return f.minStocks[id], nil
 }
 
 func (f *fakeReorderStore) UpdateProductMinStock(_ context.Context, storageID, id uuid.UUID, minStock int) (*store.Product, error) {
@@ -279,6 +288,70 @@ func TestReorderMatchFlagsExternalSearchOnFullMiss(t *testing.T) {
 	rec := f.do(http.MethodPost, f.base()+"/dashboard/reorder/items/match", `{"name":"unobtainium"}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), `"needs_image_search":true`)
+}
+
+// TestReorderMatchReportsTheMatchedProductsActualMinStock guards a real
+// overwrite risk: a matched product can be a confident local match while
+// sitting well outside both dashboard buckets (already well-stocked, so
+// ReorderProducts never surfaces it), so the confirm UI cannot get its
+// current threshold from anywhere else. If Match answered a placeholder
+// instead of the real value, confirming a match without editing the
+// prefilled field would silently drop an existing high min_stock to 1.
+func TestReorderMatchReportsTheMatchedProductsActualMinStock(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	existingID := uuid.New()
+	f.matcher.result = matching.Result{
+		Status:  matching.StatusExactMatch,
+		Product: &matching.LocalCandidate{ProductID: existingID, Name: "Milk", Similarity: 1},
+	}
+	f.reorder.minStocks = map[uuid.UUID]int{existingID: 5}
+
+	rec := f.do(http.MethodPost, f.base()+"/dashboard/reorder/items/match", `{"name":"milk"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var body struct {
+		MatchedProduct struct {
+			MinStock int `json:"min_stock"`
+		} `json:"matched_product"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, 5, body.MatchedProduct.MinStock, "must be the product's real threshold, not a placeholder")
+}
+
+// TestReorderMatchReportsMinStockForAmbiguousCandidates is the same guard for
+// the "which one did you mean?" state: whichever candidate the user picks
+// goes through the same confirm step, so each candidate needs its own real
+// min_stock too.
+func TestReorderMatchReportsMinStockForAmbiguousCandidates(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	first, second := uuid.New(), uuid.New()
+	f.matcher.result = matching.Result{
+		Status: matching.StatusAmbiguous,
+		Candidates: []matching.LocalCandidate{
+			{ProductID: first, Name: "Oat milk", Similarity: 0.5},
+			{ProductID: second, Name: "Almond milk", Similarity: 0.45},
+		},
+	}
+	f.reorder.minStocks = map[uuid.UUID]int{first: 2, second: 0}
+
+	rec := f.do(http.MethodPost, f.base()+"/dashboard/reorder/items/match", `{"name":"milk"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var body struct {
+		Candidates []struct {
+			ID       string `json:"id"`
+			MinStock int    `json:"min_stock"`
+		} `json:"candidates"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Len(t, body.Candidates, 2)
+	byID := map[string]int{body.Candidates[0].ID: body.Candidates[0].MinStock, body.Candidates[1].ID: body.Candidates[1].MinStock}
+	assert.Equal(t, 2, byID[first.String()])
+	assert.Equal(t, 0, byID[second.String()])
 }
 
 // TestReorderMatchRejectsBlankName mirrors the same validation every other

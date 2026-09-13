@@ -146,8 +146,19 @@ function renderMatch(name, match) {
   let chosenProductId = null;
   let prefill = { categoryId: null, itemType: "", imageUrl: null, iconName: null, shelfLifeDays: null };
 
+  // The confirm step's min-stock field starts at 1 for a new product, but at
+  // the matched product's own current threshold for an existing one —
+  // defaulting an existing product to 1 would mean confirming without
+  // touching the field silently overwrites a real threshold. A product can be
+  // a confident local match while sitting outside both dashboard buckets
+  // entirely (already well-stocked, so its current min_stock is otherwise
+  // invisible here), which is exactly why the match response carries it per
+  // product.
+  const minStockInput = el("input", { type: "number", min: "1", step: "1", value: "1" });
+
   if (match.status === "exact_match" && match.matched_product) {
     chosenProductId = match.matched_product.id;
+    minStockInput.value = String(match.matched_product.min_stock || 1);
     addItemResult.append(el("p", {}, [text(`Matches ${match.matched_product.name}.`)]));
   } else if (match.status === "ambiguous") {
     addItemResult.append(el("p", {}, [text("Which one did you mean?")]));
@@ -159,6 +170,7 @@ function renderMatch(name, match) {
           class: "btn btn--ghost",
           onclick: (event) => {
             chosenProductId = candidate.id;
+            minStockInput.value = String(candidate.min_stock || 1);
             for (const other of event.currentTarget.parentElement.querySelectorAll("button")) {
               other.classList.remove("btn--selected");
             }
@@ -188,7 +200,6 @@ function renderMatch(name, match) {
     }
   }
 
-  const minStockInput = el("input", { type: "number", min: "1", step: "1", value: "1" });
   const confirmButton = el(
     "button",
     {

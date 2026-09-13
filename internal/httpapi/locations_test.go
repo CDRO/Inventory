@@ -227,7 +227,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		ingest: ingestStore, ingester: ingester, photos: photos,
 		matcher: matcher, images: images, imageData: imageData,
 		consume: consumeStore, consumer: consumer, products: products,
-		reorder: reorder,
+		reorder:   reorder,
 		storageID: storageID, user: user, session: session,
 	}
 }

@@ -18,6 +18,7 @@ import (
 // ReorderStore is the slice of the store these handlers use.
 type ReorderStore interface {
 	ReorderProducts(ctx context.Context, storageID uuid.UUID) ([]store.ReorderProduct, error)
+	ProductMinStock(ctx context.Context, storageID, id uuid.UUID) (int, error)
 	UpdateProductMinStock(ctx context.Context, storageID, id uuid.UUID, minStock int) (*store.Product, error)
 	CreateProduct(ctx context.Context, storageID uuid.UUID, in store.NewProduct) (*store.Product, error)
 }
@@ -160,15 +161,29 @@ func reorderQty(current, min int) int {
 	return q
 }
 
+// reorderProductRef is a local product as the reorder match preview shows it —
+// productRef plus min_stock. The extra field is why this is its own type
+// rather than a reuse of shoppinglists.go's productRef: the confirm step's
+// min_stock input needs the product's actual current threshold to prefill,
+// not a hardcoded 1, because a product can be a confident local match while
+// sitting outside both dashboard buckets (already well-stocked, or not yet
+// tracked at min_stock = 0) — nowhere else already carries that number back
+// to the caller.
+type reorderProductRef struct {
+	ID       uuid.UUID `json:"id"`
+	Name     string    `json:"name"`
+	MinStock int       `json:"min_stock"`
+}
+
 // reorderMatchResponse mirrors shoppingListItemResponse's per-line shape, cut
 // down to what a single ad hoc name needs — no raw text, quantity or id, since
 // nothing is stored until AddItem is called.
 type reorderMatchResponse struct {
-	Status           string       `json:"status"`
-	MatchedProduct   *productRef  `json:"matched_product"`
-	Candidates       []productRef `json:"candidates"`
-	Catalog          *catalogCard `json:"catalog"`
-	NeedsImageSearch bool         `json:"needs_image_search"`
+	Status           string              `json:"status"`
+	MatchedProduct   *reorderProductRef  `json:"matched_product"`
+	Candidates       []reorderProductRef `json:"candidates"`
+	Catalog          *catalogCard        `json:"catalog"`
+	NeedsImageSearch bool                `json:"needs_image_search"`
 }
 
 // Match serves POST /api/storages/{storage_id}/dashboard/reorder/items/match.
@@ -208,21 +223,38 @@ func (h *ReorderHandler) Match(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, buildReorderMatchResponse(result))
+	response, err := h.buildReorderMatchResponse(r.Context(), storageID, result)
+	if err != nil {
+		h.errors.WriteError(w, r, Internal(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
-func buildReorderMatchResponse(result matching.Result) reorderMatchResponse {
+// buildReorderMatchResponse reads each matched product's own min_stock rather
+// than defaulting the field to a placeholder — see reorderProductRef's doc
+// comment for why a stale default here is a real overwrite risk, not just an
+// odd first paint.
+func (h *ReorderHandler) buildReorderMatchResponse(ctx context.Context, storageID uuid.UUID, result matching.Result) (reorderMatchResponse, error) {
 	out := reorderMatchResponse{
 		Status:           string(result.Status),
-		Candidates:       []productRef{},
+		Candidates:       []reorderProductRef{},
 		NeedsImageSearch: result.NeedsExternalLookup(),
 	}
 
 	if result.Product != nil {
-		out.MatchedProduct = &productRef{ID: result.Product.ProductID, Name: result.Product.Name}
+		ref, err := h.reorderRef(ctx, storageID, result.Product.ProductID, result.Product.Name)
+		if err != nil {
+			return reorderMatchResponse{}, err
+		}
+		out.MatchedProduct = &ref
 	}
 	for _, candidate := range result.Candidates {
-		out.Candidates = append(out.Candidates, productRef{ID: candidate.ProductID, Name: candidate.Name})
+		ref, err := h.reorderRef(ctx, storageID, candidate.ProductID, candidate.Name)
+		if err != nil {
+			return reorderMatchResponse{}, err
+		}
+		out.Candidates = append(out.Candidates, ref)
 	}
 	if result.Catalog != nil {
 		variants := make([]string, 0, len(result.Catalog.Variants))
@@ -239,7 +271,19 @@ func buildReorderMatchResponse(result matching.Result) reorderMatchResponse {
 			Variants:             variants,
 		}
 	}
-	return out
+	return out, nil
+}
+
+// reorderRef looks up id's current min_stock and pairs it with the name the
+// matcher already resolved, rather than a second name lookup — the matcher's
+// own trigram query is the source of truth for the display name, this call is
+// only for the number that query does not carry.
+func (h *ReorderHandler) reorderRef(ctx context.Context, storageID, id uuid.UUID, name string) (reorderProductRef, error) {
+	minStock, err := h.store.ProductMinStock(ctx, storageID, id)
+	if err != nil {
+		return reorderProductRef{}, err
+	}
+	return reorderProductRef{ID: id, Name: name, MinStock: minStock}, nil
 }
 
 // reorderProductResponse is the outcome of AddItem: the product that now

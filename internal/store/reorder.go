@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // ReorderProduct is one row of the reorder dashboard's source data: a product
@@ -51,6 +53,28 @@ func (s *Store) ReorderProducts(ctx context.Context, storageID uuid.UUID) ([]Reo
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// ProductMinStock reads a single product's current threshold, without the
+// rest of the row.
+//
+// The reorder "Add item" match preview needs this: a product can be a
+// confident local match while sitting outside both dashboard buckets (already
+// well-stocked, or not yet tracked at min_stock = 0), so its min_stock cannot
+// be read back from ReorderProducts. Showing the caller a stale default
+// instead — the UI's alternative — is what makes "confirm without editing"
+// silently overwrite a real threshold with 1.
+func (s *Store) ProductMinStock(ctx context.Context, storageID, id uuid.UUID) (int, error) {
+	var minStock int
+	err := s.pool.QueryRow(ctx, `
+		SELECT min_stock FROM products WHERE id = $1 AND storage_id = $2`, id, storageID).Scan(&minStock)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrNotFound
+		}
+		return 0, fmt.Errorf("store: product min stock: %w", err)
+	}
+	return minStock, nil
 }
 
 // UpdateProductMinStock sets a product's reorder threshold.

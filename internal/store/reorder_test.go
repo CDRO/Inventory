@@ -74,6 +74,63 @@ func TestReorderProductsIsStorageScoped(t *testing.T) {
 	assert.Empty(t, rows)
 }
 
+// TestProductMinStockReadsARowClassifiedOutOfBothDashboardBuckets — a
+// well-stocked product (current_stock >= min_stock) comes back from
+// ReorderProducts (that query only filters min_stock > 0; the low/out-of-stock
+// split is the httpapi handler's job, see classifyReorder), but the reorder
+// "Add item" match preview calls ProductMinStock directly rather than
+// searching that slice, precisely so it also has an answer for a product
+// tracked at min_stock = 0 — untracked, and absent from ReorderProducts
+// entirely — which this test also covers.
+func TestProductMinStockReadsARowClassifiedOutOfBothDashboardBuckets(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Pantry"})
+	require.NoError(t, err)
+
+	wellStocked, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Milk", MinStock: 5})
+	require.NoError(t, err)
+	_, err = s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: wellStocked.ID, LocationID: location.ID, Quantity: 10, Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+
+	untracked, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Salt", MinStock: 0})
+	require.NoError(t, err)
+
+	rows, err := s.ReorderProducts(ctx, storageID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "min_stock > 0 alone is enough to be in ReorderProducts' result")
+	assert.Equal(t, wellStocked.ID, rows[0].ProductID)
+
+	minStock, err := s.ProductMinStock(ctx, storageID, wellStocked.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 5, minStock, "reachable even though classifyReorder would put this row in neither bucket")
+
+	minStock, err = s.ProductMinStock(ctx, storageID, untracked.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, minStock, "reachable even though min_stock = 0 excludes it from ReorderProducts entirely")
+}
+
+// TestProductMinStockIsStorageScoped mirrors UpdateProductMinStock: a product
+// in another storage is ErrNotFound, the same refusal a nonexistent one gets.
+func TestProductMinStockIsStorageScoped(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	other := newStorage(t, ctx)
+
+	product, err := s.CreateProduct(ctx, other, store.NewProduct{Name: "Theirs"})
+	require.NoError(t, err)
+
+	_, err = s.ProductMinStock(ctx, storageID, product.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	_, err = s.ProductMinStock(ctx, storageID, newUUID(t))
+	assert.ErrorIs(t, err, store.ErrNotFound, "a nonexistent product is the same refusal")
+}
+
 // TestUpdateProductMinStockIsStorageScoped mirrors the other product setters
 // (SetProductCategory, DeleteProduct): a product in another storage is
 // ErrNotFound, the same refusal a nonexistent one gets.
