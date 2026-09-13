@@ -29,6 +29,10 @@
 // The admin area — the /admin page and /api/admin/* — is likewise one group
 // behind RequireSession → RequireAdmin, so the HTML and JSON halves cannot be
 // gated differently.
+//
+// Every session-gated group also carries the Idempotency middleware, after its
+// gates, so any write carrying an Idempotency-Key is safe for an offline client
+// to retry (idempotency.go).
 package httpapi
 
 import (
@@ -73,6 +77,8 @@ type APIStore interface {
 	BatchStore
 	ShoppingListStore
 	ExpiryStore
+	JobStore
+	IdempotencyStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -153,6 +159,10 @@ func NewRouter(d Deps) http.Handler {
 		// no way to hang a new /api/storages/... handler somewhere that skips
 		// RequireStorageMember, because the pattern itself lives here.
 		mw := NewMiddleware(d.Store, errs)
+		// Idempotency sits after the gates in every group it is used in: keys
+		// are per user, so it needs the session, and a request the gates refuse
+		// must never be recorded (docs/specs/12-client-api-contract.md).
+		idem := NewIdempotency(d.Store, errs)
 		locations := NewLocationHandler(d.Store, errs)
 		batches := NewBatchHandler(d.Store, errs)
 
@@ -170,6 +180,7 @@ func NewRouter(d Deps) http.Handler {
 
 		r.Group(func(ar chi.Router) {
 			ar.Use(mw.RequireSession)
+			ar.Use(idem.Middleware)
 
 			ar.Post("/api/auth/logout", authHandler.Logout)
 			ar.Get("/api/auth/me", authHandler.Me)
@@ -208,6 +219,7 @@ func NewRouter(d Deps) http.Handler {
 		r.Group(func(ad chi.Router) {
 			ad.Use(mw.RequireSession)
 			ad.Use(mw.RequireAdmin)
+			ad.Use(idem.Middleware)
 
 			ad.Get("/admin", adminPages.Page)
 
@@ -225,6 +237,7 @@ func NewRouter(d Deps) http.Handler {
 		r.Route("/api/storages/{storage_id}", func(sr chi.Router) {
 			sr.Use(mw.RequireSession)
 			sr.Use(mw.RequireStorageMember)
+			sr.Use(idem.Middleware)
 
 			sr.Get("/locations", locations.List)
 			sr.Post("/locations", locations.Create)
@@ -237,6 +250,13 @@ func NewRouter(d Deps) http.Handler {
 			expiry := NewExpiryHandler(d.Store, errs)
 			sr.Patch("/inventory-batches/{id}/expiry", expiry.PatchBatchExpiry)
 			sr.Patch("/categories/{id}/shelf-life", expiry.PatchCategoryShelfLife)
+
+			// Background jobs (docs/specs/04-backend-api-conventions.md). The
+			// endpoints that create them are the upload routes of spec 06.
+			jobsAPI := NewJobHandler(d.Store, errs)
+			sr.Get("/jobs", jobsAPI.List)
+			sr.Get("/jobs/{id}", jobsAPI.Get)
+			sr.Delete("/jobs/{id}", jobsAPI.Delete)
 
 			if d.Matcher != nil {
 				lists := NewShoppingListHandler(d.Store, d.Matcher, errs)

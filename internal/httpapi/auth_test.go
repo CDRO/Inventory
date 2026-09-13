@@ -504,12 +504,9 @@ func TestDevCookiesDropSecure(t *testing.T) {
 	auth.withPassword(t, user, "pw-for-dev")
 
 	router := httpapi.NewRouter(httpapi.Deps{
-		DB:     stubPinger{},
-		Vision: stubVision{status: "ok"},
-		Store: fakeAPI{
-			fakeAuth: auth, fakeLocations: &fakeLocations{}, fakeBatches: &fakeBatches{},
-			fakeShoppingLists: &fakeShoppingLists{}, fakeExpiry: &fakeExpiry{},
-		},
+		DB:              stubPinger{},
+		Vision:          stubVision{status: "ok"},
+		Store:           newFakeAPI(auth),
 		InsecureCookies: true,
 	})
 
