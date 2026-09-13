@@ -24,3 +24,23 @@ code {
   font-family: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace;
   font-size: 0.9em;
 }
+
+/* Layout primitives used across every page. A stack spaces its children
+   vertically; a row lays them out horizontally and wraps on a narrow phone
+   rather than overflowing it. */
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.row--between {
+  justify-content: space-between;
+}

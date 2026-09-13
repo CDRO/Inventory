@@ -94,9 +94,10 @@ func (f *fakeJobs) DeleteJob(_ context.Context, storageID, id uuid.UUID) (*strin
 
 type jobsPage struct {
 	Items []struct {
-		ID      uuid.UUID       `json:"id"`
-		Status  string          `json:"status"`
-		Payload json.RawMessage `json:"payload"`
+		ID        uuid.UUID       `json:"id"`
+		Status    string          `json:"status"`
+		Payload   json.RawMessage `json:"payload"`
+		ItemCount *int            `json:"item_count"`
 	} `json:"items"`
 	NextCursor *string `json:"next_cursor"`
 }
@@ -120,11 +121,12 @@ func TestJobGetCarriesThePayloadThePollerReads(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var body struct {
-		ID      uuid.UUID       `json:"id"`
-		Status  string          `json:"status"`
-		Kind    string          `json:"kind"`
-		Payload json.RawMessage `json:"payload"`
-		Error   *string         `json:"error"`
+		ID       uuid.UUID       `json:"id"`
+		Status   string          `json:"status"`
+		Kind     string          `json:"kind"`
+		Payload  json.RawMessage `json:"payload"`
+		Error    *string         `json:"error"`
+		HasImage *bool           `json:"has_image"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, job.ID, body.ID)
@@ -132,6 +134,14 @@ func TestJobGetCarriesThePayloadThePollerReads(t *testing.T) {
 	assert.Equal(t, "shelf_ingestion", body.Kind)
 	assert.JSONEq(t, `{"items":[{"name":"Beans"}]}`, string(body.Payload))
 	assert.Nil(t, body.Error)
+	require.NotNil(t, body.HasImage, "has_image is always present")
+	assert.False(t, *body.HasImage, "a job with no photo says so, so the review does not request one")
+
+	photo := "0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b.jpg"
+	job.ImageFilename = &photo
+	for _, path := range []string{"/jobs/" + job.ID.String(), "/jobs?status=done"} {
+		assert.Contains(t, f.do(http.MethodGet, f.base()+path, "").Body.String(), `"has_image":true`, path)
+	}
 }
 
 // TestAnotherStoragesJobIsAPlain404 — one storage's members cannot poll, list
@@ -182,12 +192,20 @@ func TestJobInboxExcludesAppliedJobsByDefault(t *testing.T) {
 	assert.NotContains(t, ids, consumed.ID)
 	assert.Nil(t, page.NextCursor)
 
+	for _, item := range page.Items {
+		assert.Nil(t, item.ItemCount, "a payload with no rows array has no count")
+	}
+
+	withRows := f.jobs.add(t, f.storageID, store.JobDone, `{"rows":[{"row_id":"0"},{"row_id":"1"}]}`)
 	onlyDone := decodeJobsPage(t, f.do(http.MethodGet, f.base()+"/jobs?status=done", "").Body.Bytes())
-	require.Len(t, onlyDone.Items, 1)
-	assert.Equal(t, done.ID, onlyDone.Items[0].ID)
+	require.Len(t, onlyDone.Items, 2)
+	assert.Equal(t, withRows.ID, onlyDone.Items[0].ID)
+	require.NotNil(t, onlyDone.Items[0].ItemCount)
+	assert.Equal(t, 2, *onlyDone.Items[0].ItemCount, "the inbox shows how many items a proposal holds")
+	assert.Equal(t, done.ID, onlyDone.Items[1].ID)
 
 	two := decodeJobsPage(t, f.do(http.MethodGet, f.base()+"/jobs?status=done,consumed", "").Body.Bytes())
-	assert.Len(t, two.Items, 2)
+	assert.Len(t, two.Items, 3)
 
 	bad := f.do(http.MethodGet, f.base()+"/jobs?status=finished", "")
 	assert.Equal(t, http.StatusUnprocessableEntity, bad.Code)

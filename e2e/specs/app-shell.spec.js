@@ -39,11 +39,16 @@ test("every shared JS module is reachable and served as JavaScript", async ({ re
     "/js/jobs.js",
     "/js/review.js",
     "/js/tree.js",
+    "/js/inbox-badge.js",
+    "/js/location-options.js",
     "/js/register-sw.js",
     "/js/pages/index.js",
     "/js/pages/storages.js",
     "/js/pages/locations.js",
     "/js/pages/shopping-list.js",
+    "/js/pages/ingest.js",
+    "/js/pages/inbox.js",
+    "/js/pages/review.js",
   ];
 
   for (const path of modules) {

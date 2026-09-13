@@ -70,4 +70,46 @@ INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, create
   ('00000000-0000-7000-8000-000000000060', '00000000-0000-7000-8000-000000000040', '00000000-0000-7000-8000-000000000050', 4, 'purchase', '00000000-0000-7000-8000-000000000002')
 ON CONFLICT (id) DO NOTHING;
 
+-- Two ingestion proposals ready for review (docs/specs/06-vision-shelf-ingestion.md),
+-- in the shape internal/ingest writes. Seeded rather than produced by a real
+-- upload because the stack has no vision model to call; the upload path itself
+-- is covered by its 503 answer in e2e/specs/ingestion.spec.js. No photo: these
+-- rows have no crop, which the review screen handles.
+--
+-- Job ...70 is reviewed and confirmed by the E2E suite: an existing product on
+-- an existing shelf, a new product on a shelf the model proposed below Pantry,
+-- and a false positive to reject. Job ...71 is discarded by it. Job ...72 is
+-- only ever looked at, so the inbox test has a proposal no parallel test
+-- consumes out from under it.
+INSERT INTO jobs (id, storage_id, kind, status, payload, created_by) VALUES
+  ('00000000-0000-7000-8000-000000000070', '00000000-0000-7000-8000-000000000010', 'shelf_ingestion', 'done',
+   '{"mode":"shelf","location_hint_id":null,"rows":[
+      {"row_id":"0","label":"Canned Tomatoes 400g","confidence":0.93,"quantity":2,"bounding_box":{"x":0.1,"y":0.2,"width":0.2,"height":0.3},
+       "match":{"status":"exact_match","product":{"id":"00000000-0000-7000-8000-000000000040","name":"Canned Tomatoes"},"candidates":[],"catalog":null},
+       "location":{"path":[{"name":"Pantry","location_id":"00000000-0000-7000-8000-000000000020","proposed":false}],"location_id":"00000000-0000-7000-8000-000000000020"}},
+      {"row_id":"1","label":"Oat Milk 1L","confidence":0.81,"quantity":3,"bounding_box":null,
+       "match":{"status":"new_item","product":null,"candidates":[],"catalog":null},
+       "location":{"path":[{"name":"Pantry","location_id":"00000000-0000-7000-8000-000000000020","proposed":false},{"name":"Top Shelf","location_id":null,"proposed":true}],"location_id":null}},
+      {"row_id":"2","label":"Mystery Jar","confidence":0.22,"quantity":1,"bounding_box":null,
+       "match":{"status":"new_item","product":null,"candidates":[],"catalog":null},
+       "location":{"path":[],"location_id":null}}
+   ]}',
+   '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000071', '00000000-0000-7000-8000-000000000010', 'product_photo', 'done',
+   '{"mode":"product","location_hint_id":null,"rows":[
+      {"row_id":"0","label":"Rolled Oats","confidence":0.7,"quantity":1,"bounding_box":null,
+       "match":{"status":"new_item","product":null,"candidates":[],"catalog":null},
+       "location":{"path":[],"location_id":null}}
+   ]}',
+   '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000072', '00000000-0000-7000-8000-000000000010', 'shelf_ingestion', 'done',
+   '{"mode":"shelf","location_hint_id":null,"rows":[
+      {"row_id":"0","label":"Rice 1kg","confidence":0.9,"quantity":1,"bounding_box":null,
+       "match":{"status":"new_item","product":null,"candidates":[],"catalog":null},"location":{"path":[],"location_id":null}},
+      {"row_id":"1","label":"Lentils 500g","confidence":0.9,"quantity":2,"bounding_box":null,
+       "match":{"status":"new_item","product":null,"candidates":[],"catalog":null},"location":{"path":[],"location_id":null}}
+   ]}',
+   '00000000-0000-7000-8000-000000000003')
+ON CONFLICT (id) DO NOTHING;
+
 COMMIT;

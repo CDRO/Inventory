@@ -329,3 +329,71 @@ th {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* --- Photo ingestion: upload, inbox, review (docs/specs/06-vision-shelf-ingestion.md) --- */
+
+/* The inbox link next to the storage switcher, with its waiting count. */
+.inbox-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.inbox-link .badge {
+  background: var(--color-accent);
+  color: var(--color-accent-text);
+}
+
+.job-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-3);
+  align-items: start;
+}
+
+.job-card__thumb {
+  width: 4.5rem;
+  height: 4.5rem;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+  background: var(--color-bg);
+}
+
+.muted {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+/* A crop of the job's photo, drawn from the item's bounding box with CSS
+   alone: the whole photo is the background, scaled and positioned so only the
+   box shows. No canvas, no second image, and the same photo request serves
+   every crop on the page. */
+.review-crop {
+  width: 4.5rem;
+  height: 4.5rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--color-bg);
+  background-repeat: no-repeat;
+  background-size: cover;
+  background-position: center;
+}
+
+.review-row .field {
+  margin: 0;
+}
+
+.review-row__error {
+  color: var(--color-danger);
+  font-size: var(--text-sm);
+}
+
+@media (max-width: 36rem) {
+  .review-row {
+    grid-template-columns: auto 1fr;
+  }
+
+  .review-row__actions {
+    grid-column: 1 / -1;
+    flex-direction: row;
+  }
+}

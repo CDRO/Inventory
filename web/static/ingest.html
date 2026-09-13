@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#2563eb">
+  <title>Scan photos · Inventory</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/css/tokens.css">
+  <link rel="stylesheet" href="/css/base.css">
+  <link rel="stylesheet" href="/css/components.css">
+</head>
+<body>
+  <header class="shell row row--between">
+    <strong>Inventory</strong>
+    <div class="row">
+      <div id="storage-switcher" hidden></div>
+      <div id="inbox-link" hidden></div>
+      <a href="/storages.html" class="btn btn--ghost">Back</a>
+    </div>
+  </header>
+
+  <main id="main" class="shell stack" aria-live="polite">
+    <h2>Scan photos</h2>
+
+    <div id="error" class="alert" role="alert" hidden></div>
+
+    <form id="upload-form" class="card stack">
+      <fieldset class="stack">
+        <legend>What is in the photo?</legend>
+        <label class="row"><input type="radio" name="mode" value="shelf" checked> A shelf, cupboard or fridge</label>
+        <label class="row"><input type="radio" name="mode" value="product"> One product I just bought</label>
+      </fieldset>
+
+      <div class="field">
+        <label for="location">Where was it taken? (optional)</label>
+        <select id="location">
+          <option value="">Let the photo tell</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="photos">Photos</label>
+        <!-- capture opens the rear camera on a phone and still allows a
+             gallery pick (docs/specs/05-frontend-pwa-foundations.md). -->
+        <input id="photos" type="file" accept="image/*" capture="environment" multiple required>
+      </div>
+
+      <button id="submit" type="submit" class="btn btn--primary">Upload</button>
+      <p class="muted">
+        Photos are analysed in the background. You can leave this page as soon
+        as they are uploaded — the results wait in your inbox.
+      </p>
+    </form>
+
+    <section id="uploads" class="stack" aria-label="Uploads"></section>
+  </main>
+
+  <template id="upload-template">
+    <div class="card stack">
+      <div class="row row--between">
+        <strong data-role="name"></strong>
+        <span class="badge" data-role="status"></span>
+      </div>
+      <p class="muted" data-role="detail"></p>
+      <div class="row" data-role="actions"></div>
+    </div>
+  </template>
+
+  <script type="module" src="/js/pages/ingest.js"></script>
+</body>
+</html>

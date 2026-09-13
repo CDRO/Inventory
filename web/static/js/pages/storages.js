@@ -12,6 +12,7 @@ import "../register-sw.js";
 
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam, renderEmptyState } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
+import { renderInboxLink } from "../inbox-badge.js";
 import { el, text, clearChildren } from "../dom.js";
 import { post, ApiError } from "../api.js";
 
@@ -59,6 +60,7 @@ async function init() {
   }
 
   renderStorageSwitcher(switcherContainer, { storages: me.storages, currentId: resolved });
+  renderInboxLink(document.querySelector("#inbox-link"), resolved);
   renderLanding(me, me.storages.find((s) => s.id === resolved));
 }
 
@@ -100,9 +102,12 @@ function renderLanding(me, storage) {
         el("a", { class: "btn", href: withStorageParam(storage.id, "/shopping-list.html") }, [
           text("Shopping list"),
         ]),
+        el("a", { class: "btn", href: withStorageParam(storage.id, "/ingest.html") }, [
+          text("Scan photos"),
+        ]),
       ]),
       el("p", { class: "empty-state" }, [
-        "Products, shelf scanning, shopping lists, consumption logging, and " +
+        "Products, consumption logging, and " +
           "the reorder dashboard each ship with their own spec issue.",
       ]),
     ]),

@@ -95,8 +95,9 @@ type shoppingListResponse struct {
 
 // Create serves POST /api/storages/{storage_id}/shopping-lists.
 //
-// Only the text source is implemented. The photo variant needs the background
-// job runner and a Gemini OCR call, neither of which exists yet (issue #28);
+// Only the text source is implemented. The photo variant still needs its own
+// upload route and a Gemini prompt that reads a list's lines (the job runner and
+// the vision client it would use now exist, from photo ingestion); until then
 // it is refused explicitly rather than silently treated as text, which would
 // file an image's bytes as somebody's shopping.
 func (h *ShoppingListHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -120,7 +121,7 @@ func (h *ShoppingListHandler) Create(w http.ResponseWriter, r *http.Request) {
 			Status:  http.StatusNotImplemented,
 			Code:    "not_implemented",
 			Message: "Photographed shopping lists are not available yet.",
-			Reason:  "photo ingestion needs the background job runner (#28) and a Gemini OCR client",
+			Reason:  "photo shopping lists need an upload route and a list-reading Gemini prompt",
 		})
 		return
 	}
@@ -446,4 +447,3 @@ func idFromPath(r *http.Request, param, reason string) (uuid.UUID, *Failure) {
 	}
 	return id, nil
 }
-
