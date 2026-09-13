@@ -3,12 +3,12 @@ import "../register-sw.js";
 // Page module for storages.html.
 //
 // docs/specs/05-frontend-pwa-foundations.md scopes this page to the storage
-// picker ("only if >1 membership"). Until dashboard.html ships with
-// docs/specs/10-reorder-and-shopping-export.md and
-// docs/specs/11-reporting-and-analytics.md, this page also serves as the
-// landing shell once a storage is resolved — a header with the switcher, and
-// an honest placeholder rather than a fabricated dashboard. That scope note
-// is recorded on the PR for issue #10.
+// picker ("only if >1 membership"). dashboard.html now ships the reorder
+// dashboard from docs/specs/10-reorder-and-shopping-export.md; until
+// docs/specs/11-reporting-and-analytics.md's turnover/waste charts land on
+// it too, this page also serves as the landing shell once a storage is
+// resolved — a header with the switcher, and an honest placeholder rather
+// than a fabricated one. That scope note is recorded on the PR for issue #10.
 
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam, renderEmptyState } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
@@ -96,6 +96,9 @@ function renderLanding(me, storage) {
       el("h2", {}, [storage.name]),
       el("p", {}, [`Signed in as ${me.display_name}.`]),
       el("div", { class: "row" }, [
+        el("a", { class: "btn", href: withStorageParam(storage.id, "/dashboard.html") }, [
+          text("Dashboard"),
+        ]),
         el("a", { class: "btn", href: withStorageParam(storage.id, "/locations.html") }, [
           text("Locations"),
         ]),
@@ -107,8 +110,8 @@ function renderLanding(me, storage) {
         ]),
       ]),
       el("p", { class: "empty-state" }, [
-        "Products, consumption logging, and " +
-          "the reorder dashboard each ship with their own spec issue.",
+        "Browsing and managing products directly ships with its own spec issue " +
+          '— use "Scan photos" to stock up, use up, or scan a shelf in the meantime.',
       ]),
     ]),
   );

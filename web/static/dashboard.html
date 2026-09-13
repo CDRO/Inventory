@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#2563eb">
+  <title>Dashboard · Inventory</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/css/tokens.css">
+  <link rel="stylesheet" href="/css/base.css">
+  <link rel="stylesheet" href="/css/components.css">
+</head>
+<body>
+  <header class="shell row row--between">
+    <strong>Inventory</strong>
+    <div class="row">
+      <div id="storage-switcher" hidden></div>
+      <div id="inbox-link" hidden></div>
+      <a href="/storages.html" class="btn btn--ghost">Back</a>
+    </div>
+  </header>
+
+  <main id="main" class="shell stack" aria-live="polite">
+    <h2>Dashboard</h2>
+
+    <div id="error" class="alert" role="alert" hidden></div>
+
+    <section class="card stack">
+      <h3>Add a missing item</h3>
+      <p class="empty-state">
+        You are out of something precisely because it was never inventoried —
+        type its name to track it for reorder.
+      </p>
+      <div class="row">
+        <div class="field" style="flex: 1;">
+          <label for="add-item-name">Product name</label>
+          <input type="text" id="add-item-name" placeholder="butter">
+        </div>
+        <button id="add-item-check" type="button" class="btn">Check</button>
+      </div>
+      <div id="add-item-result" class="stack" hidden></div>
+    </section>
+
+    <section class="stack">
+      <div class="row row--between">
+        <h3 class="urgency urgency--expired">Out of stock</h3>
+        <span id="out-of-stock-count" class="badge"></span>
+      </div>
+      <div id="out-of-stock-list" class="stack">
+        <p class="empty-state">Loading…</p>
+      </div>
+    </section>
+
+    <section class="stack">
+      <div class="row row--between">
+        <h3 class="urgency urgency--soon">Low stock</h3>
+        <span id="low-stock-count" class="badge"></span>
+      </div>
+      <div id="low-stock-list" class="stack"></div>
+    </section>
+
+    <section class="card row row--between">
+      <p class="empty-state" style="padding: 0; text-align: left;">
+        A snapshot of the lists above, for taking to a store.
+      </p>
+      <div class="row">
+        <a id="export-csv" class="btn" href="#">Download CSV</a>
+        <button id="export-pdf" type="button" class="btn">Download PDF</button>
+      </div>
+    </section>
+  </main>
+
+  <template id="reorder-row-template">
+    <div class="card row row--between">
+      <strong data-field="name"></strong>
+      <span data-field="stock" class="muted"></span>
+    </div>
+  </template>
+
+  <!-- Vendored UMD builds, plain <script> tags (no module, no CDN):
+       web/static/vendor/README.md records their origin and why these
+       versions. jsPDF must load before its autotable plugin. -->
+  <script src="/vendor/jspdf-2.5.1.umd.min.js"></script>
+  <script src="/vendor/jspdf-autotable-3.8.4.umd.min.js"></script>
+  <script type="module" src="/js/pages/dashboard.js"></script>
+</body>
+</html>
