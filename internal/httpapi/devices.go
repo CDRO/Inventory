@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"strings"
@@ -158,22 +160,34 @@ func (h *DeviceHandler) Pair(w http.ResponseWriter, r *http.Request) {
 
 // deviceResponse is one of the caller's own sessions.
 //
-// The session id is deliberately absent. It is a bearer credential, and a list
-// endpoint that handed back every one of them would turn read access to this
-// page into full account takeover. `current` is what the UI actually needs —
-// "which of these is me" — and it is computed server-side by comparing against
-// the session that made the request.
+// **The session id is never in this response.** sessions.id is not a row
+// identifier that happens to be random — it *is* the bearer token. A list that
+// returned it would hand every live credential the user holds, a paired phone's
+// year-long one included, to any script that can read this page, so reading
+// the device list would be the same as stealing every device on it.
+//
+// ID is a handle derived from the token instead (see deviceHandle): stable, so
+// the client can name a session to revoke, and one-way, so holding it grants
+// nothing. `current` is computed server-side against the session making the
+// request.
 type deviceResponse struct {
+	ID         string     `json:"id"`
 	Kind       string     `json:"kind"`
 	Label      *string    `json:"label"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastSeenAt *time.Time `json:"last_seen_at"`
 	Current    bool       `json:"current"`
-	// RevokeID is the id needed to revoke this session. It is the session id,
-	// and it is returned only because revocation needs to name one — see the
-	// note above about why the list is otherwise id-free. It is the caller's
-	// own session either way.
-	RevokeID string `json:"revoke_id"`
+}
+
+// deviceHandle is the public name of a session: the hex SHA-256 of its token.
+//
+// Tokens are 256 CSPRNG bits, so there is nothing to brute-force through the
+// hash, and no salt is needed. A handle is only ever resolved by matching it
+// against the caller's own sessions, so knowing someone else's handle does not
+// reach their session either.
+func deviceHandle(sessionID string) string {
+	sum := sha256.Sum256([]byte(sessionID))
+	return hex.EncodeToString(sum[:])
 }
 
 // ListDevices serves GET /api/auth/devices.
@@ -194,12 +208,12 @@ func (h *DeviceHandler) ListDevices(w http.ResponseWriter, r *http.Request) {
 	out := make([]deviceResponse, 0, len(sessions))
 	for _, s := range sessions {
 		out = append(out, deviceResponse{
+			ID:         deviceHandle(s.ID),
 			Kind:       string(s.Kind),
 			Label:      s.Label,
 			CreatedAt:  s.CreatedAt,
 			LastSeenAt: s.LastSeenAt,
 			Current:    current != nil && s.ID == current.ID,
-			RevokeID:   s.ID,
 		})
 	}
 
@@ -208,9 +222,10 @@ func (h *DeviceHandler) ListDevices(w http.ResponseWriter, r *http.Request) {
 
 // RevokeDevice serves DELETE /api/auth/devices/{session_id}.
 //
-// A user may revoke only their own sessions. Another user's session id gets
-// the same 404 as one that never existed — the same non-enumeration rule that
-// governs storages and the admin area.
+// The path segment is the device's `id` from the list — its handle, not the
+// token (see deviceResponse). A user may revoke only their own sessions:
+// another user's handle, or one that names nothing, gets the same 404 — the
+// non-enumeration rule that governs storages and the admin area.
 func (h *DeviceHandler) RevokeDevice(w http.ResponseWriter, r *http.Request) {
 	user, ok := UserFrom(r.Context())
 	if !ok {
@@ -218,25 +233,26 @@ func (h *DeviceHandler) RevokeDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target := chi.URLParam(r, "session_id")
+	handle := chi.URLParam(r, "session_id")
 
-	// Ownership is checked by listing the caller's own sessions rather than by
-	// deleting and inspecting the row count: a delete-then-check would have
-	// removed somebody else's session before noticing it was not ours.
+	// Resolved only against the caller's own sessions, which is both the
+	// ownership check and the only way a handle becomes a token. Checking
+	// before deleting matters: a delete-then-check would have removed somebody
+	// else's session before noticing it was not ours.
 	sessions, err := h.store.UserSessions(r.Context(), user.ID)
 	if err != nil {
 		h.errors.WriteError(w, r, Internal(err))
 		return
 	}
 
-	owned := false
+	target := ""
 	for _, s := range sessions {
-		if s.ID == target {
-			owned = true
+		if deviceHandle(s.ID) == handle {
+			target = s.ID
 			break
 		}
 	}
-	if !owned {
+	if target == "" {
 		h.errors.WriteError(w, r, NotFound("session not owned by caller or nonexistent"))
 		return
 	}

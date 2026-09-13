@@ -2,6 +2,8 @@ package httpapi_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -384,6 +386,23 @@ func TestPairingCodeURLFollowsTheForwardedScheme(t *testing.T) {
 	assert.Equal(t, "https://inventory.tailnet.ts.net", body.BaseURL)
 }
 
+type deviceItem struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Current bool   `json:"current"`
+}
+
+func listDevices(t *testing.T, f *apiFixture) (raw string, items []deviceItem) {
+	t.Helper()
+	rec := f.do(http.MethodGet, "/api/auth/devices", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body struct {
+		Items []deviceItem `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	return rec.Body.String(), body.Items
+}
+
 // TestDevicesListMarksTheCurrentSession — the UI needs "which of these is me".
 func TestDevicesListMarksTheCurrentSession(t *testing.T) {
 	t.Parallel()
@@ -392,19 +411,11 @@ func TestDevicesListMarksTheCurrentSession(t *testing.T) {
 	_, err := f.auth.CreateSession(context.Background(), f.user.ID, store.SessionDevice, nil, time.Hour)
 	require.NoError(t, err)
 
-	rec := f.do(http.MethodGet, "/api/auth/devices", "")
-	require.Equal(t, http.StatusOK, rec.Code)
-
-	var body struct {
-		Items []struct {
-			Current bool `json:"current"`
-		} `json:"items"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	require.Len(t, body.Items, 2)
+	_, items := listDevices(t, f)
+	require.Len(t, items, 2)
 
 	currents := 0
-	for _, d := range body.Items {
+	for _, d := range items {
 		if d.Current {
 			currents++
 		}
@@ -412,21 +423,48 @@ func TestDevicesListMarksTheCurrentSession(t *testing.T) {
 	assert.Equal(t, 1, currents, "exactly one session is the one making this request")
 }
 
+// TestDevicesListNeverCarriesASessionToken — sessions.id is the bearer token
+// itself. A list that returned it would hand every live credential the user
+// holds, a paired phone's year-long one included, to any script that can read
+// the page. Asserted on the raw body, so no field name can smuggle one out.
+func TestDevicesListNeverCarriesASessionToken(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	device, err := f.auth.CreateSession(context.Background(), f.user.ID, store.SessionDevice, nil, time.Hour)
+	require.NoError(t, err)
+
+	raw, items := listDevices(t, f)
+
+	assert.NotContains(t, raw, f.session.ID, "the calling session's token must not be returned")
+	assert.NotContains(t, raw, device.ID, "a paired device's token must not be returned")
+	for _, d := range items {
+		assert.NotEmpty(t, d.ID, "each device still needs a handle to revoke it by")
+	}
+}
+
 // TestRevokingAnotherUsersSessionIs404 — the same non-enumeration rule as
-// storages and the admin area. It must also not revoke anything.
+// storages and the admin area. It must also not revoke anything, whether the
+// caller names the other session by its handle or by its raw token.
 func TestRevokingAnotherUsersSessionIs404(t *testing.T) {
 	t.Parallel()
 
 	f := newAPIFixture(t)
 	_, other := f.auth.addUser(t, false)
+	sum := sha256.Sum256([]byte(other.ID))
+	otherHandle := hex.EncodeToString(sum[:])
 
-	rec := f.do(http.MethodDelete, "/api/auth/devices/"+other.ID, "")
+	for _, name := range []string{otherHandle, other.ID} {
+		rec := f.do(http.MethodDelete, "/api/auth/devices/"+name, "")
+		require.Equal(t, http.StatusNotFound, rec.Code)
+	}
 
-	require.Equal(t, http.StatusNotFound, rec.Code)
 	_, err := f.auth.LookupSession(context.Background(), other.ID)
 	assert.NoError(t, err, "a refused revoke must not have deleted someone else's session")
 }
 
+// TestRevokingYourOwnSessionWorks goes through the list, the way a client
+// has to: the handle it gets there is what revokes.
 func TestRevokingYourOwnSessionWorks(t *testing.T) {
 	t.Parallel()
 
@@ -434,11 +472,54 @@ func TestRevokingYourOwnSessionWorks(t *testing.T) {
 	device, err := f.auth.CreateSession(context.Background(), f.user.ID, store.SessionDevice, nil, time.Hour)
 	require.NoError(t, err)
 
-	rec := f.do(http.MethodDelete, "/api/auth/devices/"+device.ID, "")
+	_, items := listDevices(t, f)
+	var handle string
+	for _, d := range items {
+		if d.Kind == string(store.SessionDevice) {
+			handle = d.ID
+		}
+	}
+	require.NotEmpty(t, handle)
 
+	assert.Equal(t, http.StatusNotFound, f.do(http.MethodDelete, "/api/auth/devices/"+device.ID, "").Code,
+		"a raw token is not a handle; accepting one would make the handle pointless")
+
+	rec := f.do(http.MethodDelete, "/api/auth/devices/"+handle, "")
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	_, err = f.auth.LookupSession(context.Background(), device.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	_, err = f.auth.LookupSession(context.Background(), f.session.ID)
+	assert.NoError(t, err, "only the named session is revoked")
+}
+
+// TestDevCookiesDropSecure — the dev carve-out. Over plain http://localhost a
+// Secure cookie is never sent back, so a regression here shows up only as a
+// developer's login silently not sticking.
+func TestDevCookiesDropSecure(t *testing.T) {
+	t.Parallel()
+
+	auth := newFakeAuth()
+	user, _ := auth.addUser(t, false)
+	auth.withPassword(t, user, "pw-for-dev")
+
+	router := httpapi.NewRouter(httpapi.Deps{
+		DB:     stubPinger{},
+		Vision: stubVision{status: "ok"},
+		Store: fakeAPI{
+			fakeAuth: auth, fakeLocations: &fakeLocations{}, fakeBatches: &fakeBatches{},
+			fakeShoppingLists: &fakeShoppingLists{}, fakeExpiry: &fakeExpiry{},
+		},
+		InsecureCookies: true,
+	})
+
+	rec := postJSON(router, "/api/auth/login", `{"username":"`+user.Username+`","password":"pw-for-dev"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	cookie := sessionCookieFrom(rec)
+	require.NotNil(t, cookie)
+	assert.False(t, cookie.Secure)
+	assert.True(t, cookie.HttpOnly, "dev relaxes Secure only, never HttpOnly")
+	assert.Equal(t, http.SameSiteLaxMode, cookie.SameSite)
 }
 
 // TestAuthRoutesThatNeedASessionRequireOne — login and pair are open by
