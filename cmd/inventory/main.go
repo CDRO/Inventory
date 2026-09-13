@@ -30,6 +30,7 @@ import (
 	"github.com/CDRO/Inventory/internal/config"
 	"github.com/CDRO/Inventory/internal/httpapi"
 	"github.com/CDRO/Inventory/internal/imagesearch"
+	"github.com/CDRO/Inventory/internal/jobs"
 	"github.com/CDRO/Inventory/internal/matching"
 	"github.com/CDRO/Inventory/internal/migrate"
 	"github.com/CDRO/Inventory/internal/store"
@@ -224,6 +225,18 @@ func serve() error {
 		slog.Warn("initial admin not created yet; `migrate up` will retry it", slog.Any("err", err))
 	}
 
+	// Background jobs (docs/specs/04-backend-api-conventions.md). Recover runs
+	// before the listener, while no goroutine of this process can own a
+	// pending job, so everything pending is orphaned by the previous one. Like
+	// the bootstrap it tolerates a schema that does not exist yet: on a fresh
+	// install there are no jobs to recover either.
+	jobRunner := jobs.New(db, slog.Default())
+	if err := jobRunner.Recover(ctx); err != nil {
+		slog.Warn("could not recover interrupted jobs", slog.Any("err", err))
+	}
+
+	go runStoreSweeps(ctx, db)
+
 	srv := &http.Server{
 		Addr: net.JoinHostPort("", cfg.HTTPPort),
 		Handler: httpapi.NewRouter(httpapi.Deps{
@@ -270,7 +283,54 @@ func serve() error {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			return fmt.Errorf("http shutdown: %w", err)
 		}
+		// After the listener, so no new job can be submitted while the
+		// in-flight ones are being told to stop. Anything that outlives the
+		// grace period stays pending and the next start's Recover fails it.
+		if err := jobRunner.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("jobs still running at shutdown", slog.Any("err", err))
+		}
 		return <-errCh
+	}
+}
+
+// sweepInterval is how often expired rows are cleared. Nothing reads an expired
+// row as valid — every lookup checks expiry itself — so this is housekeeping,
+// and hourly is plenty.
+const sweepInterval = time.Hour
+
+// runStoreSweeps deletes rows past their retention: expired sessions and
+// pairing codes, idempotency records older than their 7-day replay window
+// (docs/specs/12-client-api-contract.md), and old tombstones. Once at start,
+// then every sweepInterval until ctx ends.
+func runStoreSweeps(ctx context.Context, db *store.Store) {
+	sweep := func() {
+		now := time.Now()
+		for name, run := range map[string]func() (int64, error){
+			"sessions":            func() (int64, error) { return db.SweepSessions(ctx) },
+			"pairing codes":       func() (int64, error) { return db.SweepPairingCodes(ctx) },
+			"idempotency records": func() (int64, error) { return db.SweepIdempotencyRecords(ctx, now) },
+			"tombstones":          func() (int64, error) { return db.SweepTombstones(ctx, now) },
+		} {
+			if n, err := run(); err != nil {
+				if ctx.Err() == nil {
+					slog.Warn("sweep failed", slog.String("table", name), slog.Any("err", err))
+				}
+			} else if n > 0 {
+				slog.Info("swept expired rows", slog.String("table", name), slog.Int64("count", n))
+			}
+		}
+	}
+
+	sweep()
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
+		}
 	}
 }
 

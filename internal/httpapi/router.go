@@ -29,6 +29,10 @@
 // The admin area — the /admin page and /api/admin/* — is likewise one group
 // behind RequireSession → RequireAdmin, so the HTML and JSON halves cannot be
 // gated differently.
+//
+// Every session-gated group also carries the Idempotency middleware, after its
+// gates, so any write carrying an Idempotency-Key is safe for an offline client
+// to retry (idempotency.go).
 package httpapi
 
 import (

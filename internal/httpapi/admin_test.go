@@ -200,10 +200,10 @@ func TestNonAdminCannotTellTheAdminAreaExists(t *testing.T) {
 	require.NoError(t, err)
 
 	router := httpapi.NewRouter(httpapi.Deps{
-		DB:     stubPinger{},
-		Vision: stubVision{status: "ok"},
-		Errors: httpapi.NewErrorWriter(false, discardLogger()),
-		Store:  newFakeAPI(auth),
+		DB:       stubPinger{},
+		Vision:   stubVision{status: "ok"},
+		Errors:   httpapi.NewErrorWriter(false, discardLogger()),
+		Store:    newFakeAPI(auth),
 		StaticFS: fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html></html>")}},
 	})
 

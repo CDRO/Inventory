@@ -241,7 +241,7 @@ func TestPaginationParametersAreValidated(t *testing.T) {
 
 	f := newAPIFixture(t)
 
-	for _, bad := range []string{"limit=0", "limit=-3", "limit=ten", "cursor=not!base64", "cursor=AAAA","cursor=" + uuid.NewString()} {
+	for _, bad := range []string{"limit=0", "limit=-3", "limit=ten", "cursor=not!base64", "cursor=AAAA", "cursor=" + uuid.NewString()} {
 		rec := f.do(http.MethodGet, f.base()+"/jobs?"+bad, "")
 		assert.Equal(t, http.StatusUnprocessableEntity, rec.Code, bad)
 	}
