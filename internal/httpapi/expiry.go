@@ -152,7 +152,8 @@ func parseExpirationDate(raw json.RawMessage) (*time.Time, *Failure) {
 // The spec asks for the *admin catalog* cascade to run as a background job.
 // This is the storage-scoped version, which touches one household's rows
 // rather than every storage's, and is small enough to do inline. The
-// cross-storage catalog cascade waits for the job runner (#28).
+// cross-storage catalog cascade arrives with the admin catalog routes (#36),
+// which will run it on the job runner.
 func (h *ExpiryHandler) PatchCategoryShelfLife(w http.ResponseWriter, r *http.Request) {
 	storageID, ok := StorageIDFrom(r.Context())
 	if !ok {

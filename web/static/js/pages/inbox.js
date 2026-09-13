@@ -64,7 +64,11 @@ async function init() {
 
   const confirmed = params.get("confirmed");
   if (confirmed !== null) {
-    notice.textContent = "Proposal applied to your inventory.";
+    notice.textContent = confirmationText(
+      Number(confirmed),
+      Number(params.get("products") || 0),
+      Number(params.get("locations") || 0),
+    );
     notice.hidden = false;
   }
 
@@ -144,6 +148,20 @@ async function discard(job, card) {
   } catch (err) {
     showError(err);
   }
+}
+
+// confirmationText summarises a confirm from the counts the server returned.
+// They arrive through the URL, so they are read as numbers and only numbers
+// are printed.
+function confirmationText(batches, products, locations) {
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  if (!Number.isInteger(batches) || batches <= 0) {
+    return "Proposal applied. Nothing was added to your inventory.";
+  }
+  const parts = [plural(batches, "item", "items") + " added to your inventory"];
+  if (products > 0) parts.push(plural(products, "new product", "new products"));
+  if (locations > 0) parts.push(plural(locations, "new location", "new locations"));
+  return `Proposal applied: ${parts.join(", ")}.`;
 }
 
 function age(iso) {

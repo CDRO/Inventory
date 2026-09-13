@@ -332,8 +332,16 @@ async function onConfirm() {
 
   setBusy(true);
   try {
-    await post(`/api/storages/${storageId}/ingest/${jobId}/confirm`, { items });
-    location.assign(inboxHref({ confirmed: "1" }));
+    const result = await post(`/api/storages/${storageId}/ingest/${jobId}/confirm`, { items });
+    // What the server actually wrote, not what the screen asked for: the inbox
+    // reports it back so a reviewer sees the outcome of their confirm.
+    location.assign(
+      inboxHref({
+        confirmed: String(result.batch_ids.length),
+        products: String(result.products_created),
+        locations: String(result.locations_created),
+      }),
+    );
   } catch (err) {
     setBusy(false);
     if (err instanceof ApiError && err.status === 409) {

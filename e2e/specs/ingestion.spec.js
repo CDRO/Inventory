@@ -16,6 +16,7 @@ const SHELF_JOB = "00000000-0000-7000-8000-000000000070";
 const PRODUCT_JOB = "00000000-0000-7000-8000-000000000071";
 const LOOK_ONLY_JOB = "00000000-0000-7000-8000-000000000072";
 const TOMATOES = "00000000-0000-7000-8000-000000000040";
+const PANTRY = "00000000-0000-7000-8000-000000000020";
 
 // Stand-in photo bytes. The upload is refused on the model check, which runs
 // before the body is read, so these never need to be a decodable image.
@@ -85,9 +86,51 @@ test("a proposal is reviewed and confirmed into inventory", async ({ page }) => 
   await mystery.getByRole("button", { name: "Reject" }).click();
   await expect(mystery).toHaveClass(/review-row--rejected/);
 
+  // The confirm is passed through a route handler so its body can be read:
+  // the page navigates to the inbox the moment it succeeds, and a response
+  // observed from outside loses its body with the page that made it.
+  let sent = null;
+  let written = null;
+  let status = 0;
+  await page.route(`**/ingest/${SHELF_JOB}/confirm`, async (route) => {
+    sent = route.request().postDataJSON();
+    const response = await route.fetch();
+    status = response.status();
+    written = await response.json();
+    await route.fulfill({ response });
+  });
   await page.getByRole("button", { name: "Confirm" }).click();
-  await expect(page).toHaveURL(/\/inbox\.html\?.*confirmed=1/);
-  await expect(page.locator("#notice")).toContainText("applied");
+  await expect(page).toHaveURL(/\/inbox\.html/);
+
+  // What the screen sent: every row decided, and the reviewer's edits intact —
+  // the edited quantity and date, the proposed shelf as new_location below
+  // Pantry, the existing product by id, and the rejection with nothing else.
+  expect(sent.items).toEqual([
+    { row_id: "0", decision: "accept", product_id: TOMATOES, quantity: 2, location_id: PANTRY },
+    {
+      row_id: "1",
+      decision: "accept",
+      new_product: { name: "Oat Milk 1L", item_type: "long_shelf_life" },
+      quantity: 4,
+      new_location: { parent_id: PANTRY, names: ["Top Shelf"] },
+      expiration_date: "2027-02-01",
+    },
+    { row_id: "2", decision: "reject" },
+  ]);
+
+  // What the server wrote: two batches (the rejection wrote none), one new
+  // product, one new location. How those rows persist quantity, date and
+  // expiration_source is pinned against PostgreSQL in internal/store's
+  // ingestion tests.
+  expect(status).toBe(200);
+  expect(written.batch_ids).toHaveLength(2);
+  expect(written.products_created).toBe(1);
+  expect(written.locations_created).toBe(1);
+
+  await expect(page).toHaveURL(/\/inbox\.html\?.*confirmed=2/);
+  await expect(page.locator("#notice")).toHaveText(
+    "Proposal applied: 2 items added to your inventory, 1 new product, 1 new location.",
+  );
   await expect(page.locator(`[data-job-id="${SHELF_JOB}"]`)).toHaveCount(0);
 
   // The proposed shelf now exists under Pantry.

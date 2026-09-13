@@ -55,7 +55,8 @@ async function init() {
 
   try {
     appendLocationOptions(locationSelect, await fetchLocations(storageId));
-    // The tree view's "scan this shelf" link arrives with ?location=.
+    // ?location= preselects a shelf, for a link that is already scoped to one.
+    // Nothing links here with it yet; the parameter is what such a link uses.
     const preset = new URLSearchParams(location.search).get("location");
     if (preset && [...locationSelect.options].some((o) => o.value === preset)) {
       locationSelect.value = preset;

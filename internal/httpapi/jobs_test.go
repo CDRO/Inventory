@@ -121,11 +121,12 @@ func TestJobGetCarriesThePayloadThePollerReads(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var body struct {
-		ID      uuid.UUID       `json:"id"`
-		Status  string          `json:"status"`
-		Kind    string          `json:"kind"`
-		Payload json.RawMessage `json:"payload"`
-		Error   *string         `json:"error"`
+		ID       uuid.UUID       `json:"id"`
+		Status   string          `json:"status"`
+		Kind     string          `json:"kind"`
+		Payload  json.RawMessage `json:"payload"`
+		Error    *string         `json:"error"`
+		HasImage *bool           `json:"has_image"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, job.ID, body.ID)
@@ -133,6 +134,14 @@ func TestJobGetCarriesThePayloadThePollerReads(t *testing.T) {
 	assert.Equal(t, "shelf_ingestion", body.Kind)
 	assert.JSONEq(t, `{"items":[{"name":"Beans"}]}`, string(body.Payload))
 	assert.Nil(t, body.Error)
+	require.NotNil(t, body.HasImage, "has_image is always present")
+	assert.False(t, *body.HasImage, "a job with no photo says so, so the review does not request one")
+
+	photo := "0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b.jpg"
+	job.ImageFilename = &photo
+	for _, path := range []string{"/jobs/" + job.ID.String(), "/jobs?status=done"} {
+		assert.Contains(t, f.do(http.MethodGet, f.base()+path, "").Body.String(), `"has_image":true`, path)
+	}
 }
 
 // TestAnotherStoragesJobIsAPlain404 — one storage's members cannot poll, list
