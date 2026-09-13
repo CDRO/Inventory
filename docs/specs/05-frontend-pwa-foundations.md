@@ -34,9 +34,10 @@ web/static/
 ├── locations.html             # location tree (06)
 ├── categories.html            # category tree (02, 08)
 ├── products.html              # product list + detail/edit
-├── ingest.html                # shelf photo ingestion (06)
+├── ingest.html                # camera entry point, sticky mode selector (06, 09)
 ├── shopping-list.html         # list reconciliation (07)
-├── consume.html               # consumption logging (09)
+├── review.html                # ingestion proposal review/confirm (06)
+├── consume-review.html        # consumption proposal review/confirm (09)
 ├── dashboard.html             # reorder + analytics (10, 11)
 ├── css/
 │   ├── tokens.css             # design tokens as CSS custom properties
