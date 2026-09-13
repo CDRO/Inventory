@@ -180,9 +180,21 @@ func TestEncodingAUserLeaksNothing(t *testing.T) {
 func TestIsAdminIsNeverSerialized(t *testing.T) {
 	t.Parallel()
 
-	offenders := grepGoSources(t, []string{`json:"is_admin`, `"is_admin"`}, "")
+	// The single exemption is the create-user request body, where the spec takes
+	// is_admin as input. It is exempted by file, and that file is held to
+	// containing no output path at all, so the exemption cannot quietly grow a
+	// response type.
+	const inputOnly = "internal/httpapi/admin_input.go"
+	offenders := grepGoSources(t, []string{`json:"is_admin`, `"is_admin"`}, inputOnly)
 
 	assert.Emptyf(t, offenders, "is_admin must never be put on the wire; found in: %v", offenders)
+
+	src, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(inputOnly)))
+	require.NoError(t, err)
+	for _, output := range []string{"writeJSON", "Encode", "Marshal", ".Write(", "func "} {
+		assert.NotContains(t, string(src), output,
+			"%s is exempt from the is_admin scan only because it holds a decode-only type", inputOnly)
+	}
 }
 
 // TestRouterWithoutAnErrorWriterStillHidesReasons — the fail-safe default.

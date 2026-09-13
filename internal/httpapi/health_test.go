@@ -221,8 +221,12 @@ func TestStaticMountDoesNotShadowHealthz(t *testing.T) {
 // text/plain, not the error envelope.
 //
 // The route most immediately affected was POST /api/auth/login, before spec
-// 03's HTTP surface registers it for real — exactly the request a login form
-// sends the moment it exists.
+// 03's HTTP surface registered it — exactly the request a login form sends
+// the moment it exists.
+//
+// It is a 404, not the 405 an intermediate fix produced: a 405 that appears
+// for unknown paths but not for gated admin routes (which answer 404) would
+// tell a non-admin which admin routes exist. See staticHandler in router.go.
 func TestNonGETOnAnUnregisteredPathGetsTheJSONEnvelope(t *testing.T) {
 	t.Parallel()
 
@@ -240,6 +244,8 @@ func TestNonGETOnAnUnregisteredPathGetsTheJSONEnvelope(t *testing.T) {
 		{http.MethodPost, "/api/auth/logout"},
 		{http.MethodDelete, "/some/path"},
 		{http.MethodPut, "/"},
+		{http.MethodGet, "/no/such/asset.js"},
+		{http.MethodGet, "/api/not-a-route"},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			t.Parallel()
@@ -247,13 +253,13 @@ func TestNonGETOnAnUnregisteredPathGetsTheJSONEnvelope(t *testing.T) {
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
 
-			assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+			assert.Equal(t, http.StatusNotFound, rec.Code)
 			assert.Equal(t, "application/json; charset=utf-8", rec.Header().Get("Content-Type"),
-				"a non-GET request to any unregistered path must get the JSON error envelope, never the static file server's plain text")
+				"a request to any unregistered path must get the JSON error envelope, never the static file server's plain text")
 
 			var body map[string]map[string]any
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-			assert.Equal(t, "method_not_allowed", body["error"]["code"])
+			assert.Equal(t, "not_found", body["error"]["code"])
 		})
 	}
 }

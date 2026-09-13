@@ -34,6 +34,30 @@ func TestStaticIsRootedAtStaticDir(t *testing.T) {
 	assert.Error(t, err, "the static/ prefix must be stripped, not preserved")
 }
 
+// TestTemplatesStayOutOfTheStaticTree pins the separation between what the
+// browser can fetch by path and what only the server renders. An admin template
+// reachable as a static asset would ship the admin area's shape to every
+// visitor, which docs/specs/03-auth-and-multi-tenancy.md rules out.
+func TestTemplatesStayOutOfTheStaticTree(t *testing.T) {
+	t.Parallel()
+
+	tmpl, err := web.Templates()
+	require.NoError(t, err)
+	body, err := fs.ReadFile(tmpl, "admin.html")
+	require.NoError(t, err, "admin.html must be at the root of the templates tree")
+	assert.NotEmpty(t, body)
+
+	assets, err := web.Static()
+	require.NoError(t, err)
+	require.NoError(t, fs.WalkDir(assets, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		assert.NotContains(t, path, "admin", "no admin asset may be servable from the static tree")
+		return nil
+	}))
+}
+
 // TestStaticEmbedsTheWholeTree guards against a //go:embed pattern that
 // matches the directory but silently drops nested files.
 func TestStaticEmbedsTheWholeTree(t *testing.T) {

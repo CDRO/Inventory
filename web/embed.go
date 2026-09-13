@@ -17,8 +17,26 @@ import (
 //go:embed static
 var embedded embed.FS
 
+// templates/ is a separate embed, and deliberately not under static/.
+//
+// The admin UI is server-rendered (docs/specs/03-auth-and-multi-tenancy.md),
+// and the rule is that nothing admin-shaped ships in the JavaScript
+// application. A template sitting under static/ would be served to anyone who
+// asked for it by path — no data in it, but a complete map of the admin area
+// handed to every browser. Keeping the two trees apart is what makes "the
+// admin UI does not exist in the frontend" true of the files, not just of the
+// routes.
+//
+//go:embed templates
+var templates embed.FS
+
 // Static returns the embedded asset tree rooted at web/static, so that
 // static/index.html is served as /index.html.
 func Static() (fs.FS, error) {
 	return fs.Sub(embedded, "static")
+}
+
+// Templates returns the server-side templates rooted at web/templates.
+func Templates() (fs.FS, error) {
+	return fs.Sub(templates, "templates")
 }

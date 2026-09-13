@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Inventory — Admin</title>
+<style nonce="{{.Nonce}}">
+  *, *::before, *::after { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; line-height: 1.5; color: #1f2328; background: #fafafa; }
+  main { max-width: 64rem; margin: 0 auto; padding: 2rem 1rem; }
+  h1 { margin-top: 0; }
+  section { margin-bottom: 2.5rem; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; background: #fff; }
+  th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #d0d7de; vertical-align: top; }
+  th { font-size: 0.85rem; color: #57606a; }
+  ul.plain { list-style: none; margin: 0; padding: 0; }
+  ul.plain li { display: flex; gap: 0.5rem; align-items: center; }
+  form { margin: 0; }
+  form.create { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: end; margin-top: 1rem; }
+  label { display: flex; flex-direction: column; font-size: 0.85rem; }
+  label.inline { flex-direction: row; gap: 0.25rem; align-items: center; }
+  input, select, button { font: inherit; }
+  button.link { background: none; border: none; color: #cf222e; cursor: pointer; padding: 0; }
+  .muted { color: #57606a; }
+  .error { color: #cf222e; font-size: 0.85rem; flex-basis: 100%; }
+  .error:empty { display: none; }
+</style>
+</head>
+<body>
+<main>
+<h1>Admin</h1>
+
+<section aria-labelledby="users-heading">
+  <h2 id="users-heading">Users</h2>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Username</th><th>Display name</th><th>Admin</th><th>Storages</th><th></th></tr></thead>
+    <tbody>
+    {{- range .Users}}
+      <tr>
+        <td>{{.Username}}</td>
+        <td>{{.DisplayName}}</td>
+        <td>{{if .IsAdmin}}Yes{{else}}<span class="muted">No</span>{{end}}</td>
+        <td>{{range $i, $s := .Storages}}{{if $i}}, {{end}}{{$s}}{{else}}<span class="muted">None</span>{{end}}</td>
+        <td>
+          {{- if .IsSelf}}<span class="muted">You</span>
+          {{- else}}
+          <form data-method="DELETE" data-action="/api/admin/users/{{.ID}}"
+                data-confirm="Delete {{.Username}}? They are signed out everywhere immediately.">
+            <button class="link" type="submit">Delete</button>
+            <output class="error"></output>
+          </form>
+          {{- end}}
+        </td>
+      </tr>
+    {{- end}}
+    </tbody>
+  </table>
+  </div>
+
+  <form class="create" data-method="POST" data-action="/api/admin/users">
+    <label>Username <input name="username" required maxlength="64" autocomplete="off"></label>
+    <label>Display name <input name="display_name" maxlength="255" autocomplete="off"></label>
+    <label>Password <input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
+    <label class="inline"><input name="is_admin" type="checkbox"> Admin</label>
+    <button type="submit">Create user</button>
+    <output class="error"></output>
+  </form>
+</section>
+
+<section aria-labelledby="storages-heading">
+  <h2 id="storages-heading">Storages</h2>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Name</th><th>Members</th><th>Grant access</th><th></th></tr></thead>
+    <tbody>
+    {{- range .Storages}}
+      {{- $storage := .}}
+      <tr>
+        <td>{{.Name}}</td>
+        <td>
+          <ul class="plain">
+          {{- range .Members}}
+            <li>
+              <span>{{.DisplayName}} <span class="muted">({{.Username}})</span></span>
+              <form data-method="DELETE" data-action="/api/admin/storages/{{$storage.ID}}/members/{{.UserID}}"
+                    data-confirm="Revoke {{.Username}}'s access to {{$storage.Name}}?">
+                <button class="link" type="submit">Remove</button>
+                <output class="error"></output>
+              </form>
+            </li>
+          {{- else}}
+            <li class="muted">No members</li>
+          {{- end}}
+          </ul>
+        </td>
+        <td>
+          {{- if .Candidates}}
+          <form data-method="POST" data-action="/api/admin/storages/{{.ID}}/members">
+            <select name="user_id" required aria-label="User to add to {{.Name}}">
+              {{- range .Candidates}}
+              <option value="{{.ID}}">{{.DisplayName}} ({{.Username}})</option>
+              {{- end}}
+            </select>
+            <button type="submit">Add</button>
+            <output class="error"></output>
+          </form>
+          {{- else}}<span class="muted">Everyone has access</span>{{end}}
+        </td>
+        <td>
+          <form data-method="DELETE" data-action="/api/admin/storages/{{.ID}}"
+                data-confirm="Delete {{.Name}} and everything in it? This cannot be undone.">
+            <button class="link" type="submit">Delete</button>
+            <output class="error"></output>
+          </form>
+        </td>
+      </tr>
+    {{- else}}
+      <tr><td colspan="4" class="muted">No storages yet.</td></tr>
+    {{- end}}
+    </tbody>
+  </table>
+  </div>
+
+  <form class="create" data-method="POST" data-action="/api/admin/storages">
+    <label>Name <input name="name" required maxlength="255" autocomplete="off"></label>
+    <button type="submit">Create storage</button>
+    <output class="error"></output>
+  </form>
+</section>
+</main>
+
+<script nonce="{{.Nonce}}">
+// Submits the admin forms to the JSON routes and reloads on success.
+//
+// This decides nothing. The page was composed by the server, and every request
+// below is authorized again by the API it goes to; this script only turns a
+// form into the JSON body that API expects, and puts its error message next to
+// the form that caused it.
+for (const form of document.querySelectorAll("form[data-action]")) {
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const message = form.dataset.confirm;
+    if (message && !window.confirm(message)) return;
+
+    const out = form.querySelector("output.error");
+    const button = form.querySelector("button[type=submit]");
+    out.textContent = "";
+    button.disabled = true;
+
+    const body = {};
+    for (const el of form.elements) {
+      if (!el.name) continue;
+      body[el.name] = el.type === "checkbox" ? el.checked : el.value;
+    }
+
+    try {
+      const res = await fetch(form.dataset.action, {
+        method: form.dataset.method,
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: form.dataset.method === "DELETE" ? undefined : JSON.stringify(body),
+      });
+      if (res.ok) {
+        window.location.reload();
+        return;
+      }
+      let text = "Something went wrong (" + res.status + ").";
+      try {
+        const envelope = await res.json();
+        const fields = envelope.error.fields || {};
+        const details = Object.values(fields).flat();
+        text = details.length ? details.join(" ") : envelope.error.message;
+      } catch (_) { /* not the error envelope; keep the generic text */ }
+      out.textContent = text;
+    } catch (_) {
+      out.textContent = "Could not reach the server.";
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+</script>
+</body>
+</html>
