@@ -594,7 +594,14 @@ func (s *Store) UserPreferencesFor(ctx context.Context, userID uuid.UUID) (*User
 // (docs/specs/50-gamification-overview.md principle 4). It never touches any
 // inventory feature and never affects other members of a shared storage.
 func (s *Store) SetGamificationEnabled(ctx context.Context, userID uuid.UUID, enabled bool) error {
-	_, err := s.pool.Exec(ctx, `
+	return setGamificationEnabledTx(ctx, s.pool, userID, enabled)
+}
+
+// setGamificationEnabledTx is SetGamificationEnabled's body, taking a querier
+// so SetPreferences can run it in the same transaction as the holiday-weeks
+// write.
+func setGamificationEnabledTx(ctx context.Context, q querier, userID uuid.UUID, enabled bool) error {
+	_, err := q.Exec(ctx, `
 		INSERT INTO user_preferences (user_id, gamification_enabled) VALUES ($1, $2)
 		ON CONFLICT (user_id) DO UPDATE SET gamification_enabled = $2, updated_at = now()`,
 		userID, enabled)
@@ -602,6 +609,21 @@ func (s *Store) SetGamificationEnabled(ctx context.Context, userID uuid.UUID, en
 		return fmt.Errorf("store: set gamification enabled: %w", err)
 	}
 	return nil
+}
+
+// SetPreferences updates a user's gamification toggle and holiday weeks
+// together, in one transaction (#54 finding 5). UpdateMePreferences used to
+// call SetGamificationEnabled and SetHolidayWeeks as two separate store
+// calls for what the UI presents as one PUT; a failure between them —
+// unlikely for two simple single-user writes, but possible — left the
+// toggle changed and the holiday weeks untouched, or vice versa.
+func (s *Store) SetPreferences(ctx context.Context, userID uuid.UUID, enabled bool, weeks []time.Time) error {
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		if err := setGamificationEnabledTx(ctx, tx, userID, enabled); err != nil {
+			return err
+		}
+		return setHolidayWeeksTx(ctx, tx, userID, weeks)
+	})
 }
 
 // SetHolidayWeeks replaces a user's future holiday weeks with the requested
@@ -629,66 +651,73 @@ func (s *Store) SetGamificationEnabled(ctx context.Context, userID uuid.UUID, en
 // removal in the first place reaches the same practical outcome — the
 // budget slot stays spent — without a second, shadow ledger.
 func (s *Store) SetHolidayWeeks(ctx context.Context, userID uuid.UUID, weeks []time.Time) error {
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		return setHolidayWeeksTx(ctx, tx, userID, weeks)
+	})
+}
+
+// setHolidayWeeksTx is SetHolidayWeeks' transaction-scoped body, split out so
+// SetPreferences can run it in the same transaction as the gamification-
+// enabled toggle.
+func setHolidayWeeksTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, weeks []time.Time) error {
 	requested := map[time.Time]bool{}
 	for _, w := range weeks {
 		requested[mondayOf(w)] = true
 	}
 
-	return s.inTx(ctx, func(tx pgx.Tx) error {
-		existing, err := loadHolidayWeeks(ctx, tx, userID)
-		if err != nil {
-			return err
-		}
+	existing, err := loadHolidayWeeks(ctx, tx, userID)
+	if err != nil {
+		return err
+	}
 
-		current := mondayOf(time.Now())
-		for week := range requested {
-			// A past week already on record is not a violation to reject —
-			// GET /api/me/preferences returns full history, and a client
-			// that naively resends its current list while adding or
-			// removing a future week (web/static/js/pages/settings.js does
-			// exactly this) must not have that harmless echo rejected. Only
-			// a *new* attempt to backdate a holiday week is refused.
-			if week.Before(current) && !existing[week] {
-				return fmt.Errorf("%w: only the current week or a future week may be marked as holiday", ErrValidation)
-			}
+	current := mondayOf(time.Now())
+	for week := range requested {
+		// A past week already on record is not a violation to reject —
+		// GET /api/me/preferences returns full history, and a client
+		// that naively resends its current list while adding or
+		// removing a future week (web/static/js/pages/settings.js does
+		// exactly this) must not have that harmless echo rejected. Only
+		// a *new* attempt to backdate a holiday week is refused.
+		if week.Before(current) && !existing[week] {
+			return fmt.Errorf("%w: only the current week or a future week may be marked as holiday", ErrValidation)
 		}
+	}
 
-		// final is the complete set this write would leave in place: every
-		// past/current week already on record (never removable here), plus
-		// exactly the current/future weeks the caller asked for.
-		final := map[time.Time]bool{}
-		for week := range existing {
-			if !week.After(current) {
-				final[week] = true
-			}
-		}
-		for week := range requested {
+	// final is the complete set this write would leave in place: every
+	// past/current week already on record (never removable here), plus
+	// exactly the current/future weeks the caller asked for.
+	final := map[time.Time]bool{}
+	for week := range existing {
+		if !week.After(current) {
 			final[week] = true
 		}
+	}
+	for week := range requested {
+		final[week] = true
+	}
 
-		if newlyExceedsBudget(existing, final) {
-			remaining := gamification.HolidayBudgetWeeks - gamification.MaxWeeksInWindow(toSlice(existing))
-			if remaining < 0 {
-				remaining = 0
-			}
-			return fmt.Errorf("%w: %d week(s) remaining in this 52-week window", ErrConflict, remaining)
+	if newlyExceedsBudget(existing, final) {
+		remaining := gamification.HolidayBudgetWeeks - gamification.MaxWeeksInWindow(toSlice(existing))
+		if remaining < 0 {
+			remaining = 0
 		}
+		return fmt.Errorf("%w: %d week(s) remaining in this 52-week window", ErrConflict, remaining)
+	}
 
-		if _, err := tx.Exec(ctx, `
-			DELETE FROM holiday_weeks WHERE user_id = $1 AND week_start > $2`, userID, current); err != nil {
-			return fmt.Errorf("store: clear future holiday weeks: %w", err)
-		}
-		for week := range final {
-			if week.After(current) || (week.Equal(current) && !existing[week]) {
-				if _, err := tx.Exec(ctx, `
-					INSERT INTO holiday_weeks (user_id, week_start) VALUES ($1, $2)
-					ON CONFLICT DO NOTHING`, userID, week); err != nil {
-					return fmt.Errorf("store: insert holiday week: %w", err)
-				}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM holiday_weeks WHERE user_id = $1 AND week_start > $2`, userID, current); err != nil {
+		return fmt.Errorf("store: clear future holiday weeks: %w", err)
+	}
+	for week := range final {
+		if week.After(current) || (week.Equal(current) && !existing[week]) {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO holiday_weeks (user_id, week_start) VALUES ($1, $2)
+				ON CONFLICT DO NOTHING`, userID, week); err != nil {
+				return fmt.Errorf("store: insert holiday week: %w", err)
 			}
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // newlyExceedsBudget reports whether final introduces at least one week not

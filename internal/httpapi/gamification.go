@@ -16,6 +16,7 @@ type GamificationStore interface {
 	UserPreferencesFor(ctx context.Context, userID uuid.UUID) (*store.UserPreferences, error)
 	SetGamificationEnabled(ctx context.Context, userID uuid.UUID, enabled bool) error
 	SetHolidayWeeks(ctx context.Context, userID uuid.UUID, weeks []time.Time) error
+	SetPreferences(ctx context.Context, userID uuid.UUID, enabled bool, weeks []time.Time) error
 
 	UserProgressInStorage(ctx context.Context, storageID, userID uuid.UUID) (*store.UserProgress, error)
 	HealthScoreForStorage(ctx context.Context, storageID uuid.UUID) (float64, error)
@@ -343,15 +344,13 @@ func (h *GamificationHandler) UpdateMePreferences(w http.ResponseWriter, r *http
 		return
 	}
 
-	if err := h.store.SetGamificationEnabled(r.Context(), user.ID, body.GamificationEnabled); err != nil {
-		h.errors.WriteError(w, r, Internal(err))
-		return
-	}
-	// SetHolidayWeeks enforces docs/specs/52-gamification-quests-and-ui.md's
-	// holiday-mode rules: ErrValidation for a past week, ErrConflict — with a
-	// message naming how many weeks remain — for exceeding the rolling
-	// 52-week budget.
-	if err := h.store.SetHolidayWeeks(r.Context(), user.ID, weeks); err != nil {
+	// SetPreferences applies both in one transaction, so a failure partway
+	// through can't leave the toggle changed and the holiday weeks
+	// untouched or vice versa (#54 finding 5). It enforces
+	// docs/specs/52-gamification-quests-and-ui.md's holiday-mode rules:
+	// ErrValidation for a past week, ErrConflict — with a message naming how
+	// many weeks remain — for exceeding the rolling 52-week budget.
+	if err := h.store.SetPreferences(r.Context(), user.ID, body.GamificationEnabled, weeks); err != nil {
 		h.errors.WriteError(w, r, FromStoreError(err, "holiday week rejected"))
 		return
 	}

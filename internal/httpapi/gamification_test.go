@@ -69,6 +69,13 @@ func (f *fakeGamification) SetHolidayWeeks(_ context.Context, userID uuid.UUID, 
 	return nil
 }
 
+func (f *fakeGamification) SetPreferences(ctx context.Context, userID uuid.UUID, enabled bool, weeks []time.Time) error {
+	if err := f.SetGamificationEnabled(ctx, userID, enabled); err != nil {
+		return err
+	}
+	return f.SetHolidayWeeks(ctx, userID, weeks)
+}
+
 func (f *fakeGamification) UserProgressInStorage(_ context.Context, storageID, userID uuid.UUID) (*store.UserProgress, error) {
 	if p, ok := f.progress[userID]; ok {
 		return p, nil

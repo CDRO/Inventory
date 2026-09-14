@@ -844,6 +844,31 @@ func TestSetGamificationEnabledPersists(t *testing.T) {
 	assert.True(t, prefs.GamificationEnabled)
 }
 
+// TestSetPreferencesIsAtomic is the regression for #54 finding 5.
+// UpdateMePreferences used to call SetGamificationEnabled and
+// SetHolidayWeeks as two separate store writes for what the UI presents as
+// one PUT; a failure between them left the toggle changed and the holiday
+// weeks untouched. SetPreferences now runs both in one transaction. Proving
+// it needs no lock contention, unlike #35's tests: a deliberately invalid
+// past week reliably fails setHolidayWeeksTx's own validation, so if the
+// enabled-flag write shares its transaction, it must roll back too.
+func TestSetPreferencesIsAtomic(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	userID := newUser(t, ctx)
+
+	require.NoError(t, s.SetGamificationEnabled(ctx, userID, true))
+
+	pastWeek := time.Now().AddDate(0, 0, -14)
+	err := s.SetPreferences(ctx, userID, false, []time.Time{pastWeek})
+	require.Error(t, err, "a past week not already on record must be rejected")
+
+	prefs, err := s.UserPreferencesFor(ctx, userID)
+	require.NoError(t, err)
+	assert.True(t, prefs.GamificationEnabled,
+		"the gamification-enabled write must have rolled back together with the failed holiday-weeks write")
+}
+
 // TestSetHolidayWeeksReplacesTheWholeSet: PUT semantics, not a patch — a
 // second call with a different set must not merge with the first.
 func TestSetHolidayWeeksReplacesTheWholeSet(t *testing.T) {
