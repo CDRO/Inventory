@@ -30,23 +30,11 @@ func evaluateContributionAchievements(ctx context.Context, tx pgx.Tx, storageID,
 	}
 }
 
-// evaluateLedgerAchievements is evaluateContributionAchievements' counterpart
-// for the three ledger reasons that score
-// (docs/specs/51-gamification-scoring.md).
-//
-// first_shelf unlocks on any confirmed vision_ingestion batch — the spec
-// names "your first shelf-photo ingestion" specifically, but bumpForLedgerReason
-// is called per batch created, with no view of which job kind produced it
-// (shelf vs. single product photo). Both confirm a proposal the same way,
-// so treating either as the qualifying "first confirm" is a deliberate,
-// documented simplification rather than threading job-kind through every
-// batch-creation call site for one welcome achievement.
-func evaluateLedgerAchievements(ctx context.Context, tx pgx.Tx, storageID, userID uuid.UUID, reason LogReason) error {
-	if reason != ReasonVisionIngestion {
-		return nil
-	}
-	return unlockAchievement(ctx, tx, storageID, userID, string(gamification.AchFirstShelf))
-}
+// first_shelf — "your first shelf-photo ingestion" — is unlocked directly in
+// ConfirmIngestion (internal/store/ingestion.go), the one place that has the
+// job's kind in scope, rather than here: this file's achievement checks run
+// generically per batch or per contribution, with no view of which job
+// produced either.
 
 func checkCurator(ctx context.Context, tx pgx.Tx, storageID, userID uuid.UUID) error {
 	var count int

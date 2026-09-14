@@ -123,10 +123,7 @@ func bumpForLedgerReason(ctx context.Context, tx pgx.Tx, storageID uuid.UUID, us
 	if err := bumpProgress(ctx, tx, storageID, *userID, xp, time.Now()); err != nil {
 		return err
 	}
-	if err := advanceQuests(ctx, tx, storageID, *userID, string(reason)); err != nil {
-		return err
-	}
-	return evaluateLedgerAchievements(ctx, tx, storageID, *userID, reason)
+	return advanceQuests(ctx, tx, storageID, *userID, string(reason))
 }
 
 // bumpProgress increments a user's cached XP and recomputes their level and
