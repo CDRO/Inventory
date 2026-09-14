@@ -202,6 +202,32 @@ func writeMigration(t *testing.T, dir, name, upSQL, downSQL string) {
 // goose.NopLogger. Applies two migrations, adds a third afterward without
 // applying it, and checks status reports all three — two applied, one
 // pending — rather than silence.
+// TestRunUpStaysNonNoisyOnHappyPath is the regression for a bug review-tests
+// caught in this PR's first round: making status/version print by forwarding
+// every goose Printf call unconditionally also forwarded goose's own
+// per-migration "OK <file>" lines and its "successfully migrated" line
+// during `up`, on top of the app's existing one-line summary — acceptance
+// criterion "migrate up output stays useful without becoming noisy on the
+// happy path", violated. fatalLogger's Printf is now silent unless the
+// action is status/version, so `up` must still produce exactly the one line
+// it always has.
+func TestRunUpStaysNonNoisyOnHappyPath(t *testing.T) {
+	dsn := newTestDatabase(t)
+	root := t.TempDir()
+	migrationsDir := filepath.Join(root, "migrations")
+	require.NoError(t, os.Mkdir(migrationsDir, 0o755))
+	writeMigration(t, migrationsDir, "00001_first.sql", "CREATE TABLE t1 (id int);", "DROP TABLE t1;")
+	writeMigration(t, migrationsDir, "00002_second.sql", "CREATE TABLE t2 (id int);", "DROP TABLE t2;")
+	chdir(t, root)
+
+	var out bytes.Buffer
+	err := Run(context.Background(), dsn, "up", &out)
+	require.NoError(t, err)
+
+	assert.Equal(t, "Applied migrations from migrations.\n", out.String(),
+		"up must print exactly its own one-line summary, not goose's internal per-migration Printf output")
+}
+
 func TestRunStatusListsAppliedAndPendingMigrations(t *testing.T) {
 	dsn := newTestDatabase(t)
 	root := t.TempDir()

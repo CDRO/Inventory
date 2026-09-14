@@ -74,7 +74,14 @@ func Run(ctx context.Context, dsn, action string, out io.Writer) (err error) {
 	if err := goose.SetDialect("postgres"); err != nil {
 		return fmt.Errorf("migrate: set dialect: %w", err)
 	}
-	goose.SetLogger(&fatalLogger{out: out})
+	// Printf forwarding is scoped to status/version: those two have no other
+	// way to report anything (see fatalLogger's doc comment), but up/down
+	// already print their own one-line summary below, and goose.UpContext
+	// separately Printf's a line per applied migration plus a
+	// "successfully migrated" line — forwarding those too would make a happy
+	// path noisy for no reason. Fatalf's panic/recover safety net stays on
+	// for every action regardless.
+	goose.SetLogger(&fatalLogger{out: out, verbose: action == "status" || action == "version"})
 
 	switch action {
 	case "up":
@@ -105,16 +112,24 @@ func Run(ctx context.Context, dsn, action string, out io.Writer) (err error) {
 // boundary in Run.
 type fatalLog string
 
-// fatalLogger implements goose.Logger. Printf writes go to out — this is what
-// makes `migrate status` and `migrate version` produce output at all, since
-// goose renders both through Printf rather than a return value. Fatalf panics
-// with a fatalLog, which Run recovers into a returned error instead of
-// letting goose's stdlib default (os.Exit(1)) end the process directly.
+// fatalLogger implements goose.Logger. When verbose, Printf writes go to
+// out — this is what makes `migrate status` and `migrate version` produce
+// output at all, since goose renders both through Printf rather than a
+// return value. When not verbose, Printf is silently discarded: up/down
+// have their own one-line summaries and goose's internal per-migration
+// Printf calls would otherwise make their happy path noisy. Fatalf always
+// panics, verbose or not, with a fatalLog that Run recovers into a returned
+// error instead of letting goose's stdlib default (os.Exit(1)) end the
+// process directly.
 type fatalLogger struct {
-	out io.Writer
+	out     io.Writer
+	verbose bool
 }
 
 func (l *fatalLogger) Printf(format string, v ...any) {
+	if !l.verbose {
+		return
+	}
 	fmt.Fprintf(l.out, format, v...)
 }
 
