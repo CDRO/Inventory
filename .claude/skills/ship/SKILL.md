@@ -110,7 +110,10 @@ read later. Re-read it.
 Merge only when **all** of these hold:
 
 - three `VERDICT: APPROVE` headers for the current round — one per reviewer
-- the test reviewer's `**Suite:**` line shows a passing exit code
+- the test reviewer's `**Suite:**` line shows a passing local exit code, **or**
+  — when local `docker compose` cannot reach a daemon at all — a completed,
+  successful run of the `test` GitHub Actions workflow against the PR's head
+  commit (`.claude/agents/review-tests.md` covers when this fallback applies)
 - no unaddressed blocking finding anywhere in the current round
 
 A missing reviewer comment is not an approval. Two approvals and a silence is

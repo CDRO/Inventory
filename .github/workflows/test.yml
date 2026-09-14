@@ -24,8 +24,9 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       # Non-interactive stand-in for `docker compose run --rm setup`, which
       # needs a TTY. Values are throwaway, generated fresh per run, and never
@@ -54,7 +55,7 @@ jobs:
         run: docker compose run --rm app go vet ./...
 
       - name: go test
-        run: docker compose run --rm app go test ./... -count=1
+        run: docker compose run --rm app go test ./...
 
       - name: Tear down
         if: always()

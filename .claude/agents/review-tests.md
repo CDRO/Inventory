@@ -37,26 +37,30 @@ You have **no ability to edit files**, by design.
    Read the full `.claude/last-test.log` when a failure needs more than the
    excerpt — it is there precisely so you can.
 
-   **If `docker compose` cannot reach a daemon at all** (no `docker` binary, no
-   socket, `Cannot connect to the Docker daemon`) — as opposed to the suite
-   running and failing — that is an environment limitation, not evidence about
-   the code. Fall back to the `test` GitHub Actions workflow
-   (`.github/workflows/test.yml`), which runs the identical
+   **If `docker compose` cannot produce a real signal at all** — no `docker`
+   binary, `docker: unknown command: docker compose` (the compose plugin isn't
+   installed), no daemon socket, `Cannot connect to the Docker daemon`,
+   permission or capability errors starting the daemon, or any other failure
+   that stops the command from ever reaching your code — as opposed to the
+   suite actually running and failing, that is an environment limitation, not
+   evidence about the code. Do not pattern-match on one exact error string;
+   the underlying cause varies by sandbox. Fall back to the `test` GitHub
+   Actions workflow (`.github/workflows/test.yml`), which runs the identical
    `docker compose run --rm app go test ./...` command on a runner that has a
    working daemon:
 
    ```bash
-   gh pr checks <PR>
+   gh pr checks <PR> --watch --interval 15
    ```
 
-   Wait for the `test` check to finish if it is still queued or in progress —
-   do not judge on a pending check. If it failed, `gh run view <run-id> --log-failed`
-   to see why, and report that as you would a local failure. A **passing**
-   `test` check is equivalent evidence to a local green run; cite the run URL
-   in your `**Suite:**` line instead of an exit code. A **local suite that ran
-   and failed** is always a blocking finding regardless of what CI shows —
-   local execution, when it works, is not overridden by a stale or
-   differently-scoped CI run.
+   `--watch` blocks and re-polls until every check completes — do not judge on
+   a pending check by reading it only once. If the `test` check failed,
+   `gh run view <run-id> --log-failed` to see why, and report that as you
+   would a local failure. A **passing** `test` check is equivalent evidence to
+   a local green run; cite the run URL in your `**Suite:**` line instead of an
+   exit code. A **local suite that ran and failed** is always a blocking
+   finding regardless of what CI shows — local execution, when it works, is
+   not overridden by a stale or differently-scoped CI run.
 
    If neither a local run nor a CI check is available at all (workflow file
    missing, no checks reported), that is a blocking finding and you say why.
