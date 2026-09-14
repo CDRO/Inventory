@@ -214,8 +214,11 @@ across several sittings, without losing anything.
 
 For each detected item, the reviewer sees: the cropped region of the photo
 (rendered from `bounding_box`; for single-product photos, the whole
-image), the matched/candidate product name (editable, with autocomplete
-against existing products), an editable quantity, an editable expiry
+image), the matched/candidate product name — editable, offered as a picker
+listing every product in the storage alongside the AI's own matches, so an
+existing product the model did not propose is still one choice away rather
+than becoming an accidental duplicate "new" one — an editable quantity, an
+editable expiry
 (defaulted per `08-expiration-and-classification.md`), and an editable
 location path (a picker rooted at this storage's tree, defaulting to the
 AI's proposal or the upload's `location_id` hint). Each row carries the

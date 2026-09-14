@@ -1,7 +1,8 @@
 // Category picker as a plain <select>, the same shape location-options.js
 // uses for locations — for a new product's category while reviewing an
-// ingestion or consumption-photo proposal (docs/specs/06-vision-shelf-ingestion.md,
-// docs/specs/09-consumption-logging.md).
+// ingestion proposal (docs/specs/06-vision-shelf-ingestion.md). Consumption
+// logging (docs/specs/09-consumption-logging.md) never creates a product,
+// so it has no use for this.
 //
 // GET /categories answers with a nested tree; a select needs a flat list.
 // Depth is shown by indentation, the same native-control reasoning

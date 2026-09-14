@@ -14,14 +14,17 @@ type CategoryStore interface {
 	CategoryTree(ctx context.Context, storageID uuid.UUID) ([]store.Category, error)
 }
 
-// CategoryHandler serves the category tree as a picker for review screens
-// (docs/specs/06-vision-shelf-ingestion.md, docs/specs/09-consumption-logging.md):
-// a new product created while reviewing a proposal names an existing
-// category by id, and the picker needs the whole tree to offer one.
+// CategoryHandler serves the category tree as a picker for the ingestion
+// review screen (docs/specs/06-vision-shelf-ingestion.md): a new product
+// created while reviewing a proposal names an existing category by id, and
+// the picker needs the whole tree to offer one. Consumption logging
+// (docs/specs/09-consumption-logging.md) never creates a product — "unlike
+// IngestDecision there is no NewProduct alternative" — so this has no
+// caller there.
 //
 // Every route is mounted behind RequireStorageMember, and the handler takes
 // the storage id from the request context rather than the URL — the same
-// same-storage guarantee LocationHandler documents.
+// guarantee LocationHandler documents.
 type CategoryHandler struct {
 	store  CategoryStore
 	errors *ErrorWriter
