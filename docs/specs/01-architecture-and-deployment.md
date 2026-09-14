@@ -51,6 +51,7 @@ Every command is therefore a Docker invocation:
 | Run E2E tests (deployment gate) | `docker compose -f docker-compose.e2e.yml run --rm e2e` |
 | Run migrations | `docker compose -f docker-compose.yml run --rm app migrate up` |
 | Lint / vet | `docker compose run --rm app go vet ./...` |
+| Rebuild gamification progress from scratch | `docker compose -f docker-compose.yml run --rm app recompute-progress` |
 
 **Which compose context a command runs in matters, and the table above is
 explicit about it for a reason.** `docker-compose.override.yml` holds the dev
@@ -107,7 +108,7 @@ runs the identical command against a real daemon.
 │   └── explanations/           # human-facing explanations — NOT for agents, see its README
 ├── cmd/
 │   └── inventory/
-│       └── main.go             # entrypoint; subcommands: serve (default), setup, migrate
+│       └── main.go             # entrypoint; subcommands: serve (default), setup, migrate, recompute-progress
 ├── internal/
 │   ├── config/                 # env loading + DB-backed settings overrides
 │   ├── httpapi/                # chi routers, handlers, middleware (auth, storage scoping)

@@ -259,6 +259,27 @@ func exactMatchProposal(t *testing.T, rowID string, proposed uuid.UUID) json.Raw
 	return payload
 }
 
+// exactMatchProposalWithASecondRow is exactMatchProposal plus a second,
+// plain row with no match info — for tests that need matchRowIDs to accept a
+// two-row decision list so the second row's own validation is what fails,
+// rather than the row-id-set check rejecting the request before either row
+// is ever processed.
+func exactMatchProposalWithASecondRow(t *testing.T, firstRowID string, proposed uuid.UUID, secondRowID string) json.RawMessage {
+	t.Helper()
+	first := ingestProposalRow{RowID: firstRowID}
+	first.Match.Status = "exact_match"
+	first.Match.Product = &struct {
+		ID uuid.UUID `json:"id"`
+	}{ID: proposed}
+	second := ingestProposalRow{RowID: secondRowID}
+
+	payload, err := json.Marshal(struct {
+		Rows []ingestProposalRow `json:"rows"`
+	}{Rows: []ingestProposalRow{first, second}})
+	require.NoError(t, err)
+	return payload
+}
+
 // TestConfirmIngestionRecordsAICorrectionWhenTheReviewerOverrides checks the
 // comparison against the stored proposal, not just "a batch got created".
 func TestConfirmIngestionRecordsAICorrectionWhenTheReviewerOverrides(t *testing.T) {
@@ -384,11 +405,16 @@ func TestRecomputeAllProgressAppliesCoalescing(t *testing.T) {
 	assert.Equal(t, gamification.XPLedgerContribution, xp, "two events 10 minutes apart must coalesce into one contribution")
 }
 
-// TestRecomputeAllProgressIgnoresDeletedProducts: inventory_logs.product_id
-// cascades with the product it names, so a deleted product's history is
-// simply absent from the next recompute — the "create-delete cycles earn
-// nothing" rule requires no extra bookkeeping beyond that cascade.
-func TestRecomputeAllProgressIgnoresDeletedProducts(t *testing.T) {
+// TestRecomputeAllProgressResetsAPairWithNoRemainingEvents: the cache row is
+// left in place deliberately — deleting it would just be a different way of
+// losing track of the pair — but a from-scratch recompute must still zero it
+// out rather than leaving the stale total from before the deletion untouched.
+// This is what actually makes "deleting a product removes its contribution
+// on the next recompute" (docs/specs/51-gamification-scoring.md) true: the
+// cascade alone only empties inventory_logs, and something still has to
+// notice that a *previously scored* pair now has nothing left to justify its
+// cached XP.
+func TestRecomputeAllProgressResetsAPairWithNoRemainingEvents(t *testing.T) {
 	s := requireDB(t)
 	ctx := context.Background()
 	storageID := newStorage(t, ctx)
@@ -402,15 +428,210 @@ func TestRecomputeAllProgressIgnoresDeletedProducts(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	before, _, _, found := progressRow(t, ctx, storageID, userID)
+	require.True(t, found)
+	require.Greater(t, before, 0, "the live write must have cached some XP before the deletion")
+
+	// The product's only inventory_logs row cascades away with it
+	// (docs/specs/02-data-model.md) — user_progress is deliberately left
+	// exactly as the live path last wrote it, stale XP and all, since nothing
+	// about deleting a product runs a recompute on its own.
 	require.NoError(t, s.DeleteProduct(ctx, storageID, product.ID))
-	_, err = testPool.Exec(ctx, `DELETE FROM user_progress WHERE storage_id = $1`, storageID)
+
+	n, err := s.RecomputeAllProgress(ctx)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, n, 1, "a pair with a stale row but no events must still be counted as recomputed")
+
+	xp, level, streak, found := progressRow(t, ctx, storageID, userID)
+	require.True(t, found, "the row is reset, not deleted")
+	assert.Equal(t, 0, xp, "the stale XP from before the deletion must not survive a from-scratch recompute")
+	assert.Equal(t, 1, level)
+	assert.Equal(t, 0, streak)
+}
+
+// insertLedgerEventAt writes one scoreable inventory_logs row (with its
+// paired batch, per docs/specs/02-data-model.md) at an exact timestamp, for
+// tests that need to control which week an event falls in without waiting
+// for real time to pass.
+func insertLedgerEventAt(t *testing.T, ctx context.Context, productID, locationID, userID uuid.UUID, at time.Time) {
+	t.Helper()
+	batchID := newUUID(t)
+	_, err := execTest(ctx, `
+		INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_source)
+		VALUES ($1, $2, $3, 1, 'derived')`, batchID, productID, locationID)
+	require.NoError(t, err)
+	_, err = execTest(ctx, `
+		INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by, timestamp)
+		VALUES ($1, $2, $3, 1, 'vision_ingestion', $4, $5)`,
+		newUUID(t), productID, batchID, userID, at)
+	require.NoError(t, err)
+}
+
+// mostRecentMonday matches store.mondayOf's own algorithm (Monday-start,
+// UTC) independently, rather than importing the unexported function, so the
+// test's weeks line up with what the implementation itself will compute.
+func mostRecentMonday(t *testing.T, at time.Time) time.Time {
+	t.Helper()
+	at = at.UTC()
+	offset := (int(at.Weekday()) + 6) % 7
+	return time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -offset)
+}
+
+// TestRecomputeAllProgressStreakCountsConsecutiveActiveWeeks is the ordinary
+// case: activity every week up to last week, nothing yet this week (which
+// has not finished), still counts as an unbroken streak.
+func TestRecomputeAllProgressStreakCountsConsecutiveActiveWeeks(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	userID := newUser(t, ctx)
+	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Bread"})
+	require.NoError(t, err)
+	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Pantry"})
+	require.NoError(t, err)
+
+	thisWeek := mostRecentMonday(t, time.Now())
+	for weeksAgo := 1; weeksAgo <= 3; weeksAgo++ {
+		insertLedgerEventAt(t, ctx, product.ID, location.ID, userID, thisWeek.AddDate(0, 0, -7*weeksAgo).Add(12*time.Hour))
+	}
+
+	_, err = s.RecomputeAllProgress(ctx)
+	require.NoError(t, err)
+
+	_, _, streak, found := progressRow(t, ctx, storageID, userID)
+	require.True(t, found)
+	assert.Equal(t, 3, streak, "three consecutive active weeks, with this week not yet over, is a streak of 3")
+}
+
+// TestRecomputeAllProgressStreakPausesOnAHolidayWeek: a week marked holiday
+// must not break the streak, but it must not extend it either — only the
+// active weeks on either side of it count.
+func TestRecomputeAllProgressStreakPausesOnAHolidayWeek(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	userID := newUser(t, ctx)
+	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Bread"})
+	require.NoError(t, err)
+	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Pantry"})
+	require.NoError(t, err)
+
+	thisWeek := mostRecentMonday(t, time.Now())
+	// Active 1 and 3 weeks ago; 2 weeks ago is a marked holiday with no
+	// activity at all.
+	insertLedgerEventAt(t, ctx, product.ID, location.ID, userID, thisWeek.AddDate(0, 0, -7).Add(12*time.Hour))
+	insertLedgerEventAt(t, ctx, product.ID, location.ID, userID, thisWeek.AddDate(0, 0, -21).Add(12*time.Hour))
+	require.NoError(t, s.SetHolidayWeeks(ctx, userID, []time.Time{thisWeek.AddDate(0, 0, -14)}))
+
+	_, err = s.RecomputeAllProgress(ctx)
+	require.NoError(t, err)
+
+	_, _, streak, found := progressRow(t, ctx, storageID, userID)
+	require.True(t, found)
+	assert.Equal(t, 2, streak, "the holiday week pauses the streak rather than breaking it, but does not itself count")
+}
+
+// TestRecomputeAllProgressStreakBreaksOnARealGap: a week with neither
+// activity nor a holiday marker ends the streak — only the weeks after the
+// gap (working backward from now) count.
+func TestRecomputeAllProgressStreakBreaksOnARealGap(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	userID := newUser(t, ctx)
+	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Bread"})
+	require.NoError(t, err)
+	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Pantry"})
+	require.NoError(t, err)
+
+	thisWeek := mostRecentMonday(t, time.Now())
+	// Active last week; a genuine gap two weeks ago (no holiday marker);
+	// active again three weeks ago. The old activity must not resurrect the
+	// streak across a real, unpaused gap.
+	insertLedgerEventAt(t, ctx, product.ID, location.ID, userID, thisWeek.AddDate(0, 0, -7).Add(12*time.Hour))
+	insertLedgerEventAt(t, ctx, product.ID, location.ID, userID, thisWeek.AddDate(0, 0, -21).Add(12*time.Hour))
+
+	_, err = s.RecomputeAllProgress(ctx)
+	require.NoError(t, err)
+
+	_, _, streak, found := progressRow(t, ctx, storageID, userID)
+	require.True(t, found)
+	assert.Equal(t, 1, streak, "an unmarked gap breaks the streak; activity before the gap does not count")
+}
+
+// TestRecomputeAllProgressAppliesCorrectionSupersedesRuleEndToEnd is the
+// should-fix from round 1: the pure Coalesce tests prove the 5-vs-3 rule in
+// isolation, but nothing previously chained a real ai_correction contribution
+// through the full ConfirmIngestion -> RecomputeAllProgress path to prove the
+// two layers agree once the authoritative recompute runs.
+func TestRecomputeAllProgressAppliesCorrectionSupersedesRuleEndToEnd(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	userID := newUser(t, ctx)
+	proposed, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Ketchup"})
+	require.NoError(t, err)
+	actual, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Barbecue Sauce"})
+	require.NoError(t, err)
+	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Pantry"})
+	require.NoError(t, err)
+
+	job, err := s.CreateJob(ctx, store.NewJob{StorageID: storageID, Kind: store.JobShelfIngestion})
+	require.NoError(t, err)
+	require.NoError(t, s.CompleteJob(ctx, job.ID, exactMatchProposal(t, "0", proposed.ID)))
+	_, err = s.ConfirmIngestion(ctx, storageID, job.ID, &userID, []store.IngestDecision{
+		{RowID: "0", Accept: true, ProductID: &actual.ID, Quantity: 1, LocationID: &location.ID},
+	})
 	require.NoError(t, err)
 
 	_, err = s.RecomputeAllProgress(ctx)
 	require.NoError(t, err)
 
+	xp, _, _, found := progressRow(t, ctx, storageID, userID)
+	require.True(t, found)
+	assert.Equal(t, gamification.XPAICorrection, xp, "recompute must also pay 5, not 3+5, for a corrected row")
+}
+
+// TestConfirmIngestionRollsBackContributionsWithEverythingElse verifies the
+// "same transaction as the change itself" claim
+// (docs/specs/51-gamification-scoring.md) rather than only asserting it in a
+// comment: when a later row in the same confirm fails validation, an earlier
+// row's ai_correction contribution — and its live XP bump — must not survive
+// either, exactly like the batch that row would have created.
+func TestConfirmIngestionRollsBackContributionsWithEverythingElse(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	userID := newUser(t, ctx)
+	proposed, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Ketchup"})
+	require.NoError(t, err)
+	actual, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Barbecue Sauce"})
+	require.NoError(t, err)
+	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Pantry"})
+	require.NoError(t, err)
+
+	job, err := s.CreateJob(ctx, store.NewJob{StorageID: storageID, Kind: store.JobShelfIngestion})
+	require.NoError(t, err)
+	// The stored proposal must list both rows, or matchRowIDs rejects the
+	// decision list before row 0 is ever processed — which would make this
+	// test pass on that check alone without ever exercising a mid-transaction
+	// rollback at all.
+	require.NoError(t, s.CompleteJob(ctx, job.ID, exactMatchProposalWithASecondRow(t, "0", proposed.ID, "1")))
+
+	_, err = s.ConfirmIngestion(ctx, storageID, job.ID, &userID, []store.IngestDecision{
+		// Row 0 would earn ai_correction if the transaction committed.
+		{RowID: "0", Accept: true, ProductID: &actual.ID, Quantity: 1, LocationID: &location.ID},
+		// Row 1 has no product and no new_product, which ConfirmIngestion
+		// rejects during the per-row loop — failing the whole confirm after
+		// row 0 has already been processed within the same transaction.
+		{RowID: "1", Accept: true, Quantity: 1, LocationID: &location.ID},
+	})
+	require.Error(t, err)
+
+	assert.Equal(t, 0, contributionCount(t, ctx, storageID, userID, gamification.KindAICorrection),
+		"a failed confirm must roll back row 0's contribution along with its batch")
 	_, _, _, found := progressRow(t, ctx, storageID, userID)
-	assert.False(t, found, "a deleted product's only contribution must not survive a from-scratch recompute")
+	assert.False(t, found, "and the XP it would have bumped")
 }
 
 // TestHealthScoreForStorage builds one product with every box checked and one

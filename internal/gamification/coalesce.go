@@ -93,11 +93,11 @@ func coalesceGroup(kind string) string {
 }
 
 func maxXP(events []Event) int {
-	max := 0
+	highest := 0
 	for _, e := range events {
-		if e.XP > max {
-			max = e.XP
+		if e.XP > highest {
+			highest = e.XP
 		}
 	}
-	return max
+	return highest
 }

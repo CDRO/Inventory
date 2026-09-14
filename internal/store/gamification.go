@@ -160,7 +160,15 @@ func mondayOf(t time.Time) time.Time {
 // contribution_events from scratch, and is what makes the cache "fully
 // rebuildable via the /inventory recompute-progress maintenance subcommand"
 // (docs/specs/51-gamification-scoring.md) true rather than aspirational. It
-// returns how many (storage, user) rows it wrote.
+// returns how many (storage, user) rows it touched.
+//
+// A pair with a cached row but *zero* remaining events — every scored
+// product it ever touched has since been deleted, or an admin removed its
+// only contribution_events row — is included too, and reset to zero. Without
+// this, such a pair simply has no key in allScoringEvents' result and its
+// stale cache would survive every future recompute forever, which is exactly
+// the create-delete-cycle loophole "deleting a product removes its
+// contribution on the next recompute" exists to close.
 //
 // Each pair is recomputed in its own transaction: a household's worth of
 // pairs is small, and a failure partway through must not roll back progress
@@ -171,6 +179,16 @@ func (s *Store) RecomputeAllProgress(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
+	stale, err := s.existingProgressPairs(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for pair := range stale {
+		if _, hasEvents := events[pair]; !hasEvents {
+			events[pair] = nil
+		}
+	}
+
 	n := 0
 	for pair, pairEvents := range events {
 		if err := s.recomputeOnePair(ctx, pair.storageID, pair.userID, pairEvents); err != nil {
@@ -179,6 +197,26 @@ func (s *Store) RecomputeAllProgress(ctx context.Context) (int, error) {
 		n++
 	}
 	return n, nil
+}
+
+// existingProgressPairs returns every (storage, user) pair that currently has
+// a user_progress row, whether or not it still has any scoreable history.
+func (s *Store) existingProgressPairs(ctx context.Context) (map[progressPair]bool, error) {
+	rows, err := s.pool.Query(ctx, `SELECT storage_id, user_id FROM user_progress`)
+	if err != nil {
+		return nil, fmt.Errorf("store: load existing progress pairs: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[progressPair]bool{}
+	for rows.Next() {
+		var pair progressPair
+		if err := rows.Scan(&pair.storageID, &pair.userID); err != nil {
+			return nil, fmt.Errorf("store: scan existing progress pair: %w", err)
+		}
+		out[pair] = true
+	}
+	return out, rows.Err()
 }
 
 type progressPair struct {
