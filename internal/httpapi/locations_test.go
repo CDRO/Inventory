@@ -311,6 +311,7 @@ func storageRoutes(base string) []struct {
 		{http.MethodGet, base + "/dashboard/reorder/export", ""},
 		{http.MethodPost, base + "/dashboard/reorder/items/match", `{"name":"Butter"}`},
 		{http.MethodPost, base + "/dashboard/reorder/items", `{"name":"Butter"}`},
+		{http.MethodGet, base + "/dashboard/analytics", ""},
 	}
 }
 

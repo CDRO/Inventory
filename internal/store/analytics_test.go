@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -94,6 +95,39 @@ func TestAnalyticsLocationDistributionResolvesAncestorPath(t *testing.T) {
 	assert.Equal(t, 37, rows[0].ItemCount)
 }
 
+// TestAnalyticsLocationDistributionSortsDescendingAcrossMultipleLocations —
+// the frontend renders the bars in the order the API returns them, so the
+// store's ORDER BY is what actually guarantees "sorted descending by
+// item_count" from docs/specs/11-reporting-and-analytics.md, not a client
+// sort.
+func TestAnalyticsLocationDistributionSortsDescendingAcrossMultipleLocations(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+
+	small, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Small"})
+	require.NoError(t, err)
+	big, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Big"})
+	require.NoError(t, err)
+	medium, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Medium"})
+	require.NoError(t, err)
+
+	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Milk"})
+	require.NoError(t, err)
+	for locID, qty := range map[uuid.UUID]int{small.ID: 1, big.ID: 20, medium.ID: 5} {
+		_, err = s.CreateBatch(ctx, storageID, store.NewBatch{
+			ProductID: product.ID, LocationID: locID, Quantity: qty, Reason: store.ReasonPurchase,
+		})
+		require.NoError(t, err)
+	}
+
+	rows, err := s.AnalyticsLocationDistribution(ctx, storageID)
+	require.NoError(t, err)
+	require.Len(t, rows, 3)
+	assert.Equal(t, []string{"Big", "Medium", "Small"}, []string{rows[0].LocationName, rows[1].LocationName, rows[2].LocationName})
+	assert.Equal(t, []int{20, 5, 1}, []int{rows[0].ItemCount, rows[1].ItemCount, rows[2].ItemCount})
+}
+
 // TestAnalyticsLocationDistributionSumsMultipleBatchesAtOneLocation — two
 // batches of two different products at the same shelf sum into one row, not
 // two.
@@ -182,6 +216,79 @@ func TestAnalyticsTurnoverReconcilesWithReorderDashboard(t *testing.T) {
 	require.Len(t, turnover, 1, "both the purchase and the consumption land in the current month")
 	assert.Equal(t, 5, turnover[0].Purchased)
 	assert.Equal(t, 5, turnover[0].Consumed, "consumed is reported positive, not as the ledger's negative change_qty")
+}
+
+// TestAnalyticsTurnoverGroupsSeparatePeriods is the multi-period half of the
+// grouping behavior: a purchase backdated into an earlier month and a
+// consumption in the current month must land in two separate rows, not be
+// collapsed into one — the query groups by date_trunc, so this is the only
+// way to actually exercise that GROUP BY rather than the degenerate
+// single-period case every other turnover test here produces.
+func TestAnalyticsTurnoverGroupsSeparatePeriods(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Pantry"})
+	require.NoError(t, err)
+
+	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Milk"})
+	require.NoError(t, err)
+	batch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: product.ID, LocationID: location.ID, Quantity: 5, Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+
+	// Backdate the purchase log into an earlier month directly — AdjustBatch
+	// and CreateBatch always timestamp with now(), so a second period can
+	// only be produced by moving an existing row's clock back
+	// (testPool is the package's established way to reach past the store's
+	// own API for fixture setup; see testdb_test.go).
+	_, err = testPool.Exec(ctx,
+		`UPDATE inventory_logs SET timestamp = timestamp - interval '2 months' WHERE product_id = $1 AND reason = 'purchase'`,
+		product.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, s.AdjustBatch(ctx, storageID, batch.ID, -3, store.ReasonConsumption, nil))
+
+	turnover, err := s.AnalyticsTurnover(ctx, storageID, store.GranularityMonth)
+	require.NoError(t, err)
+	require.Len(t, turnover, 2, "the backdated purchase and the current consumption must not collapse into one period")
+
+	older, current := turnover[0], turnover[1]
+	assert.Equal(t, 5, older.Purchased)
+	assert.Zero(t, older.Consumed)
+	assert.Zero(t, current.Purchased)
+	assert.Equal(t, 3, current.Consumed)
+	assert.NotEqual(t, older.Period, current.Period)
+}
+
+// TestAnalyticsTurnoverExcludesMoveReason — a batch relocated between shelves
+// is neither a purchase nor a consumption; move-reason log rows must not
+// inflate either side of the turnover chart.
+func TestAnalyticsTurnoverExcludesMoveReason(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	source, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Pantry"})
+	require.NoError(t, err)
+	target, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Fridge"})
+	require.NoError(t, err)
+
+	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Milk"})
+	require.NoError(t, err)
+	batch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: product.ID, LocationID: source.ID, Quantity: 4, Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+
+	_, err = s.MoveBatch(ctx, storageID, batch.ID, target.ID, nil)
+	require.NoError(t, err)
+
+	turnover, err := s.AnalyticsTurnover(ctx, storageID, store.GranularityMonth)
+	require.NoError(t, err)
+	require.Len(t, turnover, 1)
+	assert.Equal(t, 4, turnover[0].Purchased, "only the original purchase counts")
+	assert.Zero(t, turnover[0].Consumed, "a move is neither a purchase nor a consumption")
 }
 
 // TestAnalyticsTurnoverSumsVisionIngestionAsPurchased — vision_ingestion is
