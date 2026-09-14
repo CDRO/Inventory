@@ -172,7 +172,7 @@ func TestAUserClearedDateStaysCleared(t *testing.T) {
 	require.NoError(t, err)
 
 	// The person says: this has no expiry.
-	cleared, err := s.SetBatchExpiration(ctx, storageID, batch.ID, nil)
+	cleared, err := s.SetBatchExpiration(ctx, storageID, batch.ID, nil, nil)
 	require.NoError(t, err)
 	assert.Nil(t, cleared.ExpirationDate)
 	assert.Equal(t, store.ExpirationUser, cleared.ExpirationSource,
@@ -202,7 +202,7 @@ func TestResetGivesABatchBackToTheRules(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = s.SetBatchExpiration(ctx, storageID, batch.ID, nil)
+	_, err = s.SetBatchExpiration(ctx, storageID, batch.ID, nil, nil)
 	require.NoError(t, err)
 
 	reset, err := s.ResetBatchExpirationToDerived(ctx, storageID, batch.ID)
@@ -317,7 +317,7 @@ func TestSetBatchExpirationIsStorageScoped(t *testing.T) {
 
 	when := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	_, err = s.SetBatchExpiration(ctx, storageA, batch.ID, &when)
+	_, err = s.SetBatchExpiration(ctx, storageA, batch.ID, &when, nil)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 
 	_, err = s.ResetBatchExpirationToDerived(ctx, storageA, batch.ID)

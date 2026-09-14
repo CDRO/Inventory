@@ -101,6 +101,10 @@ func run(args []string) error {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return runMigrate(ctx, args[1:])
+	case "recompute-progress":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return runRecomputeProgress(ctx)
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 		return nil
@@ -114,11 +118,38 @@ func usage(w *os.File) {
 	fmt.Fprint(w, `inventory — household inventory system
 
 Commands:
-  serve            Run the HTTP server (default)
-  setup            Interactive first-run wizard; writes .env
-  migrate up       Apply pending database migrations
-  migrate status   Show migration state
+  serve                Run the HTTP server (default)
+  setup                Interactive first-run wizard; writes .env
+  migrate up           Apply pending database migrations
+  migrate status       Show migration state
+  recompute-progress   Rebuild gamification XP/level/streak from scratch
 `)
+}
+
+// runRecomputeProgress rebuilds every user's cached gamification progress
+// from inventory_logs and contribution_events (docs/specs/51-gamification-scoring.md).
+// It is what makes "fully rebuildable" in that spec an operator-runnable
+// fact rather than an aspiration — the same cache the nightly job in serve()
+// refreshes automatically, exposed as a maintenance subcommand of the same
+// binary (docs/specs/01-architecture-and-deployment.md) for a rule change or
+// a data correction that cannot wait for 03:00.
+func runRecomputeProgress(ctx context.Context) error {
+	cfg, err := config.Load(os.Getenv)
+	if err != nil {
+		return err
+	}
+	db, err := store.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	n, err := db.RecomputeAllProgress(ctx)
+	if err != nil {
+		return fmt.Errorf("recompute progress: %w", err)
+	}
+	fmt.Printf("inventory: recomputed progress for %d user(s)\n", n)
+	return nil
 }
 
 func runMigrate(ctx context.Context, args []string) error {
@@ -267,6 +298,7 @@ func serve() error {
 	}
 
 	go runStoreSweeps(ctx, db, ingestSweep)
+	go runGamificationRecompute(ctx, db)
 
 	srv := &http.Server{
 		Addr: net.JoinHostPort("", cfg.HTTPPort),
@@ -375,6 +407,49 @@ func runStoreSweeps(ctx context.Context, db *store.Store, ingestSweep func(conte
 			sweep()
 		}
 	}
+}
+
+// gamificationRecomputeHour is when the nightly pass runs, server-local
+// (docs/specs/51-gamification-scoring.md): early enough that it is done well
+// before anyone is awake to see a total settle slightly lower, late enough
+// that the day it is rebuilding from is actually over.
+const gamificationRecomputeHour = 3
+
+// runGamificationRecompute rebuilds gamification progress once a day at
+// docs/specs/51-gamification-scoring.md's fixed hour, consolidating the
+// coalescing and dedup rules over the completed day. It runs once at start
+// only if today's window has already passed and the process just started —
+// otherwise it waits for the next occurrence, computed fresh each time
+// rather than from a fixed-period ticker, so a DST transition cannot drift
+// it away from the intended wall-clock hour.
+func runGamificationRecompute(ctx context.Context, db *store.Store) {
+	for {
+		wait := time.Until(nextGamificationRecompute(time.Now()))
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+
+		n, err := db.RecomputeAllProgress(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				slog.Warn("nightly gamification recompute failed", slog.Any("err", err))
+			}
+			continue
+		}
+		slog.Info("recomputed gamification progress", slog.Int("users", n))
+	}
+}
+
+// nextGamificationRecompute returns the next occurrence of
+// gamificationRecomputeHour:00 strictly after now, in now's own location.
+func nextGamificationRecompute(now time.Time) time.Time {
+	next := time.Date(now.Year(), now.Month(), now.Day(), gamificationRecomputeHour, 0, 0, 0, now.Location())
+	if !next.After(now) {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next
 }
 
 // staticFS resolves the asset tree: STATIC_DIR reads from disk so a frontend

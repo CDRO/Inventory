@@ -24,7 +24,7 @@ type ShoppingListStore interface {
 	ShoppingListWithItems(ctx context.Context, storageID, listID uuid.UUID) (*store.ShoppingList, []store.ShoppingListItem, error)
 	ShoppingListItemByID(ctx context.Context, storageID, itemID uuid.UUID) (*store.ShoppingListItem, error)
 	RematchShoppingListItem(ctx context.Context, storageID, itemID uuid.UUID, rawText string, status store.ShoppingListItemStatus, matchedProductID *uuid.UUID) (*store.ShoppingListItem, error)
-	ResolveShoppingListItem(ctx context.Context, storageID, itemID uuid.UUID, productID *uuid.UUID, quantity int) (*store.ShoppingListItem, error)
+	ResolveShoppingListItem(ctx context.Context, storageID, itemID uuid.UUID, productID *uuid.UUID, quantity int, userID *uuid.UUID) (*store.ShoppingListItem, error)
 }
 
 // Matcher is the matching service, as these handlers need it.
@@ -313,6 +313,11 @@ func (h *ShoppingListHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 		h.errors.WriteError(w, r, Internal(errNoStorageInContext))
 		return
 	}
+	user, ok := UserFrom(r.Context())
+	if !ok {
+		h.errors.WriteError(w, r, Unauthorized(ReasonSessionMissing))
+		return
+	}
 
 	itemID, failure := idFromPath(r, "item_id", "malformed shopping list item id")
 	if failure != nil {
@@ -354,7 +359,8 @@ func (h *ShoppingListHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := h.store.ResolveShoppingListItem(r.Context(), storageID, itemID, productID, quantity)
+	userID := user.ID
+	updated, err := h.store.ResolveShoppingListItem(r.Context(), storageID, itemID, productID, quantity, &userID)
 	if err != nil {
 		h.errors.WriteError(w, r, conflictAs(err,
 			"shopping list item or product not in this storage or nonexistent",

@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/CDRO/Inventory/internal/gamification"
 )
 
 // Location is one node of a storage's location tree.
@@ -49,6 +51,34 @@ func (s *Store) CreateLocation(ctx context.Context, storageID uuid.UUID, in NewL
 		loc, err := insertLocation(ctx, tx, storageID, id, in)
 		out = loc
 		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// CreateLocationAsUser is CreateLocation, additionally recording a
+// location_mapped contribution in the same transaction
+// (docs/specs/51-gamification-scoring.md) — growing the tree to reflect a
+// physical space that did not have a node yet.
+func (s *Store) CreateLocationAsUser(ctx context.Context, storageID uuid.UUID, in NewLocation, userID uuid.UUID) (*Location, error) {
+	id, err := newID()
+	if err != nil {
+		return nil, err
+	}
+
+	var out *Location
+	err = s.inTx(ctx, func(tx pgx.Tx) error {
+		if err := lockStorageTree(ctx, tx, storageID); err != nil {
+			return err
+		}
+		loc, err := insertLocation(ctx, tx, storageID, id, in)
+		if err != nil {
+			return err
+		}
+		out = loc
+		return recordContribution(ctx, tx, storageID, userID, gamification.KindLocationMapped, &loc.ID)
 	})
 	if err != nil {
 		return nil, err

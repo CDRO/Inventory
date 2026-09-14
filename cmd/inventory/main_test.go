@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -131,4 +132,39 @@ func TestStaticFSSwitchIsNotInverted(t *testing.T) {
 
 	assert.Equal(t, marker, string(diskBytes))
 	assert.NotEqual(t, string(diskBytes), string(embeddedBytes))
+}
+
+// TestNextGamificationRecomputeBeforeTheHourIsToday covers the ordinary case:
+// woken up earlier in the day, the next run is later that same day.
+func TestNextGamificationRecomputeBeforeTheHourIsToday(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.March, 10, 1, 30, 0, 0, time.UTC)
+	next := nextGamificationRecompute(now)
+
+	assert.Equal(t, time.Date(2026, time.March, 10, gamificationRecomputeHour, 0, 0, 0, time.UTC), next)
+}
+
+// TestNextGamificationRecomputeAfterTheHourIsTomorrow covers the case that
+// would silently recompute twice in one day, or never on time, if the "is it
+// still today" comparison were backwards.
+func TestNextGamificationRecomputeAfterTheHourIsTomorrow(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.March, 10, gamificationRecomputeHour, 0, 1, 0, time.UTC)
+	next := nextGamificationRecompute(now)
+
+	assert.Equal(t, time.Date(2026, time.March, 11, gamificationRecomputeHour, 0, 0, 0, time.UTC), next)
+}
+
+// TestNextGamificationRecomputeAtExactlyTheHourIsTomorrow: the boundary
+// instant must not recompute again immediately — "next" means strictly
+// after, not "at or after".
+func TestNextGamificationRecomputeAtExactlyTheHourIsTomorrow(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.March, 10, gamificationRecomputeHour, 0, 0, 0, time.UTC)
+	next := nextGamificationRecompute(now)
+
+	assert.Equal(t, time.Date(2026, time.March, 11, gamificationRecomputeHour, 0, 0, 0, time.UTC), next)
 }

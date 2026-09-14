@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/CDRO/Inventory/internal/gamification"
 )
 
 // ShoppingListSource is how a list arrived.
@@ -249,7 +251,12 @@ func (s *Store) RematchShoppingListItem(ctx context.Context, storageID, itemID u
 // Resolving is idempotent-hostile on purpose: a second resolve of the same line
 // is ErrConflict rather than a silent overwrite, because the first one may have
 // already written an inventory batch and the second would double it.
-func (s *Store) ResolveShoppingListItem(ctx context.Context, storageID, itemID uuid.UUID, productID *uuid.UUID, quantity int) (*ShoppingListItem, error) {
+//
+// userID attributes the resolve for gamification when it clears an ambiguous
+// line (docs/specs/51-gamification-scoring.md); nil earns nobody XP, which is
+// the correct behaviour for a system-driven resolve rather than an error
+// condition.
+func (s *Store) ResolveShoppingListItem(ctx context.Context, storageID, itemID uuid.UUID, productID *uuid.UUID, quantity int, userID *uuid.UUID) (*ShoppingListItem, error) {
 	if quantity < 0 {
 		return nil, fmt.Errorf("%w: resolved quantity cannot be negative", ErrValidation)
 	}
@@ -292,6 +299,16 @@ func (s *Store) ResolveShoppingListItem(ctx context.Context, storageID, itemID u
 			return err
 		}
 		out = item
+
+		if userID != nil && current == ItemAmbiguous {
+			ref := itemID
+			if productID != nil {
+				ref = *productID
+			}
+			if err := recordContribution(ctx, tx, storageID, *userID, gamification.KindAmbiguityResolved, &ref); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {

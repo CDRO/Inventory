@@ -79,7 +79,7 @@ func (f *fakeShoppingLists) RematchShoppingListItem(_ context.Context, storageID
 	return &store.ShoppingListItem{ID: itemID, RawText: rawText, Status: status, MatchedProductID: matched}, nil
 }
 
-func (f *fakeShoppingLists) ResolveShoppingListItem(_ context.Context, storageID, itemID uuid.UUID, productID *uuid.UUID, quantity int) (*store.ShoppingListItem, error) {
+func (f *fakeShoppingLists) ResolveShoppingListItem(_ context.Context, storageID, itemID uuid.UUID, productID *uuid.UUID, quantity int, _ *uuid.UUID) (*store.ShoppingListItem, error) {
 	f.lastStorage, f.lastResolved, f.lastProduct, f.lastQuantity = storageID, itemID, productID, quantity
 	if f.resolveErr != nil {
 		return nil, f.resolveErr

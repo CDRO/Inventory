@@ -45,7 +45,7 @@ func (f *fakeReorderStore) ProductMinStock(_ context.Context, _, id uuid.UUID) (
 	return f.minStocks[id], nil
 }
 
-func (f *fakeReorderStore) UpdateProductMinStock(_ context.Context, storageID, id uuid.UUID, minStock int) (*store.Product, error) {
+func (f *fakeReorderStore) UpdateProductMinStockAsUser(_ context.Context, storageID, id uuid.UUID, minStock int, _ uuid.UUID) (*store.Product, error) {
 	f.updateCalls++
 	f.lastID, f.lastMin = id, minStock
 	if f.updateErr != nil {

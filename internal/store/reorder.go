@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/CDRO/Inventory/internal/gamification"
 )
 
 // ReorderProduct is one row of the reorder dashboard's source data: a product
@@ -92,4 +94,47 @@ func (s *Store) UpdateProductMinStock(ctx context.Context, storageID, id uuid.UU
 		          default_shelf_life_days, min_stock, image_url, icon_name, created_at, updated_at`,
 		minStock, id, storageID)
 	return scanProduct(row)
+}
+
+// UpdateProductMinStockAsUser is UpdateProductMinStock, additionally
+// recording a metadata_filled contribution when the change fills in a
+// threshold that was previously unset (docs/specs/51-gamification-scoring.md).
+// Raising an already-tracked product's threshold, or lowering one, earns
+// nothing: the reward is for closing the gap, not for tuning a number that
+// was already there.
+func (s *Store) UpdateProductMinStockAsUser(ctx context.Context, storageID, id uuid.UUID, minStock int, userID uuid.UUID) (*Product, error) {
+	var out *Product
+	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		var previous int
+		err := tx.QueryRow(ctx, `
+			SELECT min_stock FROM products WHERE id = $1 AND storage_id = $2 FOR UPDATE`,
+			id, storageID).Scan(&previous)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("store: lock product min stock: %w", err)
+		}
+
+		row := tx.QueryRow(ctx, `
+			UPDATE products SET min_stock = $1, updated_at = now()
+			 WHERE id = $2 AND storage_id = $3
+			RETURNING id, storage_id, name, category_id, catalog_id, item_type,
+			          default_shelf_life_days, min_stock, image_url, icon_name, created_at, updated_at`,
+			minStock, id, storageID)
+		product, err := scanProduct(row)
+		if err != nil {
+			return err
+		}
+		out = product
+
+		if previous == 0 && minStock > 0 {
+			return recordContribution(ctx, tx, storageID, userID, gamification.KindMetadataFilled, &id)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }

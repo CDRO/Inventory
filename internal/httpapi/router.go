@@ -84,6 +84,7 @@ type APIStore interface {
 	ProductStore
 	ReorderStore
 	AnalyticsStore
+	GamificationStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -181,6 +182,7 @@ func NewRouter(d Deps) http.Handler {
 		idem := NewIdempotency(d.Store, errs)
 		locations := NewLocationHandler(d.Store, errs)
 		batches := NewBatchHandler(d.Store, errs)
+		gamification := NewGamificationHandler(d.Store, errs)
 
 		// The session lifecycle (docs/specs/03-auth-and-multi-tenancy.md).
 		//
@@ -203,6 +205,14 @@ func NewRouter(d Deps) http.Handler {
 			ar.Post("/api/auth/pairing-codes", devices.CreatePairingCode)
 			ar.Get("/api/auth/devices", devices.ListDevices)
 			ar.Delete("/api/auth/devices/{session_id}", devices.RevokeDevice)
+
+			// The caller's own aggregate progress and preferences
+			// (docs/specs/51-gamification-scoring.md) — session-scoped, not
+			// storage-scoped, since they span every storage the caller belongs
+			// to and are surfaced on the profile page, not any one dashboard.
+			ar.Get("/api/me/progress", gamification.MeProgress)
+			ar.Get("/api/me/preferences", gamification.MePreferences)
+			ar.Put("/api/me/preferences", gamification.UpdateMePreferences)
 		})
 
 		// The admin area: the HTML page and the JSON routes it posts to, on one
@@ -328,6 +338,14 @@ func NewRouter(d Deps) http.Handler {
 			// sharing the dashboard page with the reorder widgets above.
 			analytics := NewAnalyticsHandler(d.Store, errs)
 			sr.Get("/dashboard/analytics", analytics.Dashboard)
+
+			// Gamification (docs/specs/51-gamification-scoring.md): this
+			// storage's progress, its optional leaderboard, and its flat
+			// any-member-may-change toggles.
+			sr.Get("/progress", gamification.Progress)
+			sr.Get("/progress/leaderboard", gamification.Leaderboard)
+			sr.Get("/gamification/settings", gamification.StorageSettings)
+			sr.Put("/gamification/settings", gamification.UpdateStorageSettings)
 		})
 	}
 

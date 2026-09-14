@@ -19,7 +19,7 @@ import (
 type ReorderStore interface {
 	ReorderProducts(ctx context.Context, storageID uuid.UUID) ([]store.ReorderProduct, error)
 	ProductMinStock(ctx context.Context, storageID, id uuid.UUID) (int, error)
-	UpdateProductMinStock(ctx context.Context, storageID, id uuid.UUID, minStock int) (*store.Product, error)
+	UpdateProductMinStockAsUser(ctx context.Context, storageID, id uuid.UUID, minStock int, userID uuid.UUID) (*store.Product, error)
 	CreateProduct(ctx context.Context, storageID uuid.UUID, in store.NewProduct) (*store.Product, error)
 }
 
@@ -318,6 +318,11 @@ func (h *ReorderHandler) AddItem(w http.ResponseWriter, r *http.Request) {
 		h.errors.WriteError(w, r, Internal(errNoStorageInContext))
 		return
 	}
+	user, ok := UserFrom(r.Context())
+	if !ok {
+		h.errors.WriteError(w, r, Unauthorized(ReasonSessionMissing))
+		return
+	}
 
 	var body struct {
 		Name                 string  `json:"name"`
@@ -397,7 +402,7 @@ func (h *ReorderHandler) AddItem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if productID != nil {
-		updated, err := h.store.UpdateProductMinStock(r.Context(), storageID, *productID, minStock)
+		updated, err := h.store.UpdateProductMinStockAsUser(r.Context(), storageID, *productID, minStock, user.ID)
 		if err != nil {
 			h.errors.WriteError(w, r, FromStoreError(err, "product not in this storage or nonexistent"))
 			return

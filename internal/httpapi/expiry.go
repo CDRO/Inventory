@@ -13,7 +13,7 @@ import (
 
 // ExpiryStore is the slice of the store the expiry handlers use.
 type ExpiryStore interface {
-	SetBatchExpiration(ctx context.Context, storageID, batchID uuid.UUID, date *time.Time) (*store.Batch, error)
+	SetBatchExpiration(ctx context.Context, storageID, batchID uuid.UUID, date *time.Time, userID *uuid.UUID) (*store.Batch, error)
 	ResetBatchExpirationToDerived(ctx context.Context, storageID, batchID uuid.UUID) (*store.Batch, error)
 	SetCategoryShelfLife(ctx context.Context, storageID, id uuid.UUID, days *int) error
 	RecomputeDerivedExpiryForCategory(ctx context.Context, storageID, categoryID uuid.UUID) (int, error)
@@ -51,6 +51,11 @@ func (h *ExpiryHandler) PatchBatchExpiry(w http.ResponseWriter, r *http.Request)
 	storageID, ok := StorageIDFrom(r.Context())
 	if !ok {
 		h.errors.WriteError(w, r, Internal(errNoStorageInContext))
+		return
+	}
+	user, ok := UserFrom(r.Context())
+	if !ok {
+		h.errors.WriteError(w, r, Unauthorized(ReasonSessionMissing))
 		return
 	}
 
@@ -105,7 +110,8 @@ func (h *ExpiryHandler) PatchBatchExpiry(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	batch, err := h.store.SetBatchExpiration(r.Context(), storageID, batchID, date)
+	userID := user.ID
+	batch, err := h.store.SetBatchExpiration(r.Context(), storageID, batchID, date, &userID)
 	if err != nil {
 		h.errors.WriteError(w, r, FromStoreError(err, "batch not in this storage or nonexistent"))
 		return
