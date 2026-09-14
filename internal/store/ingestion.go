@@ -83,10 +83,11 @@ func (s *Store) ConfirmIngestion(ctx context.Context, storageID, jobID uuid.UUID
 
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
 		var status JobStatus
+		var kind JobKind
 		var payload []byte
 		err := tx.QueryRow(ctx, `
-			SELECT status, payload FROM jobs WHERE id = $1 AND storage_id = $2 FOR UPDATE`,
-			jobID, storageID).Scan(&status, &payload)
+			SELECT status, kind, payload FROM jobs WHERE id = $1 AND storage_id = $2 FOR UPDATE`,
+			jobID, storageID).Scan(&status, &kind, &payload)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -133,7 +134,7 @@ func (s *Store) ConfirmIngestion(ctx context.Context, storageID, jobID uuid.UUID
 			// truthful (docs/specs/51-gamification-scoring.md).
 			if userID != nil {
 				if proposed, hadExactMatch := proposedProducts[d.RowID]; hadExactMatch && proposed != productID {
-					if err := recordContribution(ctx, tx, storageID, *userID, gamification.KindAICorrection, &productID); err != nil {
+					if err := recordContribution(ctx, tx, storageID, *userID, gamification.KindAICorrection, &productID, nil); err != nil {
 						return err
 					}
 				}
@@ -175,6 +176,20 @@ func (s *Store) ConfirmIngestion(ctx context.Context, storageID, jobID uuid.UUID
 				return err
 			}
 			result.BatchIDs = append(result.BatchIDs, batch.ID)
+		}
+
+		// first_shelf unlocks on a shelf-photo job specifically — "your first
+		// shelf-photo ingestion" (docs/specs/52-gamification-quests-and-ui.md)
+		// — not a single product photo, which is also confirmed through this
+		// same endpoint with the same ReasonVisionIngestion. Checked here,
+		// where the job's kind is in scope, rather than in
+		// evaluateLedgerAchievements (internal/store/achievements.go), which
+		// runs per batch created inside createBatch and has no view of which
+		// job produced it.
+		if userID != nil && kind == JobShelfIngestion && len(result.BatchIDs) > 0 {
+			if err := unlockAchievement(ctx, tx, storageID, *userID, string(gamification.AchFirstShelf)); err != nil {
+				return err
+			}
 		}
 
 		return ConsumeJob(ctx, tx, storageID, jobID)

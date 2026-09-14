@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -18,6 +19,49 @@ func hasAchievement(t *testing.T, ctx context.Context, storageID, userID uuid.UU
 	return countRows(t, ctx, `
 		SELECT count(*) FROM achievements_unlocked WHERE storage_id = $1 AND user_id = $2 AND achievement_key = $3`,
 		storageID, userID, key) > 0
+}
+
+// TestFirstShelfUnlocksOnlyForShelfIngestionJobs is the regression for #54
+// finding 4: first_shelf is named for "your first shelf-photo ingestion"
+// (docs/specs/52-gamification-quests-and-ui.md), but used to unlock on any
+// confirmed vision_ingestion batch — shelf or single product photo — because
+// the achievement check ran generically per batch created, with no view of
+// which job produced it. It is now checked in ConfirmIngestion directly,
+// where the job's kind is in scope.
+func TestFirstShelfUnlocksOnlyForShelfIngestionJobs(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	userID := newUser(t, ctx)
+	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Pantry"})
+	require.NoError(t, err)
+	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Beans"})
+	require.NoError(t, err)
+
+	confirmOneRow := func(kind store.JobKind) {
+		t.Helper()
+		payload, err := json.Marshal(map[string]any{
+			"rows": []map[string]string{{"row_id": "0"}},
+		})
+		require.NoError(t, err)
+
+		job, err := s.CreateJob(ctx, store.NewJob{StorageID: storageID, Kind: kind})
+		require.NoError(t, err)
+		require.NoError(t, s.CompleteJob(ctx, job.ID, payload))
+
+		_, err = s.ConfirmIngestion(ctx, storageID, job.ID, &userID, []store.IngestDecision{
+			{RowID: "0", Accept: true, ProductID: &product.ID, Quantity: 1, LocationID: &location.ID},
+		})
+		require.NoError(t, err)
+	}
+
+	confirmOneRow(store.JobProductPhoto)
+	assert.False(t, hasAchievement(t, ctx, storageID, userID, string(gamification.AchFirstShelf)),
+		"a single product photo must not unlock first_shelf")
+
+	confirmOneRow(store.JobShelfIngestion)
+	assert.True(t, hasAchievement(t, ctx, storageID, userID, string(gamification.AchFirstShelf)),
+		"a shelf-photo ingestion must unlock first_shelf")
 }
 
 // TestCartographerUnlocksAtThreeLevelsDeep: mapping a location three levels

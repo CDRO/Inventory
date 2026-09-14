@@ -305,7 +305,7 @@ func (s *Store) ResolveShoppingListItem(ctx context.Context, storageID, itemID u
 			if productID != nil {
 				ref = *productID
 			}
-			if err := recordContribution(ctx, tx, storageID, *userID, gamification.KindAmbiguityResolved, &ref); err != nil {
+			if err := recordContribution(ctx, tx, storageID, *userID, gamification.KindAmbiguityResolved, &ref, nil); err != nil {
 				return err
 			}
 		}

@@ -30,23 +30,11 @@ func evaluateContributionAchievements(ctx context.Context, tx pgx.Tx, storageID,
 	}
 }
 
-// evaluateLedgerAchievements is evaluateContributionAchievements' counterpart
-// for the three ledger reasons that score
-// (docs/specs/51-gamification-scoring.md).
-//
-// first_shelf unlocks on any confirmed vision_ingestion batch — the spec
-// names "your first shelf-photo ingestion" specifically, but bumpForLedgerReason
-// is called per batch created, with no view of which job kind produced it
-// (shelf vs. single product photo). Both confirm a proposal the same way,
-// so treating either as the qualifying "first confirm" is a deliberate,
-// documented simplification rather than threading job-kind through every
-// batch-creation call site for one welcome achievement.
-func evaluateLedgerAchievements(ctx context.Context, tx pgx.Tx, storageID, userID uuid.UUID, reason LogReason) error {
-	if reason != ReasonVisionIngestion {
-		return nil
-	}
-	return unlockAchievement(ctx, tx, storageID, userID, string(gamification.AchFirstShelf))
-}
+// first_shelf — "your first shelf-photo ingestion" — is unlocked directly in
+// ConfirmIngestion (internal/store/ingestion.go), the one place that has the
+// job's kind in scope, rather than here: this file's achievement checks run
+// generically per batch or per contribution, with no view of which job
+// produced either.
 
 func checkCurator(ctx context.Context, tx pgx.Tx, storageID, userID uuid.UUID) error {
 	var count int
@@ -112,7 +100,7 @@ func (s *Store) EvaluateStorageAchievements(ctx context.Context, storageID uuid.
 			return nil
 		}
 
-		health, err := healthScoreTx(ctx, tx, storageID)
+		health, err := healthScore(ctx, tx, storageID)
 		if err != nil {
 			return err
 		}
@@ -318,61 +306,4 @@ func (s *Store) RunNightlyStorageAchievements(ctx context.Context) (int, error) 
 		n++
 	}
 	return n, firstErr
-}
-
-// healthScoreTx is HealthScoreForStorage's tx-scoped counterpart, so the
-// nightly achievement sweep and a live request compute health the same way
-// without one calling the other across a transaction boundary.
-func healthScoreTx(ctx context.Context, tx pgx.Tx, storageID uuid.UUID) (float64, error) {
-	var total int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM products WHERE storage_id = $1`, storageID).Scan(&total); err != nil {
-		return 0, fmt.Errorf("store: count products for health score: %w", err)
-	}
-	if total == 0 {
-		return 0, nil
-	}
-
-	pct := func(query string) (float64, error) {
-		var n int
-		if err := tx.QueryRow(ctx, query, storageID).Scan(&n); err != nil {
-			return 0, fmt.Errorf("store: health sub-score: %w", err)
-		}
-		return float64(n) / float64(total) * 100, nil
-	}
-
-	categorized, err := pct(`SELECT count(*) FROM products WHERE storage_id = $1 AND category_id IS NOT NULL`)
-	if err != nil {
-		return 0, err
-	}
-	imaged, err := pct(`SELECT count(*) FROM products WHERE storage_id = $1 AND (image_url IS NOT NULL OR icon_name IS NOT NULL)`)
-	if err != nil {
-		return 0, err
-	}
-	minStockTracked, err := pct(`SELECT count(*) FROM products WHERE storage_id = $1 AND min_stock > 0`)
-	if err != nil {
-		return 0, err
-	}
-	recentlyActive, err := pct(`
-		SELECT count(DISTINCT p.id) FROM products p
-		  JOIN inventory_logs l ON l.product_id = p.id
-		 WHERE p.storage_id = $1 AND l.timestamp > now() - interval '180 days'`)
-	if err != nil {
-		return 0, err
-	}
-
-	var expiryEligible, expiryTrackedCount int
-	if err := tx.QueryRow(ctx, `
-		SELECT count(*), count(*) FILTER (WHERE b.expiration_date IS NOT NULL)
-		  FROM inventory_batches b
-		  JOIN products p ON p.id = b.product_id
-		 WHERE p.storage_id = $1 AND p.item_type IN ('perishable', 'long_shelf_life')`,
-		storageID).Scan(&expiryEligible, &expiryTrackedCount); err != nil {
-		return 0, fmt.Errorf("store: health sub-score expiry: %w", err)
-	}
-	expiryTracked := 0.0
-	if expiryEligible > 0 {
-		expiryTracked = float64(expiryTrackedCount) / float64(expiryEligible) * 100
-	}
-
-	return gamification.HealthScore(categorized, imaged, minStockTracked, expiryTracked, recentlyActive), nil
 }

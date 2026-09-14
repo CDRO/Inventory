@@ -74,6 +74,7 @@ type APIStore interface {
 	AuthStoreFull
 	AdminStore
 	LocationStore
+	CategoryStore
 	BatchStore
 	ShoppingListStore
 	ExpiryStore
@@ -276,6 +277,9 @@ func NewRouter(d Deps) http.Handler {
 			expiry := NewExpiryHandler(d.Store, errs)
 			sr.Patch("/inventory-batches/{id}/expiry", expiry.PatchBatchExpiry)
 			sr.Patch("/categories/{id}/shelf-life", expiry.PatchCategoryShelfLife)
+
+			categories := NewCategoryHandler(d.Store, errs)
+			sr.Get("/categories", categories.List)
 
 			// Background jobs (docs/specs/04-backend-api-conventions.md). The
 			// endpoints that create them are the upload routes of spec 06.

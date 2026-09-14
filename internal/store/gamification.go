@@ -79,7 +79,14 @@ type StorageGamificationSettings struct {
 // Unexported and tx-scoped like writeLog: the callers are the specific,
 // reviewed integration points in ingestion.go, shoppinglists.go, reorder.go,
 // expiry.go and locations.go, each already inside its own transaction.
-func recordContribution(ctx context.Context, tx pgx.Tx, storageID, userID uuid.UUID, kind gamification.ContributionKind, refID *uuid.UUID) error {
+// generator, when non-nil, routes quest-advancement through
+// advanceQuestForGenerator instead of the kind-based questRelevantGenerators
+// lookup — required for gamification.KindMetadataFilled, whose three call
+// sites (a category, an image, a min_stock threshold) share one kind and
+// one product-id refID but mean three different quest generators (see
+// questRelevantGenerators' doc comment). Every other kind passes nil and
+// gets the ordinary kind-based routing.
+func recordContribution(ctx context.Context, tx pgx.Tx, storageID, userID uuid.UUID, kind gamification.ContributionKind, refID *uuid.UUID, generator *gamification.GeneratorKind) error {
 	id, err := newID()
 	if err != nil {
 		return err
@@ -93,7 +100,11 @@ func recordContribution(ctx context.Context, tx pgx.Tx, storageID, userID uuid.U
 	if err := bumpProgress(ctx, tx, storageID, userID, gamification.XPForContribution(kind), time.Now()); err != nil {
 		return err
 	}
-	if err := advanceQuests(ctx, tx, storageID, userID, string(kind)); err != nil {
+	if generator != nil {
+		if err := advanceQuestForGenerator(ctx, tx, storageID, userID, *generator, refID); err != nil {
+			return err
+		}
+	} else if err := advanceQuests(ctx, tx, storageID, userID, string(kind), refID); err != nil {
 		return err
 	}
 	return evaluateContributionAchievements(ctx, tx, storageID, userID, kind, refID)
@@ -112,7 +123,12 @@ func recordContribution(ctx context.Context, tx pgx.Tx, storageID, userID uuid.U
 // therefore optimistic — it assumes this contribution is new — and may be
 // revised slightly downward at the next recompute, never upward and never
 // framed as a loss (docs/specs/51-gamification-scoring.md).
-func bumpForLedgerReason(ctx context.Context, tx pgx.Tx, storageID uuid.UUID, userID *uuid.UUID, reason LogReason) error {
+//
+// batchID is the write's own target, passed through to advanceQuests so it
+// can narrow quest-contributor credit to the batch ids actually frozen into
+// a quest's params at generation time (#54 finding 2), rather than crediting
+// any write of a relevant reason.
+func bumpForLedgerReason(ctx context.Context, tx pgx.Tx, storageID uuid.UUID, userID *uuid.UUID, reason LogReason, batchID uuid.UUID) error {
 	if userID == nil {
 		return nil
 	}
@@ -123,10 +139,7 @@ func bumpForLedgerReason(ctx context.Context, tx pgx.Tx, storageID uuid.UUID, us
 	if err := bumpProgress(ctx, tx, storageID, *userID, xp, time.Now()); err != nil {
 		return err
 	}
-	if err := advanceQuests(ctx, tx, storageID, *userID, string(reason)); err != nil {
-		return err
-	}
-	return evaluateLedgerAchievements(ctx, tx, storageID, *userID, reason)
+	return advanceQuests(ctx, tx, storageID, *userID, string(reason), &batchID)
 }
 
 // bumpProgress increments a user's cached XP and recomputes their level and
@@ -186,12 +199,7 @@ func mondayOf(t time.Time) time.Time {
 // pairs is small, and a failure partway through must not roll back progress
 // that was already correctly rebuilt for someone else.
 func (s *Store) RecomputeAllProgress(ctx context.Context) (int, error) {
-	events, err := s.allScoringEvents(ctx)
-	if err != nil {
-		return 0, err
-	}
-
-	stale, err := s.existingProgressPairs(ctx)
+	events, stale, err := s.loadRecomputeSnapshot(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -211,10 +219,55 @@ func (s *Store) RecomputeAllProgress(ctx context.Context) (int, error) {
 	return n, nil
 }
 
+// loadRecomputeSnapshot reads every scoring event and every existing
+// user_progress pair as of one consistent point in time.
+//
+// allScoringEvents and existingProgressPairs used to run as two independent
+// pool queries (and allScoringEvents itself issues two queries of its own).
+// Under READ COMMITTED, this project's default, a write landing in any of
+// those gaps — a user's very first scored action for a (storage, user)
+// pair, say — could have its bumpProgress commit land between them:
+// existingProgressPairs would then see the freshly created row, find no
+// matching entry in the events map captured a moment earlier, and reset it
+// to zero. REPEATABLE READ gives every statement in this one transaction the
+// same snapshot, closing the gap; it is read-only, so it never blocks a
+// concurrent writer and always commits cleanly.
+func (s *Store) loadRecomputeSnapshot(ctx context.Context) (map[progressPair][]gamification.Event, map[progressPair]bool, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, nil, fmt.Errorf("store: begin recompute snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	events, err := allScoringEvents(ctx, tx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if recomputeSnapshotSync != nil {
+		recomputeSnapshotSync()
+	}
+	stale, err := existingProgressPairs(ctx, tx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return events, stale, nil
+}
+
+// recomputeSnapshotSync, when non-nil, runs synchronously between
+// loadRecomputeSnapshot's two reads — always nil outside this package's own
+// tests. It exists so TestRecomputeAllProgressIsolatesAgainstAConcurrentWrite
+// (gamification_internal_test.go) can land a real concurrent write inside
+// the exact gap the REPEATABLE READ fix closes and prove the guarantee
+// through the real RecomputeAllProgress call path, deterministically,
+// rather than timing a goroutine against it — Postgres reads never block on
+// another transaction's locks, so there is no lock-contention equivalent of
+// the #35-style tests for this one.
+var recomputeSnapshotSync func()
+
 // existingProgressPairs returns every (storage, user) pair that currently has
 // a user_progress row, whether or not it still has any scoreable history.
-func (s *Store) existingProgressPairs(ctx context.Context) (map[progressPair]bool, error) {
-	rows, err := s.pool.Query(ctx, `SELECT storage_id, user_id FROM user_progress`)
+func existingProgressPairs(ctx context.Context, q querier) (map[progressPair]bool, error) {
+	rows, err := q.Query(ctx, `SELECT storage_id, user_id FROM user_progress`)
 	if err != nil {
 		return nil, fmt.Errorf("store: load existing progress pairs: %w", err)
 	}
@@ -244,10 +297,10 @@ type progressPair struct {
 // naturally sees only current data — see Coalesce's doc comment for why that
 // is also what makes "create-delete cycles earn nothing" hold without extra
 // bookkeeping.
-func (s *Store) allScoringEvents(ctx context.Context) (map[progressPair][]gamification.Event, error) {
+func allScoringEvents(ctx context.Context, q querier) (map[progressPair][]gamification.Event, error) {
 	out := map[progressPair][]gamification.Event{}
 
-	ledgerRows, err := s.pool.Query(ctx, `
+	ledgerRows, err := q.Query(ctx, `
 		SELECT p.storage_id, l.created_by, l.product_id, l.reason, l.timestamp
 		  FROM inventory_logs l
 		  JOIN products p ON p.id = l.product_id
@@ -277,7 +330,7 @@ func (s *Store) allScoringEvents(ctx context.Context) (map[progressPair][]gamifi
 	}
 	ledgerRows.Close()
 
-	contribRows, err := s.pool.Query(ctx, `
+	contribRows, err := q.Query(ctx, `
 		SELECT id, storage_id, user_id, kind, ref_id, created_at FROM contribution_events`)
 	if err != nil {
 		return nil, fmt.Errorf("store: load contribution events: %w", err)
@@ -430,8 +483,16 @@ func (s *Store) UserProgressInStorage(ctx context.Context, storageID, userID uui
 // computed live rather than cached, since each is a cheap aggregate over the
 // storage's own products and batches.
 func (s *Store) HealthScoreForStorage(ctx context.Context, storageID uuid.UUID) (float64, error) {
+	return healthScore(ctx, s.pool, storageID)
+}
+
+// healthScore is HealthScoreForStorage's body, taking a querier so the
+// nightly achievement sweep (internal/store/achievements.go) can compute the
+// same score inside its own transaction instead of carrying a second,
+// near-identical copy of these five queries.
+func healthScore(ctx context.Context, q querier, storageID uuid.UUID) (float64, error) {
 	var total int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM products WHERE storage_id = $1`, storageID).Scan(&total); err != nil {
+	if err := q.QueryRow(ctx, `SELECT count(*) FROM products WHERE storage_id = $1`, storageID).Scan(&total); err != nil {
 		return 0, fmt.Errorf("store: count products for health score: %w", err)
 	}
 	if total == 0 {
@@ -440,7 +501,7 @@ func (s *Store) HealthScoreForStorage(ctx context.Context, storageID uuid.UUID) 
 
 	pct := func(query string) (float64, error) {
 		var n int
-		if err := s.pool.QueryRow(ctx, query, storageID).Scan(&n); err != nil {
+		if err := q.QueryRow(ctx, query, storageID).Scan(&n); err != nil {
 			return 0, fmt.Errorf("store: health sub-score: %w", err)
 		}
 		return float64(n) / float64(total) * 100, nil
@@ -470,7 +531,7 @@ func (s *Store) HealthScoreForStorage(ctx context.Context, storageID uuid.UUID) 
 	// that are supposed to carry an expiry at all — a non_perishable batch
 	// with no date is correct, not a gap.
 	var expiryEligible, expiryTrackedCount int
-	if err := s.pool.QueryRow(ctx, `
+	if err := q.QueryRow(ctx, `
 		SELECT count(*), count(*) FILTER (WHERE b.expiration_date IS NOT NULL)
 		  FROM inventory_batches b
 		  JOIN products p ON p.id = b.product_id
@@ -568,7 +629,14 @@ func (s *Store) UserPreferencesFor(ctx context.Context, userID uuid.UUID) (*User
 // (docs/specs/50-gamification-overview.md principle 4). It never touches any
 // inventory feature and never affects other members of a shared storage.
 func (s *Store) SetGamificationEnabled(ctx context.Context, userID uuid.UUID, enabled bool) error {
-	_, err := s.pool.Exec(ctx, `
+	return setGamificationEnabledTx(ctx, s.pool, userID, enabled)
+}
+
+// setGamificationEnabledTx is SetGamificationEnabled's body, taking a querier
+// so SetPreferences can run it in the same transaction as the holiday-weeks
+// write.
+func setGamificationEnabledTx(ctx context.Context, q querier, userID uuid.UUID, enabled bool) error {
+	_, err := q.Exec(ctx, `
 		INSERT INTO user_preferences (user_id, gamification_enabled) VALUES ($1, $2)
 		ON CONFLICT (user_id) DO UPDATE SET gamification_enabled = $2, updated_at = now()`,
 		userID, enabled)
@@ -576,6 +644,21 @@ func (s *Store) SetGamificationEnabled(ctx context.Context, userID uuid.UUID, en
 		return fmt.Errorf("store: set gamification enabled: %w", err)
 	}
 	return nil
+}
+
+// SetPreferences updates a user's gamification toggle and holiday weeks
+// together, in one transaction (#54 finding 5). UpdateMePreferences used to
+// call SetGamificationEnabled and SetHolidayWeeks as two separate store
+// calls for what the UI presents as one PUT; a failure between them —
+// unlikely for two simple single-user writes, but possible — left the
+// toggle changed and the holiday weeks untouched, or vice versa.
+func (s *Store) SetPreferences(ctx context.Context, userID uuid.UUID, enabled bool, weeks []time.Time) error {
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		if err := setGamificationEnabledTx(ctx, tx, userID, enabled); err != nil {
+			return err
+		}
+		return setHolidayWeeksTx(ctx, tx, userID, weeks)
+	})
 }
 
 // SetHolidayWeeks replaces a user's future holiday weeks with the requested
@@ -603,66 +686,73 @@ func (s *Store) SetGamificationEnabled(ctx context.Context, userID uuid.UUID, en
 // removal in the first place reaches the same practical outcome — the
 // budget slot stays spent — without a second, shadow ledger.
 func (s *Store) SetHolidayWeeks(ctx context.Context, userID uuid.UUID, weeks []time.Time) error {
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		return setHolidayWeeksTx(ctx, tx, userID, weeks)
+	})
+}
+
+// setHolidayWeeksTx is SetHolidayWeeks' transaction-scoped body, split out so
+// SetPreferences can run it in the same transaction as the gamification-
+// enabled toggle.
+func setHolidayWeeksTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, weeks []time.Time) error {
 	requested := map[time.Time]bool{}
 	for _, w := range weeks {
 		requested[mondayOf(w)] = true
 	}
 
-	return s.inTx(ctx, func(tx pgx.Tx) error {
-		existing, err := loadHolidayWeeks(ctx, tx, userID)
-		if err != nil {
-			return err
-		}
+	existing, err := loadHolidayWeeks(ctx, tx, userID)
+	if err != nil {
+		return err
+	}
 
-		current := mondayOf(time.Now())
-		for week := range requested {
-			// A past week already on record is not a violation to reject —
-			// GET /api/me/preferences returns full history, and a client
-			// that naively resends its current list while adding or
-			// removing a future week (web/static/js/pages/settings.js does
-			// exactly this) must not have that harmless echo rejected. Only
-			// a *new* attempt to backdate a holiday week is refused.
-			if week.Before(current) && !existing[week] {
-				return fmt.Errorf("%w: only the current week or a future week may be marked as holiday", ErrValidation)
-			}
+	current := mondayOf(time.Now())
+	for week := range requested {
+		// A past week already on record is not a violation to reject —
+		// GET /api/me/preferences returns full history, and a client
+		// that naively resends its current list while adding or
+		// removing a future week (web/static/js/pages/settings.js does
+		// exactly this) must not have that harmless echo rejected. Only
+		// a *new* attempt to backdate a holiday week is refused.
+		if week.Before(current) && !existing[week] {
+			return fmt.Errorf("%w: only the current week or a future week may be marked as holiday", ErrValidation)
 		}
+	}
 
-		// final is the complete set this write would leave in place: every
-		// past/current week already on record (never removable here), plus
-		// exactly the current/future weeks the caller asked for.
-		final := map[time.Time]bool{}
-		for week := range existing {
-			if !week.After(current) {
-				final[week] = true
-			}
-		}
-		for week := range requested {
+	// final is the complete set this write would leave in place: every
+	// past/current week already on record (never removable here), plus
+	// exactly the current/future weeks the caller asked for.
+	final := map[time.Time]bool{}
+	for week := range existing {
+		if !week.After(current) {
 			final[week] = true
 		}
+	}
+	for week := range requested {
+		final[week] = true
+	}
 
-		if newlyExceedsBudget(existing, final) {
-			remaining := gamification.HolidayBudgetWeeks - gamification.MaxWeeksInWindow(toSlice(existing))
-			if remaining < 0 {
-				remaining = 0
-			}
-			return fmt.Errorf("%w: %d week(s) remaining in this 52-week window", ErrConflict, remaining)
+	if newlyExceedsBudget(existing, final) {
+		remaining := gamification.HolidayBudgetWeeks - gamification.MaxWeeksInWindow(toSlice(existing))
+		if remaining < 0 {
+			remaining = 0
 		}
+		return fmt.Errorf("%w: %d week(s) remaining in this 52-week window", ErrConflict, remaining)
+	}
 
-		if _, err := tx.Exec(ctx, `
-			DELETE FROM holiday_weeks WHERE user_id = $1 AND week_start > $2`, userID, current); err != nil {
-			return fmt.Errorf("store: clear future holiday weeks: %w", err)
-		}
-		for week := range final {
-			if week.After(current) || (week.Equal(current) && !existing[week]) {
-				if _, err := tx.Exec(ctx, `
-					INSERT INTO holiday_weeks (user_id, week_start) VALUES ($1, $2)
-					ON CONFLICT DO NOTHING`, userID, week); err != nil {
-					return fmt.Errorf("store: insert holiday week: %w", err)
-				}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM holiday_weeks WHERE user_id = $1 AND week_start > $2`, userID, current); err != nil {
+		return fmt.Errorf("store: clear future holiday weeks: %w", err)
+	}
+	for week := range final {
+		if week.After(current) || (week.Equal(current) && !existing[week]) {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO holiday_weeks (user_id, week_start) VALUES ($1, $2)
+				ON CONFLICT DO NOTHING`, userID, week); err != nil {
+				return fmt.Errorf("store: insert holiday week: %w", err)
 			}
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // newlyExceedsBudget reports whether final introduces at least one week not

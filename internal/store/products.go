@@ -169,7 +169,8 @@ func (s *Store) SetProductCategoryAsUser(ctx context.Context, storageID, id uuid
 		}
 
 		if previous == nil && categoryID != nil {
-			return recordContribution(ctx, tx, storageID, userID, gamification.KindMetadataFilled, &id)
+			generator := gamification.GeneratorUncategorized
+			return recordContribution(ctx, tx, storageID, userID, gamification.KindMetadataFilled, &id, &generator)
 		}
 		return nil
 	})
@@ -202,7 +203,8 @@ func (s *Store) SetProductImageAsUser(ctx context.Context, storageID, id uuid.UU
 		hadNone := previousImage == nil && previousIcon == nil
 		hasOne := imageURL != nil || iconName != nil
 		if hadNone && hasOne {
-			return recordContribution(ctx, tx, storageID, userID, gamification.KindMetadataFilled, &id)
+			generator := gamification.GeneratorImageless
+			return recordContribution(ctx, tx, storageID, userID, gamification.KindMetadataFilled, &id, &generator)
 		}
 		return nil
 	})

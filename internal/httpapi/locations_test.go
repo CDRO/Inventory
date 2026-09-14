@@ -128,6 +128,7 @@ func (f *fakeBatches) MoveBatch(_ context.Context, storageID, batchID, target uu
 type fakeAPI struct {
 	*fakeAuth
 	*fakeLocations
+	*fakeCategories
 	*fakeBatches
 	*fakeShoppingLists
 	*fakeExpiry
@@ -145,7 +146,7 @@ type fakeAPI struct {
 // resource empty.
 func newFakeAPI(auth *fakeAuth) fakeAPI {
 	return fakeAPI{
-		fakeAuth: auth, fakeLocations: &fakeLocations{}, fakeBatches: &fakeBatches{},
+		fakeAuth: auth, fakeLocations: &fakeLocations{}, fakeCategories: &fakeCategories{}, fakeBatches: &fakeBatches{},
 		fakeShoppingLists: &fakeShoppingLists{}, fakeExpiry: &fakeExpiry{},
 		fakeJobs: newFakeJobs(), fakeIdempotency: newFakeIdempotency(), fakeIngestStore: &fakeIngestStore{},
 		fakeConsumeStore: &fakeConsumeStore{}, fakeProductStore: &fakeProductStore{},
@@ -160,6 +161,7 @@ type apiFixture struct {
 	router       http.Handler
 	auth         *fakeAuth
 	locations    *fakeLocations
+	categories   *fakeCategories
 	batches      *fakeBatches
 	lists        *fakeShoppingLists
 	expiry       *fakeExpiry
@@ -187,6 +189,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 
 	auth := newFakeAuth()
 	locations := &fakeLocations{}
+	categories := &fakeCategories{}
 	batches := &fakeBatches{}
 	lists := &fakeShoppingLists{}
 	expiry := &fakeExpiry{}
@@ -214,7 +217,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		Vision: stubVision{status: "ok"},
 		Errors: httpapi.NewErrorWriter(false, discardLogger()),
 		Store: fakeAPI{
-			fakeAuth: auth, fakeLocations: locations,
+			fakeAuth: auth, fakeLocations: locations, fakeCategories: categories,
 			fakeBatches: batches, fakeShoppingLists: lists, fakeExpiry: expiry,
 			fakeJobs: jobs, fakeIdempotency: idem, fakeIngestStore: ingestStore,
 			fakeConsumeStore: consumeStore, fakeProductStore: products,
@@ -230,7 +233,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	})
 
 	return &apiFixture{
-		router: router, auth: auth, locations: locations, batches: batches,
+		router: router, auth: auth, locations: locations, categories: categories, batches: batches,
 		lists: lists, expiry: expiry, jobs: jobs, idem: idem,
 		ingest: ingestStore, ingester: ingester, photos: photos,
 		matcher: matcher, images: images, imageData: imageData,
@@ -308,6 +311,7 @@ func storageRoutes(base string) []struct {
 		body   string
 	}{
 		{http.MethodGet, base + "/locations", ""},
+		{http.MethodGet, base + "/categories", ""},
 		{http.MethodPost, base + "/locations", `{"name":"Cellar"}`},
 		{http.MethodPatch, base + "/locations/" + id, `{"name":"Cellar"}`},
 		{http.MethodDelete, base + "/locations/" + id, ""},
