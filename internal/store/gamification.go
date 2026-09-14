@@ -90,7 +90,13 @@ func recordContribution(ctx context.Context, tx pgx.Tx, storageID, userID uuid.U
 		id, storageID, userID, string(kind), refID); err != nil {
 		return fmt.Errorf("store: record contribution: %w", err)
 	}
-	return bumpProgress(ctx, tx, storageID, userID, gamification.XPForContribution(kind), time.Now())
+	if err := bumpProgress(ctx, tx, storageID, userID, gamification.XPForContribution(kind), time.Now()); err != nil {
+		return err
+	}
+	if err := advanceQuests(ctx, tx, storageID, userID, string(kind)); err != nil {
+		return err
+	}
+	return evaluateContributionAchievements(ctx, tx, storageID, userID, kind, refID)
 }
 
 // bumpForLedgerReason is the live-path counterpart to recordContribution for
@@ -114,7 +120,13 @@ func bumpForLedgerReason(ctx context.Context, tx pgx.Tx, storageID uuid.UUID, us
 	if !ok {
 		return nil
 	}
-	return bumpProgress(ctx, tx, storageID, *userID, xp, time.Now())
+	if err := bumpProgress(ctx, tx, storageID, *userID, xp, time.Now()); err != nil {
+		return err
+	}
+	if err := advanceQuests(ctx, tx, storageID, *userID, string(reason)); err != nil {
+		return err
+	}
+	return evaluateLedgerAchievements(ctx, tx, storageID, *userID, reason)
 }
 
 // bumpProgress increments a user's cached XP and recomputes their level and
@@ -331,6 +343,12 @@ func (s *Store) recomputeOnePair(ctx context.Context, storageID, userID uuid.UUI
 			storageID, userID, xp, gamification.Level(xp), streak, lastActive); err != nil {
 			return fmt.Errorf("store: write recomputed progress: %w", err)
 		}
+
+		for _, key := range gamification.SteadyHandTiersReached(streak) {
+			if err := unlockAchievement(ctx, tx, storageID, userID, string(key)); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 }
@@ -351,10 +369,14 @@ func computeStreakWeeks(activeWeeks, holidayWeeks map[time.Time]bool, now time.T
 	current := true
 	for {
 		switch {
+		case holidayWeeks[week]:
+			// Paused: neither counted nor broken — checked before activity so
+			// that a week which happens to be both active and on holiday
+			// still does not count toward the streak
+			// (docs/specs/52-gamification-quests-and-ui.md: "activity during
+			// a holiday week ... does not count toward the streak").
 		case activeWeeks[week]:
 			streak++
-		case holidayWeeks[week]:
-			// Paused: neither counted nor broken.
 		case current:
 			// The current week may not have happened yet; that alone must not
 			// break a streak earned in prior weeks.
@@ -556,23 +578,118 @@ func (s *Store) SetGamificationEnabled(ctx context.Context, userID uuid.UUID, en
 	return nil
 }
 
-// SetHolidayWeeks replaces a user's whole set of holiday weeks. Replacing
-// rather than diffing keeps the PUT semantics of
-// GET/PUT /api/me/preferences simple: the body is the new truth, not a patch.
+// SetHolidayWeeks replaces a user's future holiday weeks with the requested
+// set, enforcing docs/specs/52-gamification-quests-and-ui.md's holiday-mode
+// rules:
+//
+//   - Only the current week and future weeks may ever be *added*. A past or
+//     current week already on record stays on record regardless of whether
+//     the caller's list still names it — the body is the new truth for the
+//     future, not for history.
+//   - Un-marking a future week is a real removal (it frees the budget);
+//     un-marking a past or current week is not offered at all, because there
+//     is no way to actually free that budget slot without reopening the
+//     abuse the budget exists to prevent (see the package doc note below).
+//     Silently keeping it, rather than accepting and ignoring the removal,
+//     keeps GET immediately consistent with what was just PUT.
+//   - Adding weeks that would push any rolling 52-week window over 8 is
+//     rejected wholesale with ErrConflict, naming how many weeks remain in
+//     that window — nothing is written on that path.
+//
+// This project's holiday_weeks rows are therefore append-only for any week
+// at or before "now": the literal spec text allows un-marking a past or
+// current week "without a refund", which would require tracking budget
+// usage independently of which rows still exist. Never allowing that
+// removal in the first place reaches the same practical outcome — the
+// budget slot stays spent — without a second, shadow ledger.
 func (s *Store) SetHolidayWeeks(ctx context.Context, userID uuid.UUID, weeks []time.Time) error {
+	requested := map[time.Time]bool{}
+	for _, w := range weeks {
+		requested[mondayOf(w)] = true
+	}
+
 	return s.inTx(ctx, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `DELETE FROM holiday_weeks WHERE user_id = $1`, userID); err != nil {
-			return fmt.Errorf("store: clear holiday weeks: %w", err)
+		existing, err := loadHolidayWeeks(ctx, tx, userID)
+		if err != nil {
+			return err
 		}
-		for _, week := range weeks {
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO holiday_weeks (user_id, week_start) VALUES ($1, $2)
-				ON CONFLICT DO NOTHING`, userID, mondayOf(week)); err != nil {
-				return fmt.Errorf("store: insert holiday week: %w", err)
+
+		current := mondayOf(time.Now())
+		for week := range requested {
+			// A past week already on record is not a violation to reject —
+			// GET /api/me/preferences returns full history, and a client
+			// that naively resends its current list while adding or
+			// removing a future week (web/static/js/pages/settings.js does
+			// exactly this) must not have that harmless echo rejected. Only
+			// a *new* attempt to backdate a holiday week is refused.
+			if week.Before(current) && !existing[week] {
+				return fmt.Errorf("%w: only the current week or a future week may be marked as holiday", ErrValidation)
+			}
+		}
+
+		// final is the complete set this write would leave in place: every
+		// past/current week already on record (never removable here), plus
+		// exactly the current/future weeks the caller asked for.
+		final := map[time.Time]bool{}
+		for week := range existing {
+			if !week.After(current) {
+				final[week] = true
+			}
+		}
+		for week := range requested {
+			final[week] = true
+		}
+
+		if newlyExceedsBudget(existing, final) {
+			remaining := gamification.HolidayBudgetWeeks - gamification.MaxWeeksInWindow(toSlice(existing))
+			if remaining < 0 {
+				remaining = 0
+			}
+			return fmt.Errorf("%w: %d week(s) remaining in this 52-week window", ErrConflict, remaining)
+		}
+
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM holiday_weeks WHERE user_id = $1 AND week_start > $2`, userID, current); err != nil {
+			return fmt.Errorf("store: clear future holiday weeks: %w", err)
+		}
+		for week := range final {
+			if week.After(current) || (week.Equal(current) && !existing[week]) {
+				if _, err := tx.Exec(ctx, `
+					INSERT INTO holiday_weeks (user_id, week_start) VALUES ($1, $2)
+					ON CONFLICT DO NOTHING`, userID, week); err != nil {
+					return fmt.Errorf("store: insert holiday week: %w", err)
+				}
 			}
 		}
 		return nil
 	})
+}
+
+// newlyExceedsBudget reports whether final introduces at least one week not
+// already in existing, AND the resulting set violates the rolling-window
+// budget — a request that only removes weeks, or resends exactly what was
+// already on record, is never rejected even if legacy data happens to sit
+// over the current budget.
+func newlyExceedsBudget(existing, final map[time.Time]bool) bool {
+	hasNew := false
+	for w := range final {
+		if !existing[w] {
+			hasNew = true
+			break
+		}
+	}
+	if !hasNew {
+		return false
+	}
+	return gamification.MaxWeeksInWindow(toSlice(final)) > gamification.HolidayBudgetWeeks
+}
+
+func toSlice(weeks map[time.Time]bool) []time.Time {
+	out := make([]time.Time, 0, len(weeks))
+	for w := range weeks {
+		out = append(out, w)
+	}
+	return out
 }
 
 // StorageGamificationSettingsFor returns one storage's toggles, defaulting to
@@ -608,6 +725,15 @@ func (s *Store) UpdateStorageGamificationSettings(ctx context.Context, storageID
 		return fmt.Errorf("store: update storage gamification settings: %w", err)
 	}
 	return nil
+}
+
+// XPThresholdForLevel exposes gamification.XPThresholdForLevel to the
+// httpapi package, which may not import internal/gamification directly
+// (internal/gamification/boundary_test.go) — the header-ring popover
+// (docs/specs/52-gamification-quests-and-ui.md) needs it to answer "how much
+// more?" without re-implementing the level curve client-side.
+func XPThresholdForLevel(level int) int {
+	return gamification.XPThresholdForLevel(level)
 }
 
 func scanUserProgress(row rowScanner) (*UserProgress, error) {

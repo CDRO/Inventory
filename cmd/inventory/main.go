@@ -299,6 +299,7 @@ func serve() error {
 
 	go runStoreSweeps(ctx, db, ingestSweep)
 	go runGamificationRecompute(ctx, db)
+	go runWeeklyGamificationJobs(ctx, db)
 
 	srv := &http.Server{
 		Addr: net.JoinHostPort("", cfg.HTTPPort),
@@ -439,7 +440,54 @@ func runGamificationRecompute(ctx context.Context, db *store.Store) {
 			continue
 		}
 		slog.Info("recomputed gamification progress", slog.Int("users", n))
+
+		// Storage-attributed achievements (docs/specs/52-gamification-quests-and-ui.md)
+		// ride along on the same nightly cadence: health score and product
+		// counts change slowly enough that once a day is honest, and it is one
+		// recurring job rather than a second poll.
+		if n, err := db.RunNightlyStorageAchievements(ctx); err != nil {
+			if ctx.Err() == nil {
+				slog.Warn("nightly storage achievement sweep failed", slog.Any("err", err))
+			}
+		} else {
+			slog.Info("evaluated storage achievements", slog.Int("storages", n))
+		}
 	}
+}
+
+// runWeeklyGamificationJobs generates each storage's weekly quests, and
+// evaluates the week that just ended for zero_waste_week, at Monday 00:00
+// server-local (docs/specs/52-gamification-quests-and-ui.md). Computed fresh
+// each time rather than from a fixed-period ticker, for the same
+// DST-drift reason nextGamificationRecompute is.
+func runWeeklyGamificationJobs(ctx context.Context, db *store.Store) {
+	for {
+		wait := time.Until(nextMonday(time.Now()))
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+
+		n, err := db.RunWeeklyGamificationJobs(ctx, time.Now())
+		if err != nil {
+			if ctx.Err() == nil {
+				slog.Warn("weekly quest generation failed", slog.Any("err", err))
+			}
+			continue
+		}
+		slog.Info("generated weekly quests", slog.Int("storages", n))
+	}
+}
+
+// nextMonday returns the next occurrence of Monday 00:00 strictly after now,
+// in now's own location.
+func nextMonday(now time.Time) time.Time {
+	next := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	for next.Weekday() != time.Monday || !next.After(now) {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next
 }
 
 // nextGamificationRecompute returns the next occurrence of

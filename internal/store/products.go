@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/CDRO/Inventory/internal/gamification"
 )
 
 // ItemType drives default-expiry behaviour
@@ -131,6 +133,78 @@ func (s *Store) SetProductCategory(ctx context.Context, storageID, id uuid.UUID,
 		// its batches' dates can never be seen disagreeing.
 		_, err := recomputeDerivedExpiry(ctx, tx, storageID, id)
 		return err
+	})
+}
+
+// SetProductCategoryAsUser is SetProductCategory, additionally recording a
+// metadata_filled contribution when the change fills in a category that was
+// previously unset (docs/specs/51-gamification-scoring.md,
+// docs/specs/52-gamification-quests-and-ui.md's "uncategorized" quest). Like
+// UpdateProductMinStockAsUser, re-filing an already-categorized product, or
+// clearing one, earns nothing: the reward is for closing the gap.
+func (s *Store) SetProductCategoryAsUser(ctx context.Context, storageID, id uuid.UUID, categoryID *uuid.UUID, userID uuid.UUID) error {
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		var previous *uuid.UUID
+		if err := requireProductInStorage(ctx, tx, storageID, id); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `
+			SELECT category_id FROM products WHERE id = $1 AND storage_id = $2 FOR UPDATE`,
+			id, storageID).Scan(&previous); err != nil {
+			return fmt.Errorf("store: lock product category: %w", err)
+		}
+		if categoryID != nil {
+			if err := requireSameStorage(ctx, tx, treeCategories, storageID, *categoryID); err != nil {
+				return err
+			}
+		}
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE products SET category_id = $1, updated_at = now()
+			 WHERE id = $2 AND storage_id = $3`, categoryID, id, storageID); err != nil {
+			return fmt.Errorf("store: set product category: %w", err)
+		}
+		if _, err := recomputeDerivedExpiry(ctx, tx, storageID, id); err != nil {
+			return err
+		}
+
+		if previous == nil && categoryID != nil {
+			return recordContribution(ctx, tx, storageID, userID, gamification.KindMetadataFilled, &id)
+		}
+		return nil
+	})
+}
+
+// SetProductImageAsUser sets a product's image or icon, recording a
+// metadata_filled contribution when it fills in a picture that was
+// previously unset (docs/specs/51-gamification-scoring.md,
+// docs/specs/52-gamification-quests-and-ui.md's "imageless" quest). Exactly
+// one of imageURL and iconName is expected to be set by the caller — both
+// nil clears the picture and earns nothing.
+func (s *Store) SetProductImageAsUser(ctx context.Context, storageID, id uuid.UUID, imageURL, iconName *string, userID uuid.UUID) error {
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		var previousImage, previousIcon *string
+		if err := requireProductInStorage(ctx, tx, storageID, id); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `
+			SELECT image_url, icon_name FROM products WHERE id = $1 AND storage_id = $2 FOR UPDATE`,
+			id, storageID).Scan(&previousImage, &previousIcon); err != nil {
+			return fmt.Errorf("store: lock product image: %w", err)
+		}
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE products SET image_url = $1, icon_name = $2, updated_at = now()
+			 WHERE id = $3 AND storage_id = $4`, imageURL, iconName, id, storageID); err != nil {
+			return fmt.Errorf("store: set product image: %w", err)
+		}
+
+		hadNone := previousImage == nil && previousIcon == nil
+		hasOne := imageURL != nil || iconName != nil
+		if hadNone && hasOne {
+			return recordContribution(ctx, tx, storageID, userID, gamification.KindMetadataFilled, &id)
+		}
+		return nil
 	})
 }
 

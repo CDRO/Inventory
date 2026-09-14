@@ -168,3 +168,46 @@ func TestNextGamificationRecomputeAtExactlyTheHourIsTomorrow(t *testing.T) {
 
 	assert.Equal(t, time.Date(2026, time.March, 11, gamificationRecomputeHour, 0, 0, 0, time.UTC), next)
 }
+
+// TestNextMondayFromAMidWeekDay covers the ordinary case: woken up any day
+// but Monday, the next occurrence is this week's (or next week's) Monday
+// 00:00 (docs/specs/52-gamification-quests-and-ui.md: "generated Monday
+// 00:00 in the server's local timezone").
+func TestNextMondayFromAMidWeekDay(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.March, 11, 15, 0, 0, 0, time.UTC) // a Wednesday
+	next := nextMonday(now)
+
+	assert.Equal(t, time.Date(2026, time.March, 16, 0, 0, 0, 0, time.UTC), next) // the following Monday
+	assert.Equal(t, time.Monday, next.Weekday())
+}
+
+// TestNextMondayOnMondayBeforeMidnightIsToday covers being woken very early
+// on a Monday, before 00:00 has technically arrived for the process's clock
+// — the next occurrence is still today.
+func TestNextMondayOnMondayBeforeMidnightIsToday(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.March, 9, 0, 0, 0, 0, time.UTC).Add(-time.Nanosecond) // one ns before Monday 00:00
+	next := nextMonday(now)
+
+	assert.Equal(t, time.Date(2026, time.March, 9, 0, 0, 0, 0, time.UTC), next)
+}
+
+// TestNextMondayOnMondayAfterMidnightIsNextWeek: the boundary instant and
+// anything after it on a Monday must not fire again immediately — "next"
+// means strictly after, not "at or after", the same rule
+// nextGamificationRecompute follows.
+func TestNextMondayOnMondayAfterMidnightIsNextWeek(t *testing.T) {
+	t.Parallel()
+
+	cases := []time.Time{
+		time.Date(2026, time.March, 9, 0, 0, 0, 0, time.UTC),  // exactly at the boundary
+		time.Date(2026, time.March, 9, 12, 0, 0, 0, time.UTC), // later the same Monday
+	}
+	for _, now := range cases {
+		next := nextMonday(now)
+		assert.Equal(t, time.Date(2026, time.March, 16, 0, 0, 0, 0, time.UTC), next, "now=%s", now)
+	}
+}

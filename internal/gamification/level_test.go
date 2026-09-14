@@ -31,6 +31,27 @@ func TestLevel(t *testing.T) {
 	}
 }
 
+// TestXPThresholdForLevelInvertsLevel checks the two functions agree at
+// every level's boundary: the popover's "12/250 XP" is only honest if
+// XPThresholdForLevel(n) is exactly the first xp for which Level reports n.
+func TestXPThresholdForLevelInvertsLevel(t *testing.T) {
+	t.Parallel()
+
+	for level := 1; level <= 20; level++ {
+		threshold := gamification.XPThresholdForLevel(level)
+		assert.Equal(t, level, gamification.Level(threshold), "Level(XPThresholdForLevel(%d)) must be %d", level, level)
+		if threshold > 0 {
+			assert.Equal(t, level-1, gamification.Level(threshold-1), "one XP short of the threshold must still be the previous level")
+		}
+	}
+}
+
+func TestXPThresholdForLevelClampsBelowOne(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, 0, gamification.XPThresholdForLevel(0))
+	assert.Equal(t, 0, gamification.XPThresholdForLevel(-5))
+}
+
 // TestLevelNeverDecreasesWithMoreXP guards the "no decay" invariant
 // (docs/specs/51-gamification-scoring.md) at the level-formula boundary: XP
 // only ever accumulates, so the function backing it must be monotonic, or a

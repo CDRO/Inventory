@@ -449,6 +449,20 @@ func TestRecomputeAllProgressResetsAPairWithNoRemainingEvents(t *testing.T) {
 	assert.Equal(t, 0, streak)
 }
 
+// insertHolidayWeek writes a holiday_weeks row directly, bypassing
+// SetHolidayWeeks' docs/specs/52-gamification-quests-and-ui.md rule that only
+// the current or a future week may be *marked*. Once time has passed, a week
+// that was validly marked while it was still current/future is now history —
+// exactly the state these tests need to set up directly, since the write
+// path itself no longer offers a way to create it after the fact.
+func insertHolidayWeek(t *testing.T, ctx context.Context, userID uuid.UUID, week time.Time) {
+	t.Helper()
+	_, err := execTest(ctx, `
+		INSERT INTO holiday_weeks (user_id, week_start) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+		userID, week)
+	require.NoError(t, err)
+}
+
 // insertLedgerEventAt writes one scoreable inventory_logs row (with its
 // paired batch, per docs/specs/02-data-model.md) at an exact timestamp, for
 // tests that need to control which week an event falls in without waiting
@@ -521,7 +535,7 @@ func TestRecomputeAllProgressStreakPausesOnAHolidayWeek(t *testing.T) {
 	// activity at all.
 	insertLedgerEventAt(t, ctx, product.ID, location.ID, userID, thisWeek.AddDate(0, 0, -7).Add(12*time.Hour))
 	insertLedgerEventAt(t, ctx, product.ID, location.ID, userID, thisWeek.AddDate(0, 0, -21).Add(12*time.Hour))
-	require.NoError(t, s.SetHolidayWeeks(ctx, userID, []time.Time{thisWeek.AddDate(0, 0, -14)}))
+	insertHolidayWeek(t, ctx, userID, thisWeek.AddDate(0, 0, -14))
 
 	_, err = s.RecomputeAllProgress(ctx)
 	require.NoError(t, err)
@@ -529,6 +543,42 @@ func TestRecomputeAllProgressStreakPausesOnAHolidayWeek(t *testing.T) {
 	_, _, streak, found := progressRow(t, ctx, storageID, userID)
 	require.True(t, found)
 	assert.Equal(t, 2, streak, "the holiday week pauses the streak rather than breaking it, but does not itself count")
+}
+
+// TestRecomputeAllProgressStreakDoesNotCountAWeekThatIsBothActiveAndHoliday
+// covers docs/specs/52-gamification-quests-and-ui.md's rule precisely:
+// "activity during a holiday week still earns full XP ... [but] does not
+// count toward the streak". A week that has both a scored contribution and a
+// holiday marker must still be a paused week, not an active one, so it must
+// not raise streak_weeks above what the surrounding active weeks alone would
+// give.
+func TestRecomputeAllProgressStreakDoesNotCountAWeekThatIsBothActiveAndHoliday(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	userID := newUser(t, ctx)
+	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Bread"})
+	require.NoError(t, err)
+	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Pantry"})
+	require.NoError(t, err)
+
+	thisWeek := mostRecentMonday(t, time.Now())
+	// Active 1 and 3 weeks ago; 2 weeks ago is BOTH marked holiday AND has a
+	// scored contribution (logged from a hotel room, say) — per the spec this
+	// must still not count toward the streak, and must not cancel the
+	// holiday either.
+	insertLedgerEventAt(t, ctx, product.ID, location.ID, userID, thisWeek.AddDate(0, 0, -7).Add(12*time.Hour))
+	insertLedgerEventAt(t, ctx, product.ID, location.ID, userID, thisWeek.AddDate(0, 0, -14).Add(12*time.Hour))
+	insertLedgerEventAt(t, ctx, product.ID, location.ID, userID, thisWeek.AddDate(0, 0, -21).Add(12*time.Hour))
+	insertHolidayWeek(t, ctx, userID, thisWeek.AddDate(0, 0, -14))
+
+	_, err = s.RecomputeAllProgress(ctx)
+	require.NoError(t, err)
+
+	_, _, streak, found := progressRow(t, ctx, storageID, userID)
+	require.True(t, found)
+	assert.Equal(t, 2, streak,
+		"a week that is both active and on holiday must not count toward the streak — only the two genuinely active weeks should")
 }
 
 // TestRecomputeAllProgressStreakBreaksOnARealGap: a week with neither
@@ -754,8 +804,9 @@ func TestSetHolidayWeeksReplacesTheWholeSet(t *testing.T) {
 	s := requireDB(t)
 	ctx := context.Background()
 	userID := newUser(t, ctx)
-	first := time.Date(2026, time.January, 5, 0, 0, 0, 0, time.UTC)
-	second := time.Date(2026, time.July, 6, 0, 0, 0, 0, time.UTC)
+	thisWeek := mostRecentMonday(t, time.Now())
+	first := thisWeek.AddDate(0, 0, 7)
+	second := thisWeek.AddDate(0, 0, 70)
 
 	require.NoError(t, s.SetHolidayWeeks(ctx, userID, []time.Time{first}))
 	prefs, err := s.UserPreferencesFor(ctx, userID)
@@ -767,6 +818,147 @@ func TestSetHolidayWeeksReplacesTheWholeSet(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, prefs.HolidayWeeks, 1)
 	assert.True(t, prefs.HolidayWeeks[0].Equal(second))
+}
+
+// TestSetHolidayWeeksRejectsAPastWeek: "only the current week and future
+// weeks may be marked" (docs/specs/52-gamification-quests-and-ui.md) — this
+// is the budget-abuse door the rule closes, so a validation bypass here is a
+// streak-recovery exploit, not a cosmetic bug.
+func TestSetHolidayWeeksRejectsAPastWeek(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	userID := newUser(t, ctx)
+	pastWeek := mostRecentMonday(t, time.Now()).AddDate(0, 0, -7)
+
+	err := s.SetHolidayWeeks(ctx, userID, []time.Time{pastWeek})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, store.ErrValidation)
+
+	prefs, prefsErr := s.UserPreferencesFor(ctx, userID)
+	require.NoError(t, prefsErr)
+	assert.Empty(t, prefs.HolidayWeeks, "the rejected week must not be written")
+}
+
+// TestSetHolidayWeeksRejectsExceedingTheRollingBudget: at most 8 weeks in any
+// rolling 52-week window, rejected with 409 stating how many remain
+// (docs/specs/52-gamification-quests-and-ui.md).
+func TestSetHolidayWeeksRejectsExceedingTheRollingBudget(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	userID := newUser(t, ctx)
+	thisWeek := mostRecentMonday(t, time.Now())
+
+	eight := make([]time.Time, 8)
+	for i := range eight {
+		eight[i] = thisWeek.AddDate(0, 0, 7*(i+1))
+	}
+	require.NoError(t, s.SetHolidayWeeks(ctx, userID, eight), "exactly 8 weeks must be within budget")
+
+	nine := append(append([]time.Time{}, eight...), thisWeek.AddDate(0, 0, 7*9))
+	err := s.SetHolidayWeeks(ctx, userID, nine)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, store.ErrConflict)
+	assert.Contains(t, err.Error(), "0 week(s) remaining", "the 409 must state how many weeks remain in the window")
+
+	prefs, prefsErr := s.UserPreferencesFor(ctx, userID)
+	require.NoError(t, prefsErr)
+	assert.Len(t, prefs.HolidayWeeks, 8, "the rejected 9th week must not be written, and the first 8 must be untouched")
+}
+
+// TestSetHolidayWeeksUnmarkingAFutureWeekRefundsTheBudget is the positive
+// half of the rule: "un-marking a future week refunds the budget"
+// (docs/specs/52-gamification-quests-and-ui.md) — removing one of eight
+// already-marked future weeks must free the slot for a new one, not leave
+// the caller permanently capped at eight distinct weeks ever marked.
+func TestSetHolidayWeeksUnmarkingAFutureWeekRefundsTheBudget(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	userID := newUser(t, ctx)
+	thisWeek := mostRecentMonday(t, time.Now())
+
+	eight := make([]time.Time, 8)
+	for i := range eight {
+		eight[i] = thisWeek.AddDate(0, 0, 7*(i+1))
+	}
+	require.NoError(t, s.SetHolidayWeeks(ctx, userID, eight))
+
+	// Drop the first of the eight, then add a brand-new ninth week. Without a
+	// refund this would still be nine distinct weeks in one window and would
+	// be rejected exactly like the sibling test above.
+	sevenPlusOneNew := append(append([]time.Time{}, eight[1:]...), thisWeek.AddDate(0, 0, 7*9))
+	err := s.SetHolidayWeeks(ctx, userID, sevenPlusOneNew)
+
+	require.NoError(t, err, "un-marking one future week must refund its budget slot for the new one")
+
+	prefs, prefsErr := s.UserPreferencesFor(ctx, userID)
+	require.NoError(t, prefsErr)
+	assert.Len(t, prefs.HolidayWeeks, 8)
+	weeks := map[time.Time]bool{}
+	for _, w := range prefs.HolidayWeeks {
+		weeks[w] = true
+	}
+	assert.False(t, weeks[eight[0]], "the un-marked week must actually be gone")
+	assert.True(t, weeks[thisWeek.AddDate(0, 0, 7*9)], "the new ninth week must be present")
+}
+
+// TestSetHolidayWeeksNeverRemovesAPastOrCurrentWeek: a caller that only ever
+// lists future weeks going forward must not be able to erase the record of
+// an already-passed holiday week, which is what would let its budget slot be
+// reused (docs/specs/52-gamification-quests-and-ui.md: "un-marking the
+// current or a past week does not" refund the budget).
+func TestSetHolidayWeeksNeverRemovesAPastOrCurrentWeek(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	userID := newUser(t, ctx)
+	thisWeek := mostRecentMonday(t, time.Now())
+	pastWeek := thisWeek.AddDate(0, 0, -7)
+	insertHolidayWeek(t, ctx, userID, pastWeek)
+	insertHolidayWeek(t, ctx, userID, thisWeek)
+
+	// A client resending only a future week, with no mention of the past or
+	// current ones, must not erase them.
+	future := thisWeek.AddDate(0, 0, 7)
+	require.NoError(t, s.SetHolidayWeeks(ctx, userID, []time.Time{future}))
+
+	prefs, err := s.UserPreferencesFor(ctx, userID)
+	require.NoError(t, err)
+	weeks := map[time.Time]bool{}
+	for _, w := range prefs.HolidayWeeks {
+		weeks[w] = true
+	}
+	assert.True(t, weeks[pastWeek], "a past holiday week must survive a replace that does not mention it")
+	assert.True(t, weeks[thisWeek], "the current week must survive a replace that does not mention it")
+	assert.True(t, weeks[future], "the newly requested future week must be added")
+}
+
+// TestSetHolidayWeeksAcceptsResendingAnExistingPastWeek is the exact request
+// shape web/static/js/pages/settings.js sends: GET /api/me/preferences
+// returns full history, and adding or removing a future week naively resends
+// that whole list. A past week already on record must not turn that into a
+// validation failure — only a genuinely new attempt to backdate one should.
+func TestSetHolidayWeeksAcceptsResendingAnExistingPastWeek(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	userID := newUser(t, ctx)
+	thisWeek := mostRecentMonday(t, time.Now())
+	pastWeek := thisWeek.AddDate(0, 0, -7)
+	insertHolidayWeek(t, ctx, userID, pastWeek)
+
+	future := thisWeek.AddDate(0, 0, 7)
+	err := s.SetHolidayWeeks(ctx, userID, []time.Time{pastWeek, future})
+
+	require.NoError(t, err, "resending an already-recorded past week alongside a new future one must not be rejected")
+
+	prefs, err := s.UserPreferencesFor(ctx, userID)
+	require.NoError(t, err)
+	weeks := map[time.Time]bool{}
+	for _, w := range prefs.HolidayWeeks {
+		weeks[w] = true
+	}
+	assert.True(t, weeks[pastWeek])
+	assert.True(t, weeks[future])
 }
 
 func TestStorageGamificationSettingsDefaultToLeaderboardOff(t *testing.T) {

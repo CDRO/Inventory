@@ -19,6 +19,7 @@ import "../register-sw.js";
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
 import { renderInboxLink } from "../inbox-badge.js";
+import { initGamification } from "../gamification.js";
 import { fetchLocations, appendLocationOptions } from "../location-options.js";
 import { postForm, ApiError } from "../api.js";
 import { pollJob, JobFailedError } from "../jobs.js";
@@ -71,6 +72,7 @@ async function init() {
 
   renderStorageSwitcher(qs("#storage-switcher"), { storages: me.storages, currentId: storageId });
   renderInboxLink(qs("#inbox-link"), storageId);
+  initGamification(storageId);
 
   try {
     appendLocationOptions(locationSelect, await fetchLocations(storageId));

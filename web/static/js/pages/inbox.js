@@ -11,6 +11,7 @@ import "../register-sw.js";
 
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
+import { initGamification } from "../gamification.js";
 import { get, del, ApiError } from "../api.js";
 import { el, fromTemplate, qs, text } from "../dom.js";
 
@@ -60,6 +61,7 @@ async function init() {
   }
 
   renderStorageSwitcher(qs("#storage-switcher"), { storages: me.storages, currentId: storageId });
+  initGamification(storageId);
   qs("#scan-link").setAttribute("href", withStorageParam(storageId, "/ingest.html"));
 
   const confirmed = params.get("confirmed");

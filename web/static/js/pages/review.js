@@ -15,6 +15,7 @@ import "../register-sw.js";
 
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
+import { initGamification } from "../gamification.js";
 import { ReviewList } from "../review.js";
 import { fetchLocations, appendLocationOptions } from "../location-options.js";
 import { get, post, del, ApiError } from "../api.js";
@@ -53,6 +54,7 @@ async function init() {
   storageId = resolved;
   rememberStorageId(storageId);
   renderStorageSwitcher(qs("#storage-switcher"), { storages: me.storages, currentId: storageId });
+  initGamification(storageId);
   qs("#back").setAttribute("href", inboxHref());
 
   jobId = new URLSearchParams(location.search).get("job");

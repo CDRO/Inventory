@@ -1,0 +1,71 @@
+/* Gamification UI (docs/specs/52-gamification-quests-and-ui.md): the header
+   ring and its popover, and the dashboard card's own header row. Everything
+   else the card needs (bars, rows, badges, empty states) reuses the existing
+   component classes in components.css — no new color system, no charting or
+   animation library, per the spec's frontend implementation notes. */
+
+.gami-ring-wrapper {
+  position: relative;
+  display: inline-flex;
+}
+
+.gami-ring {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  text-decoration: none;
+  color: var(--color-text);
+}
+
+.gami-ring__svg {
+  position: absolute;
+  inset: 0;
+}
+
+.gami-ring__track {
+  fill: none;
+  stroke: var(--color-border);
+}
+
+.gami-ring__arc {
+  fill: none;
+  stroke: var(--color-accent);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.3s ease;
+}
+
+.gami-ring__level {
+  position: relative;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.gami-popover {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-card);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  z-index: 10;
+}
+
+.gami-card__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.gami-card__header .gami-ring__svg {
+  position: static;
+  width: 2.5rem;
+  height: 2.5rem;
+}

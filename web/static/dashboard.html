@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="/css/tokens.css">
   <link rel="stylesheet" href="/css/base.css">
   <link rel="stylesheet" href="/css/components.css">
+  <link rel="stylesheet" href="/css/gamification.css">
   <link rel="stylesheet" href="/vendor/uplot-1.6.31.min.css">
 </head>
 <body>
@@ -19,6 +20,8 @@
     <div class="row">
       <div id="storage-switcher" hidden></div>
       <div id="inbox-link" hidden></div>
+      <div id="gamification-ring" hidden></div>
+      <a href="/settings.html" class="btn btn--ghost">Settings</a>
       <a href="/storages.html" class="btn btn--ghost">Back</a>
     </div>
   </header>
@@ -99,6 +102,8 @@
         <p id="turnover-empty" class="empty-state" hidden>No purchases or consumption recorded yet.</p>
       </div>
     </section>
+
+    <section id="gamification-card" class="card stack" hidden></section>
   </main>
 
   <template id="reorder-row-template">
