@@ -39,38 +39,49 @@ func TestHealthHandler(t *testing.T) {
 		wantCode   int
 		wantStatus string
 		wantVision string
+		// wantVisionWire is the literal wire string, spelled out here
+		// independent of the vision package's constants — comparing only
+		// against vision.StatusOK/StatusModelUnavailable would stay green
+		// even if those constants' values were renamed, silently breaking
+		// the JSON contract docs/specs/01-architecture-and-deployment.md
+		// publishes.
+		wantVisionWire string
 	}{
 		{
-			name:       "database up and model available",
-			db:         stubPinger{},
-			vision:     stubVision{status: vision.StatusOK},
-			wantCode:   http.StatusOK,
-			wantStatus: "ok",
-			wantVision: vision.StatusOK,
+			name:           "database up and model available",
+			db:             stubPinger{},
+			vision:         stubVision{status: vision.StatusOK},
+			wantCode:       http.StatusOK,
+			wantStatus:     "ok",
+			wantVision:     vision.StatusOK,
+			wantVisionWire: "ok",
 		},
 		{
-			name:       "database up but model gone still serves 200",
-			db:         stubPinger{},
-			vision:     stubVision{status: vision.StatusModelUnavailable},
-			wantCode:   http.StatusOK,
-			wantStatus: "ok",
-			wantVision: vision.StatusModelUnavailable,
+			name:           "database up but model gone still serves 200",
+			db:             stubPinger{},
+			vision:         stubVision{status: vision.StatusModelUnavailable},
+			wantCode:       http.StatusOK,
+			wantStatus:     "ok",
+			wantVision:     vision.StatusModelUnavailable,
+			wantVisionWire: "model_unavailable",
 		},
 		{
-			name:       "database unreachable is 503 even when vision is fine",
-			db:         stubPinger{err: errors.New("dial tcp: connection refused")},
-			vision:     stubVision{status: vision.StatusOK},
-			wantCode:   http.StatusServiceUnavailable,
-			wantStatus: "unavailable",
-			wantVision: vision.StatusOK,
+			name:           "database unreachable is 503 even when vision is fine",
+			db:             stubPinger{err: errors.New("dial tcp: connection refused")},
+			vision:         stubVision{status: vision.StatusOK},
+			wantCode:       http.StatusServiceUnavailable,
+			wantStatus:     "unavailable",
+			wantVision:     vision.StatusOK,
+			wantVisionWire: "ok",
 		},
 		{
-			name:       "no vision client configured reports model_unavailable",
-			db:         stubPinger{},
-			vision:     nil,
-			wantCode:   http.StatusOK,
-			wantStatus: "ok",
-			wantVision: vision.StatusModelUnavailable,
+			name:           "no vision client configured reports model_unavailable",
+			db:             stubPinger{},
+			vision:         nil,
+			wantCode:       http.StatusOK,
+			wantStatus:     "ok",
+			wantVision:     vision.StatusModelUnavailable,
+			wantVisionWire: "model_unavailable",
 		},
 	}
 
@@ -85,6 +96,7 @@ func TestHealthHandler(t *testing.T) {
 
 			require.Equal(t, tc.wantCode, rec.Code)
 			assert.Equal(t, "application/json; charset=utf-8", rec.Header().Get("Content-Type"))
+			assert.Contains(t, rec.Body.String(), `"vision":"`+tc.wantVisionWire+`"`)
 
 			var got httpapi.HealthResponse
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))

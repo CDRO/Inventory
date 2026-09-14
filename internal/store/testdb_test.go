@@ -183,6 +183,20 @@ func requireDB(t *testing.T) *store.Store {
 	return testStore
 }
 
+// requireAdminDSN skips a test when no database is configured, and otherwise
+// returns the admin DSN used to create throwaway databases of its own — for
+// tests that need a database in a state TestMain's shared, fully-migrated
+// testStore/testPool cannot represent (e.g. never migrated at all).
+func requireAdminDSN(t *testing.T) string {
+	t.Helper()
+
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set; run via `docker compose run --rm app go test ./...`")
+	}
+	return dsn
+}
+
 // newStorage inserts a storage and returns its id. Each test gets its own, so
 // tests cannot see each other's rows even though they share a database.
 func newStorage(t *testing.T, ctx context.Context) uuid.UUID {
