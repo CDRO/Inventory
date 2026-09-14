@@ -196,12 +196,6 @@ func writeMigration(t *testing.T, dir, name, upSQL, downSQL string) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600))
 }
 
-// TestRunStatusListsAppliedAndPendingMigrations is the regression for the
-// defect issue #24 tracks: `migrate status` used to print nothing at all,
-// because goose reports status through a Logger the application set to
-// goose.NopLogger. Applies two migrations, adds a third afterward without
-// applying it, and checks status reports all three — two applied, one
-// pending — rather than silence.
 // TestRunUpStaysNonNoisyOnHappyPath is the regression for a bug review-tests
 // caught in this PR's first round: making status/version print by forwarding
 // every goose Printf call unconditionally also forwarded goose's own
@@ -228,6 +222,12 @@ func TestRunUpStaysNonNoisyOnHappyPath(t *testing.T) {
 		"up must print exactly its own one-line summary, not goose's internal per-migration Printf output")
 }
 
+// TestRunStatusListsAppliedAndPendingMigrations is the regression for the
+// defect issue #24 tracks: `migrate status` used to print nothing at all,
+// because goose reports status through a Logger the application set to
+// goose.NopLogger. Applies two migrations, adds a third afterward without
+// applying it, and checks status reports all three — two applied, one
+// pending — rather than silence.
 func TestRunStatusListsAppliedAndPendingMigrations(t *testing.T) {
 	dsn := newTestDatabase(t)
 	root := t.TempDir()
