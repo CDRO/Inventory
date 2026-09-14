@@ -453,8 +453,16 @@ func (s *Store) UserProgressInStorage(ctx context.Context, storageID, userID uui
 // computed live rather than cached, since each is a cheap aggregate over the
 // storage's own products and batches.
 func (s *Store) HealthScoreForStorage(ctx context.Context, storageID uuid.UUID) (float64, error) {
+	return healthScore(ctx, s.pool, storageID)
+}
+
+// healthScore is HealthScoreForStorage's body, taking a querier so the
+// nightly achievement sweep (internal/store/achievements.go) can compute the
+// same score inside its own transaction instead of carrying a second,
+// near-identical copy of these five queries.
+func healthScore(ctx context.Context, q querier, storageID uuid.UUID) (float64, error) {
 	var total int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM products WHERE storage_id = $1`, storageID).Scan(&total); err != nil {
+	if err := q.QueryRow(ctx, `SELECT count(*) FROM products WHERE storage_id = $1`, storageID).Scan(&total); err != nil {
 		return 0, fmt.Errorf("store: count products for health score: %w", err)
 	}
 	if total == 0 {
@@ -463,7 +471,7 @@ func (s *Store) HealthScoreForStorage(ctx context.Context, storageID uuid.UUID) 
 
 	pct := func(query string) (float64, error) {
 		var n int
-		if err := s.pool.QueryRow(ctx, query, storageID).Scan(&n); err != nil {
+		if err := q.QueryRow(ctx, query, storageID).Scan(&n); err != nil {
 			return 0, fmt.Errorf("store: health sub-score: %w", err)
 		}
 		return float64(n) / float64(total) * 100, nil
@@ -493,7 +501,7 @@ func (s *Store) HealthScoreForStorage(ctx context.Context, storageID uuid.UUID) 
 	// that are supposed to carry an expiry at all — a non_perishable batch
 	// with no date is correct, not a gap.
 	var expiryEligible, expiryTrackedCount int
-	if err := s.pool.QueryRow(ctx, `
+	if err := q.QueryRow(ctx, `
 		SELECT count(*), count(*) FILTER (WHERE b.expiration_date IS NOT NULL)
 		  FROM inventory_batches b
 		  JOIN products p ON p.id = b.product_id
