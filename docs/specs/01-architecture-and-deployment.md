@@ -101,17 +101,21 @@ runs the identical command against a real daemon.
 
 The workflow also accepts `workflow_dispatch`, so the fallback is not limited
 to the post-PR review gate. A session with no local Docker can still develop:
-push the work-in-progress branch, then ask for a signal on it directly.
-`gh run watch` requires an explicit run id outside an interactive terminal —
-every agent session — so capture the dispatched run's id first:
+push the work-in-progress branch, then ask for a signal on it directly. Two
+things `gh run watch` needs help with outside an interactive terminal — every
+agent session: it requires an explicit run id, and `gh run list` can briefly
+still show only an older run from the same branch right after dispatch, so
+poll by the exact commit SHA under test rather than trusting "the newest run
+in the list":
 
 ```console
 $ git push -u origin <branch>
 $ gh workflow run test.yml --ref <branch>
+$ SHA=$(git rev-parse HEAD)
 $ RUN_ID=""
 $ for i in $(seq 1 10); do
-    RUN_ID=$(gh run list --workflow=test.yml --branch <branch> \
-      --event workflow_dispatch --limit 1 --json databaseId -q '.[0].databaseId')
+    RUN_ID=$(gh run list --workflow=test.yml --branch <branch> --event workflow_dispatch \
+      --limit 5 --json databaseId,headSha -q ".[] | select(.headSha == \"$SHA\") | .databaseId" | head -1)
     [ -n "$RUN_ID" ] && break
     sleep 3
   done

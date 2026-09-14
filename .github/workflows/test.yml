@@ -12,16 +12,19 @@
 # every push to it re-runs automatically). `workflow_dispatch` covers the
 # earlier implementation loop, before a PR exists: a session with no local
 # Docker can push a work-in-progress branch and ask for a signal on it
-# directly. `gh run watch` requires an explicit run id when not running in an
-# interactive terminal (every agent session), so capture the dispatched run's
-# id by polling `gh run list` before watching it —
+# directly. Two things `gh run watch` needs help with outside an interactive
+# terminal (every agent session): it requires an explicit run id, and the run
+# list can briefly still show only an older run from the same branch right
+# after dispatch — so poll by the exact commit SHA under test, not just "the
+# newest run", until a match for it shows up —
 #
 #   git push -u origin <branch>
 #   gh workflow run test.yml --ref <branch>
+#   SHA=$(git rev-parse HEAD)
 #   RUN_ID=""
 #   for i in $(seq 1 10); do
-#     RUN_ID=$(gh run list --workflow=test.yml --branch <branch> \
-#       --event workflow_dispatch --limit 1 --json databaseId -q '.[0].databaseId')
+#     RUN_ID=$(gh run list --workflow=test.yml --branch <branch> --event workflow_dispatch \
+#       --limit 5 --json databaseId,headSha -q ".[] | select(.headSha == \"$SHA\") | .databaseId" | head -1)
 #     [ -n "$RUN_ID" ] && break
 #     sleep 3
 #   done

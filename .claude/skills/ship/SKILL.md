@@ -53,17 +53,20 @@ Do not push a red suite; the test reviewer will block and the round is wasted.
 **If this session has no working local `docker compose`** (no daemon, no
 `CAP_NET_ADMIN` — see issue #48), there is no local suite to run before the
 first push. Use the `test` GitHub Actions workflow as a pre-PR fallback
-instead of skipping this step. `gh run watch` requires an explicit run id
-outside an interactive terminal — every agent session — so capture the
-dispatched run's id first:
+instead of skipping this step. Two things `gh run watch` needs help with
+outside an interactive terminal — every agent session: it requires an
+explicit run id, and `gh run list` can briefly still show only an older run
+from the same branch right after dispatch, so poll by the exact commit SHA
+under test rather than trusting "the newest run in the list":
 
 ```bash
 git push -u origin spec/<NN>-<slug>
 gh workflow run test.yml --ref spec/<NN>-<slug>
+SHA=$(git rev-parse HEAD)
 RUN_ID=""
 for i in $(seq 1 10); do
-  RUN_ID=$(gh run list --workflow=test.yml --branch spec/<NN>-<slug> \
-    --event workflow_dispatch --limit 1 --json databaseId -q '.[0].databaseId')
+  RUN_ID=$(gh run list --workflow=test.yml --branch spec/<NN>-<slug> --event workflow_dispatch \
+    --limit 5 --json databaseId,headSha -q ".[] | select(.headSha == \"$SHA\") | .databaseId" | head -1)
   [ -n "$RUN_ID" ] && break
   sleep 3
 done
