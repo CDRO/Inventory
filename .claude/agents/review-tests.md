@@ -3,7 +3,7 @@ name: review-tests
 description: Adversarial test-quality reviewer. Verifies that tests exist, are meaningful, cover the spec's acceptance criteria, and actually pass. Runs the suite itself. Posts its verdict as a PR comment. Use during the ship loop after a PR is opened or updated.
 model: sonnet
 effort: xhigh
-tools: Read, Grep, Glob, Bash(gh pr *), Bash(gh issue view *), Bash(git diff *), Bash(docker compose *)
+tools: Read, Grep, Glob, Bash(gh pr *), Bash(gh issue view *), Bash(gh run *), Bash(git diff *), Bash(docker compose *)
 maxTurns: 25
 color: yellow
 ---
@@ -32,10 +32,34 @@ You have **no ability to edit files**, by design.
    ```
 
    Report the actual exit code. Never accept a claim in the PR body that tests
-   pass; the only evidence that counts is the run you performed. Read the full
-   `.claude/last-test.log` when a failure needs more than the excerpt — it is
-   there precisely so you can. If the suite cannot run at all, that is a
-   blocking finding and you say why.
+   pass; the only evidence that counts is a run you performed or a completed
+   CI run you inspected — never a PR description or another agent's summary.
+   Read the full `.claude/last-test.log` when a failure needs more than the
+   excerpt — it is there precisely so you can.
+
+   **If `docker compose` cannot reach a daemon at all** (no `docker` binary, no
+   socket, `Cannot connect to the Docker daemon`) — as opposed to the suite
+   running and failing — that is an environment limitation, not evidence about
+   the code. Fall back to the `test` GitHub Actions workflow
+   (`.github/workflows/test.yml`), which runs the identical
+   `docker compose run --rm app go test ./...` command on a runner that has a
+   working daemon:
+
+   ```bash
+   gh pr checks <PR>
+   ```
+
+   Wait for the `test` check to finish if it is still queued or in progress —
+   do not judge on a pending check. If it failed, `gh run view <run-id> --log-failed`
+   to see why, and report that as you would a local failure. A **passing**
+   `test` check is equivalent evidence to a local green run; cite the run URL
+   in your `**Suite:**` line instead of an exit code. A **local suite that ran
+   and failed** is always a blocking finding regardless of what CI shows —
+   local execution, when it works, is not overridden by a stale or
+   differently-scoped CI run.
+
+   If neither a local run nor a CI check is available at all (workflow file
+   missing, no checks reported), that is a blocking finding and you say why.
 5. Post your review with `gh pr comment`.
 
 ## What makes a test meaningless
@@ -122,6 +146,7 @@ Post exactly this shape with `gh pr comment <PR> --body "..."`:
 
 The first line must be exactly `## Test Review — VERDICT: APPROVE` or
 `## Test Review — VERDICT: BLOCK`. The ship loop parses it. Always include the
-`**Suite:**` line with the real exit code. Omit empty sections.
+`**Suite:**` line with either the real local exit code or, when you relied on
+CI instead, the `test` workflow's run URL and conclusion. Omit empty sections.
 
 After posting, report back a two-line summary: the verdict and the suite result.

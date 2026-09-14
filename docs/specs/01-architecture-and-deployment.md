@@ -82,6 +82,22 @@ tests that run in a throwaway pulled container: **not** part of the image
 build or the dev loop, but **required to pass before deploying**. See
 `05-frontend-pwa-foundations.md` for the suite and its required coverage.
 
+## Continuous integration
+
+A GitHub Actions workflow (`.github/workflows/test.yml`) runs on every push
+to `main` and on every pull request. It runs exactly the commands documented
+above — `docker compose run --rm app go vet ./...` then
+`docker compose run --rm app go test ./...` — against an ephemeral `.env`
+generated at the start of the job (throwaway credentials, never committed,
+never reused outside that run). This does not relax the no-host-toolchain
+rule: the runner has no Go, Node, or Postgres installed directly, only
+Docker; every command still goes through `docker compose`.
+
+This exists because not every environment that needs a real pass/fail signal
+for this suite can start a Docker daemon locally — the `test` job on a
+GitHub-hosted runner is the fallback source of truth in that case, since it
+runs the identical command against a real daemon.
+
 ## Repository layout
 
 ```

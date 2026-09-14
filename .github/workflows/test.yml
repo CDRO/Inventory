@@ -1,0 +1,61 @@
+# Runs the project's own documented test commands
+# (docs/specs/01-architecture-and-deployment.md) on GitHub-hosted runners.
+#
+# This exists because the sandboxes that some review/agent sessions run in
+# cannot start a Docker daemon at all (missing CAP_NET_ADMIN — see issue #48),
+# so `docker compose run --rm app go test ./...` has no environment to execute
+# in locally. GitHub-hosted runners have a working Docker daemon, so this
+# workflow is the actual pass/fail signal for those sessions: they read this
+# run's result instead of executing the suite themselves.
+#
+# Nothing here bypasses the no-host-toolchain rule: every command still goes
+# through `docker compose`, exactly as documented. No Go, Node, or Postgres is
+# installed on the runner directly.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Non-interactive stand-in for `docker compose run --rm setup`, which
+      # needs a TTY. Values are throwaway, generated fresh per run, and never
+      # leave this ephemeral runner — not real secrets.
+      - name: Write ephemeral .env for the test stack
+        run: |
+          DB_PASSWORD="ci-$(openssl rand -hex 8)"
+          cat > .env <<EOF
+          APP_ENV=dev
+          HTTP_PORT=8000
+          STATIC_DIR=/src/web/static
+          POSTGRES_USER=inventory
+          POSTGRES_PASSWORD=${DB_PASSWORD}
+          POSTGRES_DB=inventory
+          DATABASE_URL=postgres://inventory:${DB_PASSWORD}@db:5432/inventory?sslmode=disable
+          SESSION_SECRET=ci-$(openssl rand -hex 16)
+          ADMIN_INITIAL_USERNAME=admin
+          ADMIN_INITIAL_PASSWORD=ci-$(openssl rand -hex 8)
+          GEMINI_API_KEY=
+          GEMINI_MODEL=gemini-2.0-flash
+          GEMINI_IMAGE_MODEL=
+          SERPAPI_API_KEY=
+          EOF
+
+      - name: go vet
+        run: docker compose run --rm app go vet ./...
+
+      - name: go test
+        run: docker compose run --rm app go test ./... -count=1
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
