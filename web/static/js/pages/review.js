@@ -18,6 +18,8 @@ import { renderStorageSwitcher } from "../storage-switcher.js";
 import { initGamification } from "../gamification.js";
 import { ReviewList } from "../review.js";
 import { fetchLocations, appendLocationOptions } from "../location-options.js";
+import { fetchCategories, appendCategoryOptions } from "../category-options.js";
+import { fetchProducts } from "../product-options.js";
 import { get, post, del, ApiError } from "../api.js";
 import { pollJob, JobFailedError } from "../jobs.js";
 import { qs } from "../dom.js";
@@ -111,9 +113,13 @@ async function load() {
 }
 
 async function render(job) {
-  let locations;
+  let locations, categories, products;
   try {
-    locations = await fetchLocations(storageId);
+    [locations, categories, products] = await Promise.all([
+      fetchLocations(storageId),
+      fetchCategories(storageId),
+      fetchProducts(storageId),
+    ]);
   } catch (err) {
     showError(err);
     return;
@@ -127,7 +133,7 @@ async function render(job) {
   for (const row of proposal.rows) {
     const el = rowsContainer.querySelector(`[data-row-id="${CSS.escape(row.row_id)}"]`);
     rows.set(row.row_id, { row, el });
-    setupRow(el, row, proposal, locations, job.has_image);
+    setupRow(el, row, proposal, locations, categories, products, job.has_image);
   }
 
   if (proposal.rows.length === 0) {
@@ -138,7 +144,7 @@ async function render(job) {
   proposalSection.hidden = false;
 }
 
-function setupRow(el, row, proposal, locations, hasImage) {
+function setupRow(el, row, proposal, locations, categories, products, hasImage) {
   // The crop: the whole photo as a background, scaled and shifted so only the
   // item's bounding box shows. A product photo has no box and shows whole.
   const crop = qs('[data-role="crop"]', el);
@@ -158,7 +164,8 @@ function setupRow(el, row, proposal, locations, hasImage) {
 
   qs('[data-role="confidence"]', el).textContent = `${Math.round((row.confidence || 0) * 100)}%`;
 
-  setupProduct(el, row);
+  setupProduct(el, row, products);
+  appendCategoryOptions(qs('[data-role="new-product-category"]', el), categories);
   qs('[data-role="quantity"]', el).value = String(row.quantity);
   setupLocation(el, row, proposal, locations);
 
@@ -170,7 +177,7 @@ function setupRow(el, row, proposal, locations, hasImage) {
   });
 }
 
-function setupProduct(el, row) {
+function setupProduct(el, row, products) {
   const select = qs('[data-role="product"]', el);
   const match = row.match || {};
   const add = (value, label) => {
@@ -180,6 +187,10 @@ function setupProduct(el, row) {
     select.append(option);
   };
 
+  const alreadyListed = new Set();
+  if (match.product) alreadyListed.add(match.product.id);
+  for (const candidate of match.candidates || []) alreadyListed.add(candidate.id);
+
   if (match.product) add(`product:${match.product.id}`, `${match.product.name} (in your inventory)`);
   for (const candidate of match.candidates || []) {
     add(`product:${candidate.id}`, `${candidate.name} (in your inventory)`);
@@ -187,6 +198,24 @@ function setupProduct(el, row) {
   if (match.catalog) add("catalog", `New product: ${match.catalog.display_name}`);
   if (!match.catalog || match.catalog.display_name !== row.label) add("label", `New product: ${row.label}`);
   add("custom", "Something else…");
+
+  // The rest of the storage's products, alphabetical (as ListProducts
+  // returns them) — so a product the model didn't propose, or proposed with
+  // low enough confidence to omit, is still one keystroke away. A plain
+  // <select> already supports type-ahead by typing the first letters, which
+  // is what makes this "autocomplete" without a custom widget.
+  const rest = (products || []).filter((p) => !alreadyListed.has(p.id));
+  if (rest.length > 0) {
+    const group = document.createElement("optgroup");
+    group.label = "All products";
+    for (const p of rest) {
+      const option = document.createElement("option");
+      option.value = `product:${p.id}`;
+      option.textContent = p.name;
+      group.append(option);
+    }
+    select.append(group);
+  }
 
   if (match.product) {
     select.value = `product:${match.product.id}`;
@@ -282,6 +311,8 @@ function buildItems() {
       const name = qs('[data-role="new-product-name"]', el).value.trim();
       if (!name) problems.push("Name the product.");
       item.new_product = { name, item_type: qs('[data-role="item-type"]', el).value };
+      const categoryId = qs('[data-role="new-product-category"]', el).value;
+      if (categoryId) item.new_product.category_id = categoryId;
     }
 
     const quantity = Number.parseInt(qs('[data-role="quantity"]', el).value, 10);
