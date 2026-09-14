@@ -1,6 +1,10 @@
 // Gamification UI integration (docs/specs/52-gamification-quests-and-ui.md):
-// the header ring, the dashboard card, and the toast helper other pages call
-// after a confirm action.
+// the header ring and the dashboard card. The spec's fourth integration
+// point, a post-action toast, is not implemented here — it needs an XP delta
+// on the ingestion/consumption/shopping-list confirm responses that none of
+// those endpoints currently return, and fabricating one client-side would
+// mean re-implementing scoring in JS, exactly what
+// docs/specs/51-gamification-scoring.md rules out.
 //
 // gamification_enabled = FALSE is signaled by every gamification route
 // answering 204 with no body (docs/specs/51-gamification-scoring.md). This
