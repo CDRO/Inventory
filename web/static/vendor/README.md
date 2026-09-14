@@ -32,3 +32,22 @@ version is in its filename; this document records where it came from.
 
 Used by `web/static/js/pages/dashboard.js` for the client-side PDF export of
 the reorder list.
+
+## uplot-1.6.31.iife.min.js / uplot-1.6.31.min.css
+
+- **Library:** [uPlot](https://github.com/leeoniya/uPlot), MIT license.
+- **Version:** 1.6.31.
+- **Fetched from:** `https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js`
+  and `https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css`.
+- **Why this library:** a single dependency-free IIFE build small enough to
+  vendor whole, satisfying `docs/specs/11-reporting-and-analytics.md`'s "no
+  npm, no CDN at runtime" constraint — the app has to work on a LAN-only /
+  Tailscale-only NAS with no outbound internet
+  (`docs/specs/01-architecture-and-deployment.md`).
+- **Usage:** `<script src="/vendor/uplot-1.6.31.iife.min.js"></script>` plus
+  `<link rel="stylesheet" href="/vendor/uplot-1.6.31.min.css">` expose the
+  `uPlot` global. Used by `web/static/js/pages/dashboard.js` for the
+  turnover (purchased vs. consumed) trend chart. The location-distribution
+  chart is hand-rolled CSS bars instead — one dependency shared by one chart
+  that actually needs a time axis, not a library reused just to justify
+  vendoring it.

@@ -35,8 +35,18 @@ const lowStockCount = qs("#low-stock-count");
 const rowTemplate = qs("#reorder-row-template");
 const exportCsvLink = qs("#export-csv");
 const exportPdfButton = qs("#export-pdf");
+const totalItemsValue = qs("#analytics-total-items");
+const locationDistribution = qs("#location-distribution");
+const turnoverChartContainer = qs("#turnover-chart");
+const turnoverEmpty = qs("#turnover-empty");
+const turnoverGranularity = qs("#turnover-granularity");
 
 let storageId = null;
+// The uPlot instance backing the turnover chart, torn down and rebuilt on
+// every load — uPlot has no "replace the data and keep the instance" path
+// that also handles a granularity change resizing the x-axis labels, and
+// this chart is small enough that a rebuild is not worth optimizing away.
+let turnoverChart = null;
 // The dashboard's last fetch, kept only so the PDF export can render exactly
 // what is on screen without a second round trip.
 let lastDashboard = { out_of_stock: [], low_stock: [] };
@@ -70,8 +80,9 @@ async function init() {
 
   checkButton.addEventListener("click", checkItem);
   exportPdfButton.addEventListener("click", downloadPdf);
+  turnoverGranularity.addEventListener("change", () => loadTurnover(turnoverGranularity.value));
 
-  await loadDashboard();
+  await Promise.all([loadDashboard(), loadAnalytics()]);
 }
 
 function basePath() {
@@ -109,6 +120,114 @@ function renderBucket(container, countBadge, items, describe) {
     row.querySelector('[data-field="stock"]').textContent = describe(item);
     container.append(row);
   }
+}
+
+function analyticsBasePath() {
+  return `/api/storages/${storageId}/dashboard/analytics`;
+}
+
+// loadAnalytics fetches the stat tile and location-distribution chart, and
+// kicks off the turnover chart at whatever granularity the select is
+// currently showing (docs/specs/11-reporting-and-analytics.md).
+async function loadAnalytics() {
+  try {
+    const dashboard = await get(`${analyticsBasePath()}?granularity=${turnoverGranularity.value}`);
+    totalItemsValue.textContent = String(dashboard.total_items);
+    renderLocationDistribution(dashboard.location_distribution);
+    renderTurnoverChart(dashboard.turnover);
+  } catch (err) {
+    showError(err);
+  }
+}
+
+// loadTurnover re-fetches just the granularity-dependent chart when the
+// select changes, rather than re-running the whole analytics load — the stat
+// tile and location distribution do not depend on granularity at all.
+async function loadTurnover(granularity) {
+  try {
+    const dashboard = await get(`${analyticsBasePath()}?granularity=${granularity}`);
+    renderTurnoverChart(dashboard.turnover);
+  } catch (err) {
+    showError(err);
+  }
+}
+
+// renderLocationDistribution draws the per-location bars in plain CSS,
+// sorted descending by item_count (already the order the API returns them
+// in) and magnitude-colored via bar width — a list satisfies "heatmap" per
+// the spec without a literal geographic rendering.
+function renderLocationDistribution(rows) {
+  clearChildren(locationDistribution);
+
+  if (rows.length === 0) {
+    locationDistribution.append(el("p", { class: "empty-state" }, [text("No stock recorded yet.")]));
+    return;
+  }
+
+  const max = Math.max(...rows.map((row) => row.item_count));
+  for (const row of rows) {
+    const pct = max > 0 ? Math.round((row.item_count / max) * 100) : 0;
+    locationDistribution.append(
+      el("div", { class: "bar-row" }, [
+        el("span", { class: "bar-row__label", title: row.location_name }, [text(row.location_name)]),
+        el("span", { class: "bar-row__track" }, [
+          el("span", { class: "bar-row__fill", style: `width: ${pct}%` }),
+        ]),
+        el("span", { class: "bar-row__value" }, [text(String(row.item_count))]),
+      ]),
+    );
+  }
+}
+
+// renderTurnoverChart (re)builds the vendored uPlot instance showing
+// purchased vs. consumed per period (web/static/vendor/README.md records
+// where uPlot came from and why). uPlot plots numeric x values, so each
+// period's label is kept alongside its index and shown via a custom axis
+// formatter rather than a real timestamp — the API already buckets by
+// period, so the chart does not need to re-derive one.
+function renderTurnoverChart(rows) {
+  if (turnoverChart) {
+    turnoverChart.destroy();
+    turnoverChart = null;
+  }
+  clearChildren(turnoverChartContainer);
+
+  turnoverEmpty.hidden = rows.length > 0;
+  if (rows.length === 0) {
+    return;
+  }
+
+  const labels = rows.map((row) => row.period);
+  const data = [
+    rows.map((_, i) => i),
+    rows.map((row) => row.purchased),
+    rows.map((row) => row.consumed),
+  ];
+
+  turnoverChart = new uPlot(
+    {
+      width: turnoverChartContainer.clientWidth || 600,
+      height: 256,
+      series: [
+        {},
+        { label: "Purchased", stroke: "#2563eb", fill: "rgba(37, 99, 235, 0.15)" },
+        { label: "Consumed", stroke: "#b91c1c", fill: "rgba(185, 28, 28, 0.15)" },
+      ],
+      axes: [
+        // x is a period index, not a timestamp, so ticks are forced to whole
+        // numbers (incrs: [1]) and rendered back through `labels` — otherwise
+        // uPlot's default linear-axis tick chooser can land on fractional
+        // positions that have no corresponding period label.
+        { incrs: [1], values: (_u, splits) => splits.map((i) => labels[i] ?? "") },
+        {},
+      ],
+      scales: {
+        x: { time: false, range: rows.length > 1 ? [0, rows.length - 1] : [-0.5, 0.5] },
+      },
+    },
+    data,
+    turnoverChartContainer,
+  );
 }
 
 // checkItem runs the match-preview step: nothing is created or changed yet.

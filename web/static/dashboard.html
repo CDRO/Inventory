@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="/css/tokens.css">
   <link rel="stylesheet" href="/css/base.css">
   <link rel="stylesheet" href="/css/components.css">
+  <link rel="stylesheet" href="/vendor/uplot-1.6.31.min.css">
 </head>
 <body>
   <header class="shell row row--between">
@@ -70,6 +71,34 @@
         <button id="export-pdf" type="button" class="btn">Download PDF</button>
       </div>
     </section>
+
+    <h2>Analytics</h2>
+
+    <section class="card stat-tile">
+      <span id="analytics-total-items" class="stat-tile__value">—</span>
+      <span class="stat-tile__label">Total items stored</span>
+    </section>
+
+    <section class="stack">
+      <h3>Where things are</h3>
+      <div id="location-distribution" class="bar-chart card">
+        <p class="empty-state">Loading…</p>
+      </div>
+    </section>
+
+    <section class="stack">
+      <div class="row row--between">
+        <h3>Turnover</h3>
+        <select id="turnover-granularity">
+          <option value="month">By month</option>
+          <option value="week">By week</option>
+        </select>
+      </div>
+      <div class="card">
+        <div id="turnover-chart" class="turnover-chart"></div>
+        <p id="turnover-empty" class="empty-state" hidden>No purchases or consumption recorded yet.</p>
+      </div>
+    </section>
   </main>
 
   <template id="reorder-row-template">
@@ -84,6 +113,7 @@
        versions. jsPDF must load before its autotable plugin. -->
   <script src="/vendor/jspdf-2.5.1.umd.min.js"></script>
   <script src="/vendor/jspdf-autotable-3.8.4.umd.min.js"></script>
+  <script src="/vendor/uplot-1.6.31.iife.min.js"></script>
   <script type="module" src="/js/pages/dashboard.js"></script>
 </body>
 </html>

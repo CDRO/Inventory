@@ -137,6 +137,7 @@ type fakeAPI struct {
 	*fakeConsumeStore
 	*fakeProductStore
 	*fakeReorderStore
+	*fakeAnalyticsStore
 }
 
 // newFakeAPI builds the whole fake store around an auth fake, with every other
@@ -147,7 +148,7 @@ func newFakeAPI(auth *fakeAuth) fakeAPI {
 		fakeShoppingLists: &fakeShoppingLists{}, fakeExpiry: &fakeExpiry{},
 		fakeJobs: newFakeJobs(), fakeIdempotency: newFakeIdempotency(), fakeIngestStore: &fakeIngestStore{},
 		fakeConsumeStore: &fakeConsumeStore{}, fakeProductStore: &fakeProductStore{},
-		fakeReorderStore: &fakeReorderStore{},
+		fakeReorderStore: &fakeReorderStore{}, fakeAnalyticsStore: &fakeAnalyticsStore{},
 	}
 }
 
@@ -172,6 +173,7 @@ type apiFixture struct {
 	consumer  *fakeConsumer
 	products  *fakeProductStore
 	reorder   *fakeReorderStore
+	analytics *fakeAnalyticsStore
 	storageID uuid.UUID
 	user      *store.User
 	session   *store.Session
@@ -201,6 +203,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	consumer := &fakeConsumer{available: true}
 	products := &fakeProductStore{}
 	reorder := &fakeReorderStore{}
+	analytics := &fakeAnalyticsStore{}
 
 	router := httpapi.NewRouter(httpapi.Deps{
 		DB:     stubPinger{},
@@ -211,7 +214,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 			fakeBatches: batches, fakeShoppingLists: lists, fakeExpiry: expiry,
 			fakeJobs: jobs, fakeIdempotency: idem, fakeIngestStore: ingestStore,
 			fakeConsumeStore: consumeStore, fakeProductStore: products,
-			fakeReorderStore: reorder,
+			fakeReorderStore: reorder, fakeAnalyticsStore: analytics,
 		},
 		Matcher:    matcher,
 		Images:     images,
@@ -228,6 +231,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		matcher: matcher, images: images, imageData: imageData,
 		consume: consumeStore, consumer: consumer, products: products,
 		reorder:   reorder,
+		analytics: analytics,
 		storageID: storageID, user: user, session: session,
 	}
 }

@@ -83,6 +83,7 @@ type APIStore interface {
 	ConsumeStore
 	ProductStore
 	ReorderStore
+	AnalyticsStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -322,6 +323,11 @@ func NewRouter(d Deps) http.Handler {
 				sr.Post("/dashboard/reorder/items/match", reorder.Match)
 				sr.Post("/dashboard/reorder/items", reorder.AddItem)
 			}
+
+			// Reporting & analytics (docs/specs/11-reporting-and-analytics.md),
+			// sharing the dashboard page with the reorder widgets above.
+			analytics := NewAnalyticsHandler(d.Store, errs)
+			sr.Get("/dashboard/analytics", analytics.Dashboard)
 		})
 	}
 
