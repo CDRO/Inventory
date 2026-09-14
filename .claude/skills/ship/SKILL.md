@@ -50,6 +50,20 @@ exit code you did not see.
 
 Do not push a red suite; the test reviewer will block and the round is wasted.
 
+**If this session has no working local `docker compose`** (no daemon, no
+`CAP_NET_ADMIN` — see issue #48), there is no local suite to run before the
+first push. Use the `test` GitHub Actions workflow as a pre-PR fallback
+instead of skipping this step:
+
+```bash
+git push -u origin spec/<NN>-<slug>
+gh workflow run test.yml --ref spec/<NN>-<slug>
+gh run watch --exit-status   # blocks until the run finishes; non-zero = red
+```
+
+Slower than local Docker — each round-trip is a push and a runner boot — but
+it means a red suite is still caught before opening the PR, not after.
+
 ## 4. Open the PR
 
 ```bash

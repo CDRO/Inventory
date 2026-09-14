@@ -99,6 +99,21 @@ for this suite can start a Docker daemon locally — the `test` job on a
 GitHub-hosted runner is the fallback source of truth in that case, since it
 runs the identical command against a real daemon.
 
+The workflow also accepts `workflow_dispatch`, so the fallback is not limited
+to the post-PR review gate. A session with no local Docker can still develop:
+push the work-in-progress branch, then ask for a signal on it directly —
+
+```console
+$ git push -u origin <branch>
+$ gh workflow run test.yml --ref <branch>
+$ gh run watch --exit-status
+```
+
+This is slower than a local `docker compose run --rm app go test ./...` —
+each round-trip costs a push and a runner boot — so it is a fallback, not a
+replacement: use local Docker when it is available, and this loop only when
+it is not.
+
 ## Repository layout
 
 ```
