@@ -53,12 +53,21 @@ Do not push a red suite; the test reviewer will block and the round is wasted.
 **If this session has no working local `docker compose`** (no daemon, no
 `CAP_NET_ADMIN` — see issue #48), there is no local suite to run before the
 first push. Use the `test` GitHub Actions workflow as a pre-PR fallback
-instead of skipping this step:
+instead of skipping this step. `gh run watch` requires an explicit run id
+outside an interactive terminal — every agent session — so capture the
+dispatched run's id first:
 
 ```bash
 git push -u origin spec/<NN>-<slug>
 gh workflow run test.yml --ref spec/<NN>-<slug>
-gh run watch --exit-status   # blocks until the run finishes; non-zero = red
+RUN_ID=""
+for i in $(seq 1 10); do
+  RUN_ID=$(gh run list --workflow=test.yml --branch spec/<NN>-<slug> \
+    --event workflow_dispatch --limit 1 --json databaseId -q '.[0].databaseId')
+  [ -n "$RUN_ID" ] && break
+  sleep 3
+done
+gh run watch "$RUN_ID" --exit-status   # blocks until the run finishes; non-zero = red
 ```
 
 Slower than local Docker — each round-trip is a push and a runner boot — but

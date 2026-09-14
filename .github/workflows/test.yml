@@ -12,11 +12,20 @@
 # every push to it re-runs automatically). `workflow_dispatch` covers the
 # earlier implementation loop, before a PR exists: a session with no local
 # Docker can push a work-in-progress branch and ask for a signal on it
-# directly —
+# directly. `gh run watch` requires an explicit run id when not running in an
+# interactive terminal (every agent session), so capture the dispatched run's
+# id by polling `gh run list` before watching it —
 #
 #   git push -u origin <branch>
 #   gh workflow run test.yml --ref <branch>
-#   gh run watch --exit-status
+#   RUN_ID=""
+#   for i in $(seq 1 10); do
+#     RUN_ID=$(gh run list --workflow=test.yml --branch <branch> \
+#       --event workflow_dispatch --limit 1 --json databaseId -q '.[0].databaseId')
+#     [ -n "$RUN_ID" ] && break
+#     sleep 3
+#   done
+#   gh run watch "$RUN_ID" --exit-status
 #
 # — slower than a local `docker compose run`, but it keeps development
 # possible end to end without a working local daemon.
