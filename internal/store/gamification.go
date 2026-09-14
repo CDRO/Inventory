@@ -186,12 +186,7 @@ func mondayOf(t time.Time) time.Time {
 // pairs is small, and a failure partway through must not roll back progress
 // that was already correctly rebuilt for someone else.
 func (s *Store) RecomputeAllProgress(ctx context.Context) (int, error) {
-	events, err := s.allScoringEvents(ctx)
-	if err != nil {
-		return 0, err
-	}
-
-	stale, err := s.existingProgressPairs(ctx)
+	events, stale, err := s.loadRecomputeSnapshot(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -211,10 +206,41 @@ func (s *Store) RecomputeAllProgress(ctx context.Context) (int, error) {
 	return n, nil
 }
 
+// loadRecomputeSnapshot reads every scoring event and every existing
+// user_progress pair as of one consistent point in time.
+//
+// allScoringEvents and existingProgressPairs used to run as two independent
+// pool queries (and allScoringEvents itself issues two queries of its own).
+// Under READ COMMITTED, this project's default, a write landing in any of
+// those gaps — a user's very first scored action for a (storage, user)
+// pair, say — could have its bumpProgress commit land between them:
+// existingProgressPairs would then see the freshly created row, find no
+// matching entry in the events map captured a moment earlier, and reset it
+// to zero. REPEATABLE READ gives every statement in this one transaction the
+// same snapshot, closing the gap; it is read-only, so it never blocks a
+// concurrent writer and always commits cleanly.
+func (s *Store) loadRecomputeSnapshot(ctx context.Context) (map[progressPair][]gamification.Event, map[progressPair]bool, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, nil, fmt.Errorf("store: begin recompute snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	events, err := allScoringEvents(ctx, tx)
+	if err != nil {
+		return nil, nil, err
+	}
+	stale, err := existingProgressPairs(ctx, tx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return events, stale, nil
+}
+
 // existingProgressPairs returns every (storage, user) pair that currently has
 // a user_progress row, whether or not it still has any scoreable history.
-func (s *Store) existingProgressPairs(ctx context.Context) (map[progressPair]bool, error) {
-	rows, err := s.pool.Query(ctx, `SELECT storage_id, user_id FROM user_progress`)
+func existingProgressPairs(ctx context.Context, q querier) (map[progressPair]bool, error) {
+	rows, err := q.Query(ctx, `SELECT storage_id, user_id FROM user_progress`)
 	if err != nil {
 		return nil, fmt.Errorf("store: load existing progress pairs: %w", err)
 	}
@@ -244,10 +270,10 @@ type progressPair struct {
 // naturally sees only current data — see Coalesce's doc comment for why that
 // is also what makes "create-delete cycles earn nothing" hold without extra
 // bookkeeping.
-func (s *Store) allScoringEvents(ctx context.Context) (map[progressPair][]gamification.Event, error) {
+func allScoringEvents(ctx context.Context, q querier) (map[progressPair][]gamification.Event, error) {
 	out := map[progressPair][]gamification.Event{}
 
-	ledgerRows, err := s.pool.Query(ctx, `
+	ledgerRows, err := q.Query(ctx, `
 		SELECT p.storage_id, l.created_by, l.product_id, l.reason, l.timestamp
 		  FROM inventory_logs l
 		  JOIN products p ON p.id = l.product_id
@@ -277,7 +303,7 @@ func (s *Store) allScoringEvents(ctx context.Context) (map[progressPair][]gamifi
 	}
 	ledgerRows.Close()
 
-	contribRows, err := s.pool.Query(ctx, `
+	contribRows, err := q.Query(ctx, `
 		SELECT id, storage_id, user_id, kind, ref_id, created_at FROM contribution_events`)
 	if err != nil {
 		return nil, fmt.Errorf("store: load contribution events: %w", err)

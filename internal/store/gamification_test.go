@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -363,6 +364,51 @@ func TestRecomputeAllProgressRebuildsFromScratch(t *testing.T) {
 	require.True(t, found, "recompute must recreate the row, not just refuse to delete it")
 	assert.Equal(t, before, after, "recompute from scratch must reach the same total the live path reached")
 	assert.Equal(t, gamification.Level(after), level)
+}
+
+// TestRecomputeSnapshotIsolationIsConsistent proves the mechanism issue #52
+// finding 2 relies on. RecomputeAllProgress used to read allScoringEvents
+// and existingProgressPairs as two independent pool queries under READ
+// COMMITTED (this project's default): a write landing between them — a
+// user's very first scored action for a (storage, user) pair, committing
+// exactly in that gap — would make existingProgressPairs see a row
+// allScoringEvents never had a chance to score, resetting it to zero.
+// loadRecomputeSnapshot now runs both reads inside one REPEATABLE READ,
+// read-only transaction instead, which is unexported and so not callable
+// directly from this package — this test exercises the same isolation level
+// and query shape it relies on: open a REPEATABLE READ, read-only
+// transaction, run one query, commit a write from a second connection, then
+// run a second query in the SAME transaction and confirm it still can't see
+// the write. That guarantee is what makes loadRecomputeSnapshot race-free.
+func TestRecomputeSnapshotIsolationIsConsistent(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	userID := newUser(t, ctx)
+
+	snapshotTx, err := testPool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	require.NoError(t, err)
+	defer func() { _ = snapshotTx.Rollback(ctx) }()
+
+	var before int
+	require.NoError(t, snapshotTx.QueryRow(ctx,
+		`SELECT count(*) FROM user_progress WHERE storage_id = $1 AND user_id = $2`,
+		storageID, userID).Scan(&before))
+	require.Equal(t, 0, before)
+
+	// A concurrent write, committed on a separate connection — the gap
+	// between the snapshot's two reads, where the race used to live.
+	_, err = execTest(ctx,
+		`INSERT INTO user_progress (storage_id, user_id, xp) VALUES ($1, $2, 100)`,
+		storageID, userID)
+	require.NoError(t, err)
+
+	var after int
+	require.NoError(t, snapshotTx.QueryRow(ctx,
+		`SELECT count(*) FROM user_progress WHERE storage_id = $1 AND user_id = $2`,
+		storageID, userID).Scan(&after))
+	assert.Equal(t, 0, after,
+		"a REPEATABLE READ transaction must not see a write committed after it began, even in a later statement")
 }
 
 // TestRecomputeAllProgressAppliesCoalescing is what actually distinguishes
