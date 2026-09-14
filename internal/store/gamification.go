@@ -93,7 +93,7 @@ func recordContribution(ctx context.Context, tx pgx.Tx, storageID, userID uuid.U
 	if err := bumpProgress(ctx, tx, storageID, userID, gamification.XPForContribution(kind), time.Now()); err != nil {
 		return err
 	}
-	if err := advanceQuests(ctx, tx, storageID, userID, string(kind)); err != nil {
+	if err := advanceQuests(ctx, tx, storageID, userID, string(kind), refID); err != nil {
 		return err
 	}
 	return evaluateContributionAchievements(ctx, tx, storageID, userID, kind, refID)
@@ -112,7 +112,12 @@ func recordContribution(ctx context.Context, tx pgx.Tx, storageID, userID uuid.U
 // therefore optimistic — it assumes this contribution is new — and may be
 // revised slightly downward at the next recompute, never upward and never
 // framed as a loss (docs/specs/51-gamification-scoring.md).
-func bumpForLedgerReason(ctx context.Context, tx pgx.Tx, storageID uuid.UUID, userID *uuid.UUID, reason LogReason) error {
+//
+// batchID is the write's own target, passed through to advanceQuests so it
+// can narrow quest-contributor credit to the batch ids actually frozen into
+// a quest's params at generation time (#54 finding 2), rather than crediting
+// any write of a relevant reason.
+func bumpForLedgerReason(ctx context.Context, tx pgx.Tx, storageID uuid.UUID, userID *uuid.UUID, reason LogReason, batchID uuid.UUID) error {
 	if userID == nil {
 		return nil
 	}
@@ -123,7 +128,7 @@ func bumpForLedgerReason(ctx context.Context, tx pgx.Tx, storageID uuid.UUID, us
 	if err := bumpProgress(ctx, tx, storageID, *userID, xp, time.Now()); err != nil {
 		return err
 	}
-	return advanceQuests(ctx, tx, storageID, *userID, string(reason))
+	return advanceQuests(ctx, tx, storageID, *userID, string(reason), &batchID)
 }
 
 // bumpProgress increments a user's cached XP and recomputes their level and

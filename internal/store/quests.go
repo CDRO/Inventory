@@ -570,6 +570,40 @@ func questProgress(ctx context.Context, q querier, storageID uuid.UUID, quest Qu
 	}
 }
 
+// questTargetQualifies reports whether targetID is a qualifying action for
+// generator, checked against the exact ids frozen into quest.Params at
+// generation time rather than generator relevance alone (#54 finding 2).
+// A product that was never in a quest's candidate set — because it already
+// had a category, say, before the quest generated — must not credit
+// whoever touches it next as having contributed to that quest, even though
+// the write is the right kind.
+//
+// Only the five id-list-shaped generators (see idListParams) are narrowed
+// this way; the others have no single-id concept for this package's
+// batch/product ids to match against and keep matching on kind alone,
+// same as before this check existed.
+func questTargetQualifies(generator gamification.GeneratorKind, rawParams json.RawMessage, targetID *uuid.UUID) bool {
+	switch generator {
+	case gamification.GeneratorMissingExpiry, gamification.GeneratorUncategorized,
+		gamification.GeneratorImageless, gamification.GeneratorUntrackedReorder, gamification.GeneratorExpiringSoon:
+		if targetID == nil {
+			return false
+		}
+		var params idListParams
+		if err := json.Unmarshal(rawParams, &params); err != nil {
+			return false
+		}
+		for _, id := range params.IDs {
+			if id == *targetID {
+				return true
+			}
+		}
+		return false
+	default:
+		return true
+	}
+}
+
 func countMatching(ctx context.Context, q querier, rawParams json.RawMessage, query string) (int, error) {
 	var params idListParams
 	if err := json.Unmarshal(rawParams, &params); err != nil {
@@ -582,16 +616,17 @@ func countMatching(ctx context.Context, q querier, rawParams json.RawMessage, qu
 	return n, nil
 }
 
-// questRelevantGenerators is the coarse kind/reason → generator relevance map
+// questRelevantGenerators is the kind/reason → generator relevance map
 // advanceQuests uses to decide which active quests a given write could
-// plausibly advance. This is a deliberate simplification of "a qualifying
-// action is any event the quest's progress counter counted"
-// (docs/specs/52-gamification-quests-and-ui.md): rather than threading each
-// write's exact target id through to quest matching, any write of a kind
-// that generator cares about counts as an attempt, and questProgress above
-// is the actual source of truth for whether the quest is complete. See the
-// PR description for the follow-up that would tighten this to per-id
-// matching.
+// plausibly advance — a first, coarse filter. questTargetQualifies below
+// narrows further, to the write's exact target id, for the five generators
+// whose quest.Params freezes a set of product or batch ids at generation
+// time (missing_expiry, uncategorized, imageless, untracked_reorder,
+// expiring_soon). The other three — consumption_hygiene and first_mile
+// (no single qualifying id at all: a storage-wide "any consumption logged"
+// and a running product count, respectively) and stale_location (keyed on
+// a location id, a different id space than the batch/product id this
+// package threads through) — still match on kind alone, unchanged.
 var questRelevantGenerators = map[string][]gamification.GeneratorKind{
 	string(ReasonPurchase):                   {gamification.GeneratorFirstMile, gamification.GeneratorStaleLocation},
 	string(ReasonVisionIngestion):            {gamification.GeneratorFirstMile, gamification.GeneratorStaleLocation},
@@ -601,13 +636,14 @@ var questRelevantGenerators = map[string][]gamification.GeneratorKind{
 	string(gamification.KindLocationMapped):  {gamification.GeneratorStaleLocation},
 }
 
-// advanceQuests re-checks every active quest this coarse write kind is
-// relevant to, records userID as a contributor, and pays out on completion.
-// Called from recordContribution and bumpForLedgerReason — the two seams
-// every scoring-relevant write already funnels through
+// advanceQuests re-checks every active quest this write's kind is relevant
+// to, records userID as a contributor when targetID actually qualifies (see
+// questTargetQualifies), and pays out on completion. Called from
+// recordContribution and bumpForLedgerReason — the two seams every
+// scoring-relevant write already funnels through
 // (docs/specs/51-gamification-scoring.md) — so no additional call sites are
 // needed at the individual write paths.
-func advanceQuests(ctx context.Context, tx pgx.Tx, storageID, userID uuid.UUID, kind string) error {
+func advanceQuests(ctx context.Context, tx pgx.Tx, storageID, userID uuid.UUID, kind string, targetID *uuid.UUID) error {
 	generators := questRelevantGenerators[kind]
 	if len(generators) == 0 {
 		return nil
@@ -631,6 +667,10 @@ func advanceQuests(ctx context.Context, tx pgx.Tx, storageID, userID uuid.UUID, 
 			return fmt.Errorf("store: lock active quest: %w", err)
 		}
 		quest.Generator = gamification.GeneratorKind(generatorStr)
+
+		if !questTargetQualifies(quest.Generator, quest.Params, targetID) {
+			continue
+		}
 
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO quest_contributors (quest_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
