@@ -576,3 +576,128 @@ func TestRefilingToNoCategoryFallsBackToItemType(t *testing.T) {
 	expected := batch.CreatedAt.UTC().Truncate(24*time.Hour).AddDate(0, 0, 7)
 	assert.Equal(t, expected.Format(time.DateOnly), date.Format(time.DateOnly))
 }
+
+// TestSetProductCategoryRecomputeIsAtomic is the regression issue #35 asked
+// for. SetProductCategory's doc comment and commit message both assert the
+// category UPDATE and the expiry recompute commit or roll back together,
+// but nothing tested it: review-tests demonstrated that moving the recompute
+// into a separate, later transaction still left every re-file test above
+// green, because they only assert final state.
+//
+// This forces the recompute to fail — via real lock contention on the batch
+// row it needs to update, from a second connection, with a context deadline
+// short enough that SetProductCategory times out while blocked — after the
+// category UPDATE has already run inside the same transaction. If that
+// UPDATE were in its own, separate transaction (the regression this guards
+// against), it would already be committed by the time the recompute fails,
+// and the category would end up changed despite the error. Genuine
+// atomicity means the whole transaction rolls back, so the category must
+// still read as the old one.
+func TestSetProductCategoryRecomputeIsAtomic(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID, productID, locationID, food, dairy := expiryFixture(t, ctx, s)
+
+	canned, err := s.CreateCategory(ctx, storageID, store.NewCategory{
+		Name: "Canned", ParentID: &food, DefaultShelfLifeDays: shelfLife(730),
+	})
+	require.NoError(t, err)
+
+	batch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: productID, LocationID: locationID, Quantity: 1,
+		Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+	originalDate, _ := batchExpiry(t, ctx, batch.ID)
+	require.NotNil(t, originalDate)
+
+	lockTx, err := testPool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = lockTx.Rollback(ctx) }()
+	_, err = lockTx.Exec(ctx, `SELECT id FROM inventory_batches WHERE id = $1 FOR UPDATE`, batch.ID)
+	require.NoError(t, err)
+
+	shortCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	err = s.SetProductCategory(shortCtx, storageID, productID, &canned.ID)
+	require.Error(t, err, "the recompute must fail while another transaction holds the batch's row lock")
+
+	require.NoError(t, lockTx.Rollback(ctx), "release the lock")
+
+	var gotCategory uuid.UUID
+	require.NoError(t, testPool.QueryRow(ctx,
+		`SELECT category_id FROM products WHERE id = $1`, productID).Scan(&gotCategory))
+	assert.Equal(t, dairy, gotCategory,
+		"the category change must have rolled back with the failed recompute, not committed on its own")
+
+	date, _ := batchExpiry(t, ctx, batch.ID)
+	require.NotNil(t, date)
+	assert.Equal(t, originalDate.Format(time.DateOnly), date.Format(time.DateOnly),
+		"the batch's date must be unchanged too — both halves roll back together or not at all")
+}
+
+// TestRecomputeDerivedExpiryForCategoryCascadeIsRecoverable tests and locks
+// in the decision issue #35 records for the category cascade's per-product
+// transactions: a partial cascade on failure is accepted rather than fixed,
+// because it is recoverable — re-running the cascade converges, since each
+// product's recompute is idempotent. This proves that rather than leaving it
+// asserted only in a comment: forces one product's recompute to fail via
+// real lock contention, confirms the cascade surfaces the error rather than
+// silently finishing, then re-runs it with no contention and confirms every
+// product ends up on the new rule regardless of how far the failed run got.
+func TestRecomputeDerivedExpiryForCategoryCascadeIsRecoverable(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+
+	category, err := s.CreateCategory(ctx, storageID, store.NewCategory{
+		Name: "Pantry", DefaultShelfLifeDays: shelfLife(10),
+	})
+	require.NoError(t, err)
+	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Shelf"})
+	require.NoError(t, err)
+
+	firstProduct, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Beans", CategoryID: &category.ID})
+	require.NoError(t, err)
+	firstBatch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: firstProduct.ID, LocationID: location.ID, Quantity: 1, Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+
+	secondProduct, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Rice", CategoryID: &category.ID})
+	require.NoError(t, err)
+	secondBatch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: secondProduct.ID, LocationID: location.ID, Quantity: 1, Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, s.SetCategoryShelfLife(ctx, storageID, category.ID, shelfLife(730)))
+
+	// Lock the second product's batch so its recompute fails, regardless of
+	// which of the two products the cascade happens to visit first.
+	lockTx, err := testPool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = lockTx.Rollback(ctx) }()
+	_, err = lockTx.Exec(ctx, `SELECT id FROM inventory_batches WHERE id = $1 FOR UPDATE`, secondBatch.ID)
+	require.NoError(t, err)
+
+	shortCtx, cancel := context.WithTimeout(ctx, time.Second)
+	_, err = s.RecomputeDerivedExpiryForCategory(shortCtx, storageID, category.ID)
+	cancel()
+	require.Error(t, err, "the cascade must surface the failure, not silently skip the locked product")
+
+	require.NoError(t, lockTx.Rollback(ctx), "release the lock")
+
+	_, err = s.RecomputeDerivedExpiryForCategory(ctx, storageID, category.ID)
+	require.NoError(t, err, "re-running with no contention must converge")
+
+	expected := firstBatch.CreatedAt.UTC().Truncate(24*time.Hour).AddDate(0, 0, 730).Format(time.DateOnly)
+	for _, b := range []struct {
+		name string
+		id   uuid.UUID
+	}{{"first", firstBatch.ID}, {"second", secondBatch.ID}} {
+		date, _ := batchExpiry(t, ctx, b.id)
+		require.NotNil(t, date, "%s product's batch", b.name)
+		assert.Equal(t, expected, date.Format(time.DateOnly), "%s product's batch", b.name)
+	}
+}
