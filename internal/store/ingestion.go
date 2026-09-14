@@ -134,7 +134,7 @@ func (s *Store) ConfirmIngestion(ctx context.Context, storageID, jobID uuid.UUID
 			// truthful (docs/specs/51-gamification-scoring.md).
 			if userID != nil {
 				if proposed, hadExactMatch := proposedProducts[d.RowID]; hadExactMatch && proposed != productID {
-					if err := recordContribution(ctx, tx, storageID, *userID, gamification.KindAICorrection, &productID); err != nil {
+					if err := recordContribution(ctx, tx, storageID, *userID, gamification.KindAICorrection, &productID, nil); err != nil {
 						return err
 					}
 				}

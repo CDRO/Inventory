@@ -618,21 +618,29 @@ func countMatching(ctx context.Context, q querier, rawParams json.RawMessage, qu
 
 // questRelevantGenerators is the kind/reason → generator relevance map
 // advanceQuests uses to decide which active quests a given write could
-// plausibly advance — a first, coarse filter. questTargetQualifies below
-// narrows further, to the write's exact target id, for the five generators
-// whose quest.Params freezes a set of product or batch ids at generation
-// time (missing_expiry, uncategorized, imageless, untracked_reorder,
-// expiring_soon). The other three — consumption_hygiene and first_mile
-// (no single qualifying id at all: a storage-wide "any consumption logged"
-// and a running product count, respectively) and stale_location (keyed on
-// a location id, a different id space than the batch/product id this
-// package threads through) — still match on kind alone, unchanged.
+// plausibly advance — a first, coarse filter, for kinds where every write
+// of that kind really is relevant to every listed generator at once (a
+// purchase genuinely bears on both first_mile and stale_location).
+// questTargetQualifies below narrows further, to the write's exact target
+// id, for the generators whose quest.Params freezes a set of product or
+// batch ids at generation time.
+//
+// metadata_filled is deliberately absent: filling in a category, an image,
+// and a min_stock threshold all record that identical kind with an
+// identical product-id refID, but they are three different quest progress
+// counters (uncategorized, imageless, untracked_reorder). A product frozen
+// into more than one of their candidate sets — the common case for
+// anything freshly created — would let an edit to one field wrongly credit
+// a contributor toward a generator its write never advanced, if routed
+// through this kind-based map and narrowed by id alone. Each of the three
+// call sites (products.go, reorder.go) instead calls
+// advanceQuestForGenerator directly, naming the one generator it actually
+// means.
 var questRelevantGenerators = map[string][]gamification.GeneratorKind{
 	string(ReasonPurchase):                   {gamification.GeneratorFirstMile, gamification.GeneratorStaleLocation},
 	string(ReasonVisionIngestion):            {gamification.GeneratorFirstMile, gamification.GeneratorStaleLocation},
 	string(ReasonConsumption):                {gamification.GeneratorConsumptionHygiene, gamification.GeneratorExpiringSoon},
 	string(gamification.KindExpiryConfirmed): {gamification.GeneratorMissingExpiry},
-	string(gamification.KindMetadataFilled):  {gamification.GeneratorUncategorized, gamification.GeneratorImageless, gamification.GeneratorUntrackedReorder},
 	string(gamification.KindLocationMapped):  {gamification.GeneratorStaleLocation},
 }
 
@@ -644,80 +652,105 @@ var questRelevantGenerators = map[string][]gamification.GeneratorKind{
 // (docs/specs/51-gamification-scoring.md) — so no additional call sites are
 // needed at the individual write paths.
 func advanceQuests(ctx context.Context, tx pgx.Tx, storageID, userID uuid.UUID, kind string, targetID *uuid.UUID) error {
-	generators := questRelevantGenerators[kind]
-	if len(generators) == 0 {
+	for _, generator := range questRelevantGenerators[kind] {
+		if err := advanceOneQuest(ctx, tx, storageID, userID, generator, targetID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// advanceQuestForGenerator is advanceQuests for a single, explicit
+// generator, bypassing questRelevantGenerators' kind-based lookup entirely.
+//
+// It exists for contribution kinds that fan out to more than one generator
+// under questRelevantGenerators but where a given write is only ever
+// relevant to exactly one of them — metadata_filled being the case that
+// forced this: filling a category, an image, and a min_stock threshold all
+// record the identical kind with the identical product-id refID, but they
+// are three different quest progress counters
+// (docs/specs/52-gamification-quests-and-ui.md). Routing all three through
+// the kind-based map and relying on questTargetQualifies' id check alone is
+// not enough to tell them apart — a product frozen into more than one of
+// their candidate sets at generation time (the common case for anything
+// freshly created) would otherwise credit a contributor toward a generator
+// its write never actually advanced.
+func advanceQuestForGenerator(ctx context.Context, tx pgx.Tx, storageID, userID uuid.UUID, generator gamification.GeneratorKind, targetID *uuid.UUID) error {
+	return advanceOneQuest(ctx, tx, storageID, userID, generator, targetID)
+}
+
+// advanceOneQuest re-checks one active quest, records userID as a
+// contributor when targetID actually qualifies (see questTargetQualifies),
+// and pays out on completion.
+func advanceOneQuest(ctx context.Context, tx pgx.Tx, storageID, userID uuid.UUID, generator gamification.GeneratorKind, targetID *uuid.UUID) error {
+	weekStart := mondayOf(time.Now())
+
+	var quest Quest
+	var generatorStr string
+	err := tx.QueryRow(ctx, `
+		SELECT id, storage_id, week_start, generator, params, target_count, xp_reward, completed_at
+		  FROM quests
+		 WHERE storage_id = $1 AND week_start = $2 AND generator = $3 AND completed_at IS NULL
+		 FOR UPDATE`,
+		storageID, weekStart, string(generator)).Scan(
+		&quest.ID, &quest.StorageID, &quest.WeekStart, &generatorStr, &quest.Params, &quest.TargetCount, &quest.XPReward, &quest.CompletedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("store: lock active quest: %w", err)
+	}
+	quest.Generator = gamification.GeneratorKind(generatorStr)
+
+	if !questTargetQualifies(quest.Generator, quest.Params, targetID) {
 		return nil
 	}
 
-	weekStart := mondayOf(time.Now())
-	for _, generator := range generators {
-		var quest Quest
-		var generatorStr string
-		err := tx.QueryRow(ctx, `
-			SELECT id, storage_id, week_start, generator, params, target_count, xp_reward, completed_at
-			  FROM quests
-			 WHERE storage_id = $1 AND week_start = $2 AND generator = $3 AND completed_at IS NULL
-			 FOR UPDATE`,
-			storageID, weekStart, string(generator)).Scan(
-			&quest.ID, &quest.StorageID, &quest.WeekStart, &generatorStr, &quest.Params, &quest.TargetCount, &quest.XPReward, &quest.CompletedAt)
-		if errors.Is(err, pgx.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("store: lock active quest: %w", err)
-		}
-		quest.Generator = gamification.GeneratorKind(generatorStr)
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO quest_contributors (quest_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+		quest.ID, userID); err != nil {
+		return fmt.Errorf("store: record quest contributor: %w", err)
+	}
 
-		if !questTargetQualifies(quest.Generator, quest.Params, targetID) {
-			continue
-		}
+	progress, err := questProgress(ctx, tx, storageID, quest)
+	if err != nil {
+		return err
+	}
+	if progress < quest.TargetCount {
+		return nil
+	}
 
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO quest_contributors (quest_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-			quest.ID, userID); err != nil {
-			return fmt.Errorf("store: record quest contributor: %w", err)
-		}
+	tag, err := tx.Exec(ctx, `
+		UPDATE quests SET completed_at = now() WHERE id = $1 AND completed_at IS NULL`, quest.ID)
+	if err != nil {
+		return fmt.Errorf("store: complete quest: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil // another concurrent write completed it first
+	}
 
-		progress, err := questProgress(ctx, tx, storageID, quest)
-		if err != nil {
-			return err
-		}
-		if progress < quest.TargetCount {
-			continue
-		}
-
-		tag, err := tx.Exec(ctx, `
-			UPDATE quests SET completed_at = now() WHERE id = $1 AND completed_at IS NULL`, quest.ID)
-		if err != nil {
-			return fmt.Errorf("store: complete quest: %w", err)
-		}
-		if tag.RowsAffected() == 0 {
-			continue // another concurrent write completed it first
-		}
-
-		contributors, err := tx.Query(ctx, `SELECT user_id FROM quest_contributors WHERE quest_id = $1`, quest.ID)
-		if err != nil {
-			return fmt.Errorf("store: load quest contributors: %w", err)
-		}
-		var contributorIDs []uuid.UUID
-		for contributors.Next() {
-			var id uuid.UUID
-			if err := contributors.Scan(&id); err != nil {
-				contributors.Close()
-				return fmt.Errorf("store: scan quest contributor: %w", err)
-			}
-			contributorIDs = append(contributorIDs, id)
-		}
-		if err := contributors.Err(); err != nil {
+	contributors, err := tx.Query(ctx, `SELECT user_id FROM quest_contributors WHERE quest_id = $1`, quest.ID)
+	if err != nil {
+		return fmt.Errorf("store: load quest contributors: %w", err)
+	}
+	var contributorIDs []uuid.UUID
+	for contributors.Next() {
+		var id uuid.UUID
+		if err := contributors.Scan(&id); err != nil {
 			contributors.Close()
-			return fmt.Errorf("store: load quest contributors: %w", err)
+			return fmt.Errorf("store: scan quest contributor: %w", err)
 		}
+		contributorIDs = append(contributorIDs, id)
+	}
+	if err := contributors.Err(); err != nil {
 		contributors.Close()
+		return fmt.Errorf("store: load quest contributors: %w", err)
+	}
+	contributors.Close()
 
-		for _, contributorID := range contributorIDs {
-			if err := bumpProgress(ctx, tx, storageID, contributorID, quest.XPReward, time.Now()); err != nil {
-				return err
-			}
+	for _, contributorID := range contributorIDs {
+		if err := bumpProgress(ctx, tx, storageID, contributorID, quest.XPReward, time.Now()); err != nil {
+			return err
 		}
 	}
 	return nil

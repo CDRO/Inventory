@@ -283,7 +283,7 @@ func (s *Store) SetBatchExpiration(ctx context.Context, storageID, batchID uuid.
 		out = batch
 
 		if userID != nil {
-			if err := recordContribution(ctx, tx, storageID, *userID, gamification.KindExpiryConfirmed, &batch.ID); err != nil {
+			if err := recordContribution(ctx, tx, storageID, *userID, gamification.KindExpiryConfirmed, &batch.ID, nil); err != nil {
 				return err
 			}
 		}

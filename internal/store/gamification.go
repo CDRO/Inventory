@@ -79,7 +79,14 @@ type StorageGamificationSettings struct {
 // Unexported and tx-scoped like writeLog: the callers are the specific,
 // reviewed integration points in ingestion.go, shoppinglists.go, reorder.go,
 // expiry.go and locations.go, each already inside its own transaction.
-func recordContribution(ctx context.Context, tx pgx.Tx, storageID, userID uuid.UUID, kind gamification.ContributionKind, refID *uuid.UUID) error {
+// generator, when non-nil, routes quest-advancement through
+// advanceQuestForGenerator instead of the kind-based questRelevantGenerators
+// lookup — required for gamification.KindMetadataFilled, whose three call
+// sites (a category, an image, a min_stock threshold) share one kind and
+// one product-id refID but mean three different quest generators (see
+// questRelevantGenerators' doc comment). Every other kind passes nil and
+// gets the ordinary kind-based routing.
+func recordContribution(ctx context.Context, tx pgx.Tx, storageID, userID uuid.UUID, kind gamification.ContributionKind, refID *uuid.UUID, generator *gamification.GeneratorKind) error {
 	id, err := newID()
 	if err != nil {
 		return err
@@ -93,7 +100,11 @@ func recordContribution(ctx context.Context, tx pgx.Tx, storageID, userID uuid.U
 	if err := bumpProgress(ctx, tx, storageID, userID, gamification.XPForContribution(kind), time.Now()); err != nil {
 		return err
 	}
-	if err := advanceQuests(ctx, tx, storageID, userID, string(kind), refID); err != nil {
+	if generator != nil {
+		if err := advanceQuestForGenerator(ctx, tx, storageID, userID, *generator, refID); err != nil {
+			return err
+		}
+	} else if err := advanceQuests(ctx, tx, storageID, userID, string(kind), refID); err != nil {
 		return err
 	}
 	return evaluateContributionAchievements(ctx, tx, storageID, userID, kind, refID)
@@ -232,12 +243,26 @@ func (s *Store) loadRecomputeSnapshot(ctx context.Context) (map[progressPair][]g
 	if err != nil {
 		return nil, nil, err
 	}
+	if recomputeSnapshotSync != nil {
+		recomputeSnapshotSync()
+	}
 	stale, err := existingProgressPairs(ctx, tx)
 	if err != nil {
 		return nil, nil, err
 	}
 	return events, stale, nil
 }
+
+// recomputeSnapshotSync, when non-nil, runs synchronously between
+// loadRecomputeSnapshot's two reads — always nil outside this package's own
+// tests. It exists so TestRecomputeAllProgressIsolatesAgainstAConcurrentWrite
+// (gamification_internal_test.go) can land a real concurrent write inside
+// the exact gap the REPEATABLE READ fix closes and prove the guarantee
+// through the real RecomputeAllProgress call path, deterministically,
+// rather than timing a goroutine against it — Postgres reads never block on
+// another transaction's locks, so there is no lock-contention equivalent of
+// the #35-style tests for this one.
+var recomputeSnapshotSync func()
 
 // existingProgressPairs returns every (storage, user) pair that currently has
 // a user_progress row, whether or not it still has any scoreable history.

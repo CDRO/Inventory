@@ -78,7 +78,7 @@ func (s *Store) CreateLocationAsUser(ctx context.Context, storageID uuid.UUID, i
 			return err
 		}
 		out = loc
-		return recordContribution(ctx, tx, storageID, userID, gamification.KindLocationMapped, &loc.ID)
+		return recordContribution(ctx, tx, storageID, userID, gamification.KindLocationMapped, &loc.ID, nil)
 	})
 	if err != nil {
 		return nil, err

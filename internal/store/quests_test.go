@@ -277,6 +277,64 @@ func TestAdvanceQuestsIgnoresATargetNotInTheQuestsCandidateSet(t *testing.T) {
 	assert.Equal(t, 0, contributorCount, "a product outside the quest's frozen candidate set must not credit a contributor")
 }
 
+// TestAdvanceQuestsCreditsOnlyTheGeneratorTheFieldActuallyAdvanced is the
+// regression review-go asked for on #54 finding 2's first fix: a product
+// with no category, no image, and no min_stock qualifies for all three of
+// uncategorized, imageless and untracked_reorder at once, and every one of
+// those three fills records the identical metadata_filled kind with the
+// identical product-id refID. Narrowing quest-contributor credit by id
+// alone (questTargetQualifies) is not enough to tell them apart: filling in
+// only the category must not also credit imageless or untracked_reorder,
+// even though the product id qualifies for both of those quests' frozen
+// candidate sets too.
+func TestAdvanceQuestsCreditsOnlyTheGeneratorTheFieldActuallyAdvanced(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	category, err := s.CreateCategory(ctx, storageID, store.NewCategory{Name: "Staples"})
+	require.NoError(t, err)
+
+	// Five products with no category, no image, and no min_stock — each
+	// qualifies for uncategorized, imageless, and untracked_reorder at once.
+	var blank []uuid.UUID
+	for i := 0; i < 5; i++ {
+		p, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Blank item", ItemType: store.ItemNonPerishable})
+		require.NoError(t, err)
+		blank = append(blank, p.ID)
+	}
+	// Five more, fully specified, so first_mile does not also fire.
+	for i := 0; i < 5; i++ {
+		_, err := s.CreateProduct(ctx, storageID, store.NewProduct{
+			Name: "Fine item", CategoryID: &category.ID, ItemType: store.ItemNonPerishable,
+			MinStock: 1, IconName: ptrString("box"),
+		})
+		require.NoError(t, err)
+	}
+
+	holidayMember := newUser(t, ctx)
+	require.NoError(t, s.AddMember(ctx, storageID, holidayMember))
+	insertHolidayWeek(t, ctx, holidayMember, mostRecentMonday(t, time.Now()))
+
+	require.NoError(t, s.GenerateWeeklyQuests(ctx, storageID, time.Now()))
+	require.Equal(t, 3, countQuests(t, ctx, storageID),
+		"uncategorized, imageless and untracked_reorder must all fire — the scenario this test needs")
+
+	alice := newUser(t, ctx)
+	require.NoError(t, s.AddMember(ctx, storageID, alice))
+	require.NoError(t, s.SetProductCategoryAsUser(ctx, storageID, blank[0], &category.ID, alice))
+
+	isContributor := func(generator string) bool {
+		return countRows(t, ctx, `
+			SELECT count(*) FROM quest_contributors qc
+			  JOIN quests q ON q.id = qc.quest_id
+			 WHERE q.storage_id = $1 AND q.generator = $2 AND qc.user_id = $3`,
+			storageID, generator, alice) > 0
+	}
+	assert.True(t, isContributor("uncategorized"), "the field she actually filled")
+	assert.False(t, isContributor("imageless"), "she never touched the image")
+	assert.False(t, isContributor("untracked_reorder"), "she never touched min_stock")
+}
+
 // TestQuestsForStorageIsComebackAfterAGap: quests reappearing after two
 // consecutive all-clear weeks must be flagged as a comeback
 // (docs/specs/52-gamification-quests-and-ui.md's "coming back from a quiet

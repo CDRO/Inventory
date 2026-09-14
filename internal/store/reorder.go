@@ -129,7 +129,8 @@ func (s *Store) UpdateProductMinStockAsUser(ctx context.Context, storageID, id u
 		out = product
 
 		if previous == 0 && minStock > 0 {
-			return recordContribution(ctx, tx, storageID, userID, gamification.KindMetadataFilled, &id)
+			generator := gamification.GeneratorUntrackedReorder
+			return recordContribution(ctx, tx, storageID, userID, gamification.KindMetadataFilled, &id, &generator)
 		}
 		return nil
 	})
