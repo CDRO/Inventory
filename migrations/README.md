@@ -45,7 +45,3 @@ has run on the NAS must never be edited, only superseded. The application
 supplies every `id` as a UUIDv7 (`uuid.NewV7`), so new tables declare
 `id UUID PRIMARY KEY` with **no** default: a missing id has to fail loudly
 rather than fall back to a random v4 that breaks index locality.
-
-Note that `migrate status` currently prints nothing — goose reports it through
-a logger the application sets to a no-op. Tracked separately; `migrate up`
-itself is unaffected.

@@ -28,7 +28,22 @@ import (
 var candidateDirs = []string{"/migrations", "migrations"}
 
 // Run applies action ("up", "down", "status", "version") against dsn.
-func Run(ctx context.Context, dsn, action string, out io.Writer) error {
+func Run(ctx context.Context, dsn, action string, out io.Writer) (err error) {
+	// goose reports "status" and "version" through its Logger, not through a
+	// return value, so a Logger that discards output (goose.NopLogger, the
+	// previous setting here) makes both subcommands silent. fatalLogger fixes
+	// that by writing Printf output to out, and additionally turns Fatalf into
+	// a panic this function recovers into a real error: goose's own default
+	// logger calls os.Exit(1) from Fatalf, and every internal caller of it
+	// assumes the process stops right there. A Logger that only prints from
+	// Fatalf — the obvious naive fix — would let a Fatalf-worthy failure
+	// return nil, meaning a failed `migrate up` could report success. No
+	// caller in the pinned goose version reaches Fatalf today (Up, Status and
+	// Version all fail through returned errors instead), but the interface
+	// exists and a future goose upgrade must not silently regress this
+	// guarantee.
+	defer recoverFatal(&err)
+
 	dir, err := resolveDir()
 	if err != nil {
 		return err
@@ -59,7 +74,7 @@ func Run(ctx context.Context, dsn, action string, out io.Writer) error {
 	if err := goose.SetDialect("postgres"); err != nil {
 		return fmt.Errorf("migrate: set dialect: %w", err)
 	}
-	goose.SetLogger(goose.NopLogger())
+	goose.SetLogger(&fatalLogger{out: out})
 
 	switch action {
 	case "up":
@@ -84,6 +99,40 @@ func Run(ctx context.Context, dsn, action string, out io.Writer) error {
 		return fmt.Errorf("migrate: unknown action %q (want up, down, status or version)", action)
 	}
 	return nil
+}
+
+// fatalLog carries a goose Logger.Fatalf message across the panic/recover
+// boundary in Run.
+type fatalLog string
+
+// fatalLogger implements goose.Logger. Printf writes go to out — this is what
+// makes `migrate status` and `migrate version` produce output at all, since
+// goose renders both through Printf rather than a return value. Fatalf panics
+// with a fatalLog, which Run recovers into a returned error instead of
+// letting goose's stdlib default (os.Exit(1)) end the process directly.
+type fatalLogger struct {
+	out io.Writer
+}
+
+func (l *fatalLogger) Printf(format string, v ...any) {
+	fmt.Fprintf(l.out, format, v...)
+}
+
+func (l *fatalLogger) Fatalf(format string, v ...any) {
+	panic(fatalLog(fmt.Sprintf(format, v...)))
+}
+
+// recoverFatal converts a panic carrying a fatalLog (from fatalLogger.Fatalf)
+// into *err. Any other panic value is re-raised unchanged — this only ever
+// intercepts the one panic shape this package itself produces.
+func recoverFatal(err *error) {
+	if r := recover(); r != nil {
+		msg, ok := r.(fatalLog)
+		if !ok {
+			panic(r)
+		}
+		*err = fmt.Errorf("migrate: %s", string(msg))
+	}
 }
 
 // resolveDir picks the first candidate directory that exists.
