@@ -20,6 +20,7 @@ import "../register-sw.js";
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
 import { renderInboxLink } from "../inbox-badge.js";
+import { initGamification } from "../gamification.js";
 import { get, post, ApiError } from "../api.js";
 import { el, text, clearChildren, qs, fromTemplate } from "../dom.js";
 
@@ -82,7 +83,7 @@ async function init() {
   exportPdfButton.addEventListener("click", downloadPdf);
   turnoverGranularity.addEventListener("change", () => loadTurnover(turnoverGranularity.value));
 
-  await Promise.all([loadDashboard(), loadAnalytics()]);
+  await Promise.all([loadDashboard(), loadAnalytics(), initGamification(storageId)]);
 }
 
 function basePath() {

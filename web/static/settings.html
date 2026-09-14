@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#2563eb">
+  <title>Settings · Inventory</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/css/tokens.css">
+  <link rel="stylesheet" href="/css/base.css">
+  <link rel="stylesheet" href="/css/components.css">
+  <link rel="stylesheet" href="/css/gamification.css">
+</head>
+<body>
+  <header class="shell row row--between">
+    <strong>Inventory</strong>
+    <div class="row">
+      <div id="storage-switcher" hidden></div>
+      <a href="/dashboard.html" class="btn btn--ghost">Back</a>
+    </div>
+  </header>
+
+  <main id="main" class="shell stack" aria-live="polite">
+    <h2>Settings</h2>
+
+    <div id="error" class="alert" role="alert" hidden></div>
+
+    <section class="card stack">
+      <h3>Gamification</h3>
+      <p class="empty-state">
+        XP, levels, quests and streaks are entirely optional. Turning this
+        off never changes how any inventory feature works, for you or
+        anyone else in your storages.
+      </p>
+      <label class="row">
+        <input type="checkbox" id="gamification-enabled">
+        <span>Enable XP, levels, quests and streaks</span>
+      </label>
+    </section>
+
+    <section id="holiday-section" class="card stack">
+      <h3>Holiday mode</h3>
+      <p class="empty-state">
+        Mark a week you'll be away so it pauses your streak instead of
+        breaking it. Up to 8 weeks in any rolling year. Only this week or a
+        future week can be marked; a marked week can only be un-marked while
+        it is still in the future.
+      </p>
+      <div id="holiday-weeks" class="stack"></div>
+      <div class="row">
+        <div class="field">
+          <label for="holiday-week-input">Week starting (a Monday)</label>
+          <input type="date" id="holiday-week-input">
+        </div>
+        <button id="holiday-add" type="button" class="btn">Mark as holiday</button>
+      </div>
+    </section>
+
+    <section id="storage-section" class="card stack">
+      <h3>This storage</h3>
+      <p class="empty-state">
+        These settings apply to everyone in the currently selected storage.
+      </p>
+      <label class="row">
+        <input type="checkbox" id="leaderboard-enabled">
+        <span>Show an individual leaderboard alongside the shared goal</span>
+      </label>
+      <div class="field">
+        <label for="weekly-goal">Weekly goal (contributions from all members combined)</label>
+        <input type="number" id="weekly-goal" min="0" step="1">
+      </div>
+      <button id="storage-save" type="button" class="btn btn--primary">Save storage settings</button>
+    </section>
+  </main>
+
+  <script type="module" src="/js/pages/settings.js"></script>
+</body>
+</html>

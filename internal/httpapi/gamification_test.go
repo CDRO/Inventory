@@ -21,6 +21,8 @@ type fakeGamification struct {
 	settings          *store.StorageGamificationSettings
 	leaderboard       []store.LeaderboardEntry
 	overall           *store.OverallProgress
+	quests            *store.QuestsSnapshot
+	achievements      []store.UnlockedAchievement
 	updateSettingsErr error
 
 	lastSettingsUpdate struct {
@@ -100,6 +102,17 @@ func (f *fakeGamification) OverallProgressForUser(context.Context, uuid.UUID) (*
 	return f.overall, nil
 }
 
+func (f *fakeGamification) QuestsForStorage(context.Context, uuid.UUID) (*store.QuestsSnapshot, error) {
+	if f.quests != nil {
+		return f.quests, nil
+	}
+	return &store.QuestsSnapshot{}, nil
+}
+
+func (f *fakeGamification) AchievementsForUser(context.Context, uuid.UUID, uuid.UUID) ([]store.UnlockedAchievement, error) {
+	return f.achievements, nil
+}
+
 // TestProgressReports200WithHealthScore checks the happy path returns the
 // caller's cached progress alongside the storage's health score.
 func TestProgressReports200WithHealthScore(t *testing.T) {
@@ -156,6 +169,21 @@ func TestLeaderboardIs404WhenNotEnabled(t *testing.T) {
 
 	rec := f.do(http.MethodGet, f.base()+"/progress/leaderboard", "")
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestLeaderboardIsNoContentWhenDisabled: the caller's own opt-out is
+// checked before the storage's leaderboard toggle, so a disabled caller
+// never learns whether the storage even has a leaderboard.
+func TestLeaderboardIsNoContentWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	require.NoError(t, f.gamification.SetGamificationEnabled(context.Background(), f.user.ID, false))
+	f.gamification.settings.LeaderboardEnabled = true
+
+	rec := f.do(http.MethodGet, f.base()+"/progress/leaderboard", "")
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, rec.Body.String())
 }
 
 func TestLeaderboardListsMembersWhenEnabled(t *testing.T) {
@@ -247,4 +275,78 @@ func TestMeProgressAggregatesAcrossStorages(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"total_xp":130`)
 	assert.Contains(t, rec.Body.String(), `"overall_level":3`)
 	assert.Contains(t, rec.Body.String(), `"Cellar"`)
+}
+
+// TestQuestsIsNoContentWhenDisabled: the quests route obeys the same
+// gamification_enabled gate every other progress route does
+// (docs/specs/52-gamification-quests-and-ui.md's acceptance criterion,
+// verbatim from docs/specs/51-gamification-scoring.md).
+func TestQuestsIsNoContentWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	require.NoError(t, f.gamification.SetGamificationEnabled(context.Background(), f.user.ID, false))
+	f.gamification.quests = &store.QuestsSnapshot{Quests: []store.Quest{{Generator: "uncategorized"}}}
+
+	rec := f.do(http.MethodGet, f.base()+"/quests", "")
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, rec.Body.String(), "no quest data may leak to a disabled caller even if quests exist")
+}
+
+// TestQuestsReportsAllClearWhenThereAreNone checks the all-clear read is a
+// real field, not inferred by the frontend from an empty array.
+func TestQuestsReportsAllClearWhenThereAreNone(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	f.gamification.quests = &store.QuestsSnapshot{CleanStreakDays: 90}
+
+	rec := f.do(http.MethodGet, f.base()+"/quests", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"all_clear":true`)
+	assert.Contains(t, rec.Body.String(), `"quests":[]`)
+	assert.Contains(t, rec.Body.String(), `"clean_streak_days":90`)
+}
+
+func TestQuestsReportsQuestsWhenPresent(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	f.gamification.quests = &store.QuestsSnapshot{
+		Quests: []store.Quest{
+			{Generator: "uncategorized", Params: []byte(`{"ids":[]}`), TargetCount: 5, Progress: 2, XPReward: 20},
+		},
+		WeeklyGoalTarget: 20, WeeklyGoalCurrent: 14,
+	}
+
+	rec := f.do(http.MethodGet, f.base()+"/quests", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"all_clear":false`)
+	assert.Contains(t, rec.Body.String(), `"generator":"uncategorized"`)
+	assert.Contains(t, rec.Body.String(), `"progress":2`)
+	assert.Contains(t, rec.Body.String(), `"target":20,"current":14`)
+}
+
+// TestAchievementsIsNoContentWhenDisabled mirrors TestQuestsIsNoContentWhenDisabled.
+func TestAchievementsIsNoContentWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	require.NoError(t, f.gamification.SetGamificationEnabled(context.Background(), f.user.ID, false))
+	f.gamification.achievements = []store.UnlockedAchievement{{Key: "first_shelf", UnlockedAt: time.Now()}}
+
+	rec := f.do(http.MethodGet, f.base()+"/achievements", "")
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, rec.Body.String())
+}
+
+func TestAchievementsReportsUnlockedKeys(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	f.gamification.achievements = []store.UnlockedAchievement{{Key: "first_shelf", UnlockedAt: time.Now()}}
+
+	rec := f.do(http.MethodGet, f.base()+"/achievements", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"key":"first_shelf"`)
 }

@@ -19,6 +19,7 @@ import "../register-sw.js";
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
 import { renderInboxLink } from "../inbox-badge.js";
+import { initGamification } from "../gamification.js";
 import { TreeView } from "../tree.js";
 import { get, post, patch, ApiError } from "../api.js";
 import { clearChildren, el, text } from "../dom.js";
@@ -62,6 +63,7 @@ async function init() {
 
   renderStorageSwitcher(switcherContainer, { storages: me.storages, currentId: storageId });
   renderInboxLink(document.querySelector("#inbox-link"), storageId);
+  initGamification(storageId);
 
   view = new TreeView(treeContainer, {
     onAddChild: (parentId, name) => runMutation(() => createLocation(parentId, name)),

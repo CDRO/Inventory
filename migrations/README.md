@@ -28,10 +28,11 @@ Two details in that command are load-bearing:
 | `00004_shopping_and_image_cache.sql` | `shopping_lists`, `shopping_list_items`, `cached_images` — the reconciliation flow and its suggestion-image cache in [`docs/specs/07-shopping-list-reconciliation.md`](../docs/specs/07-shopping-list-reconciliation.md) |
 | `00005_ingestion.sql` | `jobs.image_filename` and `jobs.location_hint_id` — the photo and shelf hint behind a review job in [`docs/specs/06-vision-shelf-ingestion.md`](../docs/specs/06-vision-shelf-ingestion.md) |
 | `00006_gamification.sql` | `contribution_events`, `user_progress`, `achievements_unlocked`, `user_preferences`, `holiday_weeks`, `storage_gamification_settings` — the scoring ledger and caches of [`docs/specs/51-gamification-scoring.md`](../docs/specs/51-gamification-scoring.md) |
+| `00007_gamification_quests.sql` | `quests`, `quest_contributors`, plus `clean_since`/`well_stocked_since` on `storage_gamification_settings` — weekly quests and the clean-storage/well-stocked milestones of [`docs/specs/52-gamification-quests-and-ui.md`](../docs/specs/52-gamification-quests-and-ui.md) |
 
 Every file carries both `-- +goose Up` and `-- +goose Down`, and the down path
-is exercised in CI-equivalent form: `down` six times empties the schema and
-`up` restores all twenty-four tables.
+is exercised in CI-equivalent form: `down` seven times empties the schema and
+`up` restores all twenty-six tables.
 
 `00001`'s down step deliberately does **not** drop the extension. Other schemas
 in the same database may depend on `pg_trgm`, and dropping it would take their

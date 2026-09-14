@@ -16,13 +16,19 @@ import (
 
 // fakeProductStore is an in-memory ProductStore.
 type fakeProductStore struct {
-	mu            sync.Mutex
-	products      []store.Product
-	productsErr   error
-	batches       []store.Batch
-	batchesErr    error
-	lastStorageID uuid.UUID
-	lastProductID uuid.UUID
+	mu               sync.Mutex
+	products         []store.Product
+	productsErr      error
+	batches          []store.Batch
+	batchesErr       error
+	lastStorageID    uuid.UUID
+	lastProductID    uuid.UUID
+	setCategoryErr   error
+	setImageErr      error
+	lastCategoryID   *uuid.UUID
+	lastImageURL     *string
+	lastIconName     *string
+	lastActingUserID uuid.UUID
 }
 
 func (f *fakeProductStore) ListProducts(_ context.Context, storageID uuid.UUID) ([]store.Product, error) {
@@ -37,6 +43,20 @@ func (f *fakeProductStore) ListProductBatches(_ context.Context, storageID, prod
 	defer f.mu.Unlock()
 	f.lastStorageID, f.lastProductID = storageID, productID
 	return f.batches, f.batchesErr
+}
+
+func (f *fakeProductStore) SetProductCategoryAsUser(_ context.Context, storageID, id uuid.UUID, categoryID *uuid.UUID, userID uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastStorageID, f.lastProductID, f.lastCategoryID, f.lastActingUserID = storageID, id, categoryID, userID
+	return f.setCategoryErr
+}
+
+func (f *fakeProductStore) SetProductImageAsUser(_ context.Context, storageID, id uuid.UUID, imageURL, iconName *string, userID uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastStorageID, f.lastProductID, f.lastImageURL, f.lastIconName, f.lastActingUserID = storageID, id, imageURL, iconName, userID
+	return f.setImageErr
 }
 
 // TestListProductsExposesOnlyIDAndName — category_id and catalog_id are
@@ -90,4 +110,86 @@ func TestListProductBatchesIsStorageScopedAndOrdered(t *testing.T) {
 	f.products.batchesErr = store.ErrNotFound
 	notFound := f.do(http.MethodGet, f.base()+"/products/"+uuid.NewString()+"/batches", "")
 	assert.Equal(t, http.StatusNotFound, notFound.Code)
+}
+
+// TestSetCategorySendsTheParsedIDAndActingUser — the "uncategorized" quest
+// (docs/specs/52-gamification-quests-and-ui.md) is only closeable if this
+// route actually reaches the store with the caller's own id, not a blank one.
+func TestSetCategorySendsTheParsedIDAndActingUser(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	productID := uuid.New()
+	categoryID := uuid.New()
+
+	rec := f.do(http.MethodPatch, f.base()+"/products/"+productID.String()+"/category",
+		`{"category_id":"`+categoryID.String()+`"}`)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, productID, f.products.lastProductID)
+	require.NotNil(t, f.products.lastCategoryID)
+	assert.Equal(t, categoryID, *f.products.lastCategoryID)
+	assert.Equal(t, f.user.ID, f.products.lastActingUserID)
+}
+
+// TestSetCategoryAcceptsNullToClear — category_id is nullable by design
+// (a product can be uncategorized again), so null must not be treated as a
+// malformed request.
+func TestSetCategoryAcceptsNullToClear(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	rec := f.do(http.MethodPatch, f.base()+"/products/"+uuid.NewString()+"/category", `{"category_id":null}`)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Nil(t, f.products.lastCategoryID)
+}
+
+func TestSetCategoryRejectsAMalformedID(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	rec := f.do(http.MethodPatch, f.base()+"/products/"+uuid.NewString()+"/category", `{"category_id":"not-a-uuid"}`)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+}
+
+func TestSetCategoryReportsNotFoundFromTheStore(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	f.products.setCategoryErr = store.ErrNotFound
+
+	rec := f.do(http.MethodPatch, f.base()+"/products/"+uuid.NewString()+"/category", `{"category_id":null}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestSetImageSendsBothFieldsAndActingUser — the "imageless" quest
+// (docs/specs/52-gamification-quests-and-ui.md) needs this route to persist
+// whichever of image_url/icon_name the frontend resolved.
+func TestSetImageSendsBothFieldsAndActingUser(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	productID := uuid.New()
+
+	rec := f.do(http.MethodPatch, f.base()+"/products/"+productID.String()+"/image",
+		`{"image_url":"/api/storages/x/images/abc","icon_name":null}`)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, productID, f.products.lastProductID)
+	require.NotNil(t, f.products.lastImageURL)
+	assert.Equal(t, "/api/storages/x/images/abc", *f.products.lastImageURL)
+	assert.Nil(t, f.products.lastIconName)
+	assert.Equal(t, f.user.ID, f.products.lastActingUserID)
+}
+
+func TestSetImageReportsNotFoundFromTheStore(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	f.products.setImageErr = store.ErrNotFound
+
+	rec := f.do(http.MethodPatch, f.base()+"/products/"+uuid.NewString()+"/image", `{"icon_name":"box"}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }

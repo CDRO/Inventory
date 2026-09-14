@@ -24,6 +24,9 @@ type GamificationStore interface {
 	UpdateStorageGamificationSettings(ctx context.Context, storageID uuid.UUID, leaderboardEnabled bool, weeklyGoalItems int) error
 
 	OverallProgressForUser(ctx context.Context, userID uuid.UUID) (*store.OverallProgress, error)
+
+	QuestsForStorage(ctx context.Context, storageID uuid.UUID) (*store.QuestsSnapshot, error)
+	AchievementsForUser(ctx context.Context, storageID, userID uuid.UUID) ([]store.UnlockedAchievement, error)
 }
 
 // GamificationHandler serves docs/specs/51-gamification-scoring.md's API
@@ -52,9 +55,15 @@ func (h *GamificationHandler) enabledFor(w http.ResponseWriter, r *http.Request,
 }
 
 type progressResponse struct {
-	XP             int     `json:"xp"`
-	Level          int     `json:"level"`
-	StreakWeeks    int     `json:"streak_weeks"`
+	XP          int `json:"xp"`
+	Level       int `json:"level"`
+	StreakWeeks int `json:"streak_weeks"`
+	// XPForLevel and XPForNextLevel are the current and next level's
+	// thresholds, computed server-side (docs/specs/52-gamification-quests-and-ui.md's
+	// header-ring popover) so the frontend never re-implements the level
+	// curve just to answer "how much more?".
+	XPForLevel     int     `json:"xp_for_level"`
+	XPForNextLevel int     `json:"xp_for_next_level"`
 	LastActiveWeek *string `json:"last_active_week"`
 	HealthScore    float64 `json:"health_score"`
 }
@@ -99,6 +108,8 @@ func (h *GamificationHandler) Progress(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, progressResponse{
 		XP: progress.XP, Level: progress.Level, StreakWeeks: progress.StreakWeeks,
+		XPForLevel:     store.XPThresholdForLevel(progress.Level),
+		XPForNextLevel: store.XPThresholdForLevel(progress.Level + 1),
 		LastActiveWeek: dateOrNil(progress.LastActiveWeek), HealthScore: health,
 	})
 }
@@ -334,8 +345,12 @@ func (h *GamificationHandler) UpdateMePreferences(w http.ResponseWriter, r *http
 		h.errors.WriteError(w, r, Internal(err))
 		return
 	}
+	// SetHolidayWeeks enforces docs/specs/52-gamification-quests-and-ui.md's
+	// holiday-mode rules: ErrValidation for a past week, ErrConflict — with a
+	// message naming how many weeks remain — for exceeding the rolling
+	// 52-week budget.
 	if err := h.store.SetHolidayWeeks(r.Context(), user.ID, weeks); err != nil {
-		h.errors.WriteError(w, r, Internal(err))
+		h.errors.WriteError(w, r, FromStoreError(err, "holiday week rejected"))
 		return
 	}
 

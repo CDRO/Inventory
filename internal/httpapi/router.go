@@ -302,10 +302,14 @@ func NewRouter(d Deps) http.Handler {
 			sr.Post("/consume/photos/{job_id}/confirm", consumeAPI.Confirm)
 
 			// Read-only product lookups consumption logging's manual-correction
-			// and batch-picker need (docs/specs/09-consumption-logging.md).
+			// and batch-picker need (docs/specs/09-consumption-logging.md), plus
+			// the two narrow product-editing writes spec 52's "uncategorized"
+			// and "imageless" quests need to be closeable at all.
 			products := NewProductHandler(d.Store, errs)
 			sr.Get("/products", products.List)
 			sr.Get("/products/{product_id}/batches", products.Batches)
+			sr.Patch("/products/{product_id}/category", products.SetCategory)
+			sr.Patch("/products/{product_id}/image", products.SetImage)
 
 			if d.Matcher != nil {
 				lists := NewShoppingListHandler(d.Store, d.Matcher, errs)
@@ -339,13 +343,16 @@ func NewRouter(d Deps) http.Handler {
 			analytics := NewAnalyticsHandler(d.Store, errs)
 			sr.Get("/dashboard/analytics", analytics.Dashboard)
 
-			// Gamification (docs/specs/51-gamification-scoring.md): this
-			// storage's progress, its optional leaderboard, and its flat
-			// any-member-may-change toggles.
+			// Gamification (docs/specs/51-gamification-scoring.md,
+			// docs/specs/52-gamification-quests-and-ui.md): this storage's
+			// progress, its optional leaderboard, its flat any-member-may-change
+			// toggles, this week's quests, and the caller's unlocked achievements.
 			sr.Get("/progress", gamification.Progress)
 			sr.Get("/progress/leaderboard", gamification.Leaderboard)
 			sr.Get("/gamification/settings", gamification.StorageSettings)
 			sr.Put("/gamification/settings", gamification.UpdateStorageSettings)
+			sr.Get("/quests", gamification.Quests)
+			sr.Get("/achievements", gamification.Achievements)
 		})
 	}
 

@@ -149,6 +149,11 @@ export function patch(path, body, options) {
   return apiFetch(path, { ...options, method: "PATCH", body: JSON.stringify(body ?? {}) });
 }
 
+/** PUT a JSON body, returning the parsed JSON response. */
+export function put(path, body, options) {
+  return apiFetch(path, { ...options, method: "PUT", body: JSON.stringify(body ?? {}) });
+}
+
 /** DELETE, returning the parsed JSON response (often null / 204). */
 export function del(path, options) {
   return apiFetch(path, { ...options, method: "DELETE" });
