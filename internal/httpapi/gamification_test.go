@@ -128,6 +128,11 @@ func TestProgressReports200WithHealthScore(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"level":2`)
 	assert.Contains(t, rec.Body.String(), `"streak_weeks":3`)
 	assert.Contains(t, rec.Body.String(), `"health_score":61.5`)
+	// The header-ring popover computes "how much more?" from these two
+	// server-supplied thresholds rather than re-implementing the level curve
+	// (docs/specs/52-gamification-quests-and-ui.md).
+	assert.Contains(t, rec.Body.String(), `"xp_for_level":50`)
+	assert.Contains(t, rec.Body.String(), `"xp_for_next_level":200`)
 }
 
 // TestProgressIsNoContentWhenDisabled is the acceptance criterion from

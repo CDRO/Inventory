@@ -369,10 +369,14 @@ func computeStreakWeeks(activeWeeks, holidayWeeks map[time.Time]bool, now time.T
 	current := true
 	for {
 		switch {
+		case holidayWeeks[week]:
+			// Paused: neither counted nor broken — checked before activity so
+			// that a week which happens to be both active and on holiday
+			// still does not count toward the streak
+			// (docs/specs/52-gamification-quests-and-ui.md: "activity during
+			// a holiday week ... does not count toward the streak").
 		case activeWeeks[week]:
 			streak++
-		case holidayWeeks[week]:
-			// Paused: neither counted nor broken.
 		case current:
 			// The current week may not have happened yet; that alone must not
 			// break a streak earned in prior weeks.
@@ -612,7 +616,13 @@ func (s *Store) SetHolidayWeeks(ctx context.Context, userID uuid.UUID, weeks []t
 
 		current := mondayOf(time.Now())
 		for week := range requested {
-			if week.Before(current) {
+			// A past week already on record is not a violation to reject —
+			// GET /api/me/preferences returns full history, and a client
+			// that naively resends its current list while adding or
+			// removing a future week (web/static/js/pages/settings.js does
+			// exactly this) must not have that harmless echo rejected. Only
+			// a *new* attempt to backdate a holiday week is refused.
+			if week.Before(current) && !existing[week] {
 				return fmt.Errorf("%w: only the current week or a future week may be marked as holiday", ErrValidation)
 			}
 		}

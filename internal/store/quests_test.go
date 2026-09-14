@@ -224,3 +224,48 @@ func TestAdvanceQuestsCompletesAndPaysEveryContributor(t *testing.T) {
 		SELECT count(*) FROM quest_contributors qc JOIN quests q ON q.id = qc.quest_id WHERE q.storage_id = $1`, storageID)
 	assert.Equal(t, 2, contributorCount, "exactly the two contributors, once each")
 }
+
+// TestQuestsForStorageIsComebackAfterAGap: quests reappearing after two
+// consecutive all-clear weeks must be flagged as a comeback
+// (docs/specs/52-gamification-quests-and-ui.md's "coming back from a quiet
+// stretch" — the small "new this week" dot).
+func TestQuestsForStorageIsComebackAfterAGap(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	for i := 0; i < 6; i++ {
+		_, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Mystery item"})
+		require.NoError(t, err)
+	}
+	// No quests exist for either of the two prior weeks at all — the same
+	// state a storage that has been genuinely all-clear for a while is in.
+
+	require.NoError(t, s.GenerateWeeklyQuests(ctx, storageID, time.Now()))
+
+	snap, err := s.QuestsForStorage(ctx, storageID)
+	require.NoError(t, err)
+	require.NotEmpty(t, snap.Quests)
+	assert.True(t, snap.IsComeback, "quests reappearing with no rows in either prior week must be flagged as a comeback")
+}
+
+// TestQuestsForStorageIsNotComebackWhenLastWeekAlsoHadQuests: continuity, not
+// novelty — a storage with quests every week is not "coming back" from
+// anything.
+func TestQuestsForStorageIsNotComebackWhenLastWeekAlsoHadQuests(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	for i := 0; i < 6; i++ {
+		_, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Mystery item"})
+		require.NoError(t, err)
+	}
+
+	thisWeek := mostRecentMonday(t, time.Now())
+	require.NoError(t, s.GenerateWeeklyQuests(ctx, storageID, thisWeek.AddDate(0, 0, -7)))
+	require.NoError(t, s.GenerateWeeklyQuests(ctx, storageID, thisWeek))
+
+	snap, err := s.QuestsForStorage(ctx, storageID)
+	require.NoError(t, err)
+	require.NotEmpty(t, snap.Quests)
+	assert.False(t, snap.IsComeback, "quests present last week too must not be flagged as a comeback")
+}

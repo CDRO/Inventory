@@ -146,7 +146,10 @@ func (s *Store) EvaluateStorageAchievements(ctx context.Context, storageID uuid.
 			SELECT count(*) FROM products WHERE storage_id = $1 AND category_id IS NULL`, storageID).Scan(&uncategorizedCount); err != nil {
 			return fmt.Errorf("store: count uncategorized products: %w", err)
 		}
-		if uncategorizedCount == 0 && categorizedCount >= gamification.SpringCleanMinCategorized {
+		// Strictly greater than the threshold: the 101st categorized product
+		// in a fully-sorted storage is what earns it, not the 100th
+		// (docs/specs/52-gamification-quests-and-ui.md's worked example).
+		if uncategorizedCount == 0 && categorizedCount > gamification.SpringCleanMinCategorized {
 			if err := awardToEveryMember(ctx, tx, storageID, members, gamification.AchSpringClean, 0); err != nil {
 				return err
 			}

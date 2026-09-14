@@ -28,12 +28,17 @@ const (
 // (docs/specs/52-gamification-quests-and-ui.md), rather than literals
 // scattered across the predicates that check them.
 const (
-	CuratorCorrections        = 25
-	CartographerTreeDepth     = 3
-	LibrarianHealthScore      = 80.0
-	ArchivistHealthScore      = 95.0
-	DeepFreezeProductCount    = 100
-	WellStockedDays           = 7
+	CuratorCorrections     = 25
+	CartographerTreeDepth  = 3
+	LibrarianHealthScore   = 80.0
+	ArchivistHealthScore   = 95.0
+	DeepFreezeProductCount = 100
+	WellStockedDays        = 7
+	// SpringCleanMinCategorized is the "threshold of 100 categorized
+	// products" docs/specs/52-gamification-quests-and-ui.md names — but the
+	// spec's own worked example unlocks the achievement on "the 101st
+	// categorized product", i.e. strictly more than this threshold, not at
+	// it. Callers must compare with `>`, not `>=`.
 	SpringCleanMinCategorized = 100
 )
 

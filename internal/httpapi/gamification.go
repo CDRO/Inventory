@@ -29,8 +29,10 @@ type GamificationStore interface {
 	AchievementsForUser(ctx context.Context, storageID, userID uuid.UUID) ([]store.UnlockedAchievement, error)
 }
 
-// GamificationHandler serves docs/specs/51-gamification-scoring.md's API
-// surface.
+// GamificationHandler serves the API surface of both
+// docs/specs/51-gamification-scoring.md (progress, leaderboard, settings,
+// preferences) and docs/specs/52-gamification-quests-and-ui.md (quests,
+// achievements).
 type GamificationHandler struct {
 	store  GamificationStore
 	errors *ErrorWriter
