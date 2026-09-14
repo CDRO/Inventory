@@ -10,6 +10,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/CDRO/Inventory/internal/gamification"
 )
 
 // IngestDecision is the reviewer's verdict on one proposed row
@@ -103,6 +105,11 @@ func (s *Store) ConfirmIngestion(ctx context.Context, storageID, jobID uuid.UUID
 			return err
 		}
 
+		proposedProducts, err := proposedExactMatches(payload)
+		if err != nil {
+			return err
+		}
+
 		newProducts := map[string]uuid.UUID{}
 		treeLocked := false
 
@@ -117,6 +124,19 @@ func (s *Store) ConfirmIngestion(ctx context.Context, storageID, jobID uuid.UUID
 			}
 			if created {
 				result.ProductsCreated++
+			}
+
+			// The model proposed a confident, single product for this row, and
+			// the reviewer ended up filing the batch against a different one
+			// (or a brand-new product): that is the correction spec 51 pays
+			// more than acceptance for, because it is what keeps the data
+			// truthful (docs/specs/51-gamification-scoring.md).
+			if userID != nil {
+				if proposed, hadExactMatch := proposedProducts[d.RowID]; hadExactMatch && proposed != productID {
+					if err := recordContribution(ctx, tx, storageID, *userID, gamification.KindAICorrection, &productID); err != nil {
+						return err
+					}
+				}
 			}
 
 			locationID := d.LocationID
@@ -163,6 +183,40 @@ func (s *Store) ConfirmIngestion(ctx context.Context, storageID, jobID uuid.UUID
 		return nil, err
 	}
 	return result, nil
+}
+
+// proposedExactMatches reads, per row_id, the product the model proposed
+// with high enough confidence to preselect (internal/ingest.Match.Status ==
+// "exact_match") — the baseline a reviewer's final decision is compared
+// against to detect a correction (docs/specs/51-gamification-scoring.md).
+//
+// This package cannot import internal/ingest for its Proposal type: that
+// package already imports internal/store, and Go does not allow the cycle.
+// The struct below decodes the same JSON shape but names only the fields
+// this comparison needs, the same way matchRowIDs above does for row_id.
+func proposedExactMatches(payload []byte) (map[string]uuid.UUID, error) {
+	var proposal struct {
+		Rows []struct {
+			RowID string `json:"row_id"`
+			Match struct {
+				Status  string `json:"status"`
+				Product *struct {
+					ID uuid.UUID `json:"id"`
+				} `json:"product"`
+			} `json:"match"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(payload, &proposal); err != nil {
+		return nil, fmt.Errorf("store: decode stored proposal: %w", err)
+	}
+
+	out := make(map[string]uuid.UUID, len(proposal.Rows))
+	for _, r := range proposal.Rows {
+		if r.Match.Status == "exact_match" && r.Match.Product != nil {
+			out[r.RowID] = r.Match.Product.ID
+		}
+	}
+	return out, nil
 }
 
 // matchRowIDs checks that rowIDs names every row of the stored proposal

@@ -143,6 +143,9 @@ func createBatch(ctx context.Context, tx pgx.Tx, storageID uuid.UUID, in NewBatc
 	if err := writeLog(ctx, tx, in.ProductID, &batch.ID, in.Quantity, in.Reason, in.CreatedBy); err != nil {
 		return nil, err
 	}
+	if err := bumpForLedgerReason(ctx, tx, storageID, in.CreatedBy, in.Reason); err != nil {
+		return nil, err
+	}
 	return batch, nil
 }
 
@@ -206,6 +209,9 @@ func adjustBatch(ctx context.Context, tx pgx.Tx, storageID, batchID uuid.UUID, d
 		if err := writeLog(ctx, tx, productID, nil, delta, reason, userID); err != nil {
 			return uuid.Nil, err
 		}
+		if err := bumpForLedgerReason(ctx, tx, storageID, userID, reason); err != nil {
+			return uuid.Nil, err
+		}
 		return productID, nil
 	}
 
@@ -214,6 +220,9 @@ func adjustBatch(ctx context.Context, tx pgx.Tx, storageID, batchID uuid.UUID, d
 		return uuid.Nil, fmt.Errorf("store: update batch quantity: %w", err)
 	}
 	if err := writeLog(ctx, tx, productID, &batchID, delta, reason, userID); err != nil {
+		return uuid.Nil, err
+	}
+	if err := bumpForLedgerReason(ctx, tx, storageID, userID, reason); err != nil {
 		return uuid.Nil, err
 	}
 	return productID, nil

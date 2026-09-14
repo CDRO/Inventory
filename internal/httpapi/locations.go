@@ -23,7 +23,7 @@ const maxLocationName = 255
 // interface so the handlers can be tested without a database.
 type LocationStore interface {
 	LocationTree(ctx context.Context, storageID uuid.UUID) ([]store.Location, error)
-	CreateLocation(ctx context.Context, storageID uuid.UUID, in store.NewLocation) (*store.Location, error)
+	CreateLocationAsUser(ctx context.Context, storageID uuid.UUID, in store.NewLocation, userID uuid.UUID) (*store.Location, error)
 	UpdateLocation(ctx context.Context, storageID, id uuid.UUID, patch store.LocationPatch) (*store.Location, error)
 	DeleteLocation(ctx context.Context, storageID, id uuid.UUID) error
 }
@@ -84,6 +84,11 @@ func (h *LocationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		h.errors.WriteError(w, r, Internal(errNoStorageInContext))
 		return
 	}
+	user, ok := UserFrom(r.Context())
+	if !ok {
+		h.errors.WriteError(w, r, Unauthorized(ReasonSessionMissing))
+		return
+	}
 
 	var body struct {
 		Name        string  `json:"name"`
@@ -117,11 +122,11 @@ func (h *LocationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := h.store.CreateLocation(r.Context(), storageID, store.NewLocation{
+	created, err := h.store.CreateLocationAsUser(r.Context(), storageID, store.NewLocation{
 		Name:        name,
 		Description: body.Description,
 		ParentID:    parentID,
-	})
+	}, user.ID)
 	if err != nil {
 		h.errors.WriteError(w, r, FromStoreError(err, "location parent not in this storage or nonexistent"))
 		return

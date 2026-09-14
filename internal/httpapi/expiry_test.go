@@ -37,7 +37,7 @@ type fakeExpiry struct {
 	lastStorageID uuid.UUID
 }
 
-func (f *fakeExpiry) SetBatchExpiration(_ context.Context, storageID, batchID uuid.UUID, date *time.Time) (*store.Batch, error) {
+func (f *fakeExpiry) SetBatchExpiration(_ context.Context, storageID, batchID uuid.UUID, date *time.Time, _ *uuid.UUID) (*store.Batch, error) {
 	f.setCalls++
 	f.lastStorageID, f.lastBatchID = storageID, batchID
 	f.lastDate, f.lastDateGiven = date, true

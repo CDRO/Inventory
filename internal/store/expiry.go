@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/CDRO/Inventory/internal/expiry"
+	"github.com/CDRO/Inventory/internal/gamification"
 )
 
 // The database side of docs/specs/08-expiration-and-classification.md: gather
@@ -256,7 +257,11 @@ func (s *Store) RecomputeDerivedExpiryForCategory(ctx context.Context, storageID
 // that a person decided, and clearing a date is as much a decision as setting
 // one. A NULL date with a 'user' source is the sticky "this has no expiry"
 // state that no later cascade may undo.
-func (s *Store) SetBatchExpiration(ctx context.Context, storageID, batchID uuid.UUID, date *time.Time) (*Batch, error) {
+//
+// userID attributes the edit for gamification (docs/specs/51-gamification-scoring.md,
+// 'expiry_confirmed'); nil earns nobody XP, which is correct for a
+// system-driven reset rather than an error condition.
+func (s *Store) SetBatchExpiration(ctx context.Context, storageID, batchID uuid.UUID, date *time.Time, userID *uuid.UUID) (*Batch, error) {
 	var out *Batch
 
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
@@ -276,6 +281,12 @@ func (s *Store) SetBatchExpiration(ctx context.Context, storageID, batchID uuid.
 			return err
 		}
 		out = batch
+
+		if userID != nil {
+			if err := recordContribution(ctx, tx, storageID, *userID, gamification.KindExpiryConfirmed, &batch.ID); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {

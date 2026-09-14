@@ -55,7 +55,7 @@ func (f *fakeLocations) LocationTree(_ context.Context, storageID uuid.UUID) ([]
 	return f.tree, f.treeErr
 }
 
-func (f *fakeLocations) CreateLocation(_ context.Context, storageID uuid.UUID, in store.NewLocation) (*store.Location, error) {
+func (f *fakeLocations) CreateLocationAsUser(_ context.Context, storageID uuid.UUID, in store.NewLocation, _ uuid.UUID) (*store.Location, error) {
 	f.creates.Add(1)
 	f.lastStorageID = storageID
 	f.lastCreate = in
@@ -138,6 +138,7 @@ type fakeAPI struct {
 	*fakeProductStore
 	*fakeReorderStore
 	*fakeAnalyticsStore
+	*fakeGamification
 }
 
 // newFakeAPI builds the whole fake store around an auth fake, with every other
@@ -149,34 +150,36 @@ func newFakeAPI(auth *fakeAuth) fakeAPI {
 		fakeJobs: newFakeJobs(), fakeIdempotency: newFakeIdempotency(), fakeIngestStore: &fakeIngestStore{},
 		fakeConsumeStore: &fakeConsumeStore{}, fakeProductStore: &fakeProductStore{},
 		fakeReorderStore: &fakeReorderStore{}, fakeAnalyticsStore: &fakeAnalyticsStore{},
+		fakeGamification: newFakeGamification(),
 	}
 }
 
 // apiFixture builds a router with a member session already established, and
 // returns everything a test needs to make a request as that member.
 type apiFixture struct {
-	router    http.Handler
-	auth      *fakeAuth
-	locations *fakeLocations
-	batches   *fakeBatches
-	lists     *fakeShoppingLists
-	expiry    *fakeExpiry
-	jobs      *fakeJobs
-	idem      *fakeIdempotency
-	ingest    *fakeIngestStore
-	ingester  *fakeIngester
-	photos    *fakePhotoStore
-	matcher   *fakeMatcher
-	images    *fakeSuggester
-	imageData *fakeImageCache
-	consume   *fakeConsumeStore
-	consumer  *fakeConsumer
-	products  *fakeProductStore
-	reorder   *fakeReorderStore
-	analytics *fakeAnalyticsStore
-	storageID uuid.UUID
-	user      *store.User
-	session   *store.Session
+	router       http.Handler
+	auth         *fakeAuth
+	locations    *fakeLocations
+	batches      *fakeBatches
+	lists        *fakeShoppingLists
+	expiry       *fakeExpiry
+	jobs         *fakeJobs
+	idem         *fakeIdempotency
+	ingest       *fakeIngestStore
+	ingester     *fakeIngester
+	photos       *fakePhotoStore
+	matcher      *fakeMatcher
+	images       *fakeSuggester
+	imageData    *fakeImageCache
+	consume      *fakeConsumeStore
+	consumer     *fakeConsumer
+	products     *fakeProductStore
+	reorder      *fakeReorderStore
+	analytics    *fakeAnalyticsStore
+	gamification *fakeGamification
+	storageID    uuid.UUID
+	user         *store.User
+	session      *store.Session
 }
 
 func newAPIFixture(t *testing.T) *apiFixture {
@@ -190,6 +193,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	matcher := &fakeMatcher{}
 	images := &fakeSuggester{}
 	imageData := &fakeImageCache{}
+	gamification := newFakeGamification()
 	user, session := auth.addUser(t, false)
 	storageID := uuid.New()
 	auth.addMember(storageID, user.ID)
@@ -215,6 +219,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 			fakeJobs: jobs, fakeIdempotency: idem, fakeIngestStore: ingestStore,
 			fakeConsumeStore: consumeStore, fakeProductStore: products,
 			fakeReorderStore: reorder, fakeAnalyticsStore: analytics,
+			fakeGamification: gamification,
 		},
 		Matcher:    matcher,
 		Images:     images,
@@ -230,9 +235,10 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		ingest: ingestStore, ingester: ingester, photos: photos,
 		matcher: matcher, images: images, imageData: imageData,
 		consume: consumeStore, consumer: consumer, products: products,
-		reorder:   reorder,
-		analytics: analytics,
-		storageID: storageID, user: user, session: session,
+		reorder:      reorder,
+		analytics:    analytics,
+		gamification: gamification,
+		storageID:    storageID, user: user, session: session,
 	}
 }
 
