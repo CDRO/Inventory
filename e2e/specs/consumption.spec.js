@@ -92,6 +92,7 @@ test("a consumption proposal is reviewed, corrected and confirmed into a decreme
 
   await expect(page).toHaveURL(/\/inbox\.html\?.*consumed=1/);
   await expect(page.locator("#notice")).toHaveText("Proposal applied: 1 batch updated.");
+  await expect(page.locator("#notice")).toHaveClass(/\balert--success\b/);
   await expect(page.locator(`[data-job-id="${CONSUME_JOB}"]`)).toHaveCount(0);
 
   // The fridge batch actually lost one unit; the pantry batch is untouched.

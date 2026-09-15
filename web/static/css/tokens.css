@@ -42,6 +42,8 @@
   --color-accent-text: #ffffff;
   --color-danger: #b91c1c;
   --color-danger-text: #ffffff;
+  --color-success: #15803d;
+  --color-success-text: #ffffff;
 
   /*
    * Expiration urgency — verbatim from docs/specs/05-frontend-pwa-foundations.md,

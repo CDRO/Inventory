@@ -124,6 +124,12 @@
   font-size: var(--text-sm);
 }
 
+.alert--success {
+  border-color: var(--color-success);
+  color: var(--color-success);
+  background: color-mix(in srgb, var(--color-success) 8%, var(--color-surface));
+}
+
 /* --- Storage switcher --- */
 
 .storage-switcher {

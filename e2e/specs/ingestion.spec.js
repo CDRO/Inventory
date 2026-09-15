@@ -131,6 +131,7 @@ test("a proposal is reviewed and confirmed into inventory", async ({ page }) => 
   await expect(page.locator("#notice")).toHaveText(
     "Proposal applied: 2 items added to your inventory, 1 new product, 1 new location.",
   );
+  await expect(page.locator("#notice")).toHaveClass(/\balert--success\b/);
   await expect(page.locator(`[data-job-id="${SHELF_JOB}"]`)).toHaveCount(0);
 
   // The proposed shelf now exists under Pantry.
