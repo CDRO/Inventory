@@ -101,10 +101,13 @@ no `is_admin` in any response.
 
 ### Device management
 
-- `GET /api/auth/devices` — the caller's own sessions: label, created, last
-  seen, and which one is the current request.
-- `DELETE /api/auth/devices/{session_id}` — revoke one. Deleting the row
-  revokes immediately (`02-data-model.md`).
+- `GET /api/auth/devices` — the caller's own sessions: id (a derived
+  handle, never the session's bearer token — see
+  `03-auth-and-multi-tenancy.md`), label, created, last seen, and which one
+  is the current request.
+- `DELETE /api/auth/devices/{id}` — revoke one, using the handle from the
+  list above, not the session id. Deleting the row revokes immediately
+  (`02-data-model.md`).
 
 Users manage only their own devices. This is not an admin surface.
 

@@ -81,11 +81,15 @@ turn a picture of a monitor into a permanent credential.
 
 ### Device management
 
-- `GET /api/auth/devices` — the caller's own sessions: `kind`, `label`,
-  `created_at`, `last_seen_at`, and which one is making this request.
-- `DELETE /api/auth/devices/{session_id}` — revoke one, taking effect
-  immediately. A user may revoke only their own sessions; another user's
-  session id returns `404`, like any other inaccessible resource.
+- `GET /api/auth/devices` — the caller's own sessions: `id`, `kind`,
+  `label`, `created_at`, `last_seen_at`, and which one is making this
+  request. `id` is a derived handle (the hex SHA-256 of the session's
+  token), never the token itself — `sessions.id` *is* the bearer token, so
+  returning it would hand out a live credential.
+- `DELETE /api/auth/devices/{id}` — revoke one, taking effect immediately.
+  `{id}` is the handle from the list above, not the session id. A user may
+  revoke only their own sessions; another user's handle, or one that names
+  nothing, returns `404`, like any other inaccessible resource.
 
 This is a user-facing surface, not an admin one. Full contract for third-party
 clients: `12-client-api-contract.md`.
