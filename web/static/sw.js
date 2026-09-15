@@ -1,5 +1,6 @@
 // Hand-written service worker: caches the app shell cache-first, and never
-// caches /api/* (docs/specs/05-frontend-pwa-foundations.md).
+// caches /api/* or any other dynamically-rendered route
+// (docs/specs/05-frontend-pwa-foundations.md).
 //
 // There is no offline data editing (docs/specs/00-overview.md non-goals), so
 // a cached API response would be actively misleading — a user could read
@@ -7,16 +8,18 @@
 // CSS, JS, icons) is a different matter: it changes only on deploy, and
 // caching it is what makes the PWA installable and fast to open.
 
-// Bump this on every release that changes a cached file. The old cache is
-// deleted in `activate` below, so a stale version never lingers once a client
-// picks up the new service worker.
+// Bump this on every release that changes a cached file, or that changes
+// which requests get cached at all: existing clients may already hold a
+// stale entry under the old name for something the new fetch handler would
+// no longer read, and only a version bump clears it via the `activate`
+// cleanup below rather than leaving it as dead weight indefinitely.
 //
 // Nothing outside this file hardcodes the resulting name: e2e/specs/pwa.spec.js
 // discovers it through caches.keys() precisely so that a bump here cannot leave
 // a test opening a cache the service worker never uses — caches.open() creates
 // a missing cache rather than failing, which would have made that test pass
 // while checking nothing.
-const CACHE_VERSION = "v4";
+const CACHE_VERSION = "v5";
 const CACHE_NAME = `inventory-shell-${CACHE_VERSION}`;
 
 // The app shell: everything a cold load needs before the network is asked
@@ -80,13 +83,25 @@ self.addEventListener("activate", (event) => {
   self.clients.claim();
 });
 
+// Paths that are never cache candidates because the server renders them
+// fresh per request, unlike everything under web/static: today that is only
+// /admin (docs/specs/03-auth-and-multi-tenancy.md), which the backend
+// already answers with Cache-Control: no-store — but that header only
+// governs the browser's HTTP cache, not this service worker's own Cache
+// Storage, which cacheFirst() writes to directly regardless of any
+// Cache-Control header on the response. A future server-rendered route needs
+// adding here too, or it will silently get the same stale-until-hard-reload
+// treatment /admin did before this list existed.
+const NEVER_CACHE = ["/admin"];
+
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
-  // Never intercept the API. Falling through here means the browser handles
-  // the request exactly as if this service worker did not exist — no cached
-  // response is ever substituted for a live one.
-  if (url.pathname.startsWith("/api/")) {
+  // Never intercept the API, or any other dynamically-rendered route. Falling
+  // through here means the browser handles the request exactly as if this
+  // service worker did not exist — no cached response is ever substituted
+  // for a live one.
+  if (url.pathname.startsWith("/api/") || NEVER_CACHE.includes(url.pathname)) {
     return;
   }
 
