@@ -96,3 +96,61 @@ test("the service worker never serves a cached response for /api/*", async ({ pa
   // than being served from the cache this test seeded.
   expect(liveBody).not.toContain("planted");
 });
+
+// /admin is the one route the server renders fresh per request rather than
+// serving from web/static (docs/specs/03-auth-and-multi-tenancy.md), and it
+// answers with Cache-Control: no-store for exactly that reason — but that
+// header only governs the browser's own HTTP cache, not this service
+// worker's Cache Storage, which cacheFirst() writes to directly regardless.
+// Confirmed live: before sw.js excluded /admin, adding a user there and
+// reopening the page kept showing the stale member list until a hard reload
+// bypassed the service worker entirely.
+test("the service worker never serves a cached response for /admin", async ({ page }) => {
+  const loginRes = await page.request.post("/api/auth/login", {
+    data: { username: "e2e-admin", password: "e2e-fixture-password" },
+  });
+  expect(loginRes.status(), "login as e2e-admin").toBe(200);
+
+  await page.goto("/index.html");
+  await page.evaluate(() => navigator.serviceWorker.ready);
+
+  const seeded = await page.evaluate(async () => {
+    // Same discovery-not-literal reasoning as the /api/* probe above: find
+    // the shell cache by prefix so a future CACHE_VERSION bump cannot make
+    // this test pass by planting into a cache the service worker never
+    // reads.
+    const names = await caches.keys();
+    const shellCaches = names.filter((name) => name.startsWith("inventory-shell-"));
+    if (shellCaches.length !== 1) {
+      return { cacheName: null, count: shellCaches.length, body: null };
+    }
+
+    const cache = await caches.open(shellCaches[0]);
+    await cache.put(
+      "/admin",
+      new Response("<html><body>planted-admin-page</body></html>", {
+        headers: { "Content-Type": "text/html" },
+      }),
+    );
+
+    const planted = await cache.match("/admin");
+    const response = await fetch("/admin");
+    return {
+      cacheName: shellCaches[0],
+      count: shellCaches.length,
+      plantedOK: planted != null,
+      body: await response.text(),
+    };
+  });
+
+  expect(
+    seeded.cacheName,
+    `expected exactly one inventory-shell-* cache, found ${seeded.count}`,
+  ).not.toBeNull();
+  expect(seeded.plantedOK, "the probe response must actually be in the cache").toBe(true);
+
+  // The real /admin route renders the live page for an authenticated admin —
+  // anything other than the planted body proves the request reached the
+  // network rather than being served from the cache this test seeded.
+  expect(seeded.body).not.toContain("planted-admin-page");
+});
