@@ -169,9 +169,12 @@ the primary flows start with a camera capture.
   offline data editing (`00-overview.md` non-goals), and stale inventory
   data would be actively misleading.
 - **The cache-first path is an allowlist, never a denylist.** The `fetch`
-  handler decides what to cache from a known set of static shapes (the
-  precached app shell, plus the `/css/`, `/js/`, `/icons/` and `/vendor/`
-  prefixes, and `/manifest.json`) — not "everything same-origin except a
+  handler decides what to cache from a known set of static shapes: every page
+  under `web/static/` by exact path (not only the subset precached at
+  install — `sw.js`'s own `CACHEABLE_EXACT` also covers pages the shell
+  lazily caches on first visit, such as `dashboard.html` and
+  `settings.html`), plus the `/css/`, `/js/`, `/icons/` and `/vendor/`
+  prefixes, and `/manifest.json` — not "everything same-origin except a
   list of excluded paths." A denylist needs a human to remember to add every
   new server-rendered route before it ships, and forgetting is silent: the
   route works the first time, then serves a stale response from Cache

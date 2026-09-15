@@ -254,3 +254,53 @@ test("GET /sw.js is answered with Cache-Control: no-cache", async ({ request }) 
   expect(response.status()).toBe(200);
   expect(response.headers()["cache-control"]).toBe("no-cache");
 });
+
+// docs/specs/05-frontend-pwa-foundations.md makes "Reset local app data"
+// mandatory as the manual escape hatch for whatever the version-bump
+// cleanup above does not anticipate. It is only worth having if it actually
+// tears down what it claims to: a typo'd element id, a handler that
+// unregisters the worker but forgets to clear Cache Storage (or the other
+// way around), or a broken click binding would all ship green without a
+// test that drives the real button and inspects real browser state after.
+test("the 'Reset local app data' action unregisters the service worker and clears its caches", async ({ page }) => {
+  const HOUSEHOLD = "00000000-0000-7000-8000-000000000010";
+  const login = await page.request.post("/api/auth/login", {
+    data: { username: "e2e-alice", password: "e2e-fixture-password" },
+  });
+  expect(login.status()).toBe(200);
+
+  await page.goto(`/settings.html?storage=${HOUSEHOLD}`);
+  await page.evaluate(() => navigator.serviceWorker.ready);
+
+  const before = await page.evaluate(async () => {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    const names = await caches.keys();
+    return { registrations: regs.length, caches: names.length };
+  });
+  expect(before.registrations, "expected a service worker registered before the reset").toBeGreaterThan(0);
+  expect(before.caches, "expected at least the shell cache to exist before the reset").toBeGreaterThan(0);
+
+  // resetLocalAppData reloads once it finishes, and register-sw.js would
+  // immediately re-register a fresh worker on that very reload — which would
+  // make "nothing is registered" impossible to observe and turn this into a
+  // test of timing rather than of what the button actually did.
+  // addInitScript runs in every document this page loads from here on,
+  // including the reload, and — unlike page.route, which does not reliably
+  // intercept a service worker's own registration fetch (confirmed live: the
+  // route below never aborted it) — actually reaches
+  // navigator.serviceWorker.register itself, so the post-reset state
+  // reflects only the reset.
+  await page.addInitScript(() => {
+    navigator.serviceWorker.register = () => Promise.reject(new Error("registration blocked for test"));
+  });
+
+  await Promise.all([page.waitForEvent("load"), page.click("#reset-local-data")]);
+
+  const after = await page.evaluate(async () => {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    const names = await caches.keys();
+    return { registrations: regs.length, caches: names.length };
+  });
+  expect(after.registrations, "the button must actually unregister the service worker").toBe(0);
+  expect(after.caches, "the button must actually clear every Cache Storage entry").toBe(0);
+});
