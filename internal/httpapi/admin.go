@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -11,7 +12,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/CDRO/Inventory/internal/auth"
+	"github.com/CDRO/Inventory/internal/config"
 	"github.com/CDRO/Inventory/internal/store"
+	"github.com/CDRO/Inventory/internal/vision"
 )
 
 // Admin input bounds, matching the column widths in migration 00002 so an
@@ -37,6 +40,21 @@ type AdminStore interface {
 	ListMembers(ctx context.Context, storageID uuid.UUID) ([]store.Member, error)
 	AddMember(ctx context.Context, storageID, userID uuid.UUID) error
 	RemoveMember(ctx context.Context, storageID, userID uuid.UUID) error
+
+	// Setting/SetSetting back the app-settings routes (docs/specs/01-architecture-and-deployment.md's
+	// AI model resilience) — currently just the gemini_model override, read
+	// by vision.Checker.EffectiveModel and written here.
+	Setting(ctx context.Context, key string) (string, bool, error)
+	SetSetting(ctx context.Context, key, value string, updatedBy uuid.UUID) error
+
+	// SearchCatalog, SetCatalogShelfLife, RecomputeDerivedExpiryForCatalog and
+	// DeleteCatalogProduct back catalog moderation: catalog_products is
+	// insert-only (docs/specs/02-data-model.md), so an admin correcting or
+	// removing a bad entry is the only remedy.
+	SearchCatalog(ctx context.Context, q string) ([]store.CatalogProduct, error)
+	SetCatalogShelfLife(ctx context.Context, id uuid.UUID, days *int) error
+	RecomputeDerivedExpiryForCatalog(ctx context.Context, catalogID uuid.UUID) (int, error)
+	DeleteCatalogProduct(ctx context.Context, id uuid.UUID) error
 }
 
 // AdminHandler serves the admin JSON routes of
@@ -56,12 +74,17 @@ type AdminStore interface {
 // not the leak; output to any client is.
 type AdminHandler struct {
 	store  AdminStore
+	vision AdminVisionChecker
+	cfg    *config.Config
 	errors *ErrorWriter
 }
 
-// NewAdminHandler wires the admin JSON routes.
-func NewAdminHandler(s AdminStore, errs *ErrorWriter) *AdminHandler {
-	return &AdminHandler{store: s, errors: errs}
+// NewAdminHandler wires the admin JSON routes. visionChecker and cfg may be
+// nil — GetSettings/PutSettings then report model_unavailable / an empty
+// model list rather than panicking, and the env-file route is not registered
+// at all when cfg is nil (see Deps.Config in router.go).
+func NewAdminHandler(s AdminStore, visionChecker AdminVisionChecker, cfg *config.Config, errs *ErrorWriter) *AdminHandler {
+	return &AdminHandler{store: s, vision: visionChecker, cfg: cfg, errors: errs}
 }
 
 // adminUser is a user as the admin JSON API describes one. No is_admin, no
@@ -323,6 +346,230 @@ func (h *AdminHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.store.RemoveMember(r.Context(), storageID, userID); err != nil {
 		h.errors.WriteError(w, r, FromStoreError(err, "membership not found"))
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+// adminSettings is the app-settings state for GET /api/admin/settings.
+type adminSettings struct {
+	GeminiModel     string   `json:"gemini_model"`
+	AvailableModels []string `json:"available_models"`
+	Status          string   `json:"status"`
+}
+
+// GetSettings serves GET /api/admin/settings.
+func (h *AdminHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
+	out := adminSettings{AvailableModels: []string{}, Status: vision.StatusModelUnavailable}
+	if h.vision == nil {
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+
+	model, err := h.vision.EffectiveModel(r.Context())
+	if err != nil {
+		h.errors.WriteError(w, r, Internal(err))
+		return
+	}
+	out.GeminiModel = model
+	out.Status = h.vision.Status(r.Context())
+
+	models, err := h.vision.Models(r.Context())
+	if err != nil {
+		h.errors.WriteError(w, r, Internal(err))
+		return
+	}
+	out.AvailableModels = models
+
+	writeJSON(w, http.StatusOK, out)
+}
+
+// PutSettings serves PUT /api/admin/settings. Body: {gemini_model}.
+//
+// Writing the settings-table override is what makes this apply immediately,
+// no restart: vision.Checker.EffectiveModel reads the same row on every
+// check (docs/specs/01-architecture-and-deployment.md).
+func (h *AdminHandler) PutSettings(w http.ResponseWriter, r *http.Request) {
+	user, ok := UserFrom(r.Context())
+	if !ok {
+		h.errors.WriteError(w, r, Unauthorized(ReasonSessionMissing))
+		return
+	}
+
+	var body struct {
+		GeminiModel string `json:"gemini_model"`
+	}
+	if failure := decodeJSON(w, r, &body); failure != nil {
+		h.errors.WriteError(w, r, failure)
+		return
+	}
+
+	model := strings.TrimSpace(body.GeminiModel)
+	if model == "" {
+		h.errors.WriteError(w, r, ValidationFailed(
+			map[string][]string{"gemini_model": {"A model id is required."}}, nil))
+		return
+	}
+	// Rejected here, not just trimmed: this value is later written verbatim
+	// into a generated .env file (config.RenderEnv, EnvFile below) via
+	// fmt.Sprintf. A newline in it would let an admin session inject an
+	// extra line into that file — e.g. a second ADMIN_INITIAL_USERNAME= —
+	// that an operator could redeploy from without noticing.
+	if strings.ContainsAny(model, "\n\r") {
+		h.errors.WriteError(w, r, ValidationFailed(
+			map[string][]string{"gemini_model": {"Cannot contain line breaks."}}, nil))
+		return
+	}
+
+	if err := h.store.SetSetting(r.Context(), vision.SettingsModelKey, model, user.ID); err != nil {
+		h.errors.WriteError(w, r, Internal(err))
+		return
+	}
+	if h.vision != nil {
+		// Drop the cached model list so the very next Status/EffectiveModel
+		// check reflects this write — "applied immediately, no restart" is
+		// the whole point of the settings-table override.
+		h.vision.Invalidate()
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"gemini_model": model})
+}
+
+// EnvFile serves GET /api/admin/settings/env-file: a regenerated .env with
+// the corrected GEMINI_MODEL line, for an operator who prefers redeploying
+// from config over the in-app override
+// (docs/specs/01-architecture-and-deployment.md's "Admin remediation").
+// Not registered at all when the router was built with no Config (see
+// Deps.Config), so h.cfg is guaranteed non-nil whenever this runs.
+func (h *AdminHandler) EnvFile(w http.ResponseWriter, r *http.Request) {
+	model := h.cfg.GeminiModel
+	if h.vision != nil {
+		if effective, err := h.vision.EffectiveModel(r.Context()); err == nil && effective != "" {
+			model = effective
+		}
+	}
+	body := config.RenderEnv(h.cfg, model)
+
+	header := w.Header()
+	header.Set("Content-Type", "text/plain; charset=utf-8")
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("Content-Disposition", `attachment; filename=".env"`)
+	header.Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(body))
+}
+
+// adminCatalogEntry is one catalog row as the admin moderation view
+// describes it. Unlike every other surface built on catalog_products
+// (docs/specs/02-data-model.md), this one carries id: PATCH and DELETE need
+// something to target it by, and this route is reachable only behind
+// RequireAdmin — the same "one place a caller may see" exception
+// ListStorages already relies on for the same reason.
+type adminCatalogEntry struct {
+	ID                   uuid.UUID `json:"id"`
+	DisplayName          string    `json:"display_name"`
+	CategoryPath         *string   `json:"category_path"`
+	ItemType             string    `json:"item_type"`
+	DefaultShelfLifeDays *int      `json:"default_shelf_life_days"`
+}
+
+// SearchCatalog serves GET /api/admin/catalog?q=. An empty q returns the
+// first page alphabetically, so the admin page can render a browsable table
+// rather than requiring a search term before showing anything.
+func (h *AdminHandler) SearchCatalog(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	rows, err := h.store.SearchCatalog(r.Context(), q)
+	if err != nil {
+		h.errors.WriteError(w, r, Internal(err))
+		return
+	}
+	out := make([]adminCatalogEntry, 0, len(rows))
+	for _, c := range rows {
+		out = append(out, adminCatalogEntry{
+			ID: c.ID, DisplayName: c.DisplayName, CategoryPath: c.CategoryPath,
+			ItemType: string(c.ItemType), DefaultShelfLifeDays: c.DefaultShelfLifeDays,
+		})
+	}
+	writeJSON(w, http.StatusOK, collection[adminCatalogEntry]{Items: out})
+}
+
+// PatchCatalog serves PATCH /api/admin/catalog/{id}. Body:
+// {default_shelf_life_days} only — the one field catalog_products'
+// insert-only rule (docs/specs/02-data-model.md) still permits an admin to
+// change. The value is a JSON number or null, decoded by the same
+// parseShelfLifeDays helper PatchCategoryShelfLife uses
+// (internal/httpapi/expiry.go), so the two admin-facing shelf-life routes
+// share one request shape and one set of error messages.
+//
+// Changing this value is a correction, not just a setting — the old number
+// was wrong, so docs/specs/08-expiration-and-classification.md requires it to
+// reach every batch already in the database, not only future ones. Unlike
+// PatchCategoryShelfLife's storage-scoped cascade, this one crosses every
+// storage: catalog_products has no storage_id, so an admin's correction to it
+// is a correction for every household that picked this catalog entry.
+//
+// The spec calls this a "background job" because it is unbounded across
+// storages in principle. In practice it is the same shape of work as the
+// storage-scoped cascade — a bounded set of local UPDATEs, no external call,
+// no vision API — and this project's jobs table/runner
+// (internal/jobs/runner.go) exists specifically for slow *external* calls
+// that must not block a request; recomputing rows from the household's own
+// database is not that. So it runs inline, like the storage-scoped sibling,
+// and the response carries the real count rather than a job id to poll.
+func (h *AdminHandler) PatchCatalog(w http.ResponseWriter, r *http.Request) {
+	id, failure := idFromPath(r, "id", "malformed catalog id")
+	if failure != nil {
+		h.errors.WriteError(w, r, failure)
+		return
+	}
+
+	var body struct {
+		DefaultShelfLifeDays json.RawMessage `json:"default_shelf_life_days"`
+	}
+	if failure := decodeJSON(w, r, &body); failure != nil {
+		h.errors.WriteError(w, r, failure)
+		return
+	}
+	if body.DefaultShelfLifeDays == nil {
+		h.errors.WriteError(w, r, ValidationFailed(map[string][]string{
+			"default_shelf_life_days": {"Provide a number of days, or null to clear the override."},
+		}, nil))
+		return
+	}
+
+	days, failure := parseShelfLifeDays(body.DefaultShelfLifeDays)
+	if failure != nil {
+		h.errors.WriteError(w, r, failure)
+		return
+	}
+
+	if err := h.store.SetCatalogShelfLife(r.Context(), id, days); err != nil {
+		h.errors.WriteError(w, r, FromStoreError(err, "catalog entry not found"))
+		return
+	}
+
+	affected, err := h.store.RecomputeDerivedExpiryForCatalog(r.Context(), id)
+	if err != nil {
+		h.errors.WriteError(w, r, Internal(err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, struct {
+		DefaultShelfLifeDays *int `json:"default_shelf_life_days"`
+		RecomputedBatches    int  `json:"recomputed_batches"`
+	}{DefaultShelfLifeDays: days, RecomputedBatches: affected})
+}
+
+// DeleteCatalog serves DELETE /api/admin/catalog/{id} — moderation. Never
+// touches any storage's own products: products.catalog_id is
+// ON DELETE SET NULL (docs/specs/02-data-model.md).
+func (h *AdminHandler) DeleteCatalog(w http.ResponseWriter, r *http.Request) {
+	id, failure := idFromPath(r, "id", "malformed catalog id")
+	if failure != nil {
+		h.errors.WriteError(w, r, failure)
+		return
+	}
+	if err := h.store.DeleteCatalogProduct(r.Context(), id); err != nil {
+		h.errors.WriteError(w, r, FromStoreError(err, "catalog entry not found"))
 		return
 	}
 	writeJSON(w, http.StatusNoContent, nil)

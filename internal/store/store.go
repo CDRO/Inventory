@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -88,6 +89,26 @@ func (s *Store) Setting(ctx context.Context, key string) (string, bool, error) {
 	default:
 		return "", false, fmt.Errorf("store: read setting %q: %w", key, err)
 	}
+}
+
+// SetSetting upserts a settings-table override and records who changed it.
+//
+// Currently used for exactly one key, gemini_model
+// (docs/specs/01-architecture-and-deployment.md's AI model resilience: an
+// admin-corrected model id applies immediately, with no restart, because
+// Checker.EffectiveModel reads this table on every check). Takes key as a
+// parameter rather than being named for it — the shape (an admin-only,
+// database-backed override) is generic even though today's only caller
+// is not.
+func (s *Store) SetSetting(ctx context.Context, key, value string, updatedBy uuid.UUID) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO settings (key, value, updated_by) VALUES ($1, $2, $3)
+		ON CONFLICT (key) DO UPDATE SET value = $2, updated_by = $3, updated_at = now()`,
+		key, value, updatedBy)
+	if err != nil {
+		return fmt.Errorf("store: set setting %q: %w", key, err)
+	}
+	return nil
 }
 
 func isNoRows(err error) bool {

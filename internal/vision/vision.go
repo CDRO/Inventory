@@ -37,8 +37,11 @@ const (
 	StatusModelUnavailable = "model_unavailable"
 )
 
-// settingsModelKey is the settings-table row that outranks GEMINI_MODEL.
-const settingsModelKey = "gemini_model"
+// SettingsModelKey is the settings-table row that outranks GEMINI_MODEL.
+// Exported so the admin settings routes (internal/httpapi/admin.go) write
+// the same key this package reads — one name, not two literals that could
+// drift apart.
+const SettingsModelKey = "gemini_model"
 
 // defaultListEndpoint is Gemini's model catalogue.
 const defaultListEndpoint = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -103,7 +106,7 @@ func (c *Checker) EffectiveModel(ctx context.Context) (string, error) {
 	if c.settings == nil {
 		return c.envModel, nil
 	}
-	value, ok, err := c.settings.Setting(ctx, settingsModelKey)
+	value, ok, err := c.settings.Setting(ctx, SettingsModelKey)
 	if err != nil {
 		return "", fmt.Errorf("vision: resolve effective model: %w", err)
 	}

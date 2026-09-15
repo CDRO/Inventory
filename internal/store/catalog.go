@@ -196,6 +196,44 @@ func (s *Store) CatalogVariants(ctx context.Context, id uuid.UUID, limit int) ([
 	return names, nil
 }
 
+// maxCatalogSearchResults bounds an admin catalog search the same way every
+// other admin list in this project is small-household-scale: there is no
+// pagination anywhere in the admin area, and a global catalog searched by a
+// specific query string is not the exception.
+const maxCatalogSearchResults = 50
+
+// SearchCatalog is the admin catalog search
+// (docs/specs/03-auth-and-multi-tenancy.md): a case-insensitive substring
+// match against display_name. Never storage-scoped — the catalog itself is
+// global — and this is reachable only behind RequireAdmin, which is what
+// makes searching every entry in it acceptable here.
+func (s *Store) SearchCatalog(ctx context.Context, q string) ([]CatalogProduct, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, normalized_name, display_name, base_id, category_path, item_type,
+		       image_url, icon_name, default_shelf_life_days, created_at
+		  FROM catalog_products
+		 WHERE display_name ILIKE '%' || $1 || '%'
+		 ORDER BY display_name
+		 LIMIT $2`, q, maxCatalogSearchResults)
+	if err != nil {
+		return nil, fmt.Errorf("store: search catalog: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]CatalogProduct, 0)
+	for rows.Next() {
+		c, err := scanCatalogProduct(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: search catalog: %w", err)
+	}
+	return out, nil
+}
+
 // SetCatalogShelfLife is the ONLY permitted update to a catalog_products row,
 // and only an admin may call it.
 //

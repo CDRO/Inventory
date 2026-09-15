@@ -251,6 +251,59 @@ func (s *Store) RecomputeDerivedExpiryForCategory(ctx context.Context, storageID
 	return total, nil
 }
 
+// RecomputeDerivedExpiryForCatalog recomputes every product, across every
+// storage, that resolves through one catalog entry, after an admin corrected
+// that entry's shelf life (docs/specs/08-expiration-and-classification.md's
+// "Cascade against current state").
+//
+// This is the one cross-storage recompute in the package: catalog_products is
+// the one table with no storage_id (docs/specs/02-data-model.md), so an
+// admin's correction to it is a correction for every household that picked
+// that catalog entry, not just one. It still touches only
+// expiration_source = 'derived' batches, through the same
+// RecomputeDerivedExpiry each storage-scoped caller uses.
+//
+// A product with its own products.default_shelf_life_days is excluded up
+// front: that override outranks the catalog value in ExpiryRulesFor's
+// priority order, so the catalog change does not apply to it and recomputing
+// would touch the row for no reason.
+func (s *Store) RecomputeDerivedExpiryForCatalog(ctx context.Context, catalogID uuid.UUID) (int, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT storage_id, id FROM products
+		 WHERE catalog_id = $1 AND default_shelf_life_days IS NULL`, catalogID)
+	if err != nil {
+		return 0, fmt.Errorf("store: find products under catalog entry: %w", err)
+	}
+
+	type productRef struct {
+		storageID uuid.UUID
+		productID uuid.UUID
+	}
+	var products []productRef
+	for rows.Next() {
+		var p productRef
+		if err := rows.Scan(&p.storageID, &p.productID); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("store: scan product under catalog entry: %w", err)
+		}
+		products = append(products, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: find products under catalog entry: %w", err)
+	}
+
+	total := 0
+	for _, p := range products {
+		affected, err := s.RecomputeDerivedExpiry(ctx, p.storageID, p.productID)
+		if err != nil {
+			return total, err
+		}
+		total += affected
+	}
+	return total, nil
+}
+
 // SetBatchExpiration edits or clears one batch's expiration date.
 //
 // Either way the source becomes 'user': the point of the column is to record

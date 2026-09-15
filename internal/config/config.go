@@ -47,6 +47,17 @@ type Config struct {
 	GeminiImageModel string
 
 	SerpAPIKey string
+
+	// Postgres* are read for exactly one purpose: regenerating a complete,
+	// deployable .env for the admin download
+	// (docs/specs/01-architecture-and-deployment.md's AI model resilience).
+	// The application itself never uses them — it only ever talks to
+	// DatabaseURL — but docker-compose's db service reads them directly, so
+	// a regenerated .env that omitted them would not actually redeploy the
+	// stack.
+	PostgresUser     string
+	PostgresPassword string
+	PostgresDB       string
 }
 
 // IsDev reports whether verbose error reasons are permitted. Every caller that
@@ -112,5 +123,9 @@ func Load(getenv func(string) string) (*Config, error) {
 		GeminiImageModel: strings.TrimSpace(getenv("GEMINI_IMAGE_MODEL")),
 
 		SerpAPIKey: strings.TrimSpace(getenv("SERPAPI_API_KEY")),
+
+		PostgresUser:     get("POSTGRES_USER", "inventory"),
+		PostgresPassword: strings.TrimSpace(getenv("POSTGRES_PASSWORD")),
+		PostgresDB:       get("POSTGRES_DB", "inventory"),
 	}, nil
 }

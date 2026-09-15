@@ -155,11 +155,12 @@ func parseExpirationDate(raw json.RawMessage) (*time.Time, *Failure) {
 // so a user who changes a rule and immediately looks at their inventory sees
 // the new dates rather than the old ones.
 //
-// The spec asks for the *admin catalog* cascade to run as a background job.
-// This is the storage-scoped version, which touches one household's rows
-// rather than every storage's, and is small enough to do inline. The
-// cross-storage catalog cascade arrives with the admin catalog routes (#36),
-// which will run it on the job runner.
+// This is the storage-scoped version, which touches one household's rows.
+// The admin catalog cascade (PatchCatalog, internal/httpapi/admin.go) reaches
+// across every storage but is the same kind of work — a bounded set of local
+// UPDATEs, no external call — so it runs inline too, for the same reason:
+// see PatchCatalog's doc comment for why "background job" in spec 08 does not
+// mean the jobs table or runner here.
 func (h *ExpiryHandler) PatchCategoryShelfLife(w http.ResponseWriter, r *http.Request) {
 	storageID, ok := StorageIDFrom(r.Context())
 	if !ok {

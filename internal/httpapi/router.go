@@ -47,6 +47,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/CDRO/Inventory/internal/admin"
+	"github.com/CDRO/Inventory/internal/config"
 )
 
 // DBPinger reports whether the database is reachable. It is the narrow slice
@@ -54,6 +55,19 @@ import (
 // handler can be tested without a database.
 type DBPinger interface {
 	Ping(ctx context.Context) error
+}
+
+// AdminVisionChecker is the fuller slice of *vision.Checker the admin
+// settings routes and the /admin AI-model banner need — beyond
+// VisionReporter's bare Status, they also resolve which model is effective,
+// list what the provider currently offers, and drop the cached list after an
+// admin corrects the model so the very next check reflects it
+// (docs/specs/01-architecture-and-deployment.md's AI model resilience).
+type AdminVisionChecker interface {
+	EffectiveModel(ctx context.Context) (string, error)
+	Models(ctx context.Context) ([]string, error)
+	Status(ctx context.Context) string
+	Invalidate()
 }
 
 // VisionReporter reports the vision subsystem's status, either
@@ -131,6 +145,15 @@ type Deps struct {
 	// shelf and product ingestion. With no Consumer the upload route is
 	// absent; confirming and discarding existing consumption jobs still work.
 	Consumer Consumer
+	// AdminVision backs the admin settings routes and the /admin AI-model
+	// banner. With no AdminVision those routes still register (settings has
+	// no other prerequisite), but report model_unavailable / an empty model
+	// list rather than panicking on a nil dependency.
+	AdminVision AdminVisionChecker
+	// Config is the running configuration, needed only to regenerate a
+	// downloadable .env for GET /api/admin/settings/env-file. Nil disables
+	// that one route; every other admin route is unaffected.
+	Config *config.Config
 }
 
 // NewRouter builds the application's HTTP handler.
@@ -222,8 +245,8 @@ func NewRouter(d Deps) http.Handler {
 		// either is behind RequireAdmin by the act of being added, and a
 		// non-admin gets the same 404 from both as from a path that does not
 		// exist at all.
-		adminAPI := NewAdminHandler(d.Store, errs)
-		adminPages, err := admin.New(d.Store,
+		adminAPI := NewAdminHandler(d.Store, d.AdminVision, d.Config, errs)
+		adminPages, err := admin.New(d.Store, d.AdminVision,
 			func(req *http.Request) (uuid.UUID, bool) {
 				u, ok := UserFrom(req.Context())
 				if !ok {
@@ -259,6 +282,15 @@ func NewRouter(d Deps) http.Handler {
 			ad.Get("/api/admin/storages/{id}/members", adminAPI.ListMembers)
 			ad.Post("/api/admin/storages/{id}/members", adminAPI.AddMember)
 			ad.Delete("/api/admin/storages/{id}/members/{user_id}", adminAPI.RemoveMember)
+
+			ad.Get("/api/admin/settings", adminAPI.GetSettings)
+			ad.Put("/api/admin/settings", adminAPI.PutSettings)
+			if d.Config != nil {
+				ad.Get("/api/admin/settings/env-file", adminAPI.EnvFile)
+			}
+			ad.Get("/api/admin/catalog", adminAPI.SearchCatalog)
+			ad.Patch("/api/admin/catalog/{id}", adminAPI.PatchCatalog)
+			ad.Delete("/api/admin/catalog/{id}", adminAPI.DeleteCatalog)
 		})
 
 		r.Route("/api/storages/{storage_id}", func(sr chi.Router) {

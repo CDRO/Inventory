@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/CDRO/Inventory/internal/config"
 	"github.com/CDRO/Inventory/internal/httpapi"
 	"github.com/CDRO/Inventory/internal/store"
 )
@@ -179,6 +180,7 @@ type apiFixture struct {
 	reorder      *fakeReorderStore
 	analytics    *fakeAnalyticsStore
 	gamification *fakeGamification
+	adminVision  *fakeAdminVision
 	storageID    uuid.UUID
 	user         *store.User
 	session      *store.Session
@@ -211,6 +213,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	products := &fakeProductStore{}
 	reorder := &fakeReorderStore{}
 	analytics := &fakeAnalyticsStore{}
+	adminVision := &fakeAdminVision{status: "ok"}
 
 	router := httpapi.NewRouter(httpapi.Deps{
 		DB:     stubPinger{},
@@ -224,12 +227,14 @@ func newAPIFixture(t *testing.T) *apiFixture {
 			fakeReorderStore: reorder, fakeAnalyticsStore: analytics,
 			fakeGamification: gamification,
 		},
-		Matcher:    matcher,
-		Images:     images,
-		ImageCache: imageData,
-		Ingester:   ingester,
-		Photos:     photos,
-		Consumer:   consumer,
+		Matcher:     matcher,
+		Images:      images,
+		ImageCache:  imageData,
+		Ingester:    ingester,
+		Photos:      photos,
+		Consumer:    consumer,
+		AdminVision: adminVision,
+		Config:      &config.Config{GeminiModel: "gemini-2.0-flash", AppEnv: "dev", HTTPPort: "8000"},
 	})
 
 	return &apiFixture{
@@ -241,6 +246,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		reorder:      reorder,
 		analytics:    analytics,
 		gamification: gamification,
+		adminVision:  adminVision,
 		storageID:    storageID, user: user, session: session,
 	}
 }

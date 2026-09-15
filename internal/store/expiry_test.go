@@ -701,3 +701,86 @@ func TestRecomputeDerivedExpiryForCategoryCascadeIsRecoverable(t *testing.T) {
 		assert.Equal(t, expected, date.Format(time.DateOnly), "%s product's batch", b.name)
 	}
 }
+
+// TestRecomputeDerivedExpiryForCatalogReachesEveryStorage is the admin
+// catalog cascade of docs/specs/08-expiration-and-classification.md
+// (#36, PatchCatalog): an admin correcting a catalog entry's shelf life is a
+// correction for every household that picked it, not just one — the one
+// cascade in this package that is not storage-scoped, because
+// catalog_products itself has no storage_id.
+func TestRecomputeDerivedExpiryForCatalogReachesEveryStorage(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+
+	entry, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{
+		DisplayName: "Catalog Cascade " + randomSuffix(), ItemType: store.ItemLongShelfLife,
+	})
+	require.NoError(t, err)
+
+	storageA := newStorage(t, ctx)
+	locationA, err := s.CreateLocation(ctx, storageA, store.NewLocation{Name: "Shelf"})
+	require.NoError(t, err)
+	productA, err := s.CreateProduct(ctx, storageA, store.NewProduct{Name: "Store brand", CatalogID: &entry.ID})
+	require.NoError(t, err)
+	derivedBatch, err := s.CreateBatch(ctx, storageA, store.NewBatch{
+		ProductID: productA.ID, LocationID: locationA.ID, Quantity: 1, Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+	userTyped := time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
+	userBatch, err := s.CreateBatch(ctx, storageA, store.NewBatch{
+		ProductID: productA.ID, LocationID: locationA.ID, Quantity: 1,
+		ExpirationDate: &userTyped, ExpirationSource: store.ExpirationUser, Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+
+	// A second household, picking the same catalog entry: the cascade must
+	// cross into its storage too.
+	storageB := newStorage(t, ctx)
+	locationB, err := s.CreateLocation(ctx, storageB, store.NewLocation{Name: "Pantry"})
+	require.NoError(t, err)
+	productB, err := s.CreateProduct(ctx, storageB, store.NewProduct{Name: "Also store brand", CatalogID: &entry.ID})
+	require.NoError(t, err)
+	otherHouseholdBatch, err := s.CreateBatch(ctx, storageB, store.NewBatch{
+		ProductID: productB.ID, LocationID: locationB.ID, Quantity: 1, Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+
+	// A third product also links to the entry, but set its own override —
+	// the catalog value does not apply to it, so it must be skipped.
+	overrideProduct, err := s.CreateProduct(ctx, storageB, store.NewProduct{
+		Name: "Prefers its own rule", CatalogID: &entry.ID, DefaultShelfLifeDays: shelfLife(5),
+	})
+	require.NoError(t, err)
+	overrideBatch, err := s.CreateBatch(ctx, storageB, store.NewBatch{
+		ProductID: overrideProduct.ID, LocationID: locationB.ID, Quantity: 1, Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+	overrideDateBefore, _ := batchExpiry(t, ctx, overrideBatch.ID)
+	require.NotNil(t, overrideDateBefore)
+
+	require.NoError(t, s.SetCatalogShelfLife(ctx, entry.ID, shelfLife(400)))
+	affected, err := s.RecomputeDerivedExpiryForCatalog(ctx, entry.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, affected, "the two derived batches across both storages, not the user one or the override one")
+
+	expectedA := derivedBatch.CreatedAt.UTC().Truncate(24*time.Hour).AddDate(0, 0, 400).Format(time.DateOnly)
+	dateA, sourceA := batchExpiry(t, ctx, derivedBatch.ID)
+	require.NotNil(t, dateA)
+	assert.Equal(t, expectedA, dateA.Format(time.DateOnly))
+	assert.Equal(t, "derived", sourceA)
+
+	dateUser, sourceUser := batchExpiry(t, ctx, userBatch.ID)
+	require.NotNil(t, dateUser)
+	assert.Equal(t, "2027-03-01", dateUser.Format(time.DateOnly), "a user-set date is never touched by any cascade")
+	assert.Equal(t, "user", sourceUser)
+
+	expectedB := otherHouseholdBatch.CreatedAt.UTC().Truncate(24*time.Hour).AddDate(0, 0, 400).Format(time.DateOnly)
+	dateB, _ := batchExpiry(t, ctx, otherHouseholdBatch.ID)
+	require.NotNil(t, dateB)
+	assert.Equal(t, expectedB, dateB.Format(time.DateOnly), "a second storage's product must be reached too")
+
+	overrideDateAfter, _ := batchExpiry(t, ctx, overrideBatch.ID)
+	require.NotNil(t, overrideDateAfter)
+	assert.Equal(t, overrideDateBefore.Format(time.DateOnly), overrideDateAfter.Format(time.DateOnly),
+		"a product with its own shelf-life override is not reached by the catalog's value")
+}

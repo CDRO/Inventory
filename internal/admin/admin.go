@@ -35,10 +35,12 @@ import (
 	"html/template"
 	"net/http"
 	"sort"
+	"strconv"
 
 	"github.com/google/uuid"
 
 	"github.com/CDRO/Inventory/internal/store"
+	"github.com/CDRO/Inventory/internal/vision"
 	"github.com/CDRO/Inventory/web"
 )
 
@@ -47,12 +49,24 @@ type Store interface {
 	ListUsers(ctx context.Context) ([]store.User, error)
 	ListStorages(ctx context.Context) ([]store.Storage, error)
 	ListMembers(ctx context.Context, storageID uuid.UUID) ([]store.Member, error)
+	SearchCatalog(ctx context.Context, q string) ([]store.CatalogProduct, error)
+}
+
+// VisionChecker backs the AI-model banner
+// (docs/specs/01-architecture-and-deployment.md's AI model resilience). A
+// nil VisionChecker (no vision provider configured at all) renders the
+// banner as unavailable with an empty model list, rather than panicking.
+type VisionChecker interface {
+	EffectiveModel(ctx context.Context) (string, error)
+	Models(ctx context.Context) ([]string, error)
+	Status(ctx context.Context) string
 }
 
 // Handler serves the admin pages.
 type Handler struct {
-	store Store
-	page  *template.Template
+	store  Store
+	vision VisionChecker
+	page   *template.Template
 	// currentUser names the caller, so the page can withhold the delete action
 	// from their own row. It is a callback rather than an import because the
 	// session lives in the httpapi package, which mounts this one.
@@ -67,6 +81,7 @@ type Handler struct {
 // request, if the template is missing or malformed.
 func New(
 	s Store,
+	visionChecker VisionChecker,
 	currentUser func(*http.Request) (uuid.UUID, bool),
 	fail func(http.ResponseWriter, *http.Request, error),
 ) (*Handler, error) {
@@ -78,7 +93,7 @@ func New(
 	if err != nil {
 		return nil, fmt.Errorf("admin: parse template: %w", err)
 	}
-	return &Handler{store: s, page: page, currentUser: currentUser, fail: fail}, nil
+	return &Handler{store: s, vision: visionChecker, page: page, currentUser: currentUser, fail: fail}, nil
 }
 
 type userRow struct {
@@ -100,10 +115,31 @@ type storageRow struct {
 	Candidates []store.User
 }
 
+type catalogRow struct {
+	ID           uuid.UUID
+	DisplayName  string
+	CategoryPath string // empty when unset — the template shows a dash
+	ItemType     string
+	// ShelfLifeDays is pre-formatted (empty when unset) because html/template
+	// cannot dereference a *int for an <input value> attribute without a
+	// helper, and one string field is simpler than adding one.
+	ShelfLifeDays string
+}
+
 type pageData struct {
 	Nonce    string
 	Users    []userRow
 	Storages []storageRow
+
+	// AI model resilience (docs/specs/01-architecture-and-deployment.md).
+	GeminiModel      string
+	AvailableModels  []string
+	ModelUnavailable bool
+
+	// Catalog moderation: CatalogQuery echoes the search box so a reload
+	// (after a PATCH/DELETE, or just re-visiting the page) does not lose it.
+	CatalogQuery string
+	Catalog      []catalogRow
 }
 
 // Page serves GET /admin: users with their storages, storages with their
@@ -136,9 +172,17 @@ func (h *Handler) Page(w http.ResponseWriter, r *http.Request) {
 	// The page's one script and one style block run by nonce; nothing else
 	// runs at all. frame-ancestors keeps the admin page out of anyone's iframe,
 	// where its delete buttons could be clickjacked.
+	//
+	// form-action is 'self', not 'none': every write on this page goes through
+	// the script's fetch (which preventDefault stops from ever reaching a
+	// native submission, so this never mattered for those), but the catalog
+	// search box is a plain native GET to /admin?q=... — a real search UX
+	// that a client-side fetch would break, since a page a fetch replaced in
+	// place could not be reloaded or bookmarked with the query still in the
+	// URL. 'self' still refuses a form aimed at any other origin.
 	header.Set("Content-Security-Policy", fmt.Sprintf(
 		"default-src 'none'; script-src 'nonce-%[1]s'; style-src 'nonce-%[1]s'; "+
-			"connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
+			"connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
 		nonce))
 	header.Set("Referrer-Policy", "no-referrer")
 	w.WriteHeader(http.StatusOK)
@@ -197,6 +241,37 @@ func (h *Handler) load(r *http.Request) (*pageData, error) {
 			Storages:    names,
 		})
 	}
+
+	if h.vision != nil {
+		model, err := h.vision.EffectiveModel(ctx)
+		if err != nil {
+			return nil, err
+		}
+		data.GeminiModel = model
+		data.ModelUnavailable = h.vision.Status(ctx) != vision.StatusOK
+		models, err := h.vision.Models(ctx)
+		if err != nil {
+			return nil, err
+		}
+		data.AvailableModels = models
+	}
+
+	data.CatalogQuery = r.URL.Query().Get("q")
+	catalog, err := h.store.SearchCatalog(ctx, data.CatalogQuery)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range catalog {
+		row := catalogRow{ID: c.ID, DisplayName: c.DisplayName, ItemType: string(c.ItemType)}
+		if c.CategoryPath != nil {
+			row.CategoryPath = *c.CategoryPath
+		}
+		if c.DefaultShelfLifeDays != nil {
+			row.ShelfLifeDays = strconv.Itoa(*c.DefaultShelfLifeDays)
+		}
+		data.Catalog = append(data.Catalog, row)
+	}
+
 	return data, nil
 }
 
