@@ -3,6 +3,7 @@ package httpapi_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -549,6 +550,26 @@ func TestGetSettingsReportsEffectiveModelAndAvailability(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "gemini-2.5-pro")
 }
 
+// TestGetSettingsSurvivesAnUnreachableProvider: found by the E2E suite's
+// first real run against a fake, unauthenticated Gemini API key (issue #62)
+// — Models() failing (a provider outage, a bad key, no network) must not
+// take the whole settings route down with it, since "the model list could
+// not be fetched" is exactly the condition Status already reports as
+// model_unavailable rather than as an error.
+func TestGetSettingsSurvivesAnUnreachableProvider(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	f.adminVision.model = "gemini-2.0-flash"
+	f.adminVision.status = "model_unavailable"
+	f.adminVision.modelsErr = errors.New("vision: list models: connect: no route to host")
+
+	rec := f.do(http.MethodGet, "/api/admin/settings", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"gemini_model":"gemini-2.0-flash"`)
+	assert.Contains(t, rec.Body.String(), `"available_models":[]`)
+}
+
 // TestPutSettingsWritesAndInvalidatesCache: the write must reach the
 // settings-table override under vision.SettingsModelKey, and the cached
 // model list must be dropped so the very next check reflects it — "applied
@@ -699,6 +720,26 @@ func TestAdminPageShowsModelUnavailableBanner(t *testing.T) {
 	assert.Contains(t, page, "gemini-2.5-flash")
 	assert.Contains(t, page, "gemini-2.5-pro")
 	assert.Contains(t, page, `data-action="/api/admin/settings"`)
+}
+
+// TestAdminPageRendersEvenWhenModelsIsUnreachable: found alongside
+// TestGetSettingsSurvivesAnUnreachableProvider by the E2E suite's first real
+// run (issue #62) — an admin whose Gemini API key is invalid or offline
+// still needs to see and use the users/storages/catalog sections of /admin;
+// a provider outage in the one AI-model section must not take the whole
+// page down to a 500.
+func TestAdminPageRendersEvenWhenModelsIsUnreachable(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	f.adminVision.model = "gemini-2.0-flash"
+	f.adminVision.status = "model_unavailable"
+	f.adminVision.modelsErr = errors.New("vision: list models: connect: no route to host")
+
+	rec := f.do(http.MethodGet, "/admin", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "<h1>Admin</h1>")
+	assert.Contains(t, rec.Body.String(), f.user.Username, "the rest of the page still renders")
 }
 
 // TestAdminPageHidesBannerWhenModelIsFine: the warning is not a permanent

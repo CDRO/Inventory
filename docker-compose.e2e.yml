@@ -5,6 +5,7 @@
 # explicitly and on demand, never as part of the dev loop or the image build:
 #
 #   docker compose -f docker-compose.e2e.yml up -d --build
+#   docker compose -f docker-compose.e2e.yml run --rm app migrate up
 #   docker compose -f docker-compose.e2e.yml exec -T db \
 #     psql -U e2e -d e2e -f /fixtures/seed.sql
 #   docker compose -f docker-compose.e2e.yml run --rm e2e

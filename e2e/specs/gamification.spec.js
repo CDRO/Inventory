@@ -17,6 +17,24 @@
 
 import { test, expect } from "@playwright/test";
 
+// These three tests toggle /api/me/preferences for e2e-bob and e2e-alice —
+// there are only three fixture users in total (e2e/fixtures/seed.sql), and
+// the first two tests both need bob's global gamification_enabled flag in a
+// known state to make an exact-request-count assertion. Run serially so one
+// test's toggle can never land mid-assertion in another, which
+// playwright.config.js's default fullyParallel would otherwise allow —
+// confirmed live: without this, "FALSE: only the one gate check fires" and
+// "TRUE: the ring and card render" raced on bob's row and the FALSE test
+// observed quest/achievement requests that were actually the TRUE test's.
+test.describe.configure({ mode: "serial" });
+
+// Alice is a member of two storages (e2e/fixtures/seed.sql), deliberately —
+// she is also the switcher journey's fixture user. A page load with no
+// `?storage=` and nothing remembered from a prior visit can't resolve which
+// one she means (web/static/js/session.js's resolveStorage), so it redirects
+// to storages.html instead of rendering settings.html at all.
+const HOUSEHOLD = "00000000-0000-7000-8000-000000000010";
+
 const GAMIFICATION_PATHS = ["/progress", "/quests", "/achievements", "/gamification/settings"];
 
 function isGamificationRequest(url) {
@@ -84,7 +102,7 @@ test("turning gamification off in settings.html persists across a reload", async
   // Start from a known state regardless of what an earlier test left behind.
   await page.request.put("/api/me/preferences", { data: { gamification_enabled: true, holiday_weeks: [] } });
 
-  await page.goto("/settings.html");
+  await page.goto(`/settings.html?storage=${HOUSEHOLD}`);
   await expect(page.locator("#gamification-enabled")).toBeChecked();
 
   await page.locator("#gamification-enabled").uncheck();
