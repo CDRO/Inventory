@@ -31,7 +31,17 @@ export class ApiError extends Error {
 // index.html is the one page that never redirects itself away on 401 — every
 // other page does, which is why the constant lives here rather than being
 // repeated at each call site.
+//
+// http.FileServer 301-redirects a request for "/index.html" to "/"
+// (docs/specs/01-architecture-and-deployment.md; confirmed live and relied on
+// by e2e/specs/*.spec.js), so the login page's actual location.pathname is
+// "/", never "/index.html" — isLoginPage checks both so the already-there
+// guard below actually recognizes the page it is standing on.
 const LOGIN_PAGE = "/index.html";
+
+function isLoginPage() {
+  return location.pathname === "/" || location.pathname.endsWith(LOGIN_PAGE);
+}
 
 /**
  * apiFetch issues one request and returns the parsed JSON body on success.
@@ -86,7 +96,7 @@ export async function apiFetch(path, { skipAuthRedirect = false, ...options } = 
   }
 
   if (response.status === 401 && !skipAuthRedirect) {
-    if (!location.pathname.endsWith(LOGIN_PAGE)) {
+    if (!isLoginPage()) {
       location.assign(LOGIN_PAGE);
       // Deliberately never resolves: the page is navigating away, and a
       // caller acting on stale data during that navigation would be a bug
