@@ -33,6 +33,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -249,14 +250,16 @@ func (h *Handler) load(r *http.Request) (*pageData, error) {
 		}
 		data.GeminiModel = model
 		data.ModelUnavailable = h.vision.Status(ctx) != vision.StatusOK
-		// A provider that cannot be reached is exactly the condition
-		// ModelUnavailable above already reports, not a reason to fail the
-		// whole page: the template's picker falls back to a plain <input>
-		// when AvailableModels is empty (web/templates/admin.html), so the
-		// rest of the admin page — users, storages, catalog — must still
-		// render even when the vision provider is down.
+		// A provider that cannot be reached is ModelUnavailable above, not a
+		// reason to fail the whole page (see internal/httpapi/admin.go's
+		// GetSettings, which degrades the same way for the same reason);
+		// the template's picker falls back to a plain <input> when
+		// AvailableModels is empty. Logged for the same observability
+		// reason GetSettings logs it.
 		if models, err := h.vision.Models(ctx); err == nil {
 			data.AvailableModels = models
+		} else {
+			slog.Warn("admin page: could not list vision models", slog.Any("err", err))
 		}
 	}
 

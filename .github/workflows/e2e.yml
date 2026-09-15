@@ -61,18 +61,22 @@ jobs:
 
       # up -d returns once the containers have started, not once the app is
       # actually answering requests — there's no healthcheck on `app` itself
-      # (only on `db`, which gates its own startup). Traefik's own port
-      # accepts connections immediately, so polling through it is what
-      # actually tells us the backend is ready, not just that the container
-      # exists.
+      # (only on `db`, which gates its own startup). /healthz
+      # (docs/specs/01-architecture-and-deployment.md) is what actually
+      # proves readiness rather than just "Traefik is up": it only answers
+      # 200 once the app's own database connection succeeds, unlike a static
+      # asset like `/`, which staticHandler serves straight from the
+      # embedded frontend tree without touching Postgres at all — a 200
+      # there would prove nothing about whether the app can actually serve a
+      # request.
       - name: Wait for the app to answer through Traefik
         run: |
           for i in $(seq 1 30); do
-            code=$(curl -sk -o /dev/null -w '%{http_code}' https://localhost:8443/ || true)
+            code=$(curl -sk -o /dev/null -w '%{http_code}' https://localhost:8443/healthz || true)
             [ "$code" = "200" ] && exit 0
             sleep 2
           done
-          echo "app never answered a 200 through Traefik" >&2
+          echo "app never answered a 200 from /healthz" >&2
           docker compose -f docker-compose.e2e.yml logs app
           exit 1
 

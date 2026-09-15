@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -374,14 +375,15 @@ func (h *AdminHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
 	out.GeminiModel = model
 	out.Status = h.vision.Status(r.Context())
 
-	// A provider that cannot be reached right now is exactly the condition
-	// this banner exists to report, not a 500: Status above already treats
-	// the same failure as model_unavailable rather than an error, and the
-	// picker degrades to an empty list (web/templates/admin.html falls back
-	// to a plain <input>) rather than taking the whole settings route down
-	// with it.
+	// A provider that cannot be reached is model_unavailable (Status above),
+	// not a 500 (see internal/admin/admin.go's load(), which degrades the
+	// same way for the same reason). Logged, unlike Status/EffectiveModel,
+	// because this is the one path whose error is otherwise never seen
+	// anywhere — an operator would see an empty picker with no clue why.
 	if models, err := h.vision.Models(r.Context()); err == nil {
 		out.AvailableModels = models
+	} else {
+		slog.Warn("admin settings: could not list vision models", slog.Any("err", err))
 	}
 
 	writeJSON(w, http.StatusOK, out)
