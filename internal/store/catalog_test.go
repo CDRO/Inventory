@@ -233,3 +233,45 @@ func TestCatalogCarriesNoStorageReference(t *testing.T) {
 
 	_ = s
 }
+
+// TestSearchCatalogFiltersByDisplayName is the admin moderation search
+// (#36): filtered by a random suffix rather than a fixed name, since
+// catalog_products is the one global, unscoped table and this test shares
+// its database with every other test that writes to it.
+func TestSearchCatalogFiltersByDisplayName(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	suffix := randomSuffix()
+
+	milk, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{
+		DisplayName: "Whole Milk " + suffix, ItemType: store.ItemPerishable,
+	})
+	require.NoError(t, err)
+	_, err = s.InsertCatalogProduct(ctx, store.NewCatalogProduct{
+		DisplayName: "Sourdough Bread " + suffix, ItemType: store.ItemPerishable,
+	})
+	require.NoError(t, err)
+
+	results, err := s.SearchCatalog(ctx, "milk "+suffix)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, milk.ID, results[0].ID)
+	assert.Equal(t, "Whole Milk "+suffix, results[0].DisplayName)
+}
+
+// TestSearchCatalogIsCaseInsensitive: an admin moderating the catalog should
+// not have to match the exact case a household happened to type.
+func TestSearchCatalogIsCaseInsensitive(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	suffix := randomSuffix()
+
+	_, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{
+		DisplayName: "CamelCase" + suffix, ItemType: store.ItemPerishable,
+	})
+	require.NoError(t, err)
+
+	results, err := s.SearchCatalog(ctx, "camelcase"+suffix)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+}

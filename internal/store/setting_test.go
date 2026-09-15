@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -65,4 +66,48 @@ func TestSettingUndefinedTableIsNoOverride(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ok)
 	assert.Equal(t, "", value)
+}
+
+// TestSetSettingInsertsThenUpdatesInPlace is the write half of #36's admin
+// settings route: the first call must create the row, and a second call to
+// the same key must update it in place, not accumulate a second row for a
+// PRIMARY KEY(key) table.
+func TestSetSettingInsertsThenUpdatesInPlace(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := requireDB(t)
+	admin := newUser(t, ctx)
+
+	key := "test-setting-" + randomSuffix()
+	require.NoError(t, s.SetSetting(ctx, key, "gemini-2.0-flash", admin))
+
+	value, ok, err := s.Setting(ctx, key)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "gemini-2.0-flash", value)
+
+	require.NoError(t, s.SetSetting(ctx, key, "gemini-2.5-flash", admin))
+	value, ok, err = s.Setting(ctx, key)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "gemini-2.5-flash", value)
+	assert.Equal(t, 1, countRows(t, ctx, `SELECT count(*) FROM settings WHERE key = $1`, key),
+		"a second write to the same key must update the row, not duplicate it")
+}
+
+// TestSetSettingRecordsUpdatedBy pins the audit column: an override with no
+// record of who made it would be unaccountable on a shared household server.
+func TestSetSettingRecordsUpdatedBy(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := requireDB(t)
+	admin := newUser(t, ctx)
+
+	key := "test-setting-" + randomSuffix()
+	require.NoError(t, s.SetSetting(ctx, key, "gemini-2.0-flash", admin))
+
+	var updatedBy uuid.UUID
+	require.NoError(t, testPool.QueryRow(ctx,
+		`SELECT updated_by FROM settings WHERE key = $1`, key).Scan(&updatedBy))
+	assert.Equal(t, admin, updatedBy)
 }
