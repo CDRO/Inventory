@@ -28,6 +28,13 @@ import { test, expect } from "@playwright/test";
 // observed quest/achievement requests that were actually the TRUE test's.
 test.describe.configure({ mode: "serial" });
 
+// Alice is a member of two storages (e2e/fixtures/seed.sql), deliberately —
+// she is also the switcher journey's fixture user. A page load with no
+// `?storage=` and nothing remembered from a prior visit can't resolve which
+// one she means (web/static/js/session.js's resolveStorage), so it redirects
+// to storages.html instead of rendering settings.html at all.
+const HOUSEHOLD = "00000000-0000-7000-8000-000000000010";
+
 const GAMIFICATION_PATHS = ["/progress", "/quests", "/achievements", "/gamification/settings"];
 
 function isGamificationRequest(url) {
@@ -95,7 +102,7 @@ test("turning gamification off in settings.html persists across a reload", async
   // Start from a known state regardless of what an earlier test left behind.
   await page.request.put("/api/me/preferences", { data: { gamification_enabled: true, holiday_weeks: [] } });
 
-  await page.goto("/settings.html");
+  await page.goto(`/settings.html?storage=${HOUSEHOLD}`);
   await expect(page.locator("#gamification-enabled")).toBeChecked();
 
   await page.locator("#gamification-enabled").uncheck();
