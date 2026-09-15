@@ -93,6 +93,9 @@ test("a consumption proposal is reviewed, corrected and confirmed into a decreme
   await expect(page).toHaveURL(/\/inbox\.html\?.*consumed=1/);
   await expect(page.locator("#notice")).toHaveText("Proposal applied: 1 batch updated.");
   await expect(page.locator("#notice")).toHaveClass(/\balert--success\b/);
+  // Resolved --color-success (#15803d), not the --color-danger red every
+  // #error box renders in — see ingestion.spec.js for why class alone isn't enough.
+  await expect(page.locator("#notice")).toHaveCSS("color", "rgb(21, 128, 61)");
   await expect(page.locator(`[data-job-id="${CONSUME_JOB}"]`)).toHaveCount(0);
 
   // The fridge batch actually lost one unit; the pantry batch is untouched.
