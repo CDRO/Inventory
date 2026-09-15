@@ -21,6 +21,33 @@ import (
 	"github.com/CDRO/Inventory/internal/store"
 )
 
+// fakeAdminVision is the fuller vision checker the admin settings routes and
+// the /admin AI-model banner need, beyond stubVision's bare Status.
+type fakeAdminVision struct {
+	model       string
+	modelErr    error
+	models      []string
+	modelsErr   error
+	status      string
+	invalidated int
+}
+
+func (f *fakeAdminVision) EffectiveModel(context.Context) (string, error) {
+	return f.model, f.modelErr
+}
+
+func (f *fakeAdminVision) Models(context.Context) ([]string, error) {
+	return f.models, f.modelsErr
+}
+
+func (f *fakeAdminVision) Status(context.Context) string {
+	return f.status
+}
+
+func (f *fakeAdminVision) Invalidate() {
+	f.invalidated++
+}
+
 // The admin half of the in-memory store. It lives on fakeAuth rather than a
 // separate fake because deleting a user has to take their sessions with it,
 // and the sessions are fakeAuth's.
@@ -162,6 +189,56 @@ func (f *fakeAuth) RemoveMember(_ context.Context, storageID, userID uuid.UUID) 
 	return nil
 }
 
+func (f *fakeAuth) Setting(_ context.Context, key string) (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.settings[key]
+	return v, ok, nil
+}
+
+func (f *fakeAuth) SetSetting(_ context.Context, key, value string, _ uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.settings[key] = value
+	return nil
+}
+
+func (f *fakeAuth) SearchCatalog(_ context.Context, q string) ([]store.CatalogProduct, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]store.CatalogProduct, 0)
+	for _, c := range f.catalog {
+		if q == "" || strings.Contains(strings.ToLower(c.DisplayName), strings.ToLower(q)) {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeAuth) SetCatalogShelfLife(_ context.Context, id uuid.UUID, days *int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, c := range f.catalog {
+		if c.ID == id {
+			f.catalog[i].DefaultShelfLifeDays = days
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+func (f *fakeAuth) DeleteCatalogProduct(_ context.Context, id uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, c := range f.catalog {
+		if c.ID == id {
+			f.catalog = append(f.catalog[:i], f.catalog[i+1:]...)
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
 // newAdminFixture is newAPIFixture with the caller promoted to admin.
 func newAdminFixture(t *testing.T) *apiFixture {
 	t.Helper()
@@ -219,6 +296,11 @@ func TestNonAdminCannotTellTheAdminAreaExists(t *testing.T) {
 		{http.MethodGet, "/api/admin/storages", ""},
 		{http.MethodDelete, "/api/admin/storages/" + storage.ID.String(), ""},
 		{http.MethodPost, "/api/admin/storages/" + storage.ID.String() + "/members", `{"user_id":"` + victim.ID.String() + `"}`},
+		{http.MethodGet, "/api/admin/settings", ""},
+		{http.MethodPut, "/api/admin/settings", `{"gemini_model":"gemini-2.5-flash"}`},
+		{http.MethodGet, "/api/admin/catalog", ""},
+		{http.MethodPatch, "/api/admin/catalog/" + uuid.New().String(), `{"default_shelf_life_days":"5"}`},
+		{http.MethodDelete, "/api/admin/catalog/" + uuid.New().String(), ""},
 		// A registered admin path with a verb it does not have: chi would say
 		// 405 here if the static catch-all did not claim it first.
 		{http.MethodPut, "/api/admin/users", ""},
@@ -426,4 +508,226 @@ func TestAdminPageRendersServerSide(t *testing.T) {
 	// Demoted mid-session: the very next page load is the hidden-area 404.
 	f.auth.setAdmin(f.user.ID, false)
 	assert.Equal(t, http.StatusNotFound, f.do(http.MethodGet, "/admin", "").Code)
+}
+
+// TestGetSettingsReportsEffectiveModelAndAvailability covers GET
+// /api/admin/settings: the effective model, whether the provider currently
+// offers it, and the full list a picker would need
+// (docs/specs/01-architecture-and-deployment.md's AI model resilience).
+func TestGetSettingsReportsEffectiveModelAndAvailability(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	f.adminVision.model = "gemini-2.0-flash"
+	f.adminVision.status = "model_unavailable"
+	f.adminVision.models = []string{"gemini-2.5-flash", "gemini-2.5-pro"}
+
+	rec := f.do(http.MethodGet, "/api/admin/settings", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"gemini_model":"gemini-2.0-flash"`)
+	assert.Contains(t, rec.Body.String(), `"status":"model_unavailable"`)
+	assert.Contains(t, rec.Body.String(), "gemini-2.5-flash")
+	assert.Contains(t, rec.Body.String(), "gemini-2.5-pro")
+}
+
+// TestPutSettingsWritesAndInvalidatesCache: the write must reach the
+// settings-table override under vision.SettingsModelKey, and the cached
+// model list must be dropped so the very next check reflects it — "applied
+// immediately, no restart" is the point of the override.
+func TestPutSettingsWritesAndInvalidatesCache(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+
+	rec := f.do(http.MethodPut, "/api/admin/settings", `{"gemini_model":"gemini-2.5-flash"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "gemini-2.5-flash")
+
+	value, ok, err := f.auth.Setting(context.Background(), "gemini_model")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "gemini-2.5-flash", value)
+	assert.Equal(t, 1, f.adminVision.invalidated, "the cached model list must be invalidated on write")
+}
+
+// TestPutSettingsRejectsEmptyModel: a blank model id would make
+// EffectiveModel return "" and Status permanently model_unavailable — a 422
+// naming the field, not a write that quietly breaks vision for everyone.
+func TestPutSettingsRejectsEmptyModel(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	rec := f.do(http.MethodPut, "/api/admin/settings", `{"gemini_model":"  "}`)
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	assert.Equal(t, 0, f.adminVision.invalidated)
+}
+
+// TestEnvFileDownloadsARegeneratedEnv covers the "Admin remediation" path in
+// docs/specs/01-architecture-and-deployment.md: the file must be offered as
+// a download and must carry the *effective* model — the settings-table
+// override, not the stale environment value — since a file that still named
+// the dead model would not fix anything on redeploy.
+func TestEnvFileDownloadsARegeneratedEnv(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	f.adminVision.model = "gemini-2.5-flash" // overridden away from the fixture's env default
+
+	rec := f.do(http.MethodGet, "/api/admin/settings/env-file", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Header().Get("Content-Disposition"), "attachment")
+	assert.Contains(t, rec.Body.String(), "GEMINI_MODEL=gemini-2.5-flash")
+	assert.NotContains(t, rec.Body.String(), "GEMINI_MODEL=gemini-2.0-flash",
+		"the stale env-default model must not appear once a settings override is effective")
+}
+
+// TestSearchCatalogFiltersByQuery covers GET /api/admin/catalog?q=, and
+// carries id — unlike every storage-facing view of catalog_products
+// (docs/specs/02-data-model.md) — because PATCH/DELETE need it.
+func TestSearchCatalogFiltersByQuery(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	milk := uuid.New()
+	bread := uuid.New()
+	f.auth.catalog = []store.CatalogProduct{
+		{ID: milk, DisplayName: "Whole Milk", ItemType: store.ItemPerishable},
+		{ID: bread, DisplayName: "Sourdough Bread", ItemType: store.ItemPerishable},
+	}
+
+	all := f.do(http.MethodGet, "/api/admin/catalog", "")
+	require.Equal(t, http.StatusOK, all.Code)
+	assert.Contains(t, all.Body.String(), "Whole Milk")
+	assert.Contains(t, all.Body.String(), "Sourdough Bread")
+	assert.Contains(t, all.Body.String(), milk.String())
+
+	filtered := f.do(http.MethodGet, "/api/admin/catalog?q=milk", "")
+	require.Equal(t, http.StatusOK, filtered.Code)
+	assert.Contains(t, filtered.Body.String(), "Whole Milk")
+	assert.NotContains(t, filtered.Body.String(), "Sourdough Bread")
+}
+
+// TestPatchCatalogSetsAndClearsShelfLife: the one field catalog_products'
+// insert-only rule still permits an admin to change
+// (docs/specs/02-data-model.md), sent as the plain string the admin page's
+// <input> submits — a non-numeric value is a 422, an empty one clears the
+// override back to "resolve per spec 08" rather than being rejected.
+func TestPatchCatalogSetsAndClearsShelfLife(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	id := uuid.New()
+	f.auth.catalog = []store.CatalogProduct{{ID: id, DisplayName: "Rice", ItemType: store.ItemLongShelfLife}}
+
+	set := f.do(http.MethodPatch, "/api/admin/catalog/"+id.String(), `{"default_shelf_life_days":"730"}`)
+	require.Equal(t, http.StatusOK, set.Code, set.Body.String())
+	require.NotNil(t, f.auth.catalog[0].DefaultShelfLifeDays)
+	assert.Equal(t, 730, *f.auth.catalog[0].DefaultShelfLifeDays)
+
+	cleared := f.do(http.MethodPatch, "/api/admin/catalog/"+id.String(), `{"default_shelf_life_days":""}`)
+	require.Equal(t, http.StatusOK, cleared.Code)
+	assert.Nil(t, f.auth.catalog[0].DefaultShelfLifeDays)
+
+	bad := f.do(http.MethodPatch, "/api/admin/catalog/"+id.String(), `{"default_shelf_life_days":"not a number"}`)
+	assert.Equal(t, http.StatusUnprocessableEntity, bad.Code)
+
+	missing := f.do(http.MethodPatch, "/api/admin/catalog/"+uuid.New().String(), `{"default_shelf_life_days":"5"}`)
+	assert.Equal(t, http.StatusNotFound, missing.Code)
+}
+
+// TestDeleteCatalogRemovesEntry covers admin moderation of an insert-only
+// table — the only way a bad entry is removed (docs/specs/02-data-model.md).
+func TestDeleteCatalogRemovesEntry(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	id := uuid.New()
+	f.auth.catalog = []store.CatalogProduct{{ID: id, DisplayName: "Bad Entry", ItemType: store.ItemPerishable}}
+
+	rec := f.do(http.MethodDelete, "/api/admin/catalog/"+id.String(), "")
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, f.auth.catalog)
+
+	again := f.do(http.MethodDelete, "/api/admin/catalog/"+id.String(), "")
+	assert.Equal(t, http.StatusNotFound, again.Code)
+}
+
+// TestAdminPageShowsModelUnavailableBanner covers the /admin AI-model banner
+// (docs/specs/01-architecture-and-deployment.md's AI model resilience): a
+// warning naming the stale model, plus a picker built only from what the
+// provider currently offers — the stale model itself must not appear as a
+// selectable option, since selecting it again would change nothing.
+func TestAdminPageShowsModelUnavailableBanner(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	f.adminVision.model = "gemini-1.0-stale"
+	f.adminVision.status = "model_unavailable"
+	f.adminVision.models = []string{"gemini-2.5-flash", "gemini-2.5-pro"}
+
+	rec := f.do(http.MethodGet, "/admin", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	page := rec.Body.String()
+
+	assert.Contains(t, page, "gemini-1.0-stale", "the stale model must be named so the admin knows what's broken")
+	assert.Contains(t, page, "gemini-2.5-flash")
+	assert.Contains(t, page, "gemini-2.5-pro")
+	assert.Contains(t, page, `data-action="/api/admin/settings"`)
+}
+
+// TestAdminPageHidesBannerWhenModelIsFine: the warning is not a permanent
+// fixture — it must not render at all once the effective model is one the
+// provider actually offers.
+func TestAdminPageHidesBannerWhenModelIsFine(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	f.adminVision.model = "gemini-2.5-flash"
+	f.adminVision.status = "ok"
+	f.adminVision.models = []string{"gemini-2.5-flash"}
+
+	rec := f.do(http.MethodGet, "/admin", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "not currently offered")
+}
+
+// TestAdminPageRendersCatalogSearchResults covers the catalog moderation
+// table: search results, an escaped user-typed name, and the shelf-life and
+// delete forms wired to the right id.
+func TestAdminPageRendersCatalogSearchResults(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	id := uuid.New()
+	days := 30
+	f.auth.catalog = []store.CatalogProduct{
+		{ID: id, DisplayName: "<script>alert(1)</script>", ItemType: store.ItemPerishable, DefaultShelfLifeDays: &days},
+	}
+
+	rec := f.do(http.MethodGet, "/admin?q=script", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	page := rec.Body.String()
+
+	assert.NotContains(t, page, "<script>alert(1)</script>", "user-typed catalog names must be escaped")
+	assert.Contains(t, page, "&lt;script&gt;alert(1)&lt;/script&gt;")
+	assert.Contains(t, page, `data-action="/api/admin/catalog/`+id.String()+`"`)
+	assert.Contains(t, page, `value="30"`)
+	assert.Contains(t, page, `name="q" value="script"`, "the search box must echo the query back")
+}
+
+// TestAdminPageCatalogEmptyStateNamesWhetherAQueryRanOrNot: an empty catalog
+// and a search with no matches are different states worth telling apart.
+func TestAdminPageCatalogEmptyStateNamesWhetherAQueryRanOrNot(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+
+	empty := f.do(http.MethodGet, "/admin", "")
+	require.Equal(t, http.StatusOK, empty.Code)
+	assert.Contains(t, empty.Body.String(), "The catalog is empty.")
+
+	f.auth.catalog = []store.CatalogProduct{{ID: uuid.New(), DisplayName: "Rice", ItemType: store.ItemLongShelfLife}}
+	noMatch := f.do(http.MethodGet, "/admin?q=nonexistent", "")
+	require.Equal(t, http.StatusOK, noMatch.Code)
+	assert.Contains(t, noMatch.Body.String(), "No matches.")
 }

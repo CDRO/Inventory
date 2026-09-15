@@ -304,8 +304,10 @@ func serve() error {
 	srv := &http.Server{
 		Addr: net.JoinHostPort("", cfg.HTTPPort),
 		Handler: httpapi.NewRouter(httpapi.Deps{
-			DB:     db,
-			Vision: checker,
+			DB:          db,
+			Vision:      checker,
+			AdminVision: checker,
+			Config:      cfg,
 			// The one error serializer. cfg.IsDev() is the only thing that
 			// decides whether an internal reason is ever disclosed.
 			Errors:   httpapi.NewErrorWriter(cfg.IsDev(), slog.Default()),

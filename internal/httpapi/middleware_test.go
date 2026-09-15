@@ -40,6 +40,12 @@ type fakeAuth struct {
 	// storages backs the admin routes; nil until the first one is created.
 	storages map[uuid.UUID]*store.Storage
 
+	// settings and catalog back the admin settings/catalog routes
+	// (admin_test.go) — on fakeAuth for the same reason the rest of the
+	// admin fake is: one in-memory store, not a second fake to keep in sync.
+	settings map[string]string
+	catalog  []store.CatalogProduct
+
 	isAdminCalls int
 	touchCalls   int
 }
@@ -50,6 +56,7 @@ func newFakeAuth() *fakeAuth {
 		users:    map[uuid.UUID]*store.User{},
 		admins:   map[uuid.UUID]bool{},
 		members:  map[string]bool{},
+		settings: map[string]string{},
 	}
 }
 

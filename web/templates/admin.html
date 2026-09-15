@@ -26,6 +26,8 @@
   .muted { color: #57606a; }
   .error { color: #cf222e; font-size: 0.85rem; flex-basis: 100%; }
   .error:empty { display: none; }
+  .alert { background: #fff8c5; border: 1px solid #d4a72c; border-radius: 6px; padding: 0.75rem 1rem; }
+  code { background: #f6f8fa; padding: 0.1rem 0.3rem; border-radius: 4px; }
 </style>
 </head>
 <body>
@@ -129,6 +131,79 @@
     <button type="submit">Create storage</button>
     <output class="error"></output>
   </form>
+</section>
+
+<section aria-labelledby="model-heading">
+  <h2 id="model-heading">AI Model</h2>
+  {{- if .ModelUnavailable}}
+  <p class="alert" role="alert">
+    The configured model (<code>{{.GeminiModel}}</code>) is not currently offered by the provider.
+    Vision features (photo ingestion, consumption photos, shopping-list image search) are unavailable
+    until a working model is selected below.
+  </p>
+  {{- end}}
+  <form data-method="PUT" data-action="/api/admin/settings">
+    <label>Gemini model
+      {{- if .AvailableModels}}
+      <select name="gemini_model" required>
+        {{- range .AvailableModels}}
+        <option value="{{.}}"{{if eq . $.GeminiModel}} selected{{end}}>{{.}}</option>
+        {{- end}}
+      </select>
+      {{- else}}
+      <input name="gemini_model" value="{{.GeminiModel}}" required autocomplete="off">
+      {{- end}}
+    </label>
+    <button type="submit">Save</button>
+    <output class="error"></output>
+  </form>
+  <p class="muted">
+    <a href="/api/admin/settings/env-file">Download a regenerated .env</a>
+    with this model, for redeploying from config instead.
+  </p>
+</section>
+
+<section aria-labelledby="catalog-heading">
+  <h2 id="catalog-heading">Catalog</h2>
+  <p class="muted">
+    The global product catalogue is insert-only — a bad or abusive entry can only be corrected here.
+    Deleting an entry never removes it from any household's own inventory.
+  </p>
+  <form method="GET" action="/admin">
+    <label>Search <input type="search" name="q" value="{{.CatalogQuery}}" autocomplete="off"></label>
+    <button type="submit">Search</button>
+  </form>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Name</th><th>Category</th><th>Kind</th><th>Shelf life (days)</th><th></th></tr></thead>
+    <tbody>
+    {{- range .Catalog}}
+      <tr>
+        <td>{{.DisplayName}}</td>
+        <td>{{if .CategoryPath}}{{.CategoryPath}}{{else}}<span class="muted">&mdash;</span>{{end}}</td>
+        <td>{{.ItemType}}</td>
+        <td>
+          <form data-method="PATCH" data-action="/api/admin/catalog/{{.ID}}">
+            <input name="default_shelf_life_days" type="number" min="0" value="{{.ShelfLifeDays}}"
+                   aria-label="Shelf life in days for {{.DisplayName}}">
+            <button type="submit">Save</button>
+            <output class="error"></output>
+          </form>
+        </td>
+        <td>
+          <form data-method="DELETE" data-action="/api/admin/catalog/{{.ID}}"
+                data-confirm="Delete {{.DisplayName}} from the catalog? This cannot be undone.">
+            <button class="link" type="submit">Delete</button>
+            <output class="error"></output>
+          </form>
+        </td>
+      </tr>
+    {{- else}}
+      <tr><td colspan="5" class="muted">{{if .CatalogQuery}}No matches.{{else}}The catalog is empty.{{end}}</td></tr>
+    {{- end}}
+    </tbody>
+  </table>
+  </div>
 </section>
 </main>
 
