@@ -81,7 +81,7 @@ type Handler struct {
 // request, if the template is missing or malformed.
 func New(
 	s Store,
-	vision VisionChecker,
+	visionChecker VisionChecker,
 	currentUser func(*http.Request) (uuid.UUID, bool),
 	fail func(http.ResponseWriter, *http.Request, error),
 ) (*Handler, error) {
@@ -93,7 +93,7 @@ func New(
 	if err != nil {
 		return nil, fmt.Errorf("admin: parse template: %w", err)
 	}
-	return &Handler{store: s, vision: vision, page: page, currentUser: currentUser, fail: fail}, nil
+	return &Handler{store: s, vision: visionChecker, page: page, currentUser: currentUser, fail: fail}, nil
 }
 
 type userRow struct {

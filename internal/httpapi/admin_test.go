@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/CDRO/Inventory/internal/config"
 	"github.com/CDRO/Inventory/internal/httpapi"
 	"github.com/CDRO/Inventory/internal/store"
 )
@@ -227,6 +228,13 @@ func (f *fakeAuth) SetCatalogShelfLife(_ context.Context, id uuid.UUID, days *in
 	return store.ErrNotFound
 }
 
+func (f *fakeAuth) RecomputeDerivedExpiryForCatalog(_ context.Context, id uuid.UUID) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.catalogRecomputeCalls = append(f.catalogRecomputeCalls, id)
+	return f.catalogRecompute[id], nil
+}
+
 func (f *fakeAuth) DeleteCatalogProduct(_ context.Context, id uuid.UUID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -277,11 +285,18 @@ func TestNonAdminCannotTellTheAdminAreaExists(t *testing.T) {
 	require.NoError(t, err)
 
 	router := httpapi.NewRouter(httpapi.Deps{
-		DB:       stubPinger{},
-		Vision:   stubVision{status: "ok"},
-		Errors:   httpapi.NewErrorWriter(false, discardLogger()),
-		Store:    newFakeAPI(auth),
-		StaticFS: fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html></html>")}},
+		DB:     stubPinger{},
+		Vision: stubVision{status: "ok"},
+		Errors: httpapi.NewErrorWriter(false, discardLogger()),
+		Store:  newFakeAPI(auth),
+		// AdminVision and Config are set so every conditionally-registered
+		// admin route — the env-file download in particular — actually
+		// exists in this router, and is proven hidden rather than merely
+		// untested (docs/specs/03-auth-and-multi-tenancy.md's non-disclosure
+		// rule; the env-file route serves every secret in the deployment).
+		AdminVision: &fakeAdminVision{status: "ok"},
+		Config:      &config.Config{GeminiModel: "gemini-2.0-flash", AppEnv: "dev", HTTPPort: "8000"},
+		StaticFS:    fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html></html>")}},
 	})
 
 	reference := sendAs(router, session.ID, http.MethodGet, "/no-such-page", "")
@@ -298,8 +313,12 @@ func TestNonAdminCannotTellTheAdminAreaExists(t *testing.T) {
 		{http.MethodPost, "/api/admin/storages/" + storage.ID.String() + "/members", `{"user_id":"` + victim.ID.String() + `"}`},
 		{http.MethodGet, "/api/admin/settings", ""},
 		{http.MethodPut, "/api/admin/settings", `{"gemini_model":"gemini-2.5-flash"}`},
+		// Registered only conditionally (router.go, when Deps.Config is set) and
+		// the one route that serves every secret in the deployment verbatim —
+		// the route a regression here would be most costly to expose.
+		{http.MethodGet, "/api/admin/settings/env-file", ""},
 		{http.MethodGet, "/api/admin/catalog", ""},
-		{http.MethodPatch, "/api/admin/catalog/" + uuid.New().String(), `{"default_shelf_life_days":"5"}`},
+		{http.MethodPatch, "/api/admin/catalog/" + uuid.New().String(), `{"default_shelf_life_days":5}`},
 		{http.MethodDelete, "/api/admin/catalog/" + uuid.New().String(), ""},
 		// A registered admin path with a verb it does not have: chi would say
 		// 405 here if the static catch-all did not claim it first.
@@ -609,29 +628,36 @@ func TestSearchCatalogFiltersByQuery(t *testing.T) {
 
 // TestPatchCatalogSetsAndClearsShelfLife: the one field catalog_products'
 // insert-only rule still permits an admin to change
-// (docs/specs/02-data-model.md), sent as the plain string the admin page's
-// <input> submits — a non-numeric value is a 422, an empty one clears the
-// override back to "resolve per spec 08" rather than being rejected.
+// (docs/specs/02-data-model.md), sent as a JSON number or null — the same
+// shape PatchCategoryShelfLife accepts, via the same parseShelfLifeDays
+// helper — a non-numeric value is a 422, null clears the override back to
+// "resolve per spec 08" rather than being rejected.
 func TestPatchCatalogSetsAndClearsShelfLife(t *testing.T) {
 	t.Parallel()
 
 	f := newAdminFixture(t)
 	id := uuid.New()
 	f.auth.catalog = []store.CatalogProduct{{ID: id, DisplayName: "Rice", ItemType: store.ItemLongShelfLife}}
+	f.auth.catalogRecompute = map[uuid.UUID]int{id: 3}
 
-	set := f.do(http.MethodPatch, "/api/admin/catalog/"+id.String(), `{"default_shelf_life_days":"730"}`)
+	set := f.do(http.MethodPatch, "/api/admin/catalog/"+id.String(), `{"default_shelf_life_days":730}`)
 	require.Equal(t, http.StatusOK, set.Code, set.Body.String())
 	require.NotNil(t, f.auth.catalog[0].DefaultShelfLifeDays)
 	assert.Equal(t, 730, *f.auth.catalog[0].DefaultShelfLifeDays)
+	assert.Contains(t, set.Body.String(), `"recomputed_batches":3`,
+		"the cross-storage cascade's count must reach the admin, like the storage-scoped sibling's does")
+	require.Len(t, f.auth.catalogRecomputeCalls, 1)
+	assert.Equal(t, id, f.auth.catalogRecomputeCalls[0], "the cascade must run against the entry that was just changed")
 
-	cleared := f.do(http.MethodPatch, "/api/admin/catalog/"+id.String(), `{"default_shelf_life_days":""}`)
+	cleared := f.do(http.MethodPatch, "/api/admin/catalog/"+id.String(), `{"default_shelf_life_days":null}`)
 	require.Equal(t, http.StatusOK, cleared.Code)
 	assert.Nil(t, f.auth.catalog[0].DefaultShelfLifeDays)
+	assert.Len(t, f.auth.catalogRecomputeCalls, 2, "clearing the override is also a change the cascade must reach")
 
 	bad := f.do(http.MethodPatch, "/api/admin/catalog/"+id.String(), `{"default_shelf_life_days":"not a number"}`)
 	assert.Equal(t, http.StatusUnprocessableEntity, bad.Code)
 
-	missing := f.do(http.MethodPatch, "/api/admin/catalog/"+uuid.New().String(), `{"default_shelf_life_days":"5"}`)
+	missing := f.do(http.MethodPatch, "/api/admin/catalog/"+uuid.New().String(), `{"default_shelf_life_days":5}`)
 	assert.Equal(t, http.StatusNotFound, missing.Code)
 }
 

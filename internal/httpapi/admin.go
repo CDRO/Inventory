@@ -2,9 +2,9 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -47,12 +47,13 @@ type AdminStore interface {
 	Setting(ctx context.Context, key string) (string, bool, error)
 	SetSetting(ctx context.Context, key, value string, updatedBy uuid.UUID) error
 
-	// SearchCatalog, SetCatalogShelfLife and DeleteCatalogProduct back
-	// catalog moderation: catalog_products is insert-only
-	// (docs/specs/02-data-model.md), so an admin correcting or removing a
-	// bad entry is the only remedy.
+	// SearchCatalog, SetCatalogShelfLife, RecomputeDerivedExpiryForCatalog and
+	// DeleteCatalogProduct back catalog moderation: catalog_products is
+	// insert-only (docs/specs/02-data-model.md), so an admin correcting or
+	// removing a bad entry is the only remedy.
 	SearchCatalog(ctx context.Context, q string) ([]store.CatalogProduct, error)
 	SetCatalogShelfLife(ctx context.Context, id uuid.UUID, days *int) error
+	RecomputeDerivedExpiryForCatalog(ctx context.Context, catalogID uuid.UUID) (int, error)
 	DeleteCatalogProduct(ctx context.Context, id uuid.UUID) error
 }
 
@@ -78,12 +79,12 @@ type AdminHandler struct {
 	errors *ErrorWriter
 }
 
-// NewAdminHandler wires the admin JSON routes. vision and cfg may be nil —
-// GetSettings/PutSettings then report model_unavailable / an empty model
-// list rather than panicking, and the env-file route is not registered at
-// all when cfg is nil (see Deps.Config in router.go).
-func NewAdminHandler(s AdminStore, vision AdminVisionChecker, cfg *config.Config, errs *ErrorWriter) *AdminHandler {
-	return &AdminHandler{store: s, vision: vision, cfg: cfg, errors: errs}
+// NewAdminHandler wires the admin JSON routes. visionChecker and cfg may be
+// nil — GetSettings/PutSettings then report model_unavailable / an empty
+// model list rather than panicking, and the env-file route is not registered
+// at all when cfg is nil (see Deps.Config in router.go).
+func NewAdminHandler(s AdminStore, visionChecker AdminVisionChecker, cfg *config.Config, errs *ErrorWriter) *AdminHandler {
+	return &AdminHandler{store: s, vision: visionChecker, cfg: cfg, errors: errs}
 }
 
 // adminUser is a user as the admin JSON API describes one. No is_admin, no
@@ -409,6 +410,16 @@ func (h *AdminHandler) PutSettings(w http.ResponseWriter, r *http.Request) {
 			map[string][]string{"gemini_model": {"A model id is required."}}, nil))
 		return
 	}
+	// Rejected here, not just trimmed: this value is later written verbatim
+	// into a generated .env file (config.RenderEnv, EnvFile below) via
+	// fmt.Sprintf. A newline in it would let an admin session inject an
+	// extra line into that file — e.g. a second ADMIN_INITIAL_USERNAME= —
+	// that an operator could redeploy from without noticing.
+	if strings.ContainsAny(model, "\n\r") {
+		h.errors.WriteError(w, r, ValidationFailed(
+			map[string][]string{"gemini_model": {"Cannot contain line breaks."}}, nil))
+		return
+	}
 
 	if err := h.store.SetSetting(r.Context(), vision.SettingsModelKey, model, user.ID); err != nil {
 		h.errors.WriteError(w, r, Internal(err))
@@ -440,6 +451,7 @@ func (h *AdminHandler) EnvFile(w http.ResponseWriter, r *http.Request) {
 
 	header := w.Header()
 	header.Set("Content-Type", "text/plain; charset=utf-8")
+	header.Set("X-Content-Type-Options", "nosniff")
 	header.Set("Content-Disposition", `attachment; filename=".env"`)
 	header.Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
@@ -483,12 +495,26 @@ func (h *AdminHandler) SearchCatalog(w http.ResponseWriter, r *http.Request) {
 // PatchCatalog serves PATCH /api/admin/catalog/{id}. Body:
 // {default_shelf_life_days} only — the one field catalog_products'
 // insert-only rule (docs/specs/02-data-model.md) still permits an admin to
-// change.
+// change. The value is a JSON number or null, decoded by the same
+// parseShelfLifeDays helper PatchCategoryShelfLife uses
+// (internal/httpapi/expiry.go), so the two admin-facing shelf-life routes
+// share one request shape and one set of error messages.
 //
-// The value is decoded as a JSON string, not a number: the admin page's
-// plain <input> submits form values as strings (web/templates/admin.html),
-// and this is the only client this route has. An empty string clears the
-// override back to "resolve per spec 08" rather than being rejected.
+// Changing this value is a correction, not just a setting — the old number
+// was wrong, so docs/specs/08-expiration-and-classification.md requires it to
+// reach every batch already in the database, not only future ones. Unlike
+// PatchCategoryShelfLife's storage-scoped cascade, this one crosses every
+// storage: catalog_products has no storage_id, so an admin's correction to it
+// is a correction for every household that picked this catalog entry.
+//
+// The spec calls this a "background job" because it is unbounded across
+// storages in principle. In practice it is the same shape of work as the
+// storage-scoped cascade — a bounded set of local UPDATEs, no external call,
+// no vision API — and this project's jobs table/runner
+// (internal/jobs/runner.go) exists specifically for slow *external* calls
+// that must not block a request; recomputing rows from the household's own
+// database is not that. So it runs inline, like the storage-scoped sibling,
+// and the response carries the real count rather than a job id to poll.
 func (h *AdminHandler) PatchCatalog(w http.ResponseWriter, r *http.Request) {
 	id, failure := idFromPath(r, "id", "malformed catalog id")
 	if failure != nil {
@@ -497,32 +523,40 @@ func (h *AdminHandler) PatchCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		DefaultShelfLifeDays *string `json:"default_shelf_life_days"`
+		DefaultShelfLifeDays json.RawMessage `json:"default_shelf_life_days"`
 	}
 	if failure := decodeJSON(w, r, &body); failure != nil {
 		h.errors.WriteError(w, r, failure)
 		return
 	}
+	if body.DefaultShelfLifeDays == nil {
+		h.errors.WriteError(w, r, ValidationFailed(map[string][]string{
+			"default_shelf_life_days": {"Provide a number of days, or null to clear the override."},
+		}, nil))
+		return
+	}
 
-	var days *int
-	if body.DefaultShelfLifeDays != nil {
-		if trimmed := strings.TrimSpace(*body.DefaultShelfLifeDays); trimmed != "" {
-			n, err := strconv.Atoi(trimmed)
-			if err != nil || n < 0 {
-				h.errors.WriteError(w, r, ValidationFailed(map[string][]string{
-					"default_shelf_life_days": {"Must be a non-negative whole number of days."},
-				}, nil))
-				return
-			}
-			days = &n
-		}
+	days, failure := parseShelfLifeDays(body.DefaultShelfLifeDays)
+	if failure != nil {
+		h.errors.WriteError(w, r, failure)
+		return
 	}
 
 	if err := h.store.SetCatalogShelfLife(r.Context(), id, days); err != nil {
 		h.errors.WriteError(w, r, FromStoreError(err, "catalog entry not found"))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"default_shelf_life_days": days})
+
+	affected, err := h.store.RecomputeDerivedExpiryForCatalog(r.Context(), id)
+	if err != nil {
+		h.errors.WriteError(w, r, Internal(err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, struct {
+		DefaultShelfLifeDays *int `json:"default_shelf_life_days"`
+		RecomputedBatches    int  `json:"recomputed_batches"`
+	}{DefaultShelfLifeDays: days, RecomputedBatches: affected})
 }
 
 // DeleteCatalog serves DELETE /api/admin/catalog/{id} — moderation. Never

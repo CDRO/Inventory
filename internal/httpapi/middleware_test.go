@@ -46,6 +46,12 @@ type fakeAuth struct {
 	settings map[string]string
 	catalog  []store.CatalogProduct
 
+	// catalogRecompute canned-answers RecomputeDerivedExpiryForCatalog by
+	// catalog id (admin_test.go); catalogRecomputeCalls records which ids it
+	// was asked to recompute, so a test can assert the cascade ran.
+	catalogRecompute      map[uuid.UUID]int
+	catalogRecomputeCalls []uuid.UUID
+
 	isAdminCalls int
 	touchCalls   int
 }

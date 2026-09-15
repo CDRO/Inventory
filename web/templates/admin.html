@@ -228,7 +228,9 @@ for (const form of document.querySelectorAll("form[data-action]")) {
     const body = {};
     for (const el of form.elements) {
       if (!el.name) continue;
-      body[el.name] = el.type === "checkbox" ? el.checked : el.value;
+      if (el.type === "checkbox") body[el.name] = el.checked;
+      else if (el.type === "number") body[el.name] = el.value === "" ? null : Number(el.value);
+      else body[el.name] = el.value;
     }
 
     try {
