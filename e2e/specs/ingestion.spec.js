@@ -131,6 +131,12 @@ test("a proposal is reviewed and confirmed into inventory", async ({ page }) => 
   await expect(page.locator("#notice")).toHaveText(
     "Proposal applied: 2 items added to your inventory, 1 new product, 1 new location.",
   );
+  await expect(page.locator("#notice")).toHaveClass(/\balert--success\b/);
+  // Resolved --color-success (#15803d), not the --color-danger red every
+  // #error box renders in: a broken token reference inside .alert--success
+  // would leave this box either red or uncoloured, and only a computed-style
+  // check — not the static class assertion above — would catch that.
+  await expect(page.locator("#notice")).toHaveCSS("color", "rgb(21, 128, 61)");
   await expect(page.locator(`[data-job-id="${SHELF_JOB}"]`)).toHaveCount(0);
 
   // The proposed shelf now exists under Pantry.
@@ -151,6 +157,28 @@ test("a proposal can be discarded from the inbox", async ({ page }) => {
 
   const card = page.locator(`[data-job-id="${PRODUCT_JOB}"]`);
   await expect(card).toBeVisible();
+
+  // A failed discard must still surface #error in its ordinary, unchanged
+  // danger styling — #68 gave #notice its own success variant but must not
+  // have touched what an actual error box looks like.
+  const errorBox = page.locator("#error");
+  await expect(errorBox).toBeHidden();
+  await page.route(`**/jobs/${PRODUCT_JOB}`, async (route) => {
+    if (route.request().method() === "DELETE") {
+      await route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
+    } else {
+      await route.continue();
+    }
+  });
+  page.once("dialog", (dialog) => dialog.accept());
+  await card.getByRole("button", { name: "Discard" }).click();
+  await expect(errorBox).toBeVisible();
+  await expect(errorBox).not.toHaveClass(/alert--success/);
+  // Resolved --color-danger (#b91c1c), the same red it always was.
+  await expect(errorBox).toHaveCSS("color", "rgb(185, 28, 28)");
+  await expect(card).toBeVisible();
+  await page.unroute(`**/jobs/${PRODUCT_JOB}`);
+
   page.once("dialog", (dialog) => dialog.accept());
   await card.getByRole("button", { name: "Discard" }).click();
   await expect(card).toHaveCount(0);
