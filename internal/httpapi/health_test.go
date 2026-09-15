@@ -304,3 +304,35 @@ func TestHeadIsServedForStaticAssets(t *testing.T) {
 	assert.Empty(t, rec.Body.Bytes(), "HEAD must return no body")
 	assert.NotEmpty(t, rec.Header().Get("Content-Type"), "but headers must still be populated")
 }
+
+// TestServiceWorkerScriptIsNeverCached pins Cache-Control: no-cache on
+// GET /sw.js specifically (docs/specs/05-frontend-pwa-foundations.md). The
+// service worker's own update check is the one mechanism that can ever tell
+// a browser a new version exists, so it must never be satisfied from a stale
+// HTTP-cached copy of the script — a version bump inside sw.js cannot fix a
+// client that never re-fetches sw.js to see the bump at all. Every other
+// static asset keeps the file server's ordinary behaviour (no explicit
+// header), so this pins the fix to exactly the one file it targets.
+func TestServiceWorkerScriptIsNeverCached(t *testing.T) {
+	t.Parallel()
+
+	router := httpapi.NewRouter(httpapi.Deps{
+		DB:     stubPinger{},
+		Vision: stubVision{status: vision.StatusOK},
+		StaticFS: fstest.MapFS{
+			"sw.js":        &fstest.MapFile{Data: []byte("// sw")},
+			"css/base.css": &fstest.MapFile{Data: []byte("body{}")},
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sw.js", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "no-cache", rec.Header().Get("Cache-Control"))
+
+	recOther := httptest.NewRecorder()
+	router.ServeHTTP(recOther, httptest.NewRequest(http.MethodGet, "/css/base.css", nil))
+	require.Equal(t, http.StatusOK, recOther.Code)
+	assert.Empty(t, recOther.Header().Get("Cache-Control"),
+		"only sw.js gets the explicit header; a static asset must keep the file server's ordinary behaviour")
+}

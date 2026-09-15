@@ -1,5 +1,6 @@
-// Hand-written service worker: caches the app shell cache-first, and never
-// caches /api/* or any other dynamically-rendered route
+// Hand-written service worker: caches the app shell cache-first, from an
+// allowlist of known static paths — /api/* and any other dynamically-rendered
+// route are never cache candidates in the first place
 // (docs/specs/05-frontend-pwa-foundations.md).
 //
 // There is no offline data editing (docs/specs/00-overview.md non-goals), so
@@ -19,7 +20,7 @@
 // a test opening a cache the service worker never uses — caches.open() creates
 // a missing cache rather than failing, which would have made that test pass
 // while checking nothing.
-const CACHE_VERSION = "v5";
+const CACHE_VERSION = "v6";
 const CACHE_NAME = `inventory-shell-${CACHE_VERSION}`;
 
 // The app shell: everything a cold load needs before the network is asked
@@ -83,31 +84,60 @@ self.addEventListener("activate", (event) => {
   self.clients.claim();
 });
 
-// Paths that are never cache candidates because the server renders them
-// fresh per request, unlike everything under web/static: today that is only
-// /admin (docs/specs/03-auth-and-multi-tenancy.md), which the backend
-// already answers with Cache-Control: no-store — but that header only
-// governs the browser's HTTP cache, not this service worker's own Cache
-// Storage, which cacheFirst() writes to directly regardless of any
-// Cache-Control header on the response. A future server-rendered route needs
-// adding here too, or it will silently get the same stale-until-hard-reload
-// treatment /admin did before this list existed.
-const NEVER_CACHE = ["/admin"];
+// Paths this service worker will ever consider serving from cache —
+// deliberately an allowlist, not a denylist
+// (docs/specs/05-frontend-pwa-foundations.md).
+//
+// The first version of this file excluded known dynamic paths one at a time
+// (/api/*, then /admin, added only after it shipped without the exclusion
+// and kept serving a stale member list until a hard reload — PR #65). That
+// shape needs a human to remember every future server-rendered route before
+// it ships, and forgetting is silent: the route works the first time,
+// nothing is cached yet, and it only starts serving a stale response on
+// every request after that — indistinguishable from a working app until
+// someone notices. An allowlist inverts the risk: a route nobody has
+// thought about yet — /api/*, /admin, or whatever ships next — is safe by
+// default, and caching it is the thing someone opts into deliberately by
+// adding it here.
+//
+// "/index.html" is deliberately absent from CACHEABLE_EXACT, matching
+// SHELL_ASSETS above: it 301-redirects to "/", and a request for it should
+// simply fall through to the network (a cheap redirect) rather than risk
+// caching a redirected response under the wrong key.
+const CACHEABLE_EXACT = new Set([
+  "/",
+  "/manifest.json",
+  "/storages.html",
+  "/locations.html",
+  "/shopping-list.html",
+  "/ingest.html",
+  "/inbox.html",
+  "/review.html",
+  "/dashboard.html",
+  "/settings.html",
+  "/consume-review.html",
+]);
+const CACHEABLE_PREFIXES = ["/css/", "/js/", "/icons/", "/vendor/"];
+
+function isCacheable(pathname) {
+  if (CACHEABLE_EXACT.has(pathname)) return true;
+  return CACHEABLE_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+}
 
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
-  // Never intercept the API, or any other dynamically-rendered route. Falling
-  // through here means the browser handles the request exactly as if this
-  // service worker did not exist — no cached response is ever substituted
-  // for a live one.
-  if (url.pathname.startsWith("/api/") || NEVER_CACHE.includes(url.pathname)) {
+  // Only same-origin GET requests are cache candidates at all; anything else
+  // (cross-origin, non-GET) goes straight to the network untouched.
+  if (event.request.method !== "GET" || url.origin !== location.origin) {
     return;
   }
 
-  // Only same-origin GET requests are cache candidates; anything else
-  // (cross-origin, non-GET) goes straight to the network untouched.
-  if (event.request.method !== "GET" || url.origin !== location.origin) {
+  // Everything not recognized as a known static shape — /api/*, /admin, and
+  // any route that does not exist yet — falls through here. Falling through
+  // means the browser handles the request exactly as if this service worker
+  // did not exist: no cached response is ever substituted for a live one.
+  if (!isCacheable(url.pathname)) {
     return;
   }
 

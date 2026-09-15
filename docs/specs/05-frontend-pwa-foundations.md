@@ -168,6 +168,31 @@ the primary flows start with a camera capture.
   bumped on release. It must **not** cache `/api/*` responses: there is no
   offline data editing (`00-overview.md` non-goals), and stale inventory
   data would be actively misleading.
+- **The cache-first path is an allowlist, never a denylist.** The `fetch`
+  handler decides what to cache from a known set of static shapes (the
+  precached app shell, plus the `/css/`, `/js/`, `/icons/` and `/vendor/`
+  prefixes, and `/manifest.json`) — not "everything same-origin except a
+  list of excluded paths." A denylist needs a human to remember to add every
+  new server-rendered route before it ships, and forgetting is silent: the
+  route works the first time, then serves a stale response from Cache
+  Storage on every request after, indistinguishable from a working app until
+  someone notices (`/admin` shipped without an exclusion once, for exactly
+  this reason — PR #65). An allowlist has the opposite failure mode: a route
+  nobody has thought about yet is safe by default, and caching it is the
+  thing someone opts into deliberately.
+- The server answers `GET /sw.js` with `Cache-Control: no-cache` — not the
+  default `http.FileServer` behaviour of no explicit header — so the worker
+  script's own update check never depends on a browser's or an intermediate
+  proxy's caching heuristics doing the right thing. It is the one file where
+  "ask the server every time, and only reuse the bytes if it says they still
+  match" must be guaranteed rather than assumed, because it is the only
+  mechanism that can ever tell a client a new version exists.
+- A "reset local app data" action must exist somewhere a user can reach it
+  (the settings page) and must unregister every service worker registration
+  and delete every Cache Storage entry for the origin. It is the manual
+  escape hatch for whatever the version-bump cleanup above does not
+  anticipate — a real in-app recovery path rather than an instruction to open
+  DevTools.
 - Camera capture uses
   `<input type="file" accept="image/*" capture="environment">` so mobile
   browsers open the rear camera directly while still allowing a gallery

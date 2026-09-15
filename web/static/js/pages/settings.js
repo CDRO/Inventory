@@ -20,6 +20,8 @@ const holidayAddButton = qs("#holiday-add");
 const leaderboardEnabled = qs("#leaderboard-enabled");
 const weeklyGoalInput = qs("#weekly-goal");
 const storageSaveButton = qs("#storage-save");
+const resetLocalDataButton = qs("#reset-local-data");
+const resetStatus = qs("#reset-status");
 
 let storageId = null;
 /** @type {string[]} every holiday week the caller currently has on record, "YYYY-MM-DD". */
@@ -48,6 +50,7 @@ async function init() {
   gamificationEnabled.addEventListener("change", updateGamificationEnabled);
   holidayAddButton.addEventListener("click", addHolidayWeek);
   storageSaveButton.addEventListener("click", saveStorageSettings);
+  resetLocalDataButton.addEventListener("click", resetLocalAppData);
 
   await Promise.all([loadPreferences(), loadStorageSettings()]);
 }
@@ -171,6 +174,35 @@ async function saveStorageSettings() {
     weeklyGoalInput.value = String(settings.weekly_goal_items);
   } catch (err) {
     showError(err);
+  }
+}
+
+// resetLocalAppData is the manual escape hatch
+// (docs/specs/05-frontend-pwa-foundations.md) for whatever sw.js's own
+// version-bump cleanup does not anticipate — a browser stuck on a stale
+// service worker or a stale cache entry, with no way back short of DevTools.
+// It unregisters every registration and clears every Cache Storage entry for
+// this origin, then reloads so the next request for everything, including
+// this very page, goes to the network fresh.
+async function resetLocalAppData() {
+  resetLocalDataButton.disabled = true;
+  resetStatus.hidden = false;
+  resetStatus.textContent = "Clearing local data…";
+  try {
+    if ("serviceWorker" in navigator) {
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(registrations.map((r) => r.unregister()));
+    }
+    if ("caches" in window) {
+      const names = await caches.keys();
+      await Promise.all(names.map((n) => caches.delete(n)));
+    }
+    resetStatus.textContent = "Cleared. Reloading…";
+    location.reload();
+  } catch (err) {
+    resetLocalDataButton.disabled = false;
+    resetStatus.hidden = true;
+    showError(err instanceof Error ? err : new Error("Could not clear local data."));
   }
 }
 

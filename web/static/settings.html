@@ -73,6 +73,18 @@
       </div>
       <button id="storage-save" type="button" class="btn btn--primary">Save storage settings</button>
     </section>
+
+    <section id="reset-section" class="card stack">
+      <h3>Local app data</h3>
+      <p class="empty-state">
+        If a page keeps showing old data after an update, this clears the
+        service worker and everything it has cached in this browser, then
+        reloads. It never touches your inventory — only what this browser
+        has stored locally.
+      </p>
+      <button id="reset-local-data" type="button" class="btn btn--ghost">Reset local app data</button>
+      <p id="reset-status" class="empty-state" hidden></p>
+    </section>
   </main>
 
   <script type="module" src="/js/pages/settings.js"></script>
