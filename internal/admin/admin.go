@@ -249,11 +249,15 @@ func (h *Handler) load(r *http.Request) (*pageData, error) {
 		}
 		data.GeminiModel = model
 		data.ModelUnavailable = h.vision.Status(ctx) != vision.StatusOK
-		models, err := h.vision.Models(ctx)
-		if err != nil {
-			return nil, err
+		// A provider that cannot be reached is exactly the condition
+		// ModelUnavailable above already reports, not a reason to fail the
+		// whole page: the template's picker falls back to a plain <input>
+		// when AvailableModels is empty (web/templates/admin.html), so the
+		// rest of the admin page — users, storages, catalog — must still
+		// render even when the vision provider is down.
+		if models, err := h.vision.Models(ctx); err == nil {
+			data.AvailableModels = models
 		}
-		data.AvailableModels = models
 	}
 
 	data.CatalogQuery = r.URL.Query().Get("q")

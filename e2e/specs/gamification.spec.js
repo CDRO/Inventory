@@ -17,6 +17,17 @@
 
 import { test, expect } from "@playwright/test";
 
+// These three tests toggle /api/me/preferences for e2e-bob and e2e-alice —
+// there are only three fixture users in total (e2e/fixtures/seed.sql), and
+// the first two tests both need bob's global gamification_enabled flag in a
+// known state to make an exact-request-count assertion. Run serially so one
+// test's toggle can never land mid-assertion in another, which
+// playwright.config.js's default fullyParallel would otherwise allow —
+// confirmed live: without this, "FALSE: only the one gate check fires" and
+// "TRUE: the ring and card render" raced on bob's row and the FALSE test
+// observed quest/achievement requests that were actually the TRUE test's.
+test.describe.configure({ mode: "serial" });
+
 const GAMIFICATION_PATHS = ["/progress", "/quests", "/achievements", "/gamification/settings"];
 
 function isGamificationRequest(url) {

@@ -374,12 +374,15 @@ func (h *AdminHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
 	out.GeminiModel = model
 	out.Status = h.vision.Status(r.Context())
 
-	models, err := h.vision.Models(r.Context())
-	if err != nil {
-		h.errors.WriteError(w, r, Internal(err))
-		return
+	// A provider that cannot be reached right now is exactly the condition
+	// this banner exists to report, not a 500: Status above already treats
+	// the same failure as model_unavailable rather than an error, and the
+	// picker degrades to an empty list (web/templates/admin.html falls back
+	// to a plain <input>) rather than taking the whole settings route down
+	// with it.
+	if models, err := h.vision.Models(r.Context()); err == nil {
+		out.AvailableModels = models
 	}
-	out.AvailableModels = models
 
 	writeJSON(w, http.StatusOK, out)
 }
