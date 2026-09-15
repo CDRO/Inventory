@@ -447,6 +447,17 @@ func staticHandler(files fs.FS, errs *ErrorWriter) http.HandlerFunc {
 			errs.WriteError(w, r, NotFound("no route matches "+r.URL.Path))
 			return
 		}
+		// The service worker's own update check must never be satisfied from
+		// a stale cached copy of the script itself
+		// (docs/specs/05-frontend-pwa-foundations.md) — that would silently
+		// defeat every fix this file's CACHE_VERSION bumps are supposed to
+		// deliver, for the one file whose entire job is telling a client a
+		// new version exists. no-cache (not no-store) still allows a
+		// conditional GET against ETag/Last-Modified, so an unchanged
+		// rebuild still gets a cheap 304 rather than a full re-download.
+		if name == "sw.js" {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
 		fileServer.ServeHTTP(w, r)
 	}
 }

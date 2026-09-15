@@ -154,3 +154,153 @@ test("the service worker never serves a cached response for /admin", async ({ pa
   // network rather than being served from the cache this test seeded.
   expect(seeded.body).not.toContain("planted-admin-page");
 });
+
+// The /admin test above proves the exclusion sw.js already knows about
+// works. It does not prove the thing that actually matters: that a route
+// *nobody has thought to exclude yet* is still safe. /admin itself shipped
+// without an exclusion once (PR #65) and served a stale response until a
+// hard reload — the risk this test targets is the next one of those, not
+// this one. docs/specs/05-frontend-pwa-foundations.md's allowlist model
+// (CACHEABLE_EXACT / CACHEABLE_PREFIXES in sw.js) makes "not recognized as a
+// known static shape" the safe default, so a path that is not named
+// anywhere in the service worker — this one is made up and does not need to
+// be a real route — must still never be served from a poisoned cache entry.
+test("the service worker never serves a cached response for a path outside its allowlist", async ({ page }) => {
+  await page.goto("/index.html");
+  await page.evaluate(() => navigator.serviceWorker.ready);
+
+  const seeded = await page.evaluate(async () => {
+    const names = await caches.keys();
+    const shellCaches = names.filter((name) => name.startsWith("inventory-shell-"));
+    if (shellCaches.length !== 1) {
+      return { cacheName: null, count: shellCaches.length, body: null };
+    }
+
+    const cache = await caches.open(shellCaches[0]);
+    await cache.put(
+      "/some-future-dynamic-route",
+      new Response("planted-unlisted-route", { headers: { "Content-Type": "text/plain" } }),
+    );
+
+    const planted = await cache.match("/some-future-dynamic-route");
+    const response = await fetch("/some-future-dynamic-route");
+    return {
+      cacheName: shellCaches[0],
+      count: shellCaches.length,
+      plantedOK: planted != null,
+      body: await response.text(),
+    };
+  });
+
+  expect(
+    seeded.cacheName,
+    `expected exactly one inventory-shell-* cache, found ${seeded.count}`,
+  ).not.toBeNull();
+  expect(seeded.plantedOK, "the probe response must actually be in the cache").toBe(true);
+
+  // The real backend has no route here either, so the honest answer is chi's
+  // own 404 JSON envelope. Anything other than the planted body proves the
+  // request reached the network instead of the poisoned cache entry.
+  expect(seeded.body).not.toBe("planted-unlisted-route");
+});
+
+// CACHE_VERSION bumps exist specifically so a browser that already has an
+// old-named cache gets it cleaned up on the next activation, rather than
+// carrying it forever. This proves that cleanup actually runs against a
+// genuinely stale-named cache, not just that a fresh install ends up with
+// one cache (which every other test here would already show incidentally).
+test("service worker activation deletes old-versioned shell caches", async ({ page }) => {
+  await page.goto("/index.html");
+  await page.evaluate(() => navigator.serviceWorker.ready);
+
+  await page.evaluate(async () => {
+    const stale = await caches.open("inventory-shell-v0-simulated-stale");
+    await stale.put(
+      "/locations.html",
+      new Response("<html>stale</html>", { headers: { "Content-Type": "text/html" } }),
+    );
+  });
+
+  // Re-run the install/activate lifecycle a real deploy triggers, without
+  // needing to actually publish two different sw.js versions: unregister
+  // and let register-sw.js's own registration call on reload install fresh.
+  await page.evaluate(async () => {
+    const reg = await navigator.serviceWorker.getRegistration();
+    await reg.unregister();
+  });
+  await page.reload();
+  await page.evaluate(() => navigator.serviceWorker.ready);
+
+  const shellCaches = await page.evaluate(async () => {
+    const names = await caches.keys();
+    return names.filter((name) => name.startsWith("inventory-shell-"));
+  });
+
+  expect(
+    shellCaches,
+    `expected only the current-version cache to survive activation, found ${JSON.stringify(shellCaches)}`,
+  ).toHaveLength(1);
+  expect(shellCaches[0]).not.toBe("inventory-shell-v0-simulated-stale");
+});
+
+// The worker script's own update check is the one mechanism that can ever
+// tell a browser a new version exists at all — if a browser or proxy caches
+// *this* response, a CACHE_VERSION bump inside it never gets seen in the
+// first place. Server-side coverage for the same behaviour already exists
+// in internal/httpapi/health_test.go; this proves it end to end, against
+// the real prod-target binary docker-compose.e2e.yml runs.
+test("GET /sw.js is answered with Cache-Control: no-cache", async ({ request }) => {
+  const response = await request.get("/sw.js");
+  expect(response.status()).toBe(200);
+  expect(response.headers()["cache-control"]).toBe("no-cache");
+});
+
+// docs/specs/05-frontend-pwa-foundations.md makes "Reset local app data"
+// mandatory as the manual escape hatch for whatever the version-bump
+// cleanup above does not anticipate. It is only worth having if it actually
+// tears down what it claims to: a typo'd element id, a handler that
+// unregisters the worker but forgets to clear Cache Storage (or the other
+// way around), or a broken click binding would all ship green without a
+// test that drives the real button and inspects real browser state after.
+test("the 'Reset local app data' action unregisters the service worker and clears its caches", async ({ page }) => {
+  const HOUSEHOLD = "00000000-0000-7000-8000-000000000010";
+  const login = await page.request.post("/api/auth/login", {
+    data: { username: "e2e-alice", password: "e2e-fixture-password" },
+  });
+  expect(login.status()).toBe(200);
+
+  await page.goto(`/settings.html?storage=${HOUSEHOLD}`);
+  await page.evaluate(() => navigator.serviceWorker.ready);
+
+  const before = await page.evaluate(async () => {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    const names = await caches.keys();
+    return { registrations: regs.length, caches: names.length };
+  });
+  expect(before.registrations, "expected a service worker registered before the reset").toBeGreaterThan(0);
+  expect(before.caches, "expected at least the shell cache to exist before the reset").toBeGreaterThan(0);
+
+  // resetLocalAppData reloads once it finishes, and register-sw.js would
+  // immediately re-register a fresh worker on that very reload — which would
+  // make "nothing is registered" impossible to observe and turn this into a
+  // test of timing rather than of what the button actually did.
+  // addInitScript runs in every document this page loads from here on,
+  // including the reload, and — unlike page.route, which does not reliably
+  // intercept a service worker's own registration fetch (confirmed live: the
+  // route below never aborted it) — actually reaches
+  // navigator.serviceWorker.register itself, so the post-reset state
+  // reflects only the reset.
+  await page.addInitScript(() => {
+    navigator.serviceWorker.register = () => Promise.reject(new Error("registration blocked for test"));
+  });
+
+  await Promise.all([page.waitForEvent("load"), page.click("#reset-local-data")]);
+
+  const after = await page.evaluate(async () => {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    const names = await caches.keys();
+    return { registrations: regs.length, caches: names.length };
+  });
+  expect(after.registrations, "the button must actually unregister the service worker").toBe(0);
+  expect(after.caches, "the button must actually clear every Cache Storage entry").toBe(0);
+});
