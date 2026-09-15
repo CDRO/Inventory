@@ -95,12 +95,18 @@ database, not only to future batches:
    person read off a package and typed in outranks any rule, forever.
 4. Skip products that set their own `products.default_shelf_life_days`,
    since the catalog value does not apply to them.
-5. Run it as a background job (`04-backend-api-conventions.md`) — the
-   admin gets a count of affected batches, and the work is logged. It
-   writes no `inventory_logs` rows: quantities do not change.
+5. Runs **inline, before the response** — the admin gets a real count of
+   affected batches back in `{default_shelf_life_days, recomputed_batches}`,
+   the same shape `PATCH .../categories/{id}/shelf-life` returns. It writes
+   no `inventory_logs` rows: quantities do not change.
 
-The background job applies to **this** cascade, the admin one, because it
-crosses every storage and is unbounded in size.
+This crosses every storage, unlike the category- and product-scoped cascades
+below, but it is still the same shape of work: a bounded set of local
+`UPDATE`s against this server's own database, not a call to anything
+external. The background-jobs machinery in `04-backend-api-conventions.md`
+exists for slow *external* calls (the vision API) that must not block a
+request; recomputing rows already on disk is not that, so this cascade runs
+inline like its storage-scoped siblings rather than through the jobs table.
 
 The same cascade runs, scoped to one storage, when a user changes
 `categories.default_shelf_life_days` or `products.default_shelf_life_days`,
@@ -110,10 +116,11 @@ response**, because they are bounded by one household's rows and because a
 user who changes a rule and then looks at their inventory should see the new
 dates rather than the old ones.
 
-Only the category-rule change reports a count, since it is the one a user
-performs *in order to* change dates. Re-filing a product is a change of
-category that happens to move dates as a consequence, so the recompute is
-silent. Changing `products.default_shelf_life_days` has no endpoint yet.
+The category-rule change and the admin catalog change above both report a
+count, since both are performed *in order to* change dates. Re-filing a
+product is a change of category that happens to move dates as a consequence,
+so the recompute is silent. Changing `products.default_shelf_life_days` has
+no endpoint yet.
 
 ## Editing / removing expiry
 
