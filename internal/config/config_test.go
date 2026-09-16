@@ -80,7 +80,7 @@ func TestLoadAppliesDefaults(t *testing.T) {
 
 	assert.Equal(t, "prod", cfg.AppEnv)
 	assert.Equal(t, "8000", cfg.HTTPPort)
-	assert.Equal(t, "gemini-2.0-flash", cfg.GeminiModel)
+	assert.Equal(t, "gemini-3.6-flash", cfg.GeminiModel)
 	assert.Equal(t, "admin", cfg.AdminInitialUsername)
 	assert.Empty(t, cfg.StaticDir, "empty STATIC_DIR must mean embedded assets")
 	assert.Empty(t, cfg.GeminiImageModel, "the image model is optional and stays empty")

@@ -119,7 +119,7 @@ func Load(getenv func(string) string) (*Config, error) {
 		AdminInitialPassword: strings.TrimSpace(getenv("ADMIN_INITIAL_PASSWORD")),
 
 		GeminiAPIKey:     strings.TrimSpace(getenv("GEMINI_API_KEY")),
-		GeminiModel:      get("GEMINI_MODEL", "gemini-2.0-flash"),
+		GeminiModel:      get("GEMINI_MODEL", "gemini-3.6-flash"),
 		GeminiImageModel: strings.TrimSpace(getenv("GEMINI_IMAGE_MODEL")),
 
 		SerpAPIKey: strings.TrimSpace(getenv("SERPAPI_API_KEY")),
