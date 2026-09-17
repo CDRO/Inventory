@@ -187,7 +187,10 @@ type apiFixture struct {
 	session      *store.Session
 }
 
-func newAPIFixture(t *testing.T) *apiFixture {
+// newAPIFixture builds the fixture. Each opt may adjust the router's
+// dependencies before the router is built — to drop one, say, and test how
+// the API degrades without it.
+func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 	t.Helper()
 
 	auth := newFakeAuth()
@@ -217,7 +220,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	analytics := &fakeAnalyticsStore{}
 	adminVision := &fakeAdminVision{status: "ok"}
 
-	router := httpapi.NewRouter(httpapi.Deps{
+	deps := httpapi.Deps{
 		DB:     stubPinger{},
 		Vision: stubVision{status: "ok"},
 		Errors: httpapi.NewErrorWriter(false, discardLogger()),
@@ -238,7 +241,11 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		Consumer:      consumer,
 		AdminVision:   adminVision,
 		Config:        &config.Config{GeminiModel: "gemini-2.0-flash", AppEnv: "dev", HTTPPort: "8000"},
-	})
+	}
+	for _, opt := range opts {
+		opt(&deps)
+	}
+	router := httpapi.NewRouter(deps)
 
 	return &apiFixture{
 		router: router, auth: auth, locations: locations, categories: categories, batches: batches,

@@ -25,6 +25,13 @@ const TINY_JPEG = Buffer.from(
   "base64",
 );
 
+// A real, decodable 1×1 PNG, served as a job's photo where the review screen
+// draws its crops from it.
+const TINY_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+  "base64",
+);
+
 async function logInAsBob(page) {
   const res = await page.request.post("/api/auth/login", {
     data: { username: "e2e-bob", password: "e2e-fixture-password" },
@@ -78,6 +85,9 @@ test("a proposal is reviewed and confirmed into inventory", async ({ page }) => 
   const oatMilk = rows.nth(1);
   await expect(oatMilk.locator('[data-role="location"]')).toHaveValue("new");
   await expect(oatMilk.locator('[data-role="new-product-name"]')).toHaveValue("Oat Milk 1L");
+  // This job has no photo, so there is nothing to take a picture from and the
+  // choice is not offered at all.
+  await expect(oatMilk.locator('[data-role="new-product-image-field"]')).toBeHidden();
   await oatMilk.locator('[data-role="quantity"]').fill("4");
   await oatMilk.locator('[data-role="expiry"]').fill("2027-02-01");
 
@@ -185,4 +195,88 @@ test("a proposal can be discarded from the inbox", async ({ page }) => {
 
   const gone = await page.request.get(`/api/storages/${HOUSEHOLD}/jobs/${PRODUCT_JOB}`);
   expect(gone.status()).toBe(404);
+});
+
+test("a new product's picture can be taken from the reviewed photo", async ({ page }) => {
+  // No seeded job has a photo on disk, and the E2E stack has no step to put
+  // one there. So the job is read from the server as it really is and then
+  // shown to the page as a photo job, with a box on its first row only — the
+  // two cases the picture choice must tell apart. What is under test is the
+  // review screen: that it offers the right choices and sends the right field.
+  // Cutting and storing the picture is covered by the Go tests
+  // (internal/httpapi/productimages_test.go).
+  //
+  // LOOK_ONLY_JOB, because no other test consumes it and this one must not
+  // either: the confirm below is answered here, never sent to the server.
+  await logInAsBob(page);
+
+  await page.route(`**/jobs/${LOOK_ONLY_JOB}`, async (route) => {
+    const response = await route.fetch();
+    const job = await response.json();
+    job.has_image = true;
+    job.payload.rows[0].bounding_box = { x: 0.1, y: 0.2, width: 0.4, height: 0.5 };
+    job.payload.rows[1].bounding_box = null;
+    await route.fulfill({ response, json: job });
+  });
+  await page.route(`**/jobs/${LOOK_ONLY_JOB}/image`, (route) =>
+    route.fulfill({ contentType: "image/png", body: TINY_PNG }),
+  );
+
+  let sent = null;
+  await page.route(`**/ingest/${LOOK_ONLY_JOB}/confirm`, async (route) => {
+    sent = route.request().postDataJSON();
+    await route.fulfill({ json: { batch_ids: [], products_created: 2, locations_created: 0 } });
+  });
+
+  await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOOK_ONLY_JOB}`);
+  const rows = page.locator("#rows .review-row");
+  await expect(rows).toHaveCount(2);
+
+  const rice = rows.nth(0);
+  const lentils = rows.nth(1);
+  await expect(rice).toContainText("Rice 1kg");
+  await expect(lentils).toContainText("Lentils 500g");
+
+  // Both are new products on a photo job, so both are offered a picture —
+  // and neither has one until the reviewer picks it.
+  const riceChoice = rice.locator('[data-role="new-product-image"]');
+  const lentilsChoice = lentils.locator('[data-role="new-product-image"]');
+  await expect(rice.locator('[data-role="new-product-image-field"]')).toBeVisible();
+  await expect(lentils.locator('[data-role="new-product-image-field"]')).toBeVisible();
+  await expect(riceChoice).toHaveValue("");
+  await expect(lentilsChoice).toHaveValue("");
+
+  // Only a row with a box can offer its own crop.
+  await expect(riceChoice.locator("option")).toHaveText(["No picture", "This item, cut from the photo", "The whole photo"]);
+  await expect(lentilsChoice.locator("option")).toHaveText(["No picture", "The whole photo"]);
+
+  await riceChoice.selectOption("crop");
+  await rice.locator('[data-role="location"]').selectOption(PANTRY);
+  await lentils.locator('[data-role="location"]').selectOption(PANTRY);
+
+  await page.getByRole("button", { name: "Confirm" }).click();
+  await expect(page).toHaveURL(/\/inbox\.html/);
+
+  // The chosen picture travels as new_product.image; the row left on "No
+  // picture" sends no image key at all.
+  expect(sent.items).toEqual([
+    {
+      row_id: "0",
+      decision: "accept",
+      new_product: { name: "Rice 1kg", item_type: "long_shelf_life", image: "crop" },
+      quantity: 1,
+      location_id: PANTRY,
+    },
+    {
+      row_id: "1",
+      decision: "accept",
+      new_product: { name: "Lentils 500g", item_type: "long_shelf_life" },
+      quantity: 2,
+      location_id: PANTRY,
+    },
+  ]);
+
+  // And the job is still waiting on the server, untouched.
+  const job = await page.request.get(`/api/storages/${HOUSEHOLD}/jobs/${LOOK_ONLY_JOB}`);
+  expect((await job.json()).status).toBe("done");
 });

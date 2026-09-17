@@ -50,8 +50,8 @@ type IngestHandler struct {
 	store    IngestStore
 	// photos holds the photos being reviewed, and productImages is permanent
 	// storage for the product pictures cut from them. Either may be nil when
-	// the upload volume is unusable; a confirm asking for a picture is then
-	// refused, and every other confirm works as before.
+	// the upload volume is unusable; a confirm asking for a picture is then an
+	// internal error, and every other confirm works as before.
 	photos        PhotoStore
 	productImages PhotoStore
 	errors        *ErrorWriter
@@ -69,6 +69,10 @@ const (
 	productImageCrop  = "crop"  // the row's own bounding_box
 	productImagePhoto = "photo" // the whole photo — for a single-product photo, usually the right one
 )
+
+// errProductImagesUnavailable is logged when a confirm asks for a picture but
+// the upload volume could not be opened at startup (cmd/inventory/main.go).
+var errProductImagesUnavailable = errors.New("httpapi: product pictures unavailable: upload volume unusable")
 
 // productImageChoice is one accepted row that asked for a picture: which
 // decision it is, and from where.
@@ -282,7 +286,12 @@ func (h *IngestHandler) writeProductImages(ctx context.Context, storageID, jobID
 		}, nil)
 	}
 
-	if job.ImageFilename == nil || h.photos == nil || h.productImages == nil {
+	// An unusable upload volume is the server's problem, not the reviewer's:
+	// answered as one, rather than telling them their proposal has no photo.
+	if h.photos == nil || h.productImages == nil {
+		return nil, Internal(errProductImagesUnavailable)
+	}
+	if job.ImageFilename == nil {
 		return nil, noPhoto(choices[0].index)
 	}
 	photo, err := h.photos.Read(*job.ImageFilename)

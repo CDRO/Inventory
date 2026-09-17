@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/CDRO/Inventory/internal/httpapi"
 	"github.com/CDRO/Inventory/internal/store"
 )
 
@@ -283,4 +284,29 @@ func TestProductPictureIsServedOnlyInTheStorageUsingIt(t *testing.T) {
 		assert.Equal(t, reference.Body.String(), rec.Body.String(), label+": indistinguishable from a picture that never existed")
 		assert.NotContains(t, rec.Body.String(), "theirs", label)
 	}
+}
+
+// TestProductPicturesWithAnUnusableUploadVolume — cmd/inventory/main.go leaves
+// ProductImages nil when the upload volume cannot be opened. A confirm asking
+// for a picture is then the server's failure, not a claim that the proposal
+// has no photo; a confirm that asks for none is unaffected; and nothing can be
+// served, not even a picture a product records.
+func TestProductPicturesWithAnUnusableUploadVolume(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t, func(d *httpapi.Deps) { d.ProductImages = nil })
+	job := f.reviewJob(t)
+
+	rec := f.do(http.MethodPost, confirmPath(f, job), `{"items":[`+newProductRow("0", "Chutney", `"crop"`)+`]}`)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "new_product.image", "not blamed on the row")
+	assert.NotContains(t, rec.Body.String(), "no photo", "not blamed on the proposal")
+	assert.Nil(t, f.ingest.decisions, "nothing reaches the store")
+
+	rec = f.do(http.MethodPost, confirmPath(f, job), `{"items":[`+newProductRow("0", "Chutney", "")+`]}`)
+	assert.Equal(t, http.StatusOK, rec.Code, "a confirm without a picture does not need the volume")
+
+	name := uuid.Must(uuid.NewV7()).String() + ".jpg"
+	f.ingest.markImageUsed(f.storageID, f.base()+"/product-images/"+name)
+	assert.Equal(t, http.StatusNotFound, f.do(http.MethodGet, f.base()+"/product-images/"+name, "").Code)
 }

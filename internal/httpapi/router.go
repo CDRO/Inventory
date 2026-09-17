@@ -142,7 +142,8 @@ type Deps struct {
 	Photos   PhotoStore
 	// ProductImages is permanent storage for product pictures taken from a
 	// reviewed photo. Nil disables taking one — a confirm asking for a picture
-	// is refused — and every stored picture answers 404.
+	// is an internal error; one that does not is unaffected — and every stored
+	// picture answers 404.
 	ProductImages PhotoStore
 	// Consumer starts consumption-photo ingestion
 	// (docs/specs/09-consumption-logging.md), the same way Ingester starts
