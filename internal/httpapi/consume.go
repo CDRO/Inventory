@@ -21,9 +21,10 @@ const (
 	maxConsumeQuantity         = 100_000
 )
 
-// Consumer starts consumption-photo ingestion (internal/consume).
+// Consumer starts consumption-photo ingestion (internal/consume), and analyses
+// a consumption photo again when asked.
 type Consumer interface {
-	Available(ctx context.Context) (model string, ok bool)
+	Reanalyzer
 	Start(ctx context.Context, u consume.Upload) (*store.Job, error)
 }
 

@@ -281,6 +281,46 @@ func (s *Store) DeleteJob(ctx context.Context, storageID, id uuid.UUID) (*string
 	return image, nil
 }
 
+// RequeueJob moves a done or failed job back to pending, dropping its proposal
+// and its error, so its photo can be analysed again — "Analyze again"
+// (docs/specs/09-consumption-logging.md).
+//
+// Only a job that has finished and still has its photo moves. A pending job is
+// already being analysed, and a consumed one has been applied: both are
+// ErrConflict, as is a job with no photo to analyse. A job in another storage,
+// or none at all, is ErrNotFound.
+//
+// The row is locked for the check, so a confirm racing a re-analysis ends one
+// way or the other: ConsumeJob takes the same lock and finds the job pending,
+// or this finds it consumed.
+func (s *Store) RequeueJob(ctx context.Context, storageID, id uuid.UUID) error {
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		var status JobStatus
+		var image *string
+		err := tx.QueryRow(ctx, `
+			SELECT status, image_filename FROM jobs WHERE id = $1 AND storage_id = $2 FOR UPDATE`,
+			id, storageID).Scan(&status, &image)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("store: lock job: %w", err)
+		}
+		if status != JobDone && status != JobFailed {
+			return fmt.Errorf("%w: job is %s, not done or failed", ErrConflict, status)
+		}
+		if image == nil {
+			return fmt.Errorf("%w: job has no photo", ErrConflict)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE jobs SET status = 'pending', payload = NULL, error = NULL, updated_at = now()
+			 WHERE id = $1`, id); err != nil {
+			return fmt.Errorf("store: requeue job: %w", err)
+		}
+		return nil
+	})
+}
+
 // ConsumeJob marks a done job consumed, so its proposal cannot be applied twice.
 //
 // It is the confirm endpoint's guard (docs/specs/06-vision-shelf-ingestion.md):

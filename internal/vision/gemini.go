@@ -136,6 +136,17 @@ func (c *Client) Analyze(ctx context.Context, model string, mode Mode, image []b
 		return nil, fmt.Errorf("vision: encode request: %w", err)
 	}
 
+	text, err := c.generate(ctx, model, body)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAnalysis(mode, []byte(text))
+}
+
+// generate posts one generateContent request and returns the text of the first
+// candidate. A model the provider does not know is ErrModelNotFound, and a
+// reply with no candidate — a blocked prompt, say — is ErrMalformedResponse.
+func (c *Client) generate(ctx context.Context, model string, body []byte) (string, error) {
 	endpoint := c.Endpoint
 	if endpoint == "" {
 		endpoint = defaultGenerateEndpoint
@@ -145,7 +156,7 @@ func (c *Client) Analyze(ctx context.Context, model string, mode Mode, image []b
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("vision: build request: %w", err)
+		return "", fmt.Errorf("vision: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	// A header rather than ?key=: a URL ends up in proxy logs and error
@@ -158,39 +169,39 @@ func (c *Client) Analyze(ctx context.Context, model string, mode Mode, image []b
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("vision: call generateContent: %w", err)
+		return "", fmt.Errorf("vision: call generateContent: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return nil, fmt.Errorf("vision: read response: %w", err)
+		return "", fmt.Errorf("vision: read response: %w", err)
 	}
 
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
-		return nil, fmt.Errorf("%w: %s", ErrModelNotFound, model)
+		return "", fmt.Errorf("%w: %s", ErrModelNotFound, model)
 	case resp.StatusCode != http.StatusOK:
-		return nil, fmt.Errorf("vision: generateContent returned %s", resp.Status)
+		return "", fmt.Errorf("vision: generateContent returned %s", resp.Status)
 	}
 
 	var decoded generateResponse
 	if err := json.Unmarshal(raw, &decoded); err != nil {
-		return nil, fmt.Errorf("%w: envelope: %v", ErrMalformedResponse, err)
+		return "", fmt.Errorf("%w: envelope: %v", ErrMalformedResponse, err)
 	}
 	if len(decoded.Candidates) == 0 {
 		reason := "no candidates"
 		if decoded.PromptFeedback != nil && decoded.PromptFeedback.BlockReason != "" {
 			reason = "blocked: " + decoded.PromptFeedback.BlockReason
 		}
-		return nil, fmt.Errorf("%w: %s", ErrMalformedResponse, reason)
+		return "", fmt.Errorf("%w: %s", ErrMalformedResponse, reason)
 	}
 
 	var text strings.Builder
 	for _, p := range decoded.Candidates[0].Content.Parts {
 		text.WriteString(p.Text)
 	}
-	return ParseAnalysis(mode, []byte(text.String()))
+	return text.String(), nil
 }
 
 // ParseAnalysis validates the model's JSON against the contract.
@@ -359,7 +370,7 @@ type inlineData struct {
 
 type generationConfig struct {
 	ResponseMimeType string         `json:"responseMimeType"`
-	ResponseSchema   map[string]any `json:"responseSchema"`
+	ResponseSchema   map[string]any `json:"responseSchema,omitempty"`
 	Temperature      float64        `json:"temperature"`
 }
 

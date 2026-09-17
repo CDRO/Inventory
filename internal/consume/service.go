@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -27,6 +28,7 @@ const (
 // Runner starts background jobs (internal/jobs).
 type Runner interface {
 	Submit(ctx context.Context, in store.NewJob, work jobs.Work) (*store.Job, error)
+	Resubmit(ctx context.Context, storageID, id uuid.UUID, work jobs.Work) error
 }
 
 // Analyzer sends a photo to the vision model (internal/vision).
@@ -111,6 +113,26 @@ func (s *Service) Start(ctx context.Context, u Upload) (*store.Job, error) {
 		return nil, err
 	}
 	return job, nil
+}
+
+// ErrUnsupportedKind is a job this service did not create.
+var ErrUnsupportedKind = errors.New("consume: unsupported job kind")
+
+// Reanalyze runs a finished consumption job's vision call again, on the photo
+// it already has — "Analyze again" (docs/specs/09-consumption-logging.md).
+//
+// The old proposal, with any correction a reviewer made to it, is replaced by
+// the new one; that is why this only ever happens when someone asks for it. A
+// job the store will not requeue — still pending, already applied, without a
+// photo — is its ErrConflict, and nothing runs.
+func (s *Service) Reanalyze(ctx context.Context, job *store.Job) error {
+	if job.Kind != store.JobConsumptionPhoto {
+		return fmt.Errorf("%w: %s", ErrUnsupportedKind, job.Kind)
+	}
+	if job.ImageFilename == nil {
+		return fmt.Errorf("%w: job has no photo", store.ErrConflict)
+	}
+	return s.runner.Resubmit(ctx, job.StorageID, job.ID, s.work(job.StorageID, *job.ImageFilename))
 }
 
 // work is one job: read the photo, ask the model, build the proposal.

@@ -27,9 +27,10 @@ const (
 	maxLocationDepth  = 16
 )
 
-// Ingester starts photo ingestion (internal/ingest).
+// Ingester starts photo ingestion (internal/ingest), and analyses a shelf or
+// product photo again when asked.
 type Ingester interface {
-	Available(ctx context.Context) (model string, ok bool)
+	Reanalyzer
 	Start(ctx context.Context, u ingest.Upload) (*store.Job, error)
 }
 
@@ -54,20 +55,32 @@ type IngestHandler struct {
 	// internal error, and every other confirm works as before.
 	photos        PhotoStore
 	productImages PhotoStore
-	errors        *ErrorWriter
+	// cutouts holds background-removed pictures while their job is reviewed,
+	// and backgrounds makes them. Both nil is a deployment without background
+	// removal (docs/specs/09-consumption-logging.md): its routes are absent,
+	// and a confirm naming a cutout finds none.
+	cutouts     CutoutStore
+	backgrounds BackgroundRemover
+	errors      *ErrorWriter
 }
 
 // NewIngestHandler wires the ingestion routes.
-func NewIngestHandler(i Ingester, s IngestStore, photos, productImages PhotoStore, errs *ErrorWriter) *IngestHandler {
-	return &IngestHandler{ingester: i, store: s, photos: photos, productImages: productImages, errors: errs}
+func NewIngestHandler(i Ingester, s IngestStore, photos, productImages PhotoStore, cutouts CutoutStore, backgrounds BackgroundRemover, errs *ErrorWriter) *IngestHandler {
+	return &IngestHandler{
+		ingester: i, store: s, photos: photos, productImages: productImages,
+		cutouts: cutouts, backgrounds: backgrounds, errors: errs,
+	}
 }
 
-// Where a new product's picture comes from, as a confirm names it. Both are
-// taken from the photo being reviewed and cost no further AI call
-// (docs/specs/05-frontend-pwa-foundations.md, "Shared review component").
+// Where a new product's picture comes from, as a confirm names it. Crop and
+// photo are taken from the photo being reviewed and cost no further AI call
+// (docs/specs/05-frontend-pwa-foundations.md, "Shared review component"); a
+// cutout is one of those with its background removed, made before the confirm
+// by POST .../cutouts so the reviewer saw it first.
 const (
-	productImageCrop  = "crop"  // the row's own bounding_box
-	productImagePhoto = "photo" // the whole photo — for a single-product photo, usually the right one
+	productImageCrop   = "crop"   // the row's own bounding_box
+	productImagePhoto  = "photo"  // the whole photo — for a single-product photo, usually the right one
+	productImageCutout = "cutout" // a background-removed picture, named by cutout_id
 )
 
 // errProductImagesUnavailable is logged when a confirm asks for a picture but
@@ -75,10 +88,11 @@ const (
 var errProductImagesUnavailable = errors.New("httpapi: product pictures unavailable: upload volume unusable")
 
 // productImageChoice is one accepted row that asked for a picture: which
-// decision it is, and from where.
+// decision it is, from where, and — for a cutout — which one.
 type productImageChoice struct {
 	index  int
 	source string
+	cutout uuid.UUID
 }
 
 // ShelfPhoto serves POST /api/storages/{storage_id}/ingest/shelf-photos.
@@ -167,8 +181,12 @@ type confirmItem struct {
 		CategoryID *uuid.UUID `json:"category_id"`
 		ItemType   string     `json:"item_type"`
 		// Image is "crop" or "photo" to give the new product a picture taken
-		// from the photo under review; absent or null for none.
+		// from the photo under review, or "cutout" for one of those with its
+		// background removed; absent or null for none.
 		Image *string `json:"image"`
+		// CutoutID names the cutout when Image is "cutout", as POST
+		// .../cutouts returned it.
+		CutoutID *uuid.UUID `json:"cutout_id"`
 	} `json:"new_product"`
 
 	Quantity int `json:"quantity"`
@@ -233,6 +251,11 @@ func (h *IngestHandler) Confirm(w http.ResponseWriter, r *http.Request) {
 	// Whatever the outcome, no picture written above may outlive the confirm
 	// without a product using it.
 	h.discardUnusedProductImages(r.Context(), storageID, written, err == nil)
+	if err == nil {
+		// Every cutout the review made is either a product picture now or
+		// was not wanted: none is needed once the proposal is applied.
+		h.removeCutouts(r.Context(), jobID)
+	}
 	switch {
 	case errors.Is(err, store.ErrValidation):
 		h.errors.WriteError(w, r, ValidationFailed(map[string][]string{
@@ -291,20 +314,31 @@ func (h *IngestHandler) writeProductImages(ctx context.Context, storageID, jobID
 	if h.photos == nil || h.productImages == nil {
 		return nil, Internal(errProductImagesUnavailable)
 	}
-	if job.ImageFilename == nil {
-		return nil, noPhoto(choices[0].index)
-	}
-	photo, err := h.photos.Read(*job.ImageFilename)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, noPhoto(choices[0].index)
-	}
-	if err != nil {
-		return nil, Internal(err)
-	}
 
-	boxes, err := proposalBoxes(job.Payload)
-	if err != nil {
-		return nil, Internal(err)
+	// The photo is read only when a picture is cut from it here. A cutout was
+	// cut when it was made, and is still there when the photo is not.
+	var (
+		photo []byte
+		boxes map[string]*images.Box
+	)
+	for _, choice := range choices {
+		if choice.source == productImageCutout {
+			continue
+		}
+		if job.ImageFilename == nil {
+			return nil, noPhoto(choice.index)
+		}
+		photo, err = h.photos.Read(*job.ImageFilename)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, noPhoto(choice.index)
+		}
+		if err != nil {
+			return nil, Internal(err)
+		}
+		if boxes, err = proposalBoxes(job.Payload); err != nil {
+			return nil, Internal(err)
+		}
+		break
 	}
 
 	var written []string
@@ -316,24 +350,37 @@ func (h *IngestHandler) writeProductImages(ctx context.Context, storageID, jobID
 	for _, choice := range choices {
 		d := &decisions[choice.index]
 
-		var box *images.Box
-		if choice.source == productImageCrop {
-			box = boxes[d.RowID]
-			if box == nil {
+		var picture *images.Result
+		if choice.source == productImageCutout {
+			picture, err = h.readCutout(job.ID, choice.cutout)
+			if errors.Is(err, os.ErrNotExist) {
 				return fail(ValidationFailed(map[string][]string{
-					fmt.Sprintf("items[%d].new_product.image", choice.index): {"This item has no crop. Use the whole photo instead."},
+					fmt.Sprintf("items[%d].new_product.cutout_id", choice.index): {"This picture without its background is no longer available. Remove the background again, or keep the original."},
 				}, nil))
 			}
-		}
+			if err != nil {
+				return fail(Internal(err))
+			}
+		} else {
+			var box *images.Box
+			if choice.source == productImageCrop {
+				box = boxes[d.RowID]
+				if box == nil {
+					return fail(ValidationFailed(map[string][]string{
+						fmt.Sprintf("items[%d].new_product.image", choice.index): {"This item has no crop. Use the whole photo instead."},
+					}, nil))
+				}
+			}
 
-		picture, err := images.ProductImage(photo, box)
-		if errors.Is(err, images.ErrEmptyCrop) {
-			return fail(ValidationFailed(map[string][]string{
-				fmt.Sprintf("items[%d].new_product.image", choice.index): {"This item's crop is empty. Use the whole photo instead."},
-			}, nil))
-		}
-		if err != nil {
-			return fail(Internal(err))
+			picture, err = images.ProductImage(photo, box)
+			if errors.Is(err, images.ErrEmptyCrop) {
+				return fail(ValidationFailed(map[string][]string{
+					fmt.Sprintf("items[%d].new_product.image", choice.index): {"This item's crop is empty. Use the whole photo instead."},
+				}, nil))
+			}
+			if err != nil {
+				return fail(Internal(err))
+			}
 		}
 
 		id, err := uuid.NewV7()
@@ -477,13 +524,23 @@ func parseDecisions(body confirmRequest) ([]store.IngestDecision, []productImage
 			}
 			d.NewProduct = &store.NewIngestProduct{Name: name, CategoryID: item.NewProduct.CategoryID, ItemType: itemType}
 
-			if img := item.NewProduct.Image; img != nil {
+			img, cutoutID := item.NewProduct.Image, item.NewProduct.CutoutID
+			if img != nil {
 				switch *img {
 				case productImageCrop, productImagePhoto:
 					choices = append(choices, productImageChoice{index: len(out), source: *img})
+				case productImageCutout:
+					if cutoutID == nil {
+						add(i, "new_product.cutout_id", "Required for a cutout.")
+					} else {
+						choices = append(choices, productImageChoice{index: len(out), source: *img, cutout: *cutoutID})
+					}
 				default:
-					add(i, "new_product.image", "Must be crop, photo or null.")
+					add(i, "new_product.image", "Must be crop, photo, cutout or null.")
 				}
+			}
+			if cutoutID != nil && (img == nil || *img != productImageCutout) {
+				add(i, "new_product.cutout_id", "Only for a cutout.")
 			}
 		}
 

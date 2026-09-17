@@ -14,6 +14,8 @@ import "../register-sw.js";
 //
 // Nothing is written until Confirm. The body sent then decides every row
 // explicitly, because the server refuses a confirm that leaves any row out.
+// "Analyze again" replaces the whole proposal with a new analysis of the same
+// photo, the same way review.html's does.
 
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
@@ -22,7 +24,7 @@ import { ReviewList } from "../review.js";
 import { fetchProducts, fetchProductBatches } from "../product-options.js";
 import { fetchLocations } from "../location-options.js";
 import { get, post, del, ApiError } from "../api.js";
-import { pollJob, JobFailedError } from "../jobs.js";
+import { pollJob, JobFailedError, reanalyzeJob, reanalyzeFailureMessage } from "../jobs.js";
 // el() is imported as buildEl: every function below already uses `el` as the
 // parameter name for a row's own DOM element (mirroring review.html's page
 // module), so the element-builder import is renamed to avoid shadowing it.
@@ -33,6 +35,7 @@ const errorBox = qs("#error");
 const proposalSection = qs("#proposal");
 const rowsContainer = qs("#rows");
 const confirmButton = qs("#confirm");
+const reanalyzeButton = qs("#reanalyze");
 const discardButton = qs("#discard");
 const productDatalist = qs("#product-datalist");
 
@@ -74,6 +77,7 @@ async function init() {
   }
 
   confirmButton.addEventListener("click", onConfirm);
+  reanalyzeButton.addEventListener("click", onReanalyze);
   discardButton.addEventListener("click", onDiscard);
   await load();
 }
@@ -108,11 +112,15 @@ async function load() {
       setStatus(job.error || "This photo could not be analysed.");
       proposalSection.hidden = false;
       confirmButton.hidden = true;
+      // A failed analysis is exactly what analysing again is for.
+      reanalyzeButton.hidden = !job.has_image;
       return;
     case "consumed":
       setStatus("This proposal has already been applied to your inventory.");
       return;
     case "done":
+      confirmButton.hidden = false;
+      reanalyzeButton.hidden = !job.has_image;
       await render(job);
       return;
     default:
@@ -142,6 +150,7 @@ async function render(job) {
   list.onCorrect = onCorrect;
   list.setItems(proposal.rows);
 
+  rows.clear();
   for (const row of proposal.rows) {
     const el = rowsContainer.querySelector(`[data-row-id="${CSS.escape(row.row_id)}"]`);
     rows.set(row.row_id, { row, el });
@@ -413,6 +422,33 @@ async function onConfirm() {
   }
 }
 
+// onReanalyze is "Analyze again": the same photo, a new proposal. It replaces
+// everything on this screen, corrections included, so it asks first — and it
+// is the only way the model ever sees this photo twice.
+async function onReanalyze() {
+  if (!window.confirm("Analyze this photo again? The current proposal, and any changes made to it here, will be replaced.")) {
+    return;
+  }
+  clearError();
+  setBusy(true);
+  try {
+    await reanalyzeJob(storageId, jobId);
+  } catch (err) {
+    setBusy(false);
+    showMessage(reanalyzeFailureMessage(err));
+    return;
+  }
+
+  // The old proposal is gone on the server; take it off the screen too, then
+  // wait for the new one the way a fresh upload is waited for.
+  rows.clear();
+  clearChildren(rowsContainer);
+  list = null;
+  proposalSection.hidden = true;
+  setBusy(false);
+  await load();
+}
+
 async function onDiscard() {
   if (!window.confirm("Discard this photo and its proposal? Nothing will be removed from your inventory.")) {
     return;
@@ -436,6 +472,7 @@ function inboxHref(extra = {}) {
 
 function setBusy(busy) {
   confirmButton.disabled = busy;
+  reanalyzeButton.disabled = busy;
   discardButton.disabled = busy;
 }
 

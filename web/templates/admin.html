@@ -142,6 +142,13 @@
     until a working model is selected below.
   </p>
   {{- end}}
+  {{- if .ImageModelUnavailable}}
+  <p class="alert" role="alert">
+    The background-removal model (<code>{{.ImageModel}}</code>) is not currently offered by the provider.
+    Review screens stop offering to remove a picture's background until <code>GEMINI_IMAGE_MODEL</code>
+    names a model that is; everything else works as before.
+  </p>
+  {{- end}}
   <form data-method="PUT" data-action="/api/admin/settings">
     <label>Gemini model
       {{- if .AvailableModels}}

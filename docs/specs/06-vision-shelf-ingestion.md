@@ -225,7 +225,10 @@ AI's proposal or the upload's `location_id` hint). Each row carries the
 three actions defined in `09-consumption-logging.md` — accept, correct
 manually, reject — so a false-positive detection is dropped and a
 misidentified item is renamed by hand rather than re-run through the
-model.
+model. The whole job, and only the whole job, can be sent through the model
+again with "Analyze again" (`POST /api/storages/{storage_id}/jobs/{job_id}/reanalyze`,
+`09-consumption-logging.md`), which replaces the proposal on this screen
+too — including a failed job's, which is how a malformed response is retried.
 
 Manual correction here may also create a new product, and its image may be
 **the item's own crop from this photo** (`bounding_box`), which is often
@@ -241,7 +244,10 @@ item_type, image}, quantity, location_id, expiration_date}`. The server rejects 
 payload whose `row_id` set does not exactly match the proposal it issued.
 
 `new_product.image` is `"crop"` (the row's own `bounding_box`), `"photo"`
-(the whole photo), or absent for no picture. The **server** cuts the
+(the whole photo), `"cutout"` with `new_product.cutout_id` (one of those with
+its background removed, made during the review — see "Optional: background
+removal on a user photo" in `09-consumption-logging.md`), or absent for no
+picture. A cutout is copied as it is; for the other two the **server** cuts the
 picture from the job's stored photo — the client never uploads it — with
 the EXIF orientation applied before cropping, writes it to permanent
 storage under `/data/uploads/products/`

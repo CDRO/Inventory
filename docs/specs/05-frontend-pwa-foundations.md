@@ -123,12 +123,16 @@ inventory. Implement that list once:
   component — a user who learns the review screen once has learned all of
   them.
 - Manual correction may set a product image from the item's own crop or
-  the uploaded photo itself, without any further AI call.
+  the uploaded photo itself, without any further AI call. Where the
+  deployment offers it, that picture's background can then be removed, shown
+  beside the original (`09-consumption-logging.md`).
 - Rejected rows remain rendered, struck through, and reversible; they are
   omitted from the confirm payload rather than removed from the DOM.
 - A single "Confirm" action posts the edited set to the feature's confirm
   endpoint, and a "Discard" action drops the whole job. Nothing is written
-  before one of them.
+  before one of them. "Analyze again" replaces the whole proposal with a new
+  analysis of the same photo, after asking, and writes nothing to inventory
+  either (`09-consumption-logging.md`).
 
 ## Shared tree view (`js/tree.js`)
 

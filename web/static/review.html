@@ -37,6 +37,7 @@
       <div id="rows" class="review-list"></div>
       <div class="row">
         <button id="confirm" type="button" class="btn btn--primary">Confirm</button>
+        <button id="reanalyze" type="button" class="btn btn--ghost" hidden>Analyze again</button>
         <button id="discard" type="button" class="btn btn--ghost">Discard</button>
       </div>
     </section>
@@ -81,6 +82,23 @@
               <option value="photo">The whole photo</option>
             </select>
           </label>
+          <!-- Background removal: offered only once a picture from the photo
+               is chosen, and only when the server says it can be done. The
+               original stays chosen until the other one is picked. -->
+          <div class="stack" data-role="cutout" hidden>
+            <button type="button" class="btn btn--ghost" data-role="cutout-request">Remove background</button>
+            <p class="muted" data-role="cutout-status" role="status" hidden></p>
+            <div class="cutout-compare" data-role="cutout-compare" hidden>
+              <label class="cutout-choice">
+                <span class="review-crop" data-role="cutout-original" role="img" aria-label="Original picture"></span>
+                <span><input type="radio" data-role="cutout-keep" value="original" checked> Original</span>
+              </label>
+              <label class="cutout-choice">
+                <img class="review-crop cutout-image" data-role="cutout-image" alt="The picture without its background">
+                <span><input type="radio" data-role="cutout-keep" value="cutout"> Without background</span>
+              </label>
+            </div>
+          </div>
         </div>
 
         <div class="row">
