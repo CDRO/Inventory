@@ -21,6 +21,12 @@ import (
 // into the same error and scroll the actionable message out of the log.
 const ExitConfig = 78 // EX_CONFIG, sysexits.h
 
+// DefaultGeminiModel is the fallback GEMINI_MODEL, exported so nothing else
+// that needs to know it — such as a test that talks to the real Gemini API —
+// keeps its own copy that can silently drift from this one the way the
+// literal it replaced did.
+const DefaultGeminiModel = "gemini-3.6-flash"
+
 // requiredVars are the variables without which the process cannot serve a
 // single request. They are reported together rather than one per restart.
 var requiredVars = []string{"DATABASE_URL", "SESSION_SECRET", "GEMINI_API_KEY"}
@@ -119,7 +125,7 @@ func Load(getenv func(string) string) (*Config, error) {
 		AdminInitialPassword: strings.TrimSpace(getenv("ADMIN_INITIAL_PASSWORD")),
 
 		GeminiAPIKey:     strings.TrimSpace(getenv("GEMINI_API_KEY")),
-		GeminiModel:      get("GEMINI_MODEL", "gemini-2.0-flash"),
+		GeminiModel:      get("GEMINI_MODEL", DefaultGeminiModel),
 		GeminiImageModel: strings.TrimSpace(getenv("GEMINI_IMAGE_MODEL")),
 
 		SerpAPIKey: strings.TrimSpace(getenv("SERPAPI_API_KEY")),
