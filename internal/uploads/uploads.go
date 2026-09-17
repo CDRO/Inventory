@@ -30,26 +30,42 @@ const ProductImagesDir = "/data/uploads/products"
 // ErrInvalidName is a filename that is not one the server generates.
 var ErrInvalidName = errors.New("uploads: not a generated filename")
 
-// generatedName is the only filename shape accepted: a lowercase UUID plus
-// .jpg or .png. No separators, no dots beyond the extension, nothing a path
-// could be built from.
+// generatedName is the only filename shape a photo area accepts: a lowercase
+// UUID plus .jpg or .png. No separators, no dots beyond the extension, nothing
+// a path could be built from.
 var generatedName = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(jpg|png)$`)
+
+// generatedPictureName is the same shape, also allowing .svg. Only product
+// picture storage accepts it: an icon picked from the image suggestions is an
+// SVG, while a photo a person uploads never is.
+var generatedPictureName = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(jpg|png|svg)$`)
 
 // Dir is one upload area on disk.
 type Dir struct {
-	root string
+	root  string
+	names *regexp.Regexp
 }
 
-// NewDir returns the area at root, creating it if needed.
+// NewDir returns a photo area at root, creating it if needed.
 func NewDir(root string) (*Dir, error) {
+	return newDir(root, generatedName)
+}
+
+// NewPictureDir returns the product picture area at root (ProductImagesDir),
+// which also keeps promoted SVG icons.
+func NewPictureDir(root string) (*Dir, error) {
+	return newDir(root, generatedPictureName)
+}
+
+func newDir(root string, names *regexp.Regexp) (*Dir, error) {
 	if err := os.MkdirAll(root, 0o750); err != nil {
 		return nil, fmt.Errorf("uploads: create %s: %w", root, err)
 	}
-	return &Dir{root: root}, nil
+	return &Dir{root: root, names: names}, nil
 }
 
 func (d *Dir) path(name string) (string, error) {
-	if !generatedName.MatchString(name) {
+	if !d.names.MatchString(name) {
 		return "", ErrInvalidName
 	}
 	return filepath.Join(d.root, name), nil

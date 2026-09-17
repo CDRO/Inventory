@@ -82,12 +82,13 @@ func (h *ProductImageHandler) Serve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	header := w.Header()
-	contentType := "image/jpeg"
-	if strings.HasSuffix(name, ".png") {
-		contentType = "image/png"
-	}
-	header.Set("Content-Type", contentType)
+	header.Set("Content-Type", pictureContentType(name))
 	header.Set("X-Content-Type-Options", "nosniff")
+	if strings.HasSuffix(name, ".svg") {
+		// A promoted icon is served from our own origin, so like a cached one
+		// it may execute nothing if opened directly (docs/specs/07-shopping-list-reconciliation.md).
+		header.Set("Content-Security-Policy", "default-src 'none'")
+	}
 	// Still a photo taken inside someone's home, so never a shared cache. The
 	// name never changes content once written, so a day in the browser's own
 	// cache is safe and spares a household's lists re-downloading every

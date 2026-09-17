@@ -288,7 +288,7 @@ func serve() error {
 	// Product pictures taken from a reviewed photo live apart from the photos
 	// themselves: those are swept after review, these are kept for as long as
 	// the product exists (docs/specs/07-shopping-list-reconciliation.md).
-	if pictures, err := uploads.NewDir(uploads.ProductImagesDir); err != nil {
+	if pictures, err := uploads.NewPictureDir(uploads.ProductImagesDir); err != nil {
 		slog.Error("product pictures from photos disabled: upload volume unusable", slog.Any("err", err))
 	} else {
 		productStore = pictures

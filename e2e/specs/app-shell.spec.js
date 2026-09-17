@@ -11,11 +11,9 @@
 //   7  non-admin gets 404 for the admin area ...... non-disclosure.spec.js
 //   8  storage B id gets the nonexistent-id 404 ... non-disclosure.spec.js
 //
-// Two are incomplete because the product behind them is: journey 3 has no
-// category step, since no route or page can create a category (#72); and
-// journey 6 stops at each line reaching `resolved`, since confirming a line
-// does not yet write the batch or product spec 07 says it should (#74). Both
-// are tracked on #30 until those land.
+// One is incomplete because the product behind it is: journey 3 has no
+// category step, since no route or page can create a category (#72). It is
+// tracked on #30 until that lands.
 
 import { test, expect } from "@playwright/test";
 

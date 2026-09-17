@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -241,27 +242,89 @@ func (s *Store) RematchShoppingListItem(ctx context.Context, storageID, itemID u
 	return out, nil
 }
 
-// ResolveShoppingListItem marks one line resolved.
+// ResolveLine is what a person confirmed for one shopping-list line
+// (docs/specs/07-shopping-list-reconciliation.md, "Resolution UI per state").
 //
-// It touches exactly one row. That is the acceptance criterion "resolving one
+// At most one of ProductID and NewProduct is set. Neither is a dismissal — the
+// line was not bought, or not wanted — and records nothing but the resolution,
+// so its Quantity must be 0: stock of no product cannot be added.
+type ResolveLine struct {
+	// ProductID is an existing product of this storage: an exact match, or the
+	// candidate picked for an ambiguous line.
+	ProductID *uuid.UUID
+	// NewProduct is created in the same transaction as the batch.
+	NewProduct *ResolvedProduct
+
+	// Quantity is what was actually bought. Above 0 it becomes one batch at
+	// LocationID, with its purchase log row; 0 resolves without touching
+	// inventory.
+	Quantity   int
+	LocationID *uuid.UUID
+}
+
+// ResolvedProduct is a product a resolution creates.
+type ResolvedProduct struct {
+	Name     string
+	ItemType ItemType
+	MinStock int
+	// CategoryID files it under an existing category. CategoryPath instead
+	// resolves a catalog card's "Food > Dairy" against this storage's tree,
+	// creating whatever nodes are missing. At most one is set.
+	CategoryID           *uuid.UUID
+	CategoryPath         *string
+	DefaultShelfLifeDays *int
+	IconName             *string
+	// ImageURL is the product's own picture, already written to permanent
+	// storage by the caller. Never a suggestion-cache URL (spec 07, "Product
+	// images — permanent").
+	ImageURL *string
+
+	// Exactly one of AcceptedCatalogID and Catalog is set: link the product to
+	// the catalog row the person accepted, or describe it to the catalog as a
+	// new row (insert-only, ON CONFLICT DO NOTHING — see InsertCatalogProduct).
+	AcceptedCatalogID *uuid.UUID
+	Catalog           *NewCatalogProduct
+}
+
+// ResolveResult is what a resolution wrote.
+type ResolveResult struct {
+	Item           ShoppingListItem
+	ProductCreated bool
+	// BatchID is the batch the quantity became, nil for a quantity of 0.
+	BatchID *uuid.UUID
+}
+
+// ResolveShoppingListItem applies what a person confirmed for one line, all or
+// nothing: a new product (with its catalog row or catalog link, and any
+// missing category nodes), its batch and purchase log row, and the line marked
+// resolved — in one transaction.
+//
+// It resolves exactly one line. That is the acceptance criterion "resolving one
 // item doesn't block or auto-resolve others" expressed in the only place it can
 // be guaranteed: a statement that names a single id cannot cascade to a
-// sibling, no matter what the calling handler does.
+// sibling, no matter what the calling handler does. And it is the last
+// criterion's only writer: no products or inventory_batches row exists for a
+// line before this call.
 //
 // Resolving is idempotent-hostile on purpose: a second resolve of the same line
-// is ErrConflict rather than a silent overwrite, because the first one may have
-// already written an inventory batch and the second would double it.
+// is ErrConflict rather than a silent overwrite, because the first one already
+// wrote a batch and the second would double it.
 //
-// userID attributes the resolve for gamification when it clears an ambiguous
-// line (docs/specs/51-gamification-scoring.md); nil earns nobody XP, which is
-// the correct behaviour for a system-driven resolve rather than an error
-// condition.
-func (s *Store) ResolveShoppingListItem(ctx context.Context, storageID, itemID uuid.UUID, productID *uuid.UUID, quantity int, userID *uuid.UUID) (*ShoppingListItem, error) {
-	if quantity < 0 {
-		return nil, fmt.Errorf("%w: resolved quantity cannot be negative", ErrValidation)
+// Refusals: ErrNotFound for a line, product, category or location that is not
+// in this storage — the same answer as one that does not exist; ErrValidation
+// for a shape that cannot be applied (both or neither product, stock with no
+// product, stock with no location).
+//
+// userID attributes the resolve: the batch and the product are created by
+// them, and clearing an ambiguous line records its contribution
+// (docs/specs/51-gamification-scoring.md). nil earns nobody XP, which is the
+// correct behaviour for a system-driven resolve rather than an error.
+func (s *Store) ResolveShoppingListItem(ctx context.Context, storageID, itemID uuid.UUID, in ResolveLine, userID *uuid.UUID) (*ResolveResult, error) {
+	if err := in.validate(); err != nil {
+		return nil, err
 	}
 
-	var out *ShoppingListItem
+	var out *ResolveResult
 
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
 		var current ShoppingListItemStatus
@@ -281,10 +344,36 @@ func (s *Store) ResolveShoppingListItem(ctx context.Context, storageID, itemID u
 			return fmt.Errorf("%w: this line is already resolved", ErrConflict)
 		}
 
-		if productID != nil {
+		result := &ResolveResult{}
+
+		productID := in.ProductID
+		switch {
+		case productID != nil:
 			if err := requireProductInStorage(ctx, tx, storageID, *productID); err != nil {
 				return err
 			}
+		case in.NewProduct != nil:
+			id, err := createResolvedProduct(ctx, tx, storageID, *in.NewProduct)
+			if err != nil {
+				return err
+			}
+			productID = &id
+			result.ProductCreated = true
+		}
+
+		if in.Quantity > 0 {
+			// createBatch refuses a location outside this storage itself.
+			batch, err := createBatch(ctx, tx, storageID, NewBatch{
+				ProductID:  *productID,
+				LocationID: *in.LocationID,
+				Quantity:   in.Quantity,
+				Reason:     ReasonPurchase,
+				CreatedBy:  userID,
+			})
+			if err != nil {
+				return err
+			}
+			result.BatchID = &batch.ID
 		}
 
 		row := tx.QueryRow(ctx, `
@@ -292,13 +381,13 @@ func (s *Store) ResolveShoppingListItem(ctx context.Context, storageID, itemID u
 			   SET status = 'resolved', matched_product_id = $1, resolved_quantity = $2
 			 WHERE id = $3
 			RETURNING id, shopping_list_id, raw_text, status, matched_product_id, resolved_quantity, created_at`,
-			productID, quantity, itemID)
+			productID, in.Quantity, itemID)
 
 		item, err := scanShoppingListItem(row)
 		if err != nil {
 			return err
 		}
-		out = item
+		result.Item = *item
 
 		if userID != nil && current == ItemAmbiguous {
 			ref := itemID
@@ -309,12 +398,153 @@ func (s *Store) ResolveShoppingListItem(ctx context.Context, storageID, itemID u
 				return err
 			}
 		}
+		out = result
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// validate refuses a resolution that cannot be applied, before any lock is
+// taken. Whether the ids it names belong to this storage is decided inside the
+// transaction.
+func (in ResolveLine) validate() error {
+	switch {
+	case in.ProductID != nil && in.NewProduct != nil:
+		return fmt.Errorf("%w: a resolution names an existing product or a new one, not both", ErrValidation)
+	case in.Quantity < 0:
+		return fmt.Errorf("%w: resolved quantity cannot be negative", ErrValidation)
+	case in.Quantity > 0 && in.ProductID == nil && in.NewProduct == nil:
+		return fmt.Errorf("%w: stock cannot be added without a product", ErrValidation)
+	case in.Quantity > 0 && in.LocationID == nil:
+		return fmt.Errorf("%w: stock needs a location", ErrValidation)
+	}
+	if p := in.NewProduct; p != nil {
+		switch {
+		case strings.TrimSpace(p.Name) == "":
+			return fmt.Errorf("%w: a new product needs a name", ErrValidation)
+		case p.CategoryID != nil && p.CategoryPath != nil:
+			return fmt.Errorf("%w: a new product names a category or a category path, not both", ErrValidation)
+		case (p.AcceptedCatalogID == nil) == (p.Catalog == nil):
+			return fmt.Errorf("%w: a new product links an accepted catalog row or adds one, exactly one", ErrValidation)
+		case p.MinStock < 0:
+			return fmt.Errorf("%w: minimum stock cannot be negative", ErrValidation)
+		}
+	}
+	return nil
+}
+
+// createResolvedProduct creates a product a resolution named, inside the
+// caller's transaction.
+//
+// Its catalog side is one of two things. An accepted card links to the row
+// that was shown, and writes nothing to the catalog: that row already
+// describes the product. Anything else is described to the catalog now —
+// insert-only, so a name another storage wrote first keeps its description —
+// and linked to whichever row holds that name afterwards.
+func createResolvedProduct(ctx context.Context, tx pgx.Tx, storageID uuid.UUID, in ResolvedProduct) (uuid.UUID, error) {
+	categoryID := in.CategoryID
+	if in.CategoryPath != nil {
+		id, err := ensureCategoryPath(ctx, tx, storageID, *in.CategoryPath)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		categoryID = id
+	}
+
+	var catalogID uuid.UUID
+	if in.AcceptedCatalogID != nil {
+		var exists bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM catalog_products WHERE id = $1)`, *in.AcceptedCatalogID).Scan(&exists); err != nil {
+			return uuid.Nil, fmt.Errorf("store: check accepted catalog row: %w", err)
+		}
+		if !exists {
+			return uuid.Nil, ErrNotFound
+		}
+		catalogID = *in.AcceptedCatalogID
+	} else {
+		entry := *in.Catalog
+		if categoryID != nil && entry.CategoryPath == nil {
+			path, err := categoryPathOf(ctx, tx, *categoryID)
+			if err != nil {
+				return uuid.Nil, err
+			}
+			entry.CategoryPath = &path
+		}
+		row, err := insertCatalogProduct(ctx, tx, entry)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		catalogID = row.ID
+	}
+
+	product, err := createProduct(ctx, tx, storageID, NewProduct{
+		Name:                 strings.TrimSpace(in.Name),
+		CategoryID:           categoryID,
+		CatalogID:            &catalogID,
+		ItemType:             in.ItemType,
+		DefaultShelfLifeDays: in.DefaultShelfLifeDays,
+		MinStock:             in.MinStock,
+		ImageURL:             in.ImageURL,
+		IconName:             in.IconName,
+	})
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return product.ID, nil
+}
+
+// ensureCategoryPath resolves a catalog category path such as "Food > Dairy"
+// against this storage's category tree, creating the nodes that are missing,
+// and returns the leaf. A blank path files the product under no category.
+//
+// Names compare case-insensitively under the same parent, so "dairy" reuses an
+// existing "Dairy" rather than growing a second one beside it.
+func ensureCategoryPath(ctx context.Context, tx pgx.Tx, storageID uuid.UUID, path string) (*uuid.UUID, error) {
+	var names []string
+	for _, part := range strings.Split(path, ">") {
+		if name := strings.TrimSpace(part); name != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil, nil
+	}
+	if err := lockStorageTree(ctx, tx, storageID); err != nil {
+		return nil, err
+	}
+
+	var parent *uuid.UUID
+	for _, name := range names {
+		var existing uuid.UUID
+		err := tx.QueryRow(ctx, `
+			SELECT id FROM categories
+			 WHERE storage_id = $1 AND parent_id IS NOT DISTINCT FROM $2 AND lower(name) = lower($3)
+			 ORDER BY created_at, id
+			 LIMIT 1`, storageID, parent, name).Scan(&existing)
+		if err == nil {
+			parent = &existing
+			continue
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("store: find category: %w", err)
+		}
+
+		id, err := newID()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO categories (id, storage_id, parent_id, name)
+			VALUES ($1, $2, $3, $4)`, id, storageID, parent, name); err != nil {
+			return nil, fmt.Errorf("store: create category: %w", err)
+		}
+		parent = &id
+	}
+	return parent, nil
 }
 
 func scanShoppingList(row rowScanner) (*ShoppingList, error) {

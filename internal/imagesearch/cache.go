@@ -231,6 +231,25 @@ func (c *Cache) markUnusable(ctx context.Context, hash, sourceURL string) {
 	}
 }
 
+// SourceURL returns the provider URL a usable cached image was fetched from.
+//
+// It is what lets a picked suggestion be described to the anonymous catalog
+// without the catalog ever holding one storage's copy: the catalog records
+// where the picture came from, and any storage that later accepts that row
+// fetches it into its own cache and its own permanent storage
+// (docs/specs/07-shopping-list-reconciliation.md). A miss, or an image
+// recorded as unusable, is store.ErrNotFound.
+func (c *Cache) SourceURL(ctx context.Context, hash string) (string, error) {
+	row, err := c.store.CachedImageByHash(ctx, hash)
+	if err != nil {
+		return "", err
+	}
+	if row.Status != store.CachedOK {
+		return "", store.ErrNotFound
+	}
+	return row.SourceURL, nil
+}
+
 // Open returns the stored bytes and content type for a hash, and refreshes
 // recency in the background.
 func (c *Cache) Open(ctx context.Context, hash string) ([]byte, string, error) {
@@ -290,12 +309,12 @@ func (c *Cache) enforceCapAfterWrite(ctx context.Context) {
 // Evict deletes least-recently-accessed entries until the cache is at or below
 // the low-water mark.
 //
-// Nothing here checks whether a product uses an entry. Spec 07 has a chosen
-// suggestion copied into permanent storage (uploads.ProductImagesDir) so a
-// sweep can never undo the choice, but that promotion is not built yet (#75):
-// a product whose image_url points at this cache can lose its picture. No
-// screen can record such a URL today. Pictures taken from a user's own photo
-// never enter this tier at all.
+// Nothing here checks whether a product uses an entry, and nothing needs to:
+// no product ever records a cache address. A chosen suggestion is copied out
+// of this tier into permanent storage (uploads.ProductImagesDir) the moment it
+// is chosen, so a sweep can never undo the choice
+// (docs/specs/07-shopping-list-reconciliation.md). Pictures taken from a
+// user's own photo never enter this tier at all.
 func (c *Cache) Evict(ctx context.Context) error {
 	target := int64(float64(c.maxBytes) * EvictTargetRatio)
 
