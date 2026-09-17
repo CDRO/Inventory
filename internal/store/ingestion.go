@@ -43,6 +43,12 @@ type NewIngestProduct struct {
 	Name       string
 	CategoryID *uuid.UUID
 	ItemType   ItemType
+	// ImageURL is the product's own picture: a crop of, or the whole of, the
+	// photo being reviewed, already written to permanent storage by the
+	// caller. It is set on the storage's product only — never on the catalog
+	// row, because the photo was taken inside someone's home
+	// (docs/specs/02-data-model.md).
+	ImageURL *string
 }
 
 // NewIngestLocation is a location path the model proposed that did not exist
@@ -324,6 +330,7 @@ func resolveIngestProduct(ctx context.Context, tx pgx.Tx, storageID uuid.UUID, d
 		CategoryID: d.NewProduct.CategoryID,
 		CatalogID:  &catalog.ID,
 		ItemType:   d.NewProduct.ItemType,
+		ImageURL:   d.NewProduct.ImageURL,
 	})
 	if err != nil {
 		return uuid.Nil, false, err

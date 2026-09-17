@@ -72,6 +72,15 @@
           <label>Category
             <select data-role="new-product-category"></select>
           </label>
+          <!-- Offered, never preselected: a picture of someone's shelf only
+               becomes a product picture when they choose it. -->
+          <label data-role="new-product-image-field">Picture
+            <select data-role="new-product-image">
+              <option value="">No picture</option>
+              <option value="crop">This item, cut from the photo</option>
+              <option value="photo">The whole photo</option>
+            </select>
+          </label>
         </div>
 
         <div class="row">

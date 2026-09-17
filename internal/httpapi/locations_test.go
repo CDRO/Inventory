@@ -171,6 +171,7 @@ type apiFixture struct {
 	ingest       *fakeIngestStore
 	ingester     *fakeIngester
 	photos       *fakePhotoStore
+	pictures     *fakePhotoStore
 	matcher      *fakeMatcher
 	images       *fakeSuggester
 	imageData    *fakeImageCache
@@ -186,7 +187,10 @@ type apiFixture struct {
 	session      *store.Session
 }
 
-func newAPIFixture(t *testing.T) *apiFixture {
+// newAPIFixture builds the fixture. Each opt may adjust the router's
+// dependencies before the router is built — to drop one, say, and test how
+// the API degrades without it.
+func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 	t.Helper()
 
 	auth := newFakeAuth()
@@ -208,6 +212,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	ingestStore := &fakeIngestStore{}
 	ingester := &fakeIngester{available: true}
 	photos := &fakePhotoStore{files: map[string][]byte{}}
+	pictures := &fakePhotoStore{files: map[string][]byte{}}
 	consumeStore := &fakeConsumeStore{}
 	consumer := &fakeConsumer{available: true}
 	products := &fakeProductStore{}
@@ -215,7 +220,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	analytics := &fakeAnalyticsStore{}
 	adminVision := &fakeAdminVision{status: "ok"}
 
-	router := httpapi.NewRouter(httpapi.Deps{
+	deps := httpapi.Deps{
 		DB:     stubPinger{},
 		Vision: stubVision{status: "ok"},
 		Errors: httpapi.NewErrorWriter(false, discardLogger()),
@@ -227,20 +232,25 @@ func newAPIFixture(t *testing.T) *apiFixture {
 			fakeReorderStore: reorder, fakeAnalyticsStore: analytics,
 			fakeGamification: gamification,
 		},
-		Matcher:     matcher,
-		Images:      images,
-		ImageCache:  imageData,
-		Ingester:    ingester,
-		Photos:      photos,
-		Consumer:    consumer,
-		AdminVision: adminVision,
-		Config:      &config.Config{GeminiModel: "gemini-2.0-flash", AppEnv: "dev", HTTPPort: "8000"},
-	})
+		Matcher:       matcher,
+		Images:        images,
+		ImageCache:    imageData,
+		Ingester:      ingester,
+		Photos:        photos,
+		ProductImages: pictures,
+		Consumer:      consumer,
+		AdminVision:   adminVision,
+		Config:        &config.Config{GeminiModel: "gemini-2.0-flash", AppEnv: "dev", HTTPPort: "8000"},
+	}
+	for _, opt := range opts {
+		opt(&deps)
+	}
+	router := httpapi.NewRouter(deps)
 
 	return &apiFixture{
 		router: router, auth: auth, locations: locations, categories: categories, batches: batches,
 		lists: lists, expiry: expiry, jobs: jobs, idem: idem,
-		ingest: ingestStore, ingester: ingester, photos: photos,
+		ingest: ingestStore, ingester: ingester, photos: photos, pictures: pictures,
 		matcher: matcher, images: images, imageData: imageData,
 		consume: consumeStore, consumer: consumer, products: products,
 		reorder:      reorder,

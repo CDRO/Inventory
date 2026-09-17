@@ -290,9 +290,12 @@ func (c *Cache) enforceCapAfterWrite(ctx context.Context) {
 // Evict deletes least-recently-accessed entries until the cache is at or below
 // the low-water mark.
 //
-// Promoted product images are never in this tier — they were copied into
-// permanent storage when the user chose them — so choosing an image can never
-// be undone by a sweep.
+// Nothing here checks whether a product uses an entry. Spec 07 has a chosen
+// suggestion copied into permanent storage (uploads.ProductImagesDir) so a
+// sweep can never undo the choice, but that promotion is not built yet (#75):
+// a product whose image_url points at this cache can lose its picture. No
+// screen can record such a URL today. Pictures taken from a user's own photo
+// never enter this tier at all.
 func (c *Cache) Evict(ctx context.Context) error {
 	target := int64(float64(c.maxBytes) * EvictTargetRatio)
 
