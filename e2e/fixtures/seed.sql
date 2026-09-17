@@ -1,5 +1,5 @@
--- E2E fixture: a known admin, two ordinary users, one storage with a small
--- inventory (docs/specs/05-frontend-pwa-foundations.md).
+-- E2E fixture: a known admin, two ordinary users, and two storages with small
+-- inventories of their own (docs/specs/05-frontend-pwa-foundations.md).
 --
 -- Applied directly to the disposable E2E database after migrations, NOT
 -- through the application layer, so fixed ids can be referenced by name from
@@ -37,8 +37,10 @@ ON CONFLICT DO NOTHING;
 
 -- Two storages, so the "member of storage A gets 404 for storage B"
 -- required journey (docs/specs/05-frontend-pwa-foundations.md) has a second
--- storage to be denied access to. Bob is deliberately not a member of
--- either.
+-- storage to be denied access to. Bob is deliberately a member of the first
+-- one only: he is the caller who must be refused "E2E Other Household", and
+-- being in exactly one storage also makes him the user for whom the switcher
+-- must stay hidden entirely.
 INSERT INTO storages (id, name) VALUES
   ('00000000-0000-7000-8000-000000000010', 'E2E Household'),
   ('00000000-0000-7000-8000-000000000011', 'E2E Other Household')
@@ -88,6 +90,35 @@ ON CONFLICT (id) DO NOTHING;
 INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
   ('00000000-0000-7000-8000-000000000062', '00000000-0000-7000-8000-000000000041', '00000000-0000-7000-8000-000000000052', 4, 'purchase', '00000000-0000-7000-8000-000000000002'),
   ('00000000-0000-7000-8000-000000000063', '00000000-0000-7000-8000-000000000041', '00000000-0000-7000-8000-000000000053', 3, 'purchase', '00000000-0000-7000-8000-000000000002')
+ON CONFLICT (id) DO NOTHING;
+
+-- "E2E Other Household" (...011), Alice's second storage. It held nothing at
+-- all until now, which was enough for journey 8's non-disclosure check — Bob
+-- is refused it whether or not it has contents — but not for two others:
+--
+--   * Journey 2 ("switches between them and sees each storage's own data")
+--     can only show that the switch changed what is on screen if each storage
+--     has data of its own. Garage exists so the tree differs from ...010's
+--     Pantry/Fridge in both directions.
+--   * Journey 6 (shopping-list reconciliation across all three match states)
+--     runs here rather than in ...010, so that pasting a list cannot disturb
+--     the products the ingestion and consumption suites assert against.
+--
+-- The three product names are chosen for what internal/matching does with
+-- them, not for realism — see e2e/specs/shopping-list.spec.js for the
+-- arithmetic. In short: "sourdough bread" hits Sourdough Bread alone and
+-- clears ExactThreshold, while "milk" is equidistant from Oat Milk and Soy
+-- Milk by construction (same word count, same word lengths, so pg_trgm scores
+-- them identically), which puts the pair below AmbiguousMargin and forces
+-- StatusAmbiguous no matter how the absolute similarity is tuned.
+INSERT INTO locations (id, storage_id, name, description) VALUES
+  ('00000000-0000-7000-8000-000000000022', '00000000-0000-7000-8000-000000000011', 'Garage', 'Other household garage shelf')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
+  ('00000000-0000-7000-8000-000000000042', '00000000-0000-7000-8000-000000000011', 'Sourdough Bread', NULL, 'perishable', 0),
+  ('00000000-0000-7000-8000-000000000043', '00000000-0000-7000-8000-000000000011', 'Oat Milk', NULL, 'perishable', 0),
+  ('00000000-0000-7000-8000-000000000044', '00000000-0000-7000-8000-000000000011', 'Soy Milk', NULL, 'perishable', 0)
 ON CONFLICT (id) DO NOTHING;
 
 -- Two ingestion proposals ready for review (docs/specs/06-vision-shelf-ingestion.md),

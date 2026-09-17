@@ -1,8 +1,12 @@
 // The location tree of docs/specs/06-vision-shelf-ingestion.md.
 //
-// The full create-and-drag journey is tracked in issue #30. What this file
-// verifies: the page loads cleanly for a real member, a visitor without a
-// session is sent to the login page, and every API route is behind the gates.
+// What this file verifies: the page loads cleanly for a real member, a visitor
+// without a session is sent to the login page, and every API route is behind
+// the gates. Creating and nesting a location is required journey 3, and lives
+// in e2e/specs/create-and-list.spec.js. Re-parenting — both the drag-and-drop
+// path and its "Move to…" keyboard equivalent — is still uncovered end to
+// end; it is a spec 06 frontend requirement rather than one of spec 05's
+// eight gate journeys, so it is not in this round's scope.
 
 import { test, expect } from "@playwright/test";
 
