@@ -208,9 +208,12 @@ test("a pasted list lands in all three match states, and each resolves", async (
   expect(stored["sourdough bread"].matched_product.id).toBe(SOURDOUGH_BREAD);
   expect(stored["milk"].matched_product.id, "the candidate the user picked").toBe(SOY_MILK);
   expect(stored["milk"].resolved_quantity).toBe(1);
-  // Nothing was picked for the new item and nothing could be: confirming it
-  // acknowledges the line without inventing a product to point at.
-  expect(stored["smoked paprika"].matched_product ?? null).toBeNull();
+  // Deliberately NOT asserted: what confirming leaves behind. Spec 07 says
+  // confirming an exact match writes a batch and a log, and confirming a new
+  // item creates a product — neither is built yet (#74), so today every
+  // confirm only marks its line resolved. Asserting that no-op here would
+  // make this deployment gate fail the day the spec is implemented; the
+  // inventory and product assertions belong in this test once #74 lands.
 });
 
 test("an explicit multiplier in the pasted text becomes the proposed quantity", async ({ page }) => {

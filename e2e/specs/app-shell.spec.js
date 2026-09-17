@@ -1,6 +1,21 @@
 // Smoke coverage for the app shell of docs/specs/05-frontend-pwa-foundations.md.
-// The required journeys live in their own files (auth-journeys.spec.js,
-// non-disclosure.spec.js); the rest are tracked in issue #30.
+//
+// The eight required journeys of that spec each live in their own files:
+//
+//   1  log in, land in a storage; log out ......... auth-journeys.spec.js
+//   2  switch storages, see each one's own data ... storage-switching.spec.js
+//   3  create location + category, add product ... create-and-list.spec.js
+//   4  shelf photo → review → confirm ............. ingestion.spec.js
+//   5  consumption with an overridden count ....... consumption.spec.js
+//   6  reconcile a list across all match states ... shopping-list.spec.js
+//   7  non-admin gets 404 for the admin area ...... non-disclosure.spec.js
+//   8  storage B id gets the nonexistent-id 404 ... non-disclosure.spec.js
+//
+// Two are incomplete because the product behind them is: journey 3 has no
+// category step, since no route or page can create a category (#72); and
+// journey 6 stops at each line reaching `resolved`, since confirming a line
+// does not yet write the batch or product spec 07 says it should (#74). Both
+// are tracked on #30 until those land.
 
 import { test, expect } from "@playwright/test";
 
