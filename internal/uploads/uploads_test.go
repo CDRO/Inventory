@@ -76,3 +76,27 @@ func TestSaveLeavesNoTemporaryFiles(t *testing.T) {
 	require.Len(t, entries, 1)
 	assert.Equal(t, validName, entries[0].Name())
 }
+
+// TestOnlyThePictureAreaKeepsIcons: a promoted icon is an SVG, so product
+// picture storage accepts one. A photo area still refuses it, because nothing
+// a person uploads is ever an SVG.
+func TestOnlyThePictureAreaKeepsIcons(t *testing.T) {
+	t.Parallel()
+
+	icon := "0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b.svg"
+
+	pictures, err := uploads.NewPictureDir(filepath.Join(t.TempDir(), "products"))
+	require.NoError(t, err)
+	require.NoError(t, pictures.Save(icon, []byte("<svg/>")))
+	data, err := pictures.Read(icon)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("<svg/>"), data)
+
+	for _, name := range []string{"../secret.svg", "0190A1B2-C3D4-7E5F-8A6B-7C8D9E0F1A2B.svg", icon + "/../x.svg"} {
+		assert.ErrorIs(t, pictures.Save(name, []byte("x")), uploads.ErrInvalidName, name)
+	}
+
+	photos, err := uploads.NewDir(filepath.Join(t.TempDir(), "ingest"))
+	require.NoError(t, err)
+	assert.ErrorIs(t, photos.Save(icon, []byte("<svg/>")), uploads.ErrInvalidName)
+}

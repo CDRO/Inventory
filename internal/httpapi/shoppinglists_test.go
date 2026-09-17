@@ -28,9 +28,12 @@ type fakeShoppingLists struct {
 
 	lastCreated  []store.NewShoppingListItem
 	lastResolved uuid.UUID
-	lastQuantity int
+	lastLine     *store.ResolveLine
 	lastProduct  *uuid.UUID
 	lastRawText  string
+	resolves     int
+	// catalog holds the rows FindCatalogProduct can return, by name.
+	catalog map[string]*store.CatalogProduct
 	lastStorage  uuid.UUID
 }
 
@@ -79,14 +82,44 @@ func (f *fakeShoppingLists) RematchShoppingListItem(_ context.Context, storageID
 	return &store.ShoppingListItem{ID: itemID, RawText: rawText, Status: status, MatchedProductID: matched}, nil
 }
 
-func (f *fakeShoppingLists) ResolveShoppingListItem(_ context.Context, storageID, itemID uuid.UUID, productID *uuid.UUID, quantity int, _ *uuid.UUID) (*store.ShoppingListItem, error) {
-	f.lastStorage, f.lastResolved, f.lastProduct, f.lastQuantity = storageID, itemID, productID, quantity
+func (f *fakeShoppingLists) ResolveShoppingListItem(_ context.Context, storageID, itemID uuid.UUID, in store.ResolveLine, _ *uuid.UUID) (*store.ResolveResult, error) {
+	f.resolves++
+	f.lastStorage, f.lastResolved, f.lastLine, f.lastProduct = storageID, itemID, &in, in.ProductID
 	if f.resolveErr != nil {
 		return nil, f.resolveErr
 	}
-	return &store.ShoppingListItem{
-		ID: itemID, Status: store.ItemResolved, MatchedProductID: productID, ResolvedQuantity: &quantity,
-	}, nil
+
+	result := &store.ResolveResult{ProductCreated: in.NewProduct != nil}
+	product := in.ProductID
+	if in.NewProduct != nil {
+		created := uuid.New()
+		product = &created
+	}
+	if in.Quantity > 0 {
+		batch := uuid.New()
+		result.BatchID = &batch
+	}
+	quantity := in.Quantity
+	result.Item = store.ShoppingListItem{
+		ID: itemID, Status: store.ItemResolved, MatchedProductID: product, ResolvedQuantity: &quantity,
+	}
+	return result, nil
+}
+
+func (f *fakeShoppingLists) FindCatalogProduct(_ context.Context, name string) (*store.CatalogProduct, error) {
+	if row, ok := f.catalog[store.NormalizeCatalogName(name)]; ok {
+		return row, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+// seedLine adds one unresolved line the resolve route can find, and returns
+// its resolve path.
+func (f *apiFixture) seedLine(rawText string, status store.ShoppingListItemStatus) (store.ShoppingListItem, string) {
+	listID := uuid.New()
+	item := store.ShoppingListItem{ID: uuid.New(), ShoppingListID: listID, RawText: rawText, Status: status}
+	f.lists.items = append(f.lists.items, item)
+	return item, f.base() + "/shopping-lists/" + listID.String() + "/items/" + item.ID.String() + "/resolve"
 }
 
 // fakeMatcher returns a canned match result.
@@ -377,29 +410,42 @@ func TestResolveIsTheOnlyThingThatCanFinishALine(t *testing.T) {
 	t.Parallel()
 
 	f := newAPIFixture(t)
-	listID, itemID, productID := uuid.New(), uuid.New(), uuid.New()
+	item, path := f.seedLine("milk", store.ItemExactMatch)
+	productID, locationID := uuid.New(), uuid.New()
 
-	rec := f.do(http.MethodPost,
-		f.base()+"/shopping-lists/"+listID.String()+"/items/"+itemID.String()+"/resolve",
-		`{"product_id":"`+productID.String()+`","quantity":3}`)
+	rec := f.do(http.MethodPost, path,
+		`{"product_id":"`+productID.String()+`","quantity":3,"location_id":"`+locationID.String()+`"}`)
 
-	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, itemID, f.lists.lastResolved, "exactly the line that was named")
-	assert.Equal(t, 3, f.lists.lastQuantity)
-	require.NotNil(t, f.lists.lastProduct)
-	assert.Equal(t, productID, *f.lists.lastProduct)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, item.ID, f.lists.lastResolved, "exactly the line that was named")
+	require.NotNil(t, f.lists.lastLine)
+	assert.Equal(t, 3, f.lists.lastLine.Quantity)
+	require.NotNil(t, f.lists.lastLine.ProductID)
+	assert.Equal(t, productID, *f.lists.lastLine.ProductID)
+	require.NotNil(t, f.lists.lastLine.LocationID)
+	assert.Equal(t, locationID, *f.lists.lastLine.LocationID)
 	assert.Equal(t, f.storageID, f.lists.lastStorage)
 }
 
-func TestResolveDefaultsToOneUnit(t *testing.T) {
+// TestResolveDefaultsToTheLinesOwnQuantity — "milk" on a list means one milk
+// and "eggs x2" two; a line dismissed without a product adds no stock at all.
+func TestResolveDefaultsToTheLinesOwnQuantity(t *testing.T) {
 	t.Parallel()
 
 	f := newAPIFixture(t)
-	rec := f.do(http.MethodPost,
-		f.base()+"/shopping-lists/"+uuid.New().String()+"/items/"+uuid.New().String()+"/resolve", `{}`)
+	productID, locationID := uuid.New().String(), uuid.New().String()
 
-	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, 1, f.lists.lastQuantity, `"milk" on a list means one milk`)
+	for raw, want := range map[string]int{"milk": 1, "eggs x2": 2} {
+		_, path := f.seedLine(raw, store.ItemExactMatch)
+		rec := f.do(http.MethodPost, path, `{"product_id":"`+productID+`","location_id":"`+locationID+`"}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, want, f.lists.lastLine.Quantity, raw)
+	}
+
+	_, path := f.seedLine("eggs x2", store.ItemNewItem)
+	rec := f.do(http.MethodPost, path, `{}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Zero(t, f.lists.lastLine.Quantity, "a dismissal adds nothing, whatever the line said")
 }
 
 // TestResolvingTwiceIsAConflict — the second resolve would double whatever the
@@ -409,9 +455,9 @@ func TestResolvingTwiceIsAConflict(t *testing.T) {
 
 	f := newAPIFixture(t)
 	f.lists.resolveErr = store.ErrConflict
+	_, path := f.seedLine("milk", store.ItemNewItem)
 
-	rec := f.do(http.MethodPost,
-		f.base()+"/shopping-lists/"+uuid.New().String()+"/items/"+uuid.New().String()+"/resolve", `{}`)
+	rec := f.do(http.MethodPost, path, `{}`)
 
 	require.Equal(t, http.StatusConflict, rec.Code)
 	assert.NotContains(t, rec.Body.String(), "store:", "the store's own error text is not UI copy")

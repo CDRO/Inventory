@@ -36,13 +36,32 @@ func (f *fakeSuggester) Suggest(_ context.Context, query string, urlFor func(str
 	}
 }
 
-// fakeImageCache serves canned bytes.
+// fakeImageCache serves canned bytes. Fetch hands out the real hash of any
+// provider URL; SourceURL knows only the hashes a test put in sources.
 type fakeImageCache struct {
 	data        []byte
 	contentType string
 	err         error
+	fetchErr    error
+	sources     map[string]string
 
 	touched []string
+	fetched []string
+}
+
+func (f *fakeImageCache) Fetch(_ context.Context, sourceURL string) (string, error) {
+	f.fetched = append(f.fetched, sourceURL)
+	if f.fetchErr != nil {
+		return "", f.fetchErr
+	}
+	return imagesearch.HashURL(sourceURL), nil
+}
+
+func (f *fakeImageCache) SourceURL(_ context.Context, hash string) (string, error) {
+	if source, ok := f.sources[hash]; ok {
+		return source, nil
+	}
+	return "", store.ErrNotFound
 }
 
 func (f *fakeImageCache) Open(_ context.Context, _ string) ([]byte, string, error) {

@@ -224,11 +224,11 @@ func TestResolveShoppingListItemRecordsAmbiguityResolvedOnlyFromAmbiguous(t *tes
 	})
 	require.NoError(t, err)
 
-	_, err = s.ResolveShoppingListItem(ctx, storageID, items[0].ID, nil, 1, &userID)
+	_, err = s.ResolveShoppingListItem(ctx, storageID, items[0].ID, store.ResolveLine{}, &userID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, contributionCount(t, ctx, storageID, userID, gamification.KindAmbiguityResolved))
 
-	_, err = s.ResolveShoppingListItem(ctx, storageID, items[1].ID, nil, 1, &userID)
+	_, err = s.ResolveShoppingListItem(ctx, storageID, items[1].ID, store.ResolveLine{}, &userID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, contributionCount(t, ctx, storageID, userID, gamification.KindAmbiguityResolved), "resolving an exact-match line is not a correction")
 }

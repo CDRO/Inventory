@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -25,17 +26,19 @@ type ReorderStore interface {
 
 // ReorderHandler serves docs/specs/10-reorder-and-shopping-export.md.
 type ReorderHandler struct {
-	store   ReorderStore
-	matcher Matcher
-	errors  *ErrorWriter
+	store    ReorderStore
+	matcher  Matcher
+	pictures productPictures
+	errors   *ErrorWriter
 }
 
 // NewReorderHandler wires the handlers to their collaborators. matcher may be
 // nil; the two routes that need it (Match and AddItem) are only registered by
 // the router when it is present, the same rule the shopping-list routes
-// follow.
-func NewReorderHandler(s ReorderStore, matcher Matcher, errs *ErrorWriter) *ReorderHandler {
-	return &ReorderHandler{store: s, matcher: matcher, errors: errs}
+// follow. cache and productImages may be nil too: a catalog card then shows no
+// picture, and a picked picture is refused.
+func NewReorderHandler(s ReorderStore, matcher Matcher, cache ImageCache, productImages PhotoStore, errs *ErrorWriter) *ReorderHandler {
+	return &ReorderHandler{store: s, matcher: matcher, errors: errs, pictures: productPictures{images: productImages, cache: cache}}
 }
 
 // outOfStockItem is one row of the dashboard's out_of_stock list. current_stock
@@ -265,7 +268,7 @@ func (h *ReorderHandler) buildReorderMatchResponse(ctx context.Context, storageI
 			DisplayName:          result.Catalog.DisplayName,
 			CategoryPath:         result.Catalog.CategoryPath,
 			ItemType:             result.Catalog.ItemType,
-			ImageURL:             result.Catalog.ImageURL,
+			ImageURL:             h.pictures.cardImageURL(ctx, storageID, result.Catalog.ImageURL),
 			IconName:             result.Catalog.IconName,
 			DefaultShelfLifeDays: result.Catalog.DefaultShelfLifeDays,
 			Variants:             variants,
@@ -330,7 +333,9 @@ func (h *ReorderHandler) AddItem(w http.ResponseWriter, r *http.Request) {
 		MinStock             *int    `json:"min_stock"`
 		CategoryID           *string `json:"category_id"`
 		ItemType             string  `json:"item_type"`
-		ImageURL             *string `json:"image_url"`
+		// Image is the hash of a picked image suggestion, promoted into
+		// permanent storage. A picture is never taken by URL: see productPictures.
+		Image                *string `json:"image"`
 		IconName             *string `json:"icon_name"`
 		DefaultShelfLifeDays *int    `json:"default_shelf_life_days"`
 	}
@@ -413,16 +418,36 @@ func (h *ReorderHandler) AddItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only now, once a product is certainly being created, is a picked picture
+	// copied into permanent storage — an update above would never use it.
+	var picture string
+	var imageURL *string
+	if body.Image != nil {
+		name, url, _, err := h.pictures.promoteSuggestion(r.Context(), storageID, *body.Image)
+		switch {
+		case errors.Is(err, errPictureUnavailable):
+			h.errors.WriteError(w, r, ValidationFailed(map[string][]string{
+				"image": {"That picture is no longer available. Pick another, or continue without one."},
+			}, err))
+			return
+		case err != nil:
+			h.errors.WriteError(w, r, Internal(err))
+			return
+		}
+		picture, imageURL = name, &url
+	}
+
 	created, err := h.store.CreateProduct(r.Context(), storageID, store.NewProduct{
 		Name:                 name,
 		CategoryID:           categoryID,
 		ItemType:             itemType,
 		DefaultShelfLifeDays: body.DefaultShelfLifeDays,
 		MinStock:             minStock,
-		ImageURL:             body.ImageURL,
+		ImageURL:             imageURL,
 		IconName:             body.IconName,
 	})
 	if err != nil {
+		h.pictures.remove(r.Context(), h.errors, picture)
 		h.errors.WriteError(w, r, FromStoreError(err, "product could not be created"))
 		return
 	}

@@ -351,14 +351,14 @@ func NewRouter(d Deps) http.Handler {
 			// and batch-picker need (docs/specs/09-consumption-logging.md), plus
 			// the two narrow product-editing writes spec 52's "uncategorized"
 			// and "imageless" quests need to be closeable at all.
-			products := NewProductHandler(d.Store, errs)
+			products := NewProductHandler(d.Store, d.ImageCache, d.ProductImages, errs)
 			sr.Get("/products", products.List)
 			sr.Get("/products/{product_id}/batches", products.Batches)
 			sr.Patch("/products/{product_id}/category", products.SetCategory)
 			sr.Patch("/products/{product_id}/image", products.SetImage)
 
 			if d.Matcher != nil {
-				lists := NewShoppingListHandler(d.Store, d.Matcher, errs)
+				lists := NewShoppingListHandler(d.Store, d.Matcher, d.ImageCache, d.ProductImages, errs)
 				sr.Post("/shopping-lists", lists.Create)
 				sr.Get("/shopping-lists/{id}", lists.Get)
 				sr.Post("/shopping-lists/{id}/items/{item_id}/rematch", lists.Rematch)
@@ -376,7 +376,7 @@ func NewRouter(d Deps) http.Handler {
 			// additionally needs the matcher, so those two routes follow the same
 			// "absent collaborator, absent route" rule as the shopping-list group
 			// above.
-			reorder := NewReorderHandler(d.Store, d.Matcher, errs)
+			reorder := NewReorderHandler(d.Store, d.Matcher, d.ImageCache, d.ProductImages, errs)
 			sr.Get("/dashboard/reorder", reorder.Dashboard)
 			sr.Get("/dashboard/reorder/export", reorder.Export)
 			if d.Matcher != nil {

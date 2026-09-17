@@ -78,10 +78,9 @@ test("a location is created from the page, nests a child, and survives a reload"
 
 test("a product added from the dashboard appears in the reorder list", async ({ page }) => {
   // "Add a missing item" (docs/specs/10-reorder-and-shopping-export.md) is the
-  // only route by which a person can create a product by name alone today. The
-  // one other way a product comes into being is confirming a new item on an
-  // ingestion proposal, covered by ingestion.spec.js. Resolving a shopping
-  // line does not create one yet, although spec 07 says it should (#74).
+  // one route that creates a product with no stock at all. The others create
+  // one alongside its first batch: confirming a new item on an ingestion
+  // proposal (ingestion.spec.js) or on a shopping list (shopping-list.spec.js).
   const product = unique("Quinoa Flakes");
 
   await logIn(page);

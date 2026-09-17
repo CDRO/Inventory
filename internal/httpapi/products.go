@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -25,13 +26,15 @@ type ProductStore interface {
 // can actually do to close them. General product browsing or creation stays
 // out of scope for this handler.
 type ProductHandler struct {
-	store  ProductStore
-	errors *ErrorWriter
+	store    ProductStore
+	pictures productPictures
+	errors   *ErrorWriter
 }
 
-// NewProductHandler wires the product routes.
-func NewProductHandler(s ProductStore, errs *ErrorWriter) *ProductHandler {
-	return &ProductHandler{store: s, errors: errs}
+// NewProductHandler wires the product routes. cache and productImages may be
+// nil, in which case setting a picture is refused and setting an icon works.
+func NewProductHandler(s ProductStore, cache ImageCache, productImages PhotoStore, errs *ErrorWriter) *ProductHandler {
+	return &ProductHandler{store: s, errors: errs, pictures: productPictures{images: productImages, cache: cache}}
 }
 
 // productResponse is id and name only — everything the manual-correction
@@ -143,11 +146,13 @@ func (h *ProductHandler) SetCategory(w http.ResponseWriter, r *http.Request) {
 // SetImage serves PATCH /api/storages/{storage_id}/products/{product_id}/image
 // — the write that lets a person close the "imageless" quest
 // (docs/specs/52-gamification-quests-and-ui.md) on an existing product.
-// Exactly one of image_url and icon_name is expected. No frontend calls this
-// route yet, and it does not itself promote a suggestion-cache URL into
-// permanent storage (docs/specs/07-shopping-list-reconciliation.md) — that
-// promotion step is still unbuilt (issue #75), so a caller that passes a
-// suggestion-cache URL through here risks it being evicted later.
+//
+// The body is `{"image": "<suggestion hash>"}` or `{"icon_name": "…"}`; both
+// null clears the picture. A picture is taken by the hash of a picked image
+// suggestion and promoted into permanent storage, never by a URL: a
+// suggestion-cache URL recorded on a product could be evicted from under it,
+// and any other URL would let a caller point a household's product at a
+// server of their choosing (docs/specs/07-shopping-list-reconciliation.md).
 func (h *ProductHandler) SetImage(w http.ResponseWriter, r *http.Request) {
 	storageID, ok := StorageIDFrom(r.Context())
 	if !ok {
@@ -166,7 +171,7 @@ func (h *ProductHandler) SetImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		ImageURL *string `json:"image_url"`
+		Image    *string `json:"image"`
 		IconName *string `json:"icon_name"`
 	}
 	if failure := decodeJSON(w, r, &body); failure != nil {
@@ -174,9 +179,27 @@ func (h *ProductHandler) SetImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.SetProductImageAsUser(r.Context(), storageID, productID, body.ImageURL, body.IconName, user.ID); err != nil {
+	var picture string
+	var imageURL *string
+	if body.Image != nil {
+		name, url, _, err := h.pictures.promoteSuggestion(r.Context(), storageID, *body.Image)
+		switch {
+		case errors.Is(err, errPictureUnavailable):
+			h.errors.WriteError(w, r, ValidationFailed(map[string][]string{
+				"image": {"That picture is no longer available. Pick another."},
+			}, err))
+			return
+		case err != nil:
+			h.errors.WriteError(w, r, Internal(err))
+			return
+		}
+		picture, imageURL = name, &url
+	}
+
+	if err := h.store.SetProductImageAsUser(r.Context(), storageID, productID, imageURL, body.IconName, user.ID); err != nil {
+		h.pictures.remove(r.Context(), h.errors, picture)
 		h.errors.WriteError(w, r, FromStoreError(err, "product not found in storage"))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"image_url": body.ImageURL, "icon_name": body.IconName})
+	writeJSON(w, http.StatusOK, map[string]any{"image_url": imageURL, "icon_name": body.IconName})
 }

@@ -36,9 +36,11 @@ const BASE = `/api/storages/${STORAGE_ID}`;
 const HASH = "a".repeat(64);
 const OTHER_HOUSEHOLD = "00000000-0000-7000-8000-000000000011";
 const PASSWORD = "e2e-fixture-password";
-// Fixture product ids in OTHER_HOUSEHOLD (e2e/fixtures/seed.sql).
+// Fixture ids in OTHER_HOUSEHOLD (e2e/fixtures/seed.sql). Garage is its only
+// location, so it is where every confirmed line in this suite lands.
 const SOURDOUGH_BREAD = "00000000-0000-7000-8000-000000000042";
 const SOY_MILK = "00000000-0000-7000-8000-000000000044";
+const GARAGE = "00000000-0000-7000-8000-000000000022";
 
 test("shopping-list.html loads for a member with no console errors", async ({ page }) => {
   const consoleErrors = [];
@@ -159,22 +161,29 @@ test("a pasted list lands in all three match states, and each resolves", async (
   await expect(candidates).toHaveText(["Oat Milk", "Soy Milk"]);
 
   // New item: no local match and no catalog hit, so the page says so rather
-  // than inventing a product card.
+  // than inventing a product card, and opens the form to describe it — named
+  // from the line itself.
   const newItem = lineFor(page, "smoked paprika");
   await expect(newItem.locator('[data-field="status"]')).toHaveText("New");
   await expect(newItem.locator('[data-field="detail"]')).toContainText("Nothing known about this yet.");
+  await expect(newItem.locator('[data-field="new-product"]')).toBeVisible();
+  await expect(newItem.locator('[data-field="name"]')).toHaveValue("smoked paprika");
 
-  // Resolve all three. The exact match carries an overridden quantity, so
-  // `resolved_quantity` can be shown to record what was applied rather than
-  // what was proposed (docs/specs/07-shopping-list-reconciliation.md).
+  // Resolve all three, each into Garage. The exact match carries an
+  // overridden quantity, so `resolved_quantity` can be shown to record what
+  // was applied rather than what was proposed
+  // (docs/specs/07-shopping-list-reconciliation.md).
   await exact.locator('[data-field="quantity"]').fill("3");
+  await exact.locator('[data-field="location"]').selectOption(GARAGE);
   await exact.locator('[data-action="resolve"]').click();
   await expect(lineFor(page, "sourdough bread").locator('[data-field="status"]')).toHaveText("Done");
 
   await candidates.filter({ hasText: "Soy Milk" }).click();
+  await ambiguous.locator('[data-field="location"]').selectOption(GARAGE);
   await ambiguous.locator('[data-action="resolve"]').click();
   await expect(lineFor(page, "milk").locator('[data-field="status"]')).toHaveText("Done");
 
+  await newItem.locator('[data-field="location"]').selectOption(GARAGE);
   await newItem.locator('[data-action="resolve"]').click();
   await expect(lineFor(page, "smoked paprika").locator('[data-field="status"]')).toHaveText("Done");
 
@@ -208,12 +217,27 @@ test("a pasted list lands in all three match states, and each resolves", async (
   expect(stored["sourdough bread"].matched_product.id).toBe(SOURDOUGH_BREAD);
   expect(stored["milk"].matched_product.id, "the candidate the user picked").toBe(SOY_MILK);
   expect(stored["milk"].resolved_quantity).toBe(1);
-  // Deliberately NOT asserted: what confirming leaves behind. Spec 07 says
-  // confirming an exact match writes a batch and a log, and confirming a new
-  // item creates a product — neither is built yet (#74), so today every
-  // confirm only marks its line resolved. Asserting that no-op here would
-  // make this deployment gate fail the day the spec is implemented; the
-  // inventory and product assertions belong in this test once #74 lands.
+
+  // And what confirming wrote to inventory — the point of reconciling a
+  // list. Each line's quantity is now a batch in Garage: on the matched
+  // product, on the candidate picked for the ambiguous line, and on the
+  // product the new item created.
+  const batchesOf = async (productId) => {
+    const res = await page.request.get(`/api/storages/${OTHER_HOUSEHOLD}/products/${productId}/batches`);
+    expect(res.status()).toBe(200);
+    return (await res.json()).items;
+  };
+  const inGarage = (batches) =>
+    batches.filter((b) => b.location_id === GARAGE).reduce((sum, b) => sum + b.quantity, 0);
+
+  expect(inGarage(await batchesOf(SOURDOUGH_BREAD)), "the exact match").toBe(3);
+  expect(inGarage(await batchesOf(SOY_MILK)), "the candidate picked for milk").toBe(1);
+
+  const paprika = stored["smoked paprika"].matched_product;
+  expect(paprika, "confirming the new item created a product").not.toBeNull();
+  const products = (await (await page.request.get(`/api/storages/${OTHER_HOUSEHOLD}/products`)).json()).items;
+  expect(products.find((p) => p.id === paprika.id)?.name).toBe("smoked paprika");
+  expect(inGarage(await batchesOf(paprika.id)), "the new product's first batch").toBe(1);
 });
 
 test("an explicit multiplier in the pasted text becomes the proposed quantity", async ({ page }) => {
