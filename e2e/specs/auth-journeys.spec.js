@@ -1,6 +1,11 @@
-// Required journeys 1 and 2 of docs/specs/05-frontend-pwa-foundations.md:
-// log in and land on a resolved storage; log out and land back on the login
-// page. Fixture users and storages come from e2e/fixtures/seed.sql.
+// Required journey 1 of docs/specs/05-frontend-pwa-foundations.md: log in and
+// land on a resolved storage; log out and land back on the login page.
+// Fixture users and storages come from e2e/fixtures/seed.sql.
+//
+// Journey 2 — switching between two storages and seeing each one's own data —
+// is e2e/specs/storage-switching.spec.js. What stays here is only the login
+// step's own branch: a user with two memberships is asked which one rather
+// than being sent somewhere arbitrary.
 
 import { test, expect } from "@playwright/test";
 
