@@ -97,7 +97,8 @@ The markup, the CSS and the script stay as they are:
 
 [`runbook.pl`](runbook.pl), next to this file, does the checking and the
 writing back, so neither is done by eye. Git Bash ships perl, so it needs no
-host toolchain. Work in a scratch directory, not the repository.
+host toolchain. The page and the JSON files go in a scratch directory, never
+the repository.
 
 ### Procedure
 
@@ -106,19 +107,21 @@ host toolchain. Work in a scratch directory, not the repository.
    page's script, which a data update never does.
 2. Read the page twice. `Artifact(action: "read", url: <runbook>)` is what lets
    the later publish go through. `Artifact(action: "read", url: <runbook>,
-   path: "index.html", out_dir: <scratch dir>)` saves the same page as a local
-   file, `page.html` below. Every republish is built from that file, never
-   retyped. The page arrives inside the platform's own
+   path: "index.html", out_dir: <scratch dir>)` saves the same page as
+   `<scratch dir>/index.html`. Below, `index.html`, `plan.json`, `state.json`
+   and `out.html` all mean files in that scratch directory; run the commands
+   from the repository root and give them those paths. Every republish is built
+   from that file, never retyped. The page arrives inside the platform's own
    `<!doctype html><head>…` skeleton, which is expected and republishes as-is.
 3. **Check the file is clean before editing it:**
-   `perl .claude/skills/seed-issues/runbook.pl check page.html`. It exits 0 with
+   `perl .claude/skills/seed-issues/runbook.pl check index.html`. It exits 0 with
    a one-line summary, or exits 1 and names each problem: a script the page did
    not write, a node of the page's own that appears twice, the viewer's runtime
    baked in, a script closed early, a data block that is not valid JSON or holds
    a literal `<`, a duplicated id, a status for no item. Any of those means the
    page's own save has regressed, or someone edited it by hand: stop, report
    the output, and do not republish that copy.
-4. `perl .claude/skills/seed-issues/runbook.pl extract page.html plan.json state.json`
+4. `perl .claude/skills/seed-issues/runbook.pl extract index.html plan.json state.json`
    writes the two blocks out as readable JSON. Edit those two files.
 5. Edit `plan.json`:
    - **Look before adding.** Search the plan for the issue number first. A
@@ -148,7 +151,7 @@ host toolchain. Work in a scratch directory, not the repository.
      the page shows as not started.
    - Set `"updated"` to the current time. Without that, a viewer's older copy in
      their browser storage outranks what you publish.
-7. `perl .claude/skills/seed-issues/runbook.pl inject page.html plan.json state.json out.html`
+7. `perl .claude/skills/seed-issues/runbook.pl inject index.html plan.json state.json out.html`
    writes the two blocks back into an otherwise byte-identical page. It refuses,
    and writes nothing, when either file is not valid JSON, when an item or a
    status that the page had is gone, when an id is used twice or a status names

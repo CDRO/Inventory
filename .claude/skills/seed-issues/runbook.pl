@@ -1,9 +1,9 @@
 #!/usr/bin/perl
 # Checks and edits the Build Runbook page for /seed-issues, step 4.
 #
-#   perl runbook.pl check   page.html
-#   perl runbook.pl extract page.html plan.json state.json
-#   perl runbook.pl inject  page.html plan.json state.json out.html
+#   perl runbook.pl check   index.html
+#   perl runbook.pl extract index.html plan.json state.json
+#   perl runbook.pl inject  index.html plan.json state.json out.html
 #
 # `check` exits 1 and names every problem when the page is not the page's own
 # clean markup. `inject` refuses to write unless the source page is clean, the
@@ -13,6 +13,7 @@
 use strict;
 use warnings;
 use JSON::PP;
+use Time::Local qw(timegm_modern);
 
 $| = 1;
 my %STATUSES = map { $_ => 1 } qw(todo working done);
@@ -21,7 +22,7 @@ my ($cmd, @args) = @ARGV;
 if    (($cmd // '') eq 'check'   && @args == 1) { exit(report(check_page(slurp($args[0]))) ? 0 : 1) }
 elsif (($cmd // '') eq 'extract' && @args == 3) { extract(@args) }
 elsif (($cmd // '') eq 'inject'  && @args == 4) { inject(@args) }
-else  { die "usage: runbook.pl check page.html | extract page.html plan.json state.json | inject page.html plan.json state.json out.html\n" }
+else  { die "usage: runbook.pl check index.html | extract index.html plan.json state.json | inject index.html plan.json state.json out.html\n" }
 
 sub slurp {
   my ($file) = @_;
@@ -37,6 +38,23 @@ sub spit {
   open my $fh, '>:raw', $file or die "cannot write $file: $!\n";
   print $fh $s;
   close $fh or die "cannot write $file: $!\n";
+}
+
+# instant turns an ISO 8601 time into seconds since the epoch, or undef. The
+# page writes Date.toISOString() and a shell writes whatever `date` gives, so
+# two times are compared as instants, never as strings: ".500Z" sorts below
+# "Z" although it is later.
+sub instant {
+  my ($iso) = @_;
+  my ($y, $mo, $d, $h, $mi, $s, $frac, undef, $sign, $oh, $om) = defined $iso
+    ? $iso =~ /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(\.\d+)?(Z|([+-])(\d\d):?(\d\d))$/
+    : ();
+  return undef unless defined $y;
+  my $t = eval { timegm_modern($s, $mi, $h, $d, $mo - 1, $y) };
+  return undef unless defined $t;
+  $t += $frac if defined $frac;
+  $t -= ($sign eq '+' ? 1 : -1) * ($oh * 3600 + $om * 60) if defined $sign;
+  return $t;
 }
 
 # scripts walks the page's script elements in document order. A script's
@@ -144,7 +162,7 @@ sub check_data {
         next;
       }
       push @problems, "item id $id is used twice" if $ids{$id}++;
-      for my $field (qw(n spec title desc)) {
+      for my $field (qw(n spec title desc model effort size after)) {
         push @problems, "item $id is missing \"$field\"" unless defined $item->{$field} && length $item->{$field};
       }
       push @problems, "item $id has no steps" unless ref $item->{steps} eq 'ARRAY' && @{ $item->{steps} };
@@ -207,8 +225,13 @@ sub inject {
     }
 
     # A viewer's browser keeps its own copy and prefers whichever is newer.
-    my ($old, $new) = ($old_state->{updated} // '', $state->{updated} // '');
-    push @refusals, "\"updated\" must be later than the page's $old (set it to the current time)" unless $new gt $old;
+    my ($old, $new) = (instant($old_state->{updated}), instant($state->{updated}));
+    if (!defined $new) {
+      push @refusals, "\"updated\" must be an ISO 8601 time such as 2026-09-17T09:30:00.000Z";
+    }
+    elsif (defined $old && $new <= $old) {
+      push @refusals, "\"updated\" must be later than the page's $old_state->{updated} (set it to the current time)";
+    }
   }
   if (@refusals) {
     print STDERR "REFUSED, nothing written:\n";
