@@ -287,6 +287,12 @@ an image must never be undone by a cleanup sweep. The same applies to a
 catalog suggestion accepted into a storage (`02-data-model.md`) and to a
 user-uploaded custom photo, which goes straight to permanent storage.
 
+Promotion itself is not yet implemented (issue #75). Until it ships, no
+caller may set `products.image_url` to a suggestion-cache URL directly —
+doing so would persist a path the hourly eviction sweep can still delete
+out from under the product, which is exactly the guarantee this section
+requires.
+
 Deleting a product deletes its permanent image, provided no other product
 references the same file.
 

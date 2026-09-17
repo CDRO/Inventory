@@ -143,10 +143,11 @@ func (h *ProductHandler) SetCategory(w http.ResponseWriter, r *http.Request) {
 // SetImage serves PATCH /api/storages/{storage_id}/products/{product_id}/image
 // — the write that lets a person close the "imageless" quest
 // (docs/specs/52-gamification-quests-and-ui.md) on an existing product.
-// Exactly one of image_url and icon_name is expected; the frontend already
-// resolves a chosen image_url through the existing image-suggestions flow
-// (docs/specs/07-shopping-list-reconciliation.md) before this call, so this
-// route only ever persists a URL or icon name already on this origin.
+// Exactly one of image_url and icon_name is expected. No frontend calls this
+// route yet, and it does not itself promote a suggestion-cache URL into
+// permanent storage (docs/specs/07-shopping-list-reconciliation.md) — that
+// promotion step is still unbuilt (issue #75), so a caller that passes a
+// suggestion-cache URL through here risks it being evicted later.
 func (h *ProductHandler) SetImage(w http.ResponseWriter, r *http.Request) {
 	storageID, ok := StorageIDFrom(r.Context())
 	if !ok {
