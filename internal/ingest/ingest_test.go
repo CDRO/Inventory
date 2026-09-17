@@ -23,9 +23,10 @@ import (
 // --- fakes ---
 
 type fakeRunner struct {
-	submitted []store.NewJob
-	work      jobs.Work
-	err       error
+	submitted   []store.NewJob
+	resubmitted []uuid.UUID
+	work        jobs.Work
+	err         error
 }
 
 func (f *fakeRunner) Submit(_ context.Context, in store.NewJob, work jobs.Work) (*store.Job, error) {
@@ -35,6 +36,15 @@ func (f *fakeRunner) Submit(_ context.Context, in store.NewJob, work jobs.Work) 
 	f.submitted = append(f.submitted, in)
 	f.work = work
 	return &store.Job{ID: uuid.New(), StorageID: in.StorageID, Kind: in.Kind, Status: store.JobPending}, nil
+}
+
+func (f *fakeRunner) Resubmit(_ context.Context, _, id uuid.UUID, work jobs.Work) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.resubmitted = append(f.resubmitted, id)
+	f.work = work
+	return nil
 }
 
 type fakeAnalyzer struct {
@@ -329,4 +339,47 @@ func TestSweepImagesRemovesExpiredPhotos(t *testing.T) {
 	assert.Equal(t, 1, n)
 	assert.NotContains(t, h.photos.files, photoName)
 	assert.Equal(t, []uuid.UUID{id}, h.store.cleared)
+}
+
+// TestReanalyzeRunsTheJobsOwnAnalysisAgain — "Analyze again" re-runs the same
+// photo in the job's own mode, keeps its location hint, and builds a fresh
+// proposal; a job this service did not create, or one with no photo, is
+// refused without touching the runner.
+func TestReanalyzeRunsTheJobsOwnAnalysisAgain(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness()
+	h.photos.files[photoName] = []byte("stripped jpeg")
+	h.analyzer.analysis = &vision.Analysis{Items: []vision.Item{{Label: "Rolled Oats", Confidence: 0.8, Quantity: 1}}}
+
+	photo := photoName
+	hint := uuid.New()
+	job := &store.Job{ID: uuid.New(), StorageID: uuid.New(), Kind: store.JobProductPhoto, Status: store.JobFailed,
+		ImageFilename: &photo, LocationHintID: &hint}
+
+	require.NoError(t, h.svc.Reanalyze(context.Background(), job))
+	assert.Equal(t, []uuid.UUID{job.ID}, h.runner.resubmitted)
+	assert.Empty(t, h.runner.submitted, "the same job again, not a new one")
+
+	payload, err := h.runner.work(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, vision.ModeProduct, h.analyzer.gotMode, "the job's own kind decides the prompt")
+	assert.Equal(t, []byte("stripped jpeg"), h.analyzer.gotImage, "the photo already stored is what gets analysed")
+
+	var proposal Proposal
+	require.NoError(t, json.Unmarshal(payload, &proposal))
+	require.Len(t, proposal.Rows, 1)
+	assert.Equal(t, "Rolled Oats", proposal.Rows[0].Label)
+	require.NotNil(t, proposal.LocationHintID)
+	assert.Equal(t, hint, *proposal.LocationHintID, "the upload's shelf still scopes the new proposal")
+
+	other := newHarness()
+	consumption := &store.Job{ID: uuid.New(), Kind: store.JobConsumptionPhoto, Status: store.JobDone, ImageFilename: &photo}
+	assert.ErrorIs(t, other.svc.Reanalyze(context.Background(), consumption), ErrUnsupportedKind)
+	noPhoto := &store.Job{ID: uuid.New(), Kind: store.JobShelfIngestion, Status: store.JobDone}
+	assert.ErrorIs(t, other.svc.Reanalyze(context.Background(), noPhoto), store.ErrConflict)
+	assert.Empty(t, other.runner.resubmitted)
+
+	other.runner.err = store.ErrConflict
+	assert.ErrorIs(t, other.svc.Reanalyze(context.Background(), job), store.ErrConflict, "the store's refusal reaches the caller")
 }

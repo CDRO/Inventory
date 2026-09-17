@@ -250,6 +250,17 @@
   white-space: nowrap;
 }
 
+/* What a tree's renderDetail hook draws beside a name — the category tree's
+   shelf-life rule. It keeps its width so a long name is what truncates. */
+.tree-detail {
+  flex: none;
+  color: var(--color-text-muted);
+}
+
+.tree-shelf-life-input {
+  width: 6rem;
+}
+
 /* --- Review list (js/review.js): 06/07/09 ingestion proposals --- */
 
 .review-list {
@@ -386,6 +397,29 @@ th {
 
 .review-row .field {
   margin: 0;
+}
+
+/* Background removal: the original picture and the one without its background,
+   side by side, so choosing between them is choosing what you see. The
+   checkerboard shows which parts are now transparent. */
+.cutout-compare {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.cutout-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.cutout-image {
+  object-fit: contain;
+  background-color: var(--color-surface);
+  background-image: conic-gradient(var(--color-border) 25%, transparent 0 50%, var(--color-border) 0 75%, transparent 0);
+  background-size: 0.75rem 0.75rem;
 }
 
 .review-row__error {

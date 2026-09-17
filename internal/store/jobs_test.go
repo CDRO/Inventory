@@ -189,3 +189,60 @@ func TestConsumeJobAppliesAProposalOnce(t *testing.T) {
 
 	assert.ErrorIs(t, consume(storageID), store.ErrConflict, "a proposal cannot be applied twice")
 }
+
+// TestRequeueJobAnalysesAFinishedPhotoAgain — "Analyze again" moves a done or
+// failed job back to pending with its proposal and error gone, and refuses
+// every job that is not finished, has been applied, has no photo, or belongs
+// to another storage.
+func TestRequeueJobAnalysesAFinishedPhotoAgain(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	photo := uuid.NewString() + ".jpg"
+
+	newJob := func(image *string) *store.Job {
+		job, err := s.CreateJob(ctx, store.NewJob{StorageID: storageID, Kind: store.JobShelfIngestion, ImageFilename: image})
+		require.NoError(t, err)
+		return job
+	}
+
+	done := newJob(&photo)
+	require.NoError(t, s.CompleteJob(ctx, done.ID, json.RawMessage(`{"rows":[]}`)))
+	assert.ErrorIs(t, s.RequeueJob(ctx, newStorage(t, ctx), done.ID), store.ErrNotFound, "another storage's job")
+	require.NoError(t, s.RequeueJob(ctx, storageID, done.ID))
+
+	got, err := s.Job(ctx, storageID, done.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobPending, got.Status)
+	assert.Nil(t, got.Payload, "the old proposal must not outlive the new analysis")
+	require.NotNil(t, got.ImageFilename)
+	assert.Equal(t, photo, *got.ImageFilename, "the photo stays with the job")
+
+	assert.ErrorIs(t, s.RequeueJob(ctx, storageID, done.ID), store.ErrConflict, "a pending job is already being analysed")
+
+	// A requeued job finishes like a new one.
+	require.NoError(t, s.CompleteJob(ctx, done.ID, json.RawMessage(`{"rows":[{"row_id":"0"}]}`)))
+
+	failed := newJob(&photo)
+	require.NoError(t, s.FailJob(ctx, failed.ID, "The photo could not be analysed."))
+	require.NoError(t, s.RequeueJob(ctx, storageID, failed.ID))
+	got, err = s.Job(ctx, storageID, failed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobPending, got.Status)
+	assert.Nil(t, got.Error, "the old failure must not show while the new analysis runs")
+
+	noPhoto := newJob(nil)
+	require.NoError(t, s.CompleteJob(ctx, noPhoto.ID, json.RawMessage(`{"rows":[]}`)))
+	assert.ErrorIs(t, s.RequeueJob(ctx, storageID, noPhoto.ID), store.ErrConflict, "nothing to analyse")
+
+	consumed := newJob(&photo)
+	require.NoError(t, s.CompleteJob(ctx, consumed.ID, json.RawMessage(`{"rows":[]}`)))
+	tx, err := testPool.Begin(ctx)
+	require.NoError(t, err)
+	require.NoError(t, store.ConsumeJob(ctx, tx, storageID, consumed.ID))
+	require.NoError(t, tx.Commit(ctx))
+	assert.ErrorIs(t, s.RequeueJob(ctx, storageID, consumed.ID), store.ErrConflict, "an applied proposal cannot be replaced")
+	assert.Equal(t, "consumed", jobStatus(t, ctx, consumed.ID))
+
+	assert.ErrorIs(t, s.RequeueJob(ctx, storageID, uuid.New()), store.ErrNotFound)
+}

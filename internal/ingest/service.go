@@ -32,6 +32,7 @@ const (
 // Runner starts background jobs (internal/jobs).
 type Runner interface {
 	Submit(ctx context.Context, in store.NewJob, work jobs.Work) (*store.Job, error)
+	Resubmit(ctx context.Context, storageID, id uuid.UUID, work jobs.Work) error
 }
 
 // Analyzer sends a photo to the vision model (internal/vision).
@@ -132,6 +133,28 @@ func (s *Service) Start(ctx context.Context, u Upload) (*store.Job, error) {
 		return nil, err
 	}
 	return job, nil
+}
+
+// Reanalyze runs a finished job's vision call again, on the photo it already
+// has — "Analyze again" (docs/specs/09-consumption-logging.md).
+//
+// It is the whole job or nothing: the old proposal, with any correction a
+// reviewer made to it, is replaced by the new one. That is why it only ever
+// happens when someone asks for it. The job reads as pending until the new call
+// finishes, exactly as it did after upload, and keeps its location hint.
+//
+// A job the store will not requeue — still pending, already applied, without a
+// photo — is its ErrConflict, and nothing runs.
+func (s *Service) Reanalyze(ctx context.Context, job *store.Job) error {
+	mode, ok := modes[job.Kind]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrUnsupportedKind, job.Kind)
+	}
+	if job.ImageFilename == nil {
+		return fmt.Errorf("%w: job has no photo", store.ErrConflict)
+	}
+	return s.runner.Resubmit(ctx, job.StorageID, job.ID,
+		s.work(job.StorageID, mode, *job.ImageFilename, job.LocationHintID))
 }
 
 var modes = map[store.JobKind]vision.Mode{

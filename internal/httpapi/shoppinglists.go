@@ -2,8 +2,11 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -24,7 +27,10 @@ type ShoppingListStore interface {
 	ShoppingListWithItems(ctx context.Context, storageID, listID uuid.UUID) (*store.ShoppingList, []store.ShoppingListItem, error)
 	ShoppingListItemByID(ctx context.Context, storageID, itemID uuid.UUID) (*store.ShoppingListItem, error)
 	RematchShoppingListItem(ctx context.Context, storageID, itemID uuid.UUID, rawText string, status store.ShoppingListItemStatus, matchedProductID *uuid.UUID) (*store.ShoppingListItem, error)
-	ResolveShoppingListItem(ctx context.Context, storageID, itemID uuid.UUID, productID *uuid.UUID, quantity int, userID *uuid.UUID) (*store.ShoppingListItem, error)
+	ResolveShoppingListItem(ctx context.Context, storageID, itemID uuid.UUID, in store.ResolveLine, userID *uuid.UUID) (*store.ResolveResult, error)
+	// FindCatalogProduct reads a catalog row by name — here, only ever a
+	// variant this line's card offered, never one a client names freely.
+	FindCatalogProduct(ctx context.Context, name string) (*store.CatalogProduct, error)
 }
 
 // Matcher is the matching service, as these handlers need it.
@@ -34,14 +40,20 @@ type Matcher interface {
 
 // ShoppingListHandler serves docs/specs/07-shopping-list-reconciliation.md.
 type ShoppingListHandler struct {
-	store   ShoppingListStore
-	matcher Matcher
-	errors  *ErrorWriter
+	store    ShoppingListStore
+	matcher  Matcher
+	pictures productPictures
+	errors   *ErrorWriter
 }
 
-// NewShoppingListHandler wires the handlers to their collaborators.
-func NewShoppingListHandler(s ShoppingListStore, m Matcher, errs *ErrorWriter) *ShoppingListHandler {
-	return &ShoppingListHandler{store: s, matcher: m, errors: errs}
+// NewShoppingListHandler wires the handlers to their collaborators. cache and
+// productImages may be nil: catalog cards then show no picture, and a picked
+// picture is refused rather than recorded by an evictable address.
+func NewShoppingListHandler(s ShoppingListStore, m Matcher, cache ImageCache, productImages PhotoStore, errs *ErrorWriter) *ShoppingListHandler {
+	return &ShoppingListHandler{
+		store: s, matcher: m, errors: errs,
+		pictures: productPictures{images: productImages, cache: cache},
+	}
 }
 
 // catalogCard is a catalog hit as a client is allowed to see it.
@@ -176,7 +188,9 @@ func (h *ShoppingListHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, buildListResponse(list, created, results))
+	response := buildListResponse(list, created, results)
+	h.showCatalogImages(r.Context(), storageID, response.Items, results)
+	writeJSON(w, http.StatusCreated, response)
 }
 
 // Get serves GET /api/storages/{storage_id}/shopping-lists/{id}.
@@ -217,7 +231,9 @@ func (h *ShoppingListHandler) Get(w http.ResponseWriter, r *http.Request) {
 		results = append(results, h.displayMatch(r.Context(), storageID, item))
 	}
 
-	writeJSON(w, http.StatusOK, buildListResponse(list, items, results))
+	response := buildListResponse(list, items, results)
+	h.showCatalogImages(r.Context(), storageID, response.Items, results)
+	writeJSON(w, http.StatusOK, response)
 }
 
 // displayMatch recomputes the choices for one line, for rendering only.
@@ -293,20 +309,70 @@ func (h *ShoppingListHandler) Rematch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, buildItemResponse(*updated, result))
+	response := []shoppingListItemResponse{buildItemResponse(*updated, result)}
+	h.showCatalogImages(r.Context(), storageID, response, []matching.Result{result})
+	writeJSON(w, http.StatusOK, response[0])
+}
+
+// resolveRequest is the body of POST .../items/{item_id}/resolve: what the
+// person confirmed for one line (docs/specs/07-shopping-list-reconciliation.md,
+// "Resolution UI per state").
+type resolveRequest struct {
+	// Quantity is what was bought; absent is the line's own parsed quantity.
+	// Above 0 it needs LocationID, and becomes one batch there.
+	Quantity   *int       `json:"quantity"`
+	LocationID *uuid.UUID `json:"location_id"`
+
+	// ProductID is an existing product: the exact match, or the candidate
+	// picked for an ambiguous line. NewProduct creates one. Neither dismisses
+	// the line, which then records nothing but its resolution.
+	ProductID  *uuid.UUID         `json:"product_id"`
+	NewProduct *resolveNewProduct `json:"new_product"`
+}
+
+// resolveNewProduct is a product the resolution creates.
+type resolveNewProduct struct {
+	// From is "catalog" — "Add this" on the line's catalog card, or on one of
+	// its variants by Variant display name — or "manual" for everything a
+	// person describes themselves: a new item with no card, "It's something
+	// else", "Treat as new item", "Enter manually".
+	From    string  `json:"from"`
+	Variant *string `json:"variant"`
+
+	// The manual fields. A catalog accept takes all of them from the card.
+	Name       string     `json:"name"`
+	CategoryID *uuid.UUID `json:"category_id"`
+	ItemType   string     `json:"item_type"`
+	MinStock   *int       `json:"min_stock"`
+	// Image is the hash of a picked image suggestion, which is promoted into
+	// permanent storage. Absent or null is no picture.
+	Image *string `json:"image"`
+}
+
+const (
+	resolveFromCatalog = "catalog"
+	resolveFromManual  = "manual"
+)
+
+// resolveResponse is a resolved line plus what resolving it wrote.
+type resolveResponse struct {
+	shoppingListItemResponse
+	ProductCreated bool       `json:"product_created"`
+	BatchID        *uuid.UUID `json:"batch_id"`
 }
 
 // Resolve serves POST /api/storages/{storage_id}/shopping-lists/{id}/items/{item_id}/resolve.
 //
-// Nothing about a line touches inventory until this call: the spec's last
-// acceptance criterion is that no products or inventory_batches row exists
-// before the user explicitly confirms a resolution for that line.
+// Nothing about a line touches inventory until this call — the spec's last
+// acceptance criterion — and this call applies all of it at once: a new product
+// with its catalog side, the batch, the purchase log row, and the line marked
+// resolved, in one transaction.
 //
-// This PR resolves a line against a product that already exists, or records a
-// dismissal with no product at all. Creating a product, its catalog entry and
-// its opening batch from a resolution is the next slice of this spec and is
-// tracked on the issue — a confirm that half-created things would be worse
-// than one that is honest about not doing it yet.
+// The client never names a catalog row. It was never given an id (see
+// catalogCard), so accepting a card or declining one is decided here, by
+// matching the line again and reading the card it produces. That is also how
+// a declined card becomes the variant link: the server knows which row the
+// person was shown.
 func (h *ShoppingListHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 	storageID, ok := StorageIDFrom(r.Context())
 	if !ok {
@@ -325,50 +391,225 @@ func (h *ShoppingListHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var body struct {
-		ProductID *string `json:"product_id"`
-		Quantity  *int    `json:"quantity"`
-	}
+	var body resolveRequest
 	if failure := decodeJSON(w, r, &body); failure != nil {
 		h.errors.WriteError(w, r, failure)
 		return
 	}
-
-	fields := map[string][]string{}
-
-	var productID *uuid.UUID
-	if body.ProductID != nil {
-		parsed, err := uuid.Parse(*body.ProductID)
-		if err != nil {
-			fields["product_id"] = append(fields["product_id"], "Must be a UUID or null.")
-		} else {
-			productID = &parsed
-		}
-	}
-
-	quantity := 1
-	if body.Quantity != nil {
-		quantity = *body.Quantity
-	}
-	if quantity < 0 {
-		fields["quantity"] = append(fields["quantity"], "Cannot be negative.")
-	}
-
-	if len(fields) > 0 {
-		h.errors.WriteError(w, r, ValidationFailed(fields, nil))
+	if failure := body.validate(); failure != nil {
+		h.errors.WriteError(w, r, failure)
 		return
 	}
 
-	userID := user.ID
-	updated, err := h.store.ResolveShoppingListItem(r.Context(), storageID, itemID, productID, quantity, &userID)
+	item, err := h.store.ShoppingListItemByID(r.Context(), storageID, itemID)
 	if err != nil {
+		h.errors.WriteError(w, r, FromStoreError(err, "shopping list item not in this storage or nonexistent"))
+		return
+	}
+
+	line := store.ResolveLine{ProductID: body.ProductID, LocationID: body.LocationID}
+	switch {
+	case body.Quantity != nil:
+		line.Quantity = *body.Quantity
+	case body.ProductID != nil || body.NewProduct != nil:
+		// "milk" on a list means one milk, and "eggs x2" means two.
+		_, line.Quantity = matching.ParseLine(item.RawText)
+	default:
+		// No product: the line is being dismissed, and adds no stock.
+		line.Quantity = 0
+	}
+
+	var picture string
+	if body.NewProduct != nil {
+		product, saved, failure := h.newProduct(r.Context(), storageID, *item, *body.NewProduct)
+		if failure != nil {
+			h.errors.WriteError(w, r, failure)
+			return
+		}
+		line.NewProduct, picture = product, saved
+	}
+
+	userID := user.ID
+	result, err := h.store.ResolveShoppingListItem(r.Context(), storageID, itemID, line, &userID)
+	if err != nil {
+		h.pictures.remove(r.Context(), h.errors, picture)
 		h.errors.WriteError(w, r, conflictAs(err,
-			"shopping list item or product not in this storage or nonexistent",
+			"shopping list item, product, category or location not in this storage or nonexistent",
 			"This line has already been resolved."))
 		return
 	}
 
-	writeJSON(w, http.StatusOK, buildItemResponse(*updated, matching.Result{Status: matching.Status(updated.Status)}))
+	writeJSON(w, http.StatusOK, resolveResponse{
+		shoppingListItemResponse: buildItemResponse(result.Item, matching.Result{Status: matching.Status(result.Item.Status)}),
+		ProductCreated:           result.ProductCreated,
+		BatchID:                  result.BatchID,
+	})
+}
+
+// validate checks the body's shape. Whether its ids belong to this storage is
+// the store's to decide, inside the transaction.
+func (b resolveRequest) validate() *Failure {
+	fields := map[string][]string{}
+	add := func(field, msg string) { fields[field] = append(fields[field], msg) }
+
+	if b.ProductID != nil && b.NewProduct != nil {
+		add("product_id", "Give product_id or new_product, not both.")
+	}
+	if b.Quantity != nil {
+		switch {
+		case *b.Quantity < 0:
+			add("quantity", "Cannot be negative.")
+		case *b.Quantity > maxIngestQuantity:
+			add("quantity", "Too large.")
+		}
+	}
+
+	if p := b.NewProduct; p != nil {
+		switch p.From {
+		case resolveFromCatalog:
+		case resolveFromManual:
+			name := strings.TrimSpace(p.Name)
+			switch {
+			case name == "":
+				add("new_product.name", "A name is required.")
+			case utf8.RuneCountInString(name) > maxProductName:
+				add("new_product.name", "Must be at most 255 characters.")
+			}
+			switch store.ItemType(p.ItemType) {
+			case "", store.ItemPerishable, store.ItemLongShelfLife, store.ItemNonPerishable:
+			default:
+				add("new_product.item_type", "Must be perishable, long_shelf_life or non_perishable.")
+			}
+			if p.MinStock != nil && *p.MinStock < 0 {
+				add("new_product.min_stock", "Cannot be negative.")
+			}
+		default:
+			add("new_product.from", `Must be "catalog" or "manual".`)
+		}
+	}
+
+	if len(fields) > 0 {
+		return ValidationFailed(fields, nil)
+	}
+	return nil
+}
+
+// newProduct turns what the person described into the store's input, and
+// promotes the picture it names. It returns the saved picture's name so a
+// failed confirm can remove it.
+func (h *ShoppingListHandler) newProduct(ctx context.Context, storageID uuid.UUID, item store.ShoppingListItem, in resolveNewProduct) (*store.ResolvedProduct, string, *Failure) {
+	// The card this line shows. Matched again rather than trusted from the
+	// client, which was never given a catalog id — and matched the same way
+	// Get renders it, so the card accepted is the card that was on screen.
+	var card *matching.CatalogMatch
+	text, _ := matching.ParseLine(item.RawText)
+	if result, err := h.matcher.MatchProductCandidates(ctx, storageID, text); err != nil {
+		return nil, "", Internal(err)
+	} else if result.Status == matching.StatusNewItem {
+		card = result.Catalog
+	}
+
+	if in.From == resolveFromCatalog {
+		return h.acceptCard(ctx, storageID, card, in.Variant)
+	}
+
+	product := &store.ResolvedProduct{
+		Name:       strings.TrimSpace(in.Name),
+		ItemType:   store.ItemType(in.ItemType),
+		CategoryID: in.CategoryID,
+	}
+	if in.MinStock != nil {
+		product.MinStock = *in.MinStock
+	}
+	entry := &store.NewCatalogProduct{DisplayName: product.Name, ItemType: product.ItemType}
+
+	// Declining the card that was shown and naming the product differently
+	// is the only way the variant graph grows (spec 07).
+	if card != nil && store.NormalizeCatalogName(card.DisplayName) != store.NormalizeCatalogName(product.Name) {
+		entry.ShownID = &card.ID
+	}
+
+	var saved string
+	if in.Image != nil {
+		name, url, source, err := h.pictures.promoteSuggestion(ctx, storageID, *in.Image)
+		switch {
+		case errors.Is(err, errPictureUnavailable):
+			return nil, "", ValidationFailed(map[string][]string{
+				"new_product.image": {"That picture is no longer available. Pick another, or continue without one."},
+			}, err)
+		case err != nil:
+			return nil, "", Internal(err)
+		}
+		saved = name
+		product.ImageURL = &url
+		// The catalog may only record a provider picture (spec 02), and this
+		// is one: a suggestion is always a provider's, never a user's photo.
+		entry.ImageURL = &source
+	}
+
+	product.Catalog = entry
+	return product, saved, nil
+}
+
+// acceptCard copies the line's catalog card — or one of its variants — into a
+// new product: "Add this", with no external search.
+func (h *ShoppingListHandler) acceptCard(ctx context.Context, storageID uuid.UUID, card *matching.CatalogMatch, variant *string) (*store.ResolvedProduct, string, *Failure) {
+	if card == nil {
+		return nil, "", ValidationFailed(map[string][]string{
+			"new_product.from": {"This line has no catalog description to accept."},
+		}, nil)
+	}
+
+	id, name, categoryPath, itemType := card.ID, card.DisplayName, card.CategoryPath, card.ItemType
+	image, icon, shelfLife := card.ImageURL, card.IconName, card.DefaultShelfLifeDays
+
+	if variant != nil {
+		// Only a variant actually offered with this card can be accepted:
+		// naming any other catalog row would let a client pull in a
+		// description it was never shown.
+		offered := false
+		for _, v := range card.Variants {
+			if store.NormalizeCatalogName(v.DisplayName) == store.NormalizeCatalogName(*variant) {
+				offered = true
+				break
+			}
+		}
+		if !offered {
+			return nil, "", ValidationFailed(map[string][]string{
+				"new_product.variant": {"That is not one of this line's suggestions."},
+			}, nil)
+		}
+		row, err := h.store.FindCatalogProduct(ctx, *variant)
+		if err != nil {
+			return nil, "", FromStoreError(err, "offered catalog variant vanished")
+		}
+		id, name, categoryPath, itemType = row.ID, row.DisplayName, row.CategoryPath, string(row.ItemType)
+		image, icon, shelfLife = row.ImageURL, row.IconName, row.DefaultShelfLifeDays
+	}
+
+	saved, url := h.pictures.promoteSource(ctx, storageID, image)
+	return &store.ResolvedProduct{
+		Name:                 name,
+		ItemType:             store.ItemType(itemType),
+		CategoryPath:         categoryPath,
+		DefaultShelfLifeDays: shelfLife,
+		IconName:             icon,
+		ImageURL:             url,
+		AcceptedCatalogID:    &id,
+	}, saved, nil
+}
+
+// showCatalogImages replaces each catalog card's provider picture with the
+// address it is served from here. buildItemResponse never copies the
+// provider URL into a card, so a caller that skips this shows no picture —
+// it cannot leak one.
+func (h *ShoppingListHandler) showCatalogImages(ctx context.Context, storageID uuid.UUID, items []shoppingListItemResponse, results []matching.Result) {
+	for i := range items {
+		if i >= len(results) || items[i].Catalog == nil || results[i].Catalog == nil {
+			continue
+		}
+		items[i].Catalog.ImageURL = h.pictures.cardImageURL(ctx, storageID, results[i].Catalog.ImageURL)
+	}
 }
 
 // buildListResponse pairs stored rows with their match results positionally.
@@ -431,10 +672,11 @@ func buildItemResponse(item store.ShoppingListItem, result matching.Result) shop
 			variants = append(variants, v.DisplayName)
 		}
 		out.Catalog = &catalogCard{
-			DisplayName:          result.Catalog.DisplayName,
-			CategoryPath:         result.Catalog.CategoryPath,
-			ItemType:             result.Catalog.ItemType,
-			ImageURL:             result.Catalog.ImageURL,
+			DisplayName:  result.Catalog.DisplayName,
+			CategoryPath: result.Catalog.CategoryPath,
+			ItemType:     result.Catalog.ItemType,
+			// ImageURL is left nil: the catalog holds a provider URL, which
+			// must never reach a browser. showCatalogImages fills in our own.
 			IconName:             result.Catalog.IconName,
 			DefaultShelfLifeDays: result.Catalog.DefaultShelfLifeDays,
 			Variants:             variants,

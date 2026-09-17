@@ -264,7 +264,7 @@ function renderMatch(name, match) {
   // handler below branches on, the same role node.dataset.productId plays in
   // shopping-list.js.
   let chosenProductId = null;
-  let prefill = { categoryId: null, itemType: "", imageUrl: null, iconName: null, shelfLifeDays: null };
+  let prefill = { categoryId: null, itemType: "", iconName: null, shelfLifeDays: null };
 
   // The confirm step's min-stock field starts at 1 for a new product, but at
   // the matched product's own current threshold for an existing one —
@@ -303,10 +303,12 @@ function renderMatch(name, match) {
     addItemResult.append(el("div", { class: "stack" }, buttons));
   } else if (match.catalog) {
     // new_item with a catalog hit: one-click acceptance, no external call.
+    // The card's picture is shown, but not sent: a picture reaches a product
+    // only as a picked suggestion the server copies into permanent storage,
+    // never by an address (docs/specs/07-shopping-list-reconciliation.md).
     prefill = {
       categoryId: null,
       itemType: match.catalog.item_type || "",
-      imageUrl: match.catalog.image_url,
       iconName: match.catalog.icon_name,
       shelfLifeDays: match.catalog.default_shelf_life_days,
     };
@@ -383,7 +385,6 @@ async function confirmAddItem(name, productId, minStock, prefill) {
       min_stock: minStock,
       category_id: prefill.categoryId,
       item_type: prefill.itemType || undefined,
-      image_url: prefill.imageUrl,
       icon_name: prefill.iconName,
       default_shelf_life_days: prefill.shelfLifeDays,
     });

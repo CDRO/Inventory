@@ -135,6 +135,31 @@ Each `shopping_list_items` row moves to `status = 'resolved'` once the
 user has confirmed an action for it; `resolved_quantity` records what was
 actually applied.
 
+### Resolving a line
+
+`POST /api/storages/{storage_id}/shopping-lists/{id}/items/{item_id}/resolve`
+applies one line's resolution in **one transaction**: a new product (with
+its catalog side and any missing category nodes), one `inventory_batches`
+row for the quantity at the chosen location, its `inventory_logs` row with
+`reason = 'purchase'`, and the line marked resolved. Body:
+
+- `quantity` — what was bought; absent means the line's own parsed
+  quantity. Above 0 it requires `location_id`.
+- `product_id` — an existing product: the exact match, or the candidate
+  picked for an ambiguous line; **or**
+- `new_product` — `{from: "catalog", variant?}` accepts the line's catalog
+  card ("Add this"), or one of the variants that card offered, by display
+  name; `{from: "manual", name, category_id?, item_type?, min_stock?,
+  image?}` is a product the user describes, where `image` is the hash of a
+  picked image suggestion.
+- Neither: the line is dismissed ("not bought"), with a quantity of 0.
+
+The client never sends a catalog id, because it is never given one. The
+server matches the line again to learn which card was on screen: that row
+is what "Add this" links the product to, and what a declined card's new,
+differently-named row takes as its `base_id`. A variant the card did not
+offer is refused.
+
 ## Image suggestion flow (New Item)
 
 `GET /api/storages/{storage_id}/image-suggestions?query={text}` returns
@@ -287,11 +312,23 @@ an image must never be undone by a cleanup sweep. The same applies to a
 catalog suggestion accepted into a storage (`02-data-model.md`) and to a
 user-uploaded custom photo, which goes straight to permanent storage.
 
-Promotion itself is not yet implemented (issue #75). Until it ships, no
-caller may set `products.image_url` to a suggestion-cache URL directly —
-doing so would persist a path the hourly eviction sweep can still delete
-out from under the product, which is exactly the guarantee this section
-requires.
+A picture is therefore never recorded by an address a caller supplies.
+Every route that sets one — resolving a line, adding a reorder item,
+`PATCH …/products/{id}/image` — takes the **hash** of a picked suggestion
+and promotes it; a suggestion-cache URL recorded on a product would be a
+path the eviction sweep can still delete out from under it, and any other
+URL would point a household's product at a server of the caller's
+choosing. Promoted pictures are served at
+`/api/storages/{storage_id}/product-images/{name}`, only to the storage
+whose product uses them (`06-vision-shelf-ingestion.md`).
+
+The catalog records the **provider URL** a picked suggestion came from —
+never a storage's copy, and never a user's photo. A card's picture is
+shown by fetching that URL into this server's suggestion cache and serving
+it from our own origin; the provider URL never reaches a browser. Accepting
+the card fetches it once more and promotes it into the accepting storage.
+If the provider is unreachable, the product is created without a picture
+rather than the confirm failing.
 
 Deleting a product deletes its permanent image, provided no other product
 references the same file.

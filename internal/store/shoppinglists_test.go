@@ -36,12 +36,14 @@ func TestShoppingListKeepsEveryLineIndependently(t *testing.T) {
 	assert.Equal(t, 4, countRows(t, ctx,
 		`SELECT count(*) FROM shopping_list_items WHERE shopping_list_id = $1`, items[0].ShoppingListID))
 
-	// Resolve exactly one of them.
-	resolved, err := s.ResolveShoppingListItem(ctx, storageID, items[1].ID, nil, 2, nil)
+	// Resolve exactly one of them — as a dismissal, so the independence is
+	// the only thing under test here.
+	result, err := s.ResolveShoppingListItem(ctx, storageID, items[1].ID, store.ResolveLine{}, nil)
 	require.NoError(t, err)
+	resolved := result.Item
 	assert.Equal(t, store.ItemResolved, resolved.Status)
 	require.NotNil(t, resolved.ResolvedQuantity)
-	assert.Equal(t, 2, *resolved.ResolvedQuantity)
+	assert.Equal(t, 0, *resolved.ResolvedQuantity)
 
 	// Every other line must be untouched — same status, still unresolved.
 	assert.Equal(t, 3, countRows(t, ctx,
@@ -66,10 +68,10 @@ func TestResolvingTwiceIsRefused(t *testing.T) {
 	_, items, err := s.CreateShoppingList(ctx, storageID, store.SourceText, nil, lines("milk"))
 	require.NoError(t, err)
 
-	_, err = s.ResolveShoppingListItem(ctx, storageID, items[0].ID, nil, 1, nil)
+	_, err = s.ResolveShoppingListItem(ctx, storageID, items[0].ID, store.ResolveLine{}, nil)
 	require.NoError(t, err)
 
-	_, err = s.ResolveShoppingListItem(ctx, storageID, items[0].ID, nil, 1, nil)
+	_, err = s.ResolveShoppingListItem(ctx, storageID, items[0].ID, store.ResolveLine{}, nil)
 	assert.ErrorIs(t, err, store.ErrConflict)
 }
 
@@ -88,7 +90,7 @@ func TestRematchIsRefusedOnceResolved(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "milk", fixed.RawText)
 
-	_, err = s.ResolveShoppingListItem(ctx, storageID, items[0].ID, nil, 1, nil)
+	_, err = s.ResolveShoppingListItem(ctx, storageID, items[0].ID, store.ResolveLine{}, nil)
 	require.NoError(t, err)
 
 	_, err = s.RematchShoppingListItem(ctx, storageID, items[0].ID, "oat milk", store.ItemNewItem, nil)
@@ -118,7 +120,7 @@ func TestShoppingListsAreStorageScoped(t *testing.T) {
 	})
 
 	t.Run("resolving an item", func(t *testing.T) {
-		_, err := s.ResolveShoppingListItem(ctx, storageA, theirItem, nil, 1, nil)
+		_, err := s.ResolveShoppingListItem(ctx, storageA, theirItem, store.ResolveLine{}, nil)
 		assert.ErrorIs(t, err, store.ErrNotFound)
 
 		still, err := s.ShoppingListItemByID(ctx, storageB, theirItem)
@@ -165,7 +167,7 @@ func TestAMatchedProductMustBelongToThisStorage(t *testing.T) {
 		_, items, err := s.CreateShoppingList(ctx, storageA, store.SourceText, nil, lines("milk"))
 		require.NoError(t, err)
 
-		_, err = s.ResolveShoppingListItem(ctx, storageA, items[0].ID, &foreign.ID, 1, nil)
+		_, err = s.ResolveShoppingListItem(ctx, storageA, items[0].ID, store.ResolveLine{ProductID: &foreign.ID}, nil)
 		assert.ErrorIs(t, err, store.ErrNotFound)
 	})
 }

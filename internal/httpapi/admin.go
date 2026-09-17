@@ -48,13 +48,12 @@ type AdminStore interface {
 	Setting(ctx context.Context, key string) (string, bool, error)
 	SetSetting(ctx context.Context, key, value string, updatedBy uuid.UUID) error
 
-	// SearchCatalog, SetCatalogShelfLife, RecomputeDerivedExpiryForCatalog and
-	// DeleteCatalogProduct back catalog moderation: catalog_products is
-	// insert-only (docs/specs/02-data-model.md), so an admin correcting or
-	// removing a bad entry is the only remedy.
+	// SearchCatalog, CorrectCatalogShelfLife and DeleteCatalogProduct back
+	// catalog moderation: catalog_products is insert-only
+	// (docs/specs/02-data-model.md), so an admin correcting or removing a bad
+	// entry is the only remedy.
 	SearchCatalog(ctx context.Context, q string) ([]store.CatalogProduct, error)
-	SetCatalogShelfLife(ctx context.Context, id uuid.UUID, days *int) error
-	RecomputeDerivedExpiryForCatalog(ctx context.Context, catalogID uuid.UUID) (int, error)
+	CorrectCatalogShelfLife(ctx context.Context, catalogID uuid.UUID, days *int) (int, error)
 	DeleteCatalogProduct(ctx context.Context, id uuid.UUID) error
 }
 
@@ -520,6 +519,13 @@ func (h *AdminHandler) SearchCatalog(w http.ResponseWriter, r *http.Request) {
 // that must not block a request; recomputing rows from the household's own
 // database is not that. So it runs inline, like the storage-scoped sibling,
 // and the response carries the real count rather than a job id to poll.
+//
+// Running inline under the request's context means an admin who cancels, or
+// whose connection drops, can stop the cascade part-way. That is safe because
+// the write and the cascade are one transaction
+// (store.CorrectCatalogShelfLife): a correction that does not finish is
+// rolled back whole, so the entry is never left showing a value its batches
+// do not follow.
 func (h *AdminHandler) PatchCatalog(w http.ResponseWriter, r *http.Request) {
 	id, failure := idFromPath(r, "id", "malformed catalog id")
 	if failure != nil {
@@ -547,14 +553,9 @@ func (h *AdminHandler) PatchCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.SetCatalogShelfLife(r.Context(), id, days); err != nil {
-		h.errors.WriteError(w, r, FromStoreError(err, "catalog entry not found"))
-		return
-	}
-
-	affected, err := h.store.RecomputeDerivedExpiryForCatalog(r.Context(), id)
+	affected, err := h.store.CorrectCatalogShelfLife(r.Context(), id, days)
 	if err != nil {
-		h.errors.WriteError(w, r, Internal(err))
+		h.errors.WriteError(w, r, FromStoreError(err, "catalog entry not found"))
 		return
 	}
 

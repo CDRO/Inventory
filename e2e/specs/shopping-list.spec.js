@@ -36,9 +36,11 @@ const BASE = `/api/storages/${STORAGE_ID}`;
 const HASH = "a".repeat(64);
 const OTHER_HOUSEHOLD = "00000000-0000-7000-8000-000000000011";
 const PASSWORD = "e2e-fixture-password";
-// Fixture product ids in OTHER_HOUSEHOLD (e2e/fixtures/seed.sql).
+// Fixture ids in OTHER_HOUSEHOLD (e2e/fixtures/seed.sql). Garage is its only
+// location, so it is where every confirmed line in this suite lands.
 const SOURDOUGH_BREAD = "00000000-0000-7000-8000-000000000042";
 const SOY_MILK = "00000000-0000-7000-8000-000000000044";
+const GARAGE = "00000000-0000-7000-8000-000000000022";
 
 test("shopping-list.html loads for a member with no console errors", async ({ page }) => {
   const consoleErrors = [];
@@ -60,6 +62,46 @@ test("shopping-list.html loads for a member with no console errors", async ({ pa
   await expect(page.locator("#error")).toBeHidden();
 
   expect(consoleErrors, `unexpected console errors: ${consoleErrors.join("; ")}`).toEqual([]);
+});
+
+// A list matched before the storage's locations and categories arrive would
+// render every line with empty "Put it in" and category pickers, so the button
+// waits for both, and a load that fails leaves it disabled for good.
+test("Match waits for the storage's locations and categories, and stays disabled if they fail", async ({ page }) => {
+  const isCategories = (url) => new URL(url).pathname.endsWith("/categories");
+
+  const login = await page.request.post("/api/auth/login", {
+    data: { username: "e2e-bob", password: PASSWORD },
+  });
+  expect(login.status(), "fixture login").toBe(200);
+
+  // Hold the categories response until the button has been seen disabled.
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  await page.route(isCategories, async (route) => {
+    await held;
+    await route.continue();
+  });
+  await page.goto("/shopping-list.html");
+  await expect(page).toHaveURL(/storage=/);
+  await expect(page.locator("#submit")).toBeDisabled();
+  release();
+  await expect(page.locator("#submit")).toBeEnabled();
+  await page.unroute(isCategories);
+
+  // Now the same load failing: the error is shown and Match never enables.
+  await page.route(isCategories, (route) =>
+    route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "internal", message: "Something went wrong on our side." } }),
+    }),
+  );
+  const failed = page.waitForResponse((res) => isCategories(res.url()) && res.status() === 500);
+  await page.reload();
+  await failed;
+  await expect(page.locator("#error")).toBeVisible();
+  await expect(page.locator("#submit")).toBeDisabled();
 });
 
 test("shopping-list.html without a session redirects to the login page", async ({ page }) => {
@@ -159,22 +201,29 @@ test("a pasted list lands in all three match states, and each resolves", async (
   await expect(candidates).toHaveText(["Oat Milk", "Soy Milk"]);
 
   // New item: no local match and no catalog hit, so the page says so rather
-  // than inventing a product card.
+  // than inventing a product card, and opens the form to describe it — named
+  // from the line itself.
   const newItem = lineFor(page, "smoked paprika");
   await expect(newItem.locator('[data-field="status"]')).toHaveText("New");
   await expect(newItem.locator('[data-field="detail"]')).toContainText("Nothing known about this yet.");
+  await expect(newItem.locator('[data-field="new-product"]')).toBeVisible();
+  await expect(newItem.locator('[data-field="name"]')).toHaveValue("smoked paprika");
 
-  // Resolve all three. The exact match carries an overridden quantity, so
-  // `resolved_quantity` can be shown to record what was applied rather than
-  // what was proposed (docs/specs/07-shopping-list-reconciliation.md).
+  // Resolve all three, each into Garage. The exact match carries an
+  // overridden quantity, so `resolved_quantity` can be shown to record what
+  // was applied rather than what was proposed
+  // (docs/specs/07-shopping-list-reconciliation.md).
   await exact.locator('[data-field="quantity"]').fill("3");
+  await exact.locator('[data-field="location"]').selectOption(GARAGE);
   await exact.locator('[data-action="resolve"]').click();
   await expect(lineFor(page, "sourdough bread").locator('[data-field="status"]')).toHaveText("Done");
 
   await candidates.filter({ hasText: "Soy Milk" }).click();
+  await ambiguous.locator('[data-field="location"]').selectOption(GARAGE);
   await ambiguous.locator('[data-action="resolve"]').click();
   await expect(lineFor(page, "milk").locator('[data-field="status"]')).toHaveText("Done");
 
+  await newItem.locator('[data-field="location"]').selectOption(GARAGE);
   await newItem.locator('[data-action="resolve"]').click();
   await expect(lineFor(page, "smoked paprika").locator('[data-field="status"]')).toHaveText("Done");
 
@@ -208,12 +257,27 @@ test("a pasted list lands in all three match states, and each resolves", async (
   expect(stored["sourdough bread"].matched_product.id).toBe(SOURDOUGH_BREAD);
   expect(stored["milk"].matched_product.id, "the candidate the user picked").toBe(SOY_MILK);
   expect(stored["milk"].resolved_quantity).toBe(1);
-  // Deliberately NOT asserted: what confirming leaves behind. Spec 07 says
-  // confirming an exact match writes a batch and a log, and confirming a new
-  // item creates a product — neither is built yet (#74), so today every
-  // confirm only marks its line resolved. Asserting that no-op here would
-  // make this deployment gate fail the day the spec is implemented; the
-  // inventory and product assertions belong in this test once #74 lands.
+
+  // And what confirming wrote to inventory — the point of reconciling a
+  // list. Each line's quantity is now a batch in Garage: on the matched
+  // product, on the candidate picked for the ambiguous line, and on the
+  // product the new item created.
+  const batchesOf = async (productId) => {
+    const res = await page.request.get(`/api/storages/${OTHER_HOUSEHOLD}/products/${productId}/batches`);
+    expect(res.status()).toBe(200);
+    return (await res.json()).items;
+  };
+  const inGarage = (batches) =>
+    batches.filter((b) => b.location_id === GARAGE).reduce((sum, b) => sum + b.quantity, 0);
+
+  expect(inGarage(await batchesOf(SOURDOUGH_BREAD)), "the exact match").toBe(3);
+  expect(inGarage(await batchesOf(SOY_MILK)), "the candidate picked for milk").toBe(1);
+
+  const paprika = stored["smoked paprika"].matched_product;
+  expect(paprika, "confirming the new item created a product").not.toBeNull();
+  const products = (await (await page.request.get(`/api/storages/${OTHER_HOUSEHOLD}/products`)).json()).items;
+  expect(products.find((p) => p.id === paprika.id)?.name).toBe("smoked paprika");
+  expect(inGarage(await batchesOf(paprika.id)), "the new product's first batch").toBe(1);
 });
 
 test("an explicit multiplier in the pasted text becomes the proposed quantity", async ({ page }) => {
@@ -227,4 +291,186 @@ test("an explicit multiplier in the pasted text becomes the proposed quantity", 
   const line = lineFor(page, "sourdough bread x2");
   await expect(line.locator('[data-field="quantity"]')).toHaveValue("2");
   await expect(line.locator('[data-field="detail"]')).toContainText("Matches Sourdough Bread.");
+});
+
+// --- The resolution choices the fixture cannot reach on its own ------------
+//
+// Journey 6 above reaches all three match states through the real server. Two
+// sets of choices it does not click are covered here: a catalog card's "Add
+// this", its variants and "It's something else" — the fixture's catalog is
+// empty on purpose, so no line gets a card — and an ambiguous line's two
+// escape hatches.
+//
+// Both tests capture what the page sends rather than letting the server apply
+// it. Creating products in "E2E Other Household" would change what journey 6's
+// lines match, and fullyParallel runs these beside it. What confirming writes
+// on each of these paths is covered against PostgreSQL in
+// internal/store/shoppinglists_resolve_test.go, and the server's handling of
+// each body in internal/httpapi/shoppinglists_resolve_test.go. The claim here
+// is narrower: each button produces exactly the resolve body that path needs.
+
+const CARD = {
+  display_name: "Tomatoes",
+  category_path: "Food > Vegetables",
+  item_type: "perishable",
+  image_url: null,
+  icon_name: null,
+  default_shelf_life_days: 7,
+  variants: ["Cherry Tomatoes", "Yellow Tomatoes"],
+};
+
+// captureResolves answers every resolve on the page itself and records the
+// body each one sent, by the line's raw text.
+async function captureResolves(page, rawTextById) {
+  const sent = {};
+  await page.route("**/items/*/resolve", async (route) => {
+    const id = route.request().url().split("/items/")[1].split("/")[0];
+    const body = route.request().postDataJSON();
+    sent[rawTextById()[id]] = body;
+    const named = Boolean(body.product_id || body.new_product);
+    await route.fulfill({
+      json: {
+        id,
+        raw_text: rawTextById()[id],
+        status: "resolved",
+        quantity: body.quantity,
+        matched_product: named ? { id: "00000000-0000-7000-8000-0000000000ff", name: "" } : null,
+        candidates: [],
+        catalog: null,
+        needs_image_search: false,
+        resolved_quantity: body.quantity,
+        product_created: Boolean(body.new_product),
+        batch_id: null,
+      },
+    });
+  });
+  return sent;
+}
+
+// showCatalogCard makes the server's answer to the pasted list describe every
+// line with CARD, the shape a stage-2 catalog hit arrives in.
+async function showCatalogCard(page) {
+  await page.route(`**/api/storages/${OTHER_HOUSEHOLD}/shopping-lists`, async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    const response = await route.fetch();
+    const list = await response.json();
+    for (const item of list.items) {
+      Object.assign(item, { status: "new_item", matched_product: null, candidates: [], catalog: CARD, needs_image_search: false });
+    }
+    await route.fulfill({ response, json: list });
+  });
+}
+
+test("a catalog card is accepted with one click, or one of its variants is", async ({ page }) => {
+  let rawTextById = {};
+  const sent = await captureResolves(page, () => rawTextById);
+  await showCatalogCard(page);
+
+  const created = await pasteList(page, ["tomatoes", "tomatoes, c."]);
+  rawTextById = Object.fromEntries(created.items.map((item) => [item.id, item.raw_text]));
+  const rows = page.locator("#items .item");
+  await expect(rows).toHaveCount(2);
+
+  // The card is shown, and accepting it as described is the choice already
+  // made: nothing needs clicking to "Add this", and no form is open.
+  const accept = rows.nth(0);
+  await expect(accept.locator('[data-field="detail"]')).toContainText("Food > Vegetables");
+  await expect(accept.getByRole("button", { name: "Add this: Tomatoes" })).toHaveAttribute("aria-pressed", "true");
+  await expect(accept.getByRole("button", { name: "Cherry Tomatoes" })).toHaveAttribute("aria-pressed", "false");
+  await expect(accept.locator('[data-field="new-product"]')).toBeHidden();
+  await accept.locator('[data-action="resolve"]').click();
+  await expect(rows.nth(0).locator('[data-field="status"]')).toHaveText("Done");
+
+  // A variant replaces the card as the choice.
+  const variant = rows.nth(1);
+  await variant.getByRole("button", { name: "Cherry Tomatoes" }).click();
+  await expect(variant.getByRole("button", { name: "Cherry Tomatoes" })).toHaveAttribute("aria-pressed", "true");
+  await expect(variant.getByRole("button", { name: "Add this: Tomatoes" })).toHaveAttribute("aria-pressed", "false");
+  await variant.locator('[data-action="resolve"]').click();
+  await expect(rows.nth(1).locator('[data-field="status"]')).toHaveText("Done");
+
+  // No catalog id in either body — the page was never given one.
+  expect(sent["tomatoes"]).toEqual({ quantity: 1, location_id: GARAGE, new_product: { from: "catalog" } });
+  expect(sent["tomatoes, c."]).toEqual({
+    quantity: 1,
+    location_id: GARAGE,
+    new_product: { from: "catalog", variant: "Cherry Tomatoes" },
+  });
+  await expect(page.locator("#error")).toBeHidden();
+});
+
+test("declining a catalog card opens an empty form for what it really is", async ({ page }) => {
+  let rawTextById = {};
+  const sent = await captureResolves(page, () => rawTextById);
+  await showCatalogCard(page);
+
+  const created = await pasteList(page, ["tomatoes"]);
+  rawTextById = Object.fromEntries(created.items.map((item) => [item.id, item.raw_text]));
+  const line = page.locator("#items .item").first();
+
+  await line.getByRole("button", { name: "It's something else" }).click();
+
+  // The card's choices are withdrawn and the name starts empty: prefilling
+  // "Tomatoes" would invite confirming the very card that was just declined.
+  await expect(line.locator('[data-field="new-product"]')).toBeVisible();
+  await expect(line.locator('[data-field="name"]')).toHaveValue("");
+  await expect(line.getByRole("button", { name: "Add this: Tomatoes" })).toBeDisabled();
+  await expect(line.getByRole("button", { name: "It's something else" })).toHaveCount(0);
+
+  await line.locator('[data-field="name"]').fill("Heirloom Tomatoes");
+  await line.locator('[data-field="item_type"]').selectOption("perishable");
+  await line.locator('[data-field="min_stock"]').fill("2");
+  await line.locator('[data-action="resolve"]').click();
+  await expect(line.locator('[data-field="status"]')).toHaveText("Done");
+
+  // "manual" with the new name: the server compares it with the card it
+  // showed, and links the two as variants because they differ.
+  expect(sent["tomatoes"]).toEqual({
+    quantity: 1,
+    location_id: GARAGE,
+    new_product: { from: "manual", name: "Heirloom Tomatoes", item_type: "perishable", min_stock: 2 },
+  });
+});
+
+test("an ambiguous line can be treated as a new item, or entered by hand", async ({ page }) => {
+  let rawTextById = {};
+  const sent = await captureResolves(page, () => rawTextById);
+
+  // Both lines are genuinely ambiguous on the real server: "milk" sits exactly
+  // between Oat Milk and Soy Milk (see this file's header), with or without
+  // the multiplier.
+  const created = await pasteList(page, ["milk", "milk x2"]);
+  expect(created.items.map((item) => item.status)).toEqual(["ambiguous", "ambiguous"]);
+  rawTextById = Object.fromEntries(created.items.map((item) => [item.id, item.raw_text]));
+  const rows = page.locator("#items .item");
+
+  // "Treat as new item" keeps the line's own name, without its multiplier.
+  const treat = rows.nth(0);
+  await treat.getByRole("button", { name: "Treat as new item" }).click();
+  await expect(treat.locator('[data-field="new-product"]')).toBeVisible();
+  await expect(treat.locator('[data-field="name"]')).toHaveValue("milk");
+  await expect(treat.getByRole("button", { name: "Oat Milk" })).toBeDisabled();
+  await expect(treat.getByRole("button", { name: "Enter manually" })).toHaveCount(0);
+  await treat.locator('[data-action="resolve"]').click();
+  await expect(rows.nth(0).locator('[data-field="status"]')).toHaveText("Done");
+
+  // "Enter manually" starts from nothing.
+  const manual = rows.nth(1);
+  await manual.getByRole("button", { name: "Enter manually" }).click();
+  await expect(manual.locator('[data-field="name"]')).toHaveValue("");
+  await manual.locator('[data-field="name"]').fill("Almond Milk");
+  await manual.locator('[data-action="resolve"]').click();
+  await expect(rows.nth(1).locator('[data-field="status"]')).toHaveText("Done");
+
+  expect(sent["milk"]).toEqual({
+    quantity: 1,
+    location_id: GARAGE,
+    new_product: { from: "manual", name: "milk", item_type: "long_shelf_life", min_stock: 0 },
+  });
+  expect(sent["milk x2"]).toEqual({
+    quantity: 2,
+    location_id: GARAGE,
+    new_product: { from: "manual", name: "Almond Milk", item_type: "long_shelf_life", min_stock: 0 },
+  });
+  await expect(page.locator("#error")).toBeHidden();
 });

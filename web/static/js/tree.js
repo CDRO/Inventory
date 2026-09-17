@@ -33,7 +33,8 @@ import { el, text, clearChildren } from "./dom.js";
  * This component never calls the network itself. Every mutation goes through
  * the callbacks supplied to the constructor, so the same class serves the
  * locations tree and the categories tree, which differ only in which
- * endpoint their callbacks post to.
+ * endpoint their callbacks post to — and in what the categories tree shows
+ * beside each name, which it supplies through renderDetail.
  */
 export class TreeView {
   /**
@@ -47,12 +48,20 @@ export class TreeView {
    *   predicting the new shape, since the server is the one that validates
    *   same-storage membership and rejects a cycle
    *   (docs/specs/02-data-model.md).
+   * @param {(node: TreeNode) => (Node|null)} [callbacks.renderDetail] -
+   *   optional; returns an element to show between a node's name and its
+   *   actions, such as the category tree's shelf-life rule
+   *   (docs/specs/08-expiration-and-classification.md). Called on every
+   *   render, including the ones expand/collapse triggers internally, so
+   *   whatever it draws always matches the node beside it. Omitted, nothing
+   *   extra is drawn — the locations tree does not pass it.
    */
-  constructor(container, { onAddChild, onRename, onMove }) {
+  constructor(container, { onAddChild, onRename, onMove, renderDetail = null }) {
     this.container = container;
     this.onAddChild = onAddChild;
     this.onRename = onRename;
     this.onMove = onMove;
+    this.renderDetail = renderDetail;
     /** @type {TreeNode[]} */
     this.nodes = [];
     /** @type {Set<string>} ids of nodes currently expanded. */
@@ -90,6 +99,7 @@ export class TreeView {
     );
 
     const nameSpan = el("span", { class: "tree-name", "data-field": "name" }, [text(node.name)]);
+    const detail = this.renderDetail ? this.renderDetail(node) : null;
 
     const nodeEl = el(
       "div",
@@ -101,6 +111,7 @@ export class TreeView {
       [
         toggle,
         nameSpan,
+        ...(detail ? [detail] : []),
         el("div", { class: "row" }, [
           el("button", { type: "button", class: "btn btn--ghost", onclick: () => this._startRename(node, nameSpan) }, [
             text("Rename"),

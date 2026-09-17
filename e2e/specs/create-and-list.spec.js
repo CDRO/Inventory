@@ -1,18 +1,7 @@
 // Required journey 3 of docs/specs/05-frontend-pwa-foundations.md: "Create a
-// location and a category; add a product; see it in the list."
-//
-// Two of those three are covered here. **Creating a category has no user
-// interface and no route to call** — `POST .../categories` does not exist
-// (internal/httpapi/router.go registers only `GET /categories` and
-// `PATCH /categories/{id}/shelf-life`), and `store.CreateCategory` has no
-// non-test caller at all. docs/specs/06-vision-shelf-ingestion.md anticipates
-// the page ("The same component serves the category tree") and
-// docs/specs/08-expiration-and-classification.md assumes it ("a user can edit
-// them in the category tree without a code change"), but nothing builds it
-// yet. That gap is issue #72; journey 3 cannot be completed until it lands,
-// and writing a test that reached into the database to create
-// a category would assert the journey works while the user-facing half of it
-// does not exist.
+// location and a category; add a product; see it in the list." One test per
+// part, each through the page a person would use: locations.html,
+// categories.html, and the dashboard's "Add a missing item".
 //
 // Everything below runs as Bob, the fixture's single-storage user, so no
 // `?storage=` handling is in the way of what is being tested. Names are
@@ -76,12 +65,66 @@ test("a location is created from the page, nests a child, and survives a reload"
   await expect(parentItem.locator(`ul .tree-node:has-text("${child}")`)).toHaveCount(1);
 });
 
+test("a category is created from the page, nests a child, takes a shelf life, and survives a reload", async ({ page }) => {
+  const parent = unique("Baking");
+  const child = unique("Flour");
+
+  // A node is found by its own name, never by text anywhere inside it: a
+  // child's shelf-life label names the parent it inherits from ("120 days
+  // (from Baking …)"), so filtering on the parent's name as plain text would
+  // match the child's node too.
+  const nodeNamed = (name) =>
+    page.locator(".tree-node").filter({ has: page.locator(".tree-name", { hasText: new RegExp(`^${name}$`) }) });
+
+  await logIn(page);
+  await page.goto("/categories.html");
+  // The seeded Canned Goods, with its own 730-day rule, proves the tree and
+  // its shelf-life labels finished loading.
+  await expect(nodeNamed("Canned Goods").locator(".tree-shelf-life")).toHaveText("730 days");
+
+  await page.click("#add-root");
+  await page.fill("#add-root-name", parent);
+  await page.click('#add-root-form button[type="submit"]');
+
+  const parentNode = nodeNamed(parent);
+  await expect(parentNode).toHaveCount(1);
+  // Nothing above a new top-level category sets a rule, so the label says
+  // what does decide — never an empty field a person could read as "no expiry".
+  await expect(parentNode.locator(".tree-shelf-life")).toHaveText("By item type");
+
+  await parentNode.getByRole("button", { name: "Add", exact: true }).click();
+  await page.locator('#tree input[placeholder="New name"]').fill(child);
+  await page.locator("#tree button.btn--primary", { hasText: "Add" }).click();
+  await expect(nodeNamed(child)).toHaveCount(1);
+
+  // Set the parent's shelf life. A new category files no products yet, so the
+  // cascade has nothing to move — and the page says so rather than nothing.
+  await parentNode.locator(".tree-shelf-life").click();
+  await parentNode.locator(".tree-shelf-life-input").fill("120");
+  await parentNode.getByRole("button", { name: "Save" }).click();
+  await expect(page.locator("#status")).toContainText("No existing expiry dates needed to change.");
+  await expect(parentNode.locator(".tree-shelf-life")).toHaveText("120 days");
+  await expect(page.locator("#error")).toBeHidden();
+
+  // A reload re-reads from the server, so what follows was persisted.
+  await page.reload();
+  await expect(parentNode.locator(".tree-shelf-life")).toHaveText("120 days");
+
+  // The child sits under the parent, not beside it, and inherits its rule —
+  // the label names where the number comes from.
+  await parentNode.locator(".tree-toggle").click();
+  const parentItem = page.locator("#tree li").filter({ has: parentNode });
+  const childNode = parentItem.locator("ul").locator(".tree-node").filter({ has: page.locator(".tree-name", { hasText: new RegExp(`^${child}$`) }) });
+  await expect(childNode).toHaveCount(1);
+  await expect(childNode).toBeVisible();
+  await expect(childNode.locator(".tree-shelf-life")).toHaveText(`120 days (from ${parent})`);
+});
+
 test("a product added from the dashboard appears in the reorder list", async ({ page }) => {
   // "Add a missing item" (docs/specs/10-reorder-and-shopping-export.md) is the
-  // only route by which a person can create a product by name alone today. The
-  // one other way a product comes into being is confirming a new item on an
-  // ingestion proposal, covered by ingestion.spec.js. Resolving a shopping
-  // line does not create one yet, although spec 07 says it should (#74).
+  // one route that creates a product with no stock at all. The others create
+  // one alongside its first batch: confirming a new item on an ingestion
+  // proposal (ingestion.spec.js) or on a shopping list (shopping-list.spec.js).
   const product = unique("Quinoa Flakes");
 
   await logIn(page);

@@ -23,16 +23,27 @@ import (
 )
 
 type fakeIngester struct {
-	mu        sync.Mutex
-	available bool
-	started   []ingest.Upload
-	err       error
+	mu         sync.Mutex
+	available  bool
+	started    []ingest.Upload
+	reanalyzed []uuid.UUID
+	err        error
 }
 
 func (f *fakeIngester) Available(context.Context) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return "gemini-test", f.available
+}
+
+func (f *fakeIngester) Reanalyze(_ context.Context, job *store.Job) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.reanalyzed = append(f.reanalyzed, job.ID)
+	return nil
 }
 
 func (f *fakeIngester) Start(_ context.Context, u ingest.Upload) (*store.Job, error) {

@@ -150,6 +150,13 @@ type Deps struct {
 	// shelf and product ingestion. With no Consumer the upload route is
 	// absent; confirming and discarding existing consumption jobs still work.
 	Consumer Consumer
+	// Backgrounds removes the background from a picture taken from a reviewed
+	// photo, and Cutouts keeps the results while the review lasts
+	// (docs/specs/09-consumption-logging.md). Either nil — GEMINI_IMAGE_MODEL
+	// unset, or no usable upload volume — means no background removal: its
+	// routes are absent and no job offers it.
+	Backgrounds BackgroundRemover
+	Cutouts     CutoutStore
 	// AdminVision backs the admin settings routes and the /admin AI-model
 	// banner. With no AdminVision those routes still register (settings has
 	// no other prerequisite), but report model_unavailable / an empty model
@@ -251,7 +258,11 @@ func NewRouter(d Deps) http.Handler {
 		// non-admin gets the same 404 from both as from a path that does not
 		// exist at all.
 		adminAPI := NewAdminHandler(d.Store, d.AdminVision, d.Config, errs)
-		adminPages, err := admin.New(d.Store, d.AdminVision,
+		var imageModel admin.ImageModelChecker
+		if d.Backgrounds != nil {
+			imageModel = d.Backgrounds
+		}
+		adminPages, err := admin.New(d.Store, d.AdminVision, imageModel,
 			func(req *http.Request) (uuid.UUID, bool) {
 				u, ok := UserFrom(req.Context())
 				if !ok {
@@ -317,22 +328,39 @@ func NewRouter(d Deps) http.Handler {
 
 			categories := NewCategoryHandler(d.Store, errs)
 			sr.Get("/categories", categories.List)
+			sr.Post("/categories", categories.Create)
+			sr.Patch("/categories/{id}", categories.Update)
+			sr.Delete("/categories/{id}", categories.Delete)
 
 			// Background jobs (docs/specs/04-backend-api-conventions.md). The
 			// endpoints that create them are the upload routes of spec 06.
-			jobsAPI := NewJobHandler(d.Store, d.Photos, errs)
+			// Both nil or neither, so no route or response offers half of
+			// background removal.
+			backgrounds, cutouts := d.Backgrounds, d.Cutouts
+			if backgrounds == nil || cutouts == nil {
+				backgrounds, cutouts = nil, nil
+			}
+
+			jobsAPI := NewJobHandler(d.Store, d.Photos, reanalyzers(d), cutouts, backgrounds, errs)
 			sr.Get("/jobs", jobsAPI.List)
 			sr.Get("/jobs/{id}", jobsAPI.Get)
 			sr.Get("/jobs/{id}/image", jobsAPI.Image)
 			sr.Delete("/jobs/{id}", jobsAPI.Delete)
+			// "Analyze again" (docs/specs/09-consumption-logging.md), for
+			// every kind of job whose service is wired.
+			sr.Post("/jobs/{id}/reanalyze", jobsAPI.Reanalyze)
 
 			// Photo ingestion (docs/specs/06-vision-shelf-ingestion.md).
-			ingestAPI := NewIngestHandler(d.Ingester, d.Store, d.Photos, d.ProductImages, errs)
+			ingestAPI := NewIngestHandler(d.Ingester, d.Store, d.Photos, d.ProductImages, cutouts, backgrounds, errs)
 			if d.Ingester != nil {
 				sr.Post("/ingest/shelf-photos", ingestAPI.ShelfPhoto)
 				sr.Post("/ingest/product-photos", ingestAPI.ProductPhoto)
 			}
 			sr.Post("/ingest/{job_id}/confirm", ingestAPI.Confirm)
+			if backgrounds != nil {
+				sr.Post("/ingest/{job_id}/cutouts", ingestAPI.Cutout)
+				sr.Get("/ingest/{job_id}/cutouts/{cutout_id}", ingestAPI.CutoutImage)
+			}
 
 			// Product pictures cut from a reviewed photo, behind the same
 			// membership gate as everything else here.
@@ -351,14 +379,14 @@ func NewRouter(d Deps) http.Handler {
 			// and batch-picker need (docs/specs/09-consumption-logging.md), plus
 			// the two narrow product-editing writes spec 52's "uncategorized"
 			// and "imageless" quests need to be closeable at all.
-			products := NewProductHandler(d.Store, errs)
+			products := NewProductHandler(d.Store, d.ImageCache, d.ProductImages, errs)
 			sr.Get("/products", products.List)
 			sr.Get("/products/{product_id}/batches", products.Batches)
 			sr.Patch("/products/{product_id}/category", products.SetCategory)
 			sr.Patch("/products/{product_id}/image", products.SetImage)
 
 			if d.Matcher != nil {
-				lists := NewShoppingListHandler(d.Store, d.Matcher, errs)
+				lists := NewShoppingListHandler(d.Store, d.Matcher, d.ImageCache, d.ProductImages, errs)
 				sr.Post("/shopping-lists", lists.Create)
 				sr.Get("/shopping-lists/{id}", lists.Get)
 				sr.Post("/shopping-lists/{id}/items/{item_id}/rematch", lists.Rematch)
@@ -376,7 +404,7 @@ func NewRouter(d Deps) http.Handler {
 			// additionally needs the matcher, so those two routes follow the same
 			// "absent collaborator, absent route" rule as the shopping-list group
 			// above.
-			reorder := NewReorderHandler(d.Store, d.Matcher, errs)
+			reorder := NewReorderHandler(d.Store, d.Matcher, d.ImageCache, d.ProductImages, errs)
 			sr.Get("/dashboard/reorder", reorder.Dashboard)
 			sr.Get("/dashboard/reorder/export", reorder.Export)
 			if d.Matcher != nil {

@@ -99,6 +99,13 @@ database, not only to future batches:
    affected batches back in `{default_shelf_life_days, recomputed_batches}`,
    the same shape `PATCH .../categories/{id}/shelf-life` returns. It writes
    no `inventory_logs` rows: quantities do not change.
+6. **The new value and every recompute share one transaction.** A
+   correction that stops part-way — the request cancelled, a timeout, an
+   error on one product — rolls back whole: the entry keeps its old value
+   and no batch in any storage has moved, so a retry is the complete fix.
+   Committing per product would instead leave some households on the new
+   date and some on the old, with the entry already showing the new value
+   and nothing recording how far the cascade got.
 
 This crosses every storage, unlike the category- and product-scoped cascades
 below, but it is still the same shape of work: a bounded set of local
@@ -110,17 +117,65 @@ inline like its storage-scoped siblings rather than through the jobs table.
 
 The same cascade runs, scoped to one storage, when a user changes
 `categories.default_shelf_life_days` or `products.default_shelf_life_days`,
-or re-files a product into a different category: derived dates are
-recomputed, user-set dates are left alone. Those run **inline, before the
-response**, because they are bounded by one household's rows and because a
-user who changes a rule and then looks at their inventory should see the new
-dates rather than the old ones.
+re-files a product into a different category, or moves a category to a
+different parent — which re-files every product in the moved subtree at
+once, since their category chains now climb through different ancestors:
+derived dates are recomputed, user-set dates are left alone. Those run
+**inline, before the response**, because they are bounded by one household's
+rows and because a user who changes a rule and then looks at their inventory
+should see the new dates rather than the old ones. Re-filing a product and
+moving a category recompute in the same transaction as the change itself, so
+a product's category and its batches' dates are never seen disagreeing.
 
 The category-rule change and the admin catalog change above both report a
 count, since both are performed *in order to* change dates. Re-filing a
-product is a change of category that happens to move dates as a consequence,
-so the recompute is silent. Changing `products.default_shelf_life_days` has
-no endpoint yet.
+product, or moving a category, is a change of category that happens to move
+dates as a consequence, so the recompute is silent. Changing
+`products.default_shelf_life_days` has no endpoint yet.
+
+## The category tree
+
+Categories are where the storage-scoped rules live, so a household edits
+them in its own category tree. The tree has the same shape and the same
+invariants as the location tree (`02-data-model.md`), and its routes mirror
+`06-vision-shelf-ingestion.md`'s location routes, with the same rules:
+every route is storage-scoped and behind `RequireStorageMember`, and **every
+category id in a request — the path id, `parent_id`, a move target — must
+belong to the storage in the URL**, a foreign id answering exactly like a
+nonexistent one (`404 not_found`, never `403`;
+`03-auth-and-multi-tenancy.md`).
+
+- `GET /api/storages/{storage_id}/categories` — the tree of that storage
+  only, nested: `{id, name, default_shelf_life_days, children: [...]}`.
+  `default_shelf_life_days` is always present; `null` means the node sets no
+  rule and inherits.
+- `POST /api/storages/{storage_id}/categories` — body `{name, parent_id,
+  default_shelf_life_days}`, the last two optional. A given `parent_id` must
+  be in this storage, or `404`. A shelf life set here needs no cascade: no
+  product can be filed under a category that did not exist. Records a
+  `category_created` contribution (`51-gamification-scoring.md`).
+- `PATCH /api/storages/{storage_id}/categories/{id}` — rename, or move by
+  changing `parent_id` (absent leaves the parent alone; `null` makes the node
+  a root). `404` if `{id}` or the new parent is not in this storage; `409
+  conflict` if the move would create a cycle. A move recomputes the moved
+  subtree's derived dates, as above. It does **not** change the shelf-life
+  rule: a body carrying `default_shelf_life_days` is refused with `422`
+  rather than silently ignored.
+- `PATCH /api/storages/{storage_id}/categories/{id}/shelf-life` — body
+  `{default_shelf_life_days}` (a whole number of days, `0`–`36500`, or `null`
+  to inherit). Runs the cascade and returns `{default_shelf_life_days,
+  recomputed_batches}`.
+- `DELETE /api/storages/{storage_id}/categories/{id}` — removes the node and
+  its subtree. `409 conflict` while any product is filed anywhere in that
+  subtree (`02-data-model.md`).
+
+The frontend is `categories.html`, using the shared tree component
+(`05-frontend-pwa-foundations.md`) exactly as `locations.html` does, plus
+each node's rule. The rule label always states which rule is in force — the
+node's own ("10 days"), the nearest ancestor's ("365 days (from Food)"), or
+"By item type" when nothing above sets one — so an inheriting node is never
+mistaken for one with no expiry. Saving a rule shows the returned count of
+dates it moved.
 
 ## Editing / removing expiry
 
@@ -193,7 +248,11 @@ client-side from `expiration_date` relative to "today":
   effect immediately for new ones, with no redeploy.
 - Re-assigning a product to a different category likewise recomputes
   `derived` dates for its existing batches: `derived` means "follows the
-  current rules", and a stale derived date is simply a wrong one.
+  current rules", and a stale derived date is simply a wrong one. So does
+  moving a category to a different parent, for every product in its
+  subtree.
+- An admin catalog correction that does not finish leaves the entry's value
+  and every batch exactly as they were before it started.
 - Clearing a batch's expiration date sets `expiration_source = 'user'`,
   and no later cascade, rule change, or admin action ever gives that batch
   a date again — only the explicit "use the automatic date again" reset

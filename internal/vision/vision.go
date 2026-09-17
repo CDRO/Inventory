@@ -138,6 +138,26 @@ func (c *Checker) Status(ctx context.Context) string {
 	return StatusModelUnavailable
 }
 
+// Offers reports whether the provider currently lists model — for a model other
+// than the effective one, such as the optional GEMINI_IMAGE_MODEL
+// (docs/specs/01-architecture-and-deployment.md). It reads the same cached list
+// Status does, so asking costs no extra outbound call.
+//
+// An empty id, or a provider that cannot be reached, is false: an optional
+// feature that cannot be shown to work is simply not offered.
+func (c *Checker) Offers(ctx context.Context, model string) bool {
+	model = normalizeModelID(model)
+	if model == "" {
+		return false
+	}
+	available, err := c.available(ctx)
+	if err != nil {
+		return false
+	}
+	_, ok := available[model]
+	return ok
+}
+
 // Models returns the cached list of available model ids, for the admin banner
 // that offers a replacement when the configured one has gone away.
 func (c *Checker) Models(ctx context.Context) ([]string, error) {

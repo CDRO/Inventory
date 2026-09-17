@@ -53,12 +53,47 @@
         <span class="badge" data-field="status"></span>
       </div>
       <div data-field="detail" class="stack"></div>
-      <div class="row">
+      <!-- The ways out of what matching proposed: "Treat as new item",
+           "Enter manually", "It's something else". Kept apart from the
+           detail's own choices so each group reads as one decision. -->
+      <div data-field="escape" class="row"></div>
+
+      <!-- A product this line creates: filled in for a new item with no
+           catalog description, or when the reviewer steps away from what
+           matching offered. -->
+      <div data-field="new-product" class="stack" hidden>
+        <label>Name
+          <input type="text" data-field="name" maxlength="255">
+        </label>
+        <div class="row">
+          <label>Kind
+            <select data-field="item_type">
+              <option value="long_shelf_life">Keeps a long time</option>
+              <option value="perishable">Perishable</option>
+              <option value="non_perishable">Does not expire</option>
+            </select>
+          </label>
+          <label>Category
+            <select data-field="category"></select>
+          </label>
+          <label>Keep at least
+            <input type="number" data-field="min_stock" min="0" step="1" value="0">
+          </label>
+        </div>
+        <div data-field="pictures" class="stack"></div>
+      </div>
+
+      <div class="row" data-field="apply">
         <label>
           Quantity
           <input type="number" data-field="quantity" min="0" step="1" value="1">
         </label>
+        <label>
+          Put it in
+          <select data-field="location"></select>
+        </label>
         <button type="button" class="btn" data-action="resolve">Confirm</button>
+        <button type="button" class="btn btn--ghost" data-action="dismiss">Not bought</button>
       </div>
     </div>
   </template>

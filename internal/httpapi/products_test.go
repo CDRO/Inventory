@@ -3,6 +3,7 @@ package httpapi_test
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -164,24 +165,66 @@ func TestSetCategoryReportsNotFoundFromTheStore(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-// TestSetImageSendsBothFieldsAndActingUser — the "imageless" quest
-// (docs/specs/52-gamification-quests-and-ui.md) needs this route to persist
-// whichever of image_url/icon_name the frontend resolved.
-func TestSetImageSendsBothFieldsAndActingUser(t *testing.T) {
+// TestSetImagePromotesThePickedSuggestion — the "imageless" quest
+// (docs/specs/52-gamification-quests-and-ui.md) needs this route to give a
+// product a picture, and spec 07 needs that picture to be a permanent copy:
+// a suggestion-cache address recorded on a product can be evicted from under
+// it.
+func TestSetImagePromotesThePickedSuggestion(t *testing.T) {
 	t.Parallel()
 
 	f := newAPIFixture(t)
 	productID := uuid.New()
+	hash := strings.Repeat("b", 64)
+	f.imageData.sources = map[string]string{hash: "https://provider.test/soup.png"}
+	f.imageData.data, f.imageData.contentType = []byte("\x89PNGsoup"), "image/png"
 
 	rec := f.do(http.MethodPatch, f.base()+"/products/"+productID.String()+"/image",
-		`{"image_url":"/api/storages/x/images/abc","icon_name":null}`)
+		`{"image":"`+hash+`","icon_name":null}`)
 
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, productID, f.products.lastProductID)
-	require.NotNil(t, f.products.lastImageURL)
-	assert.Equal(t, "/api/storages/x/images/abc", *f.products.lastImageURL)
 	assert.Nil(t, f.products.lastIconName)
 	assert.Equal(t, f.user.ID, f.products.lastActingUserID)
+
+	require.NotNil(t, f.products.lastImageURL)
+	prefix := f.base() + "/product-images/"
+	require.True(t, strings.HasPrefix(*f.products.lastImageURL, prefix), *f.products.lastImageURL)
+	assert.Equal(t, []byte("\x89PNGsoup"), f.pictures.files[strings.TrimPrefix(*f.products.lastImageURL, prefix)],
+		"the product records a permanent copy of the suggestion's bytes")
+}
+
+// TestSetImageNeverRecordsACallerSuppliedURL — neither a suggestion-cache
+// address nor anyone else's server can become a product's picture through
+// this route.
+func TestSetImageNeverRecordsACallerSuppliedURL(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+
+	for _, url := range []string{"/api/storages/x/images/abc", "https://tracker.example/pixel.png"} {
+		rec := f.do(http.MethodPatch, f.base()+"/products/"+uuid.NewString()+"/image",
+			`{"image_url":"`+url+`","icon_name":"box"}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Nil(t, f.products.lastImageURL, url)
+	}
+	assert.Empty(t, f.pictures.files)
+}
+
+// TestSetImageRefusesASuggestionNoLongerCached — the person picked a picture
+// that was evicted since, and is asked to pick again rather than getting a
+// product with a broken picture.
+func TestSetImageRefusesASuggestionNoLongerCached(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+
+	rec := f.do(http.MethodPatch, f.base()+"/products/"+uuid.NewString()+"/image",
+		`{"image":"`+strings.Repeat("c", 64)+`"}`)
+
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+	assert.NotEmpty(t, errorFields(t, rec)["image"])
+	assert.Empty(t, f.pictures.files)
 }
 
 func TestSetImageReportsNotFoundFromTheStore(t *testing.T) {

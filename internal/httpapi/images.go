@@ -16,10 +16,17 @@ type ImageSuggester interface {
 	Suggest(ctx context.Context, query string, urlFor func(hash string) string) []imagesearch.Suggestion
 }
 
-// ImageCache serves stored suggestion bytes.
+// ImageCache is the suggestion cache: it serves stored suggestion bytes, and
+// it is where a chosen picture is promoted from into permanent product
+// storage. *imagesearch.Cache satisfies it.
 type ImageCache interface {
 	Open(ctx context.Context, hash string) ([]byte, string, error)
 	Touch(hash string)
+	// Fetch returns the hash of a cached copy of a provider URL, downloading
+	// it first if this server has not seen it.
+	Fetch(ctx context.Context, sourceURL string) (string, error)
+	// SourceURL is the provider URL a cached picture came from.
+	SourceURL(ctx context.Context, hash string) (string, error)
 }
 
 // ImageHandler serves the image-suggestion flow of

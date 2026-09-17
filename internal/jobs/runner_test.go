@@ -35,6 +35,22 @@ func (f *fakeStore) CreateJob(_ context.Context, in store.NewJob) (*store.Job, e
 	return &copied, nil
 }
 
+// RequeueJob mirrors the store: only a done or failed job with a photo, in its
+// own storage, moves back to pending.
+func (f *fakeStore) RequeueJob(_ context.Context, storageID, id uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	j, ok := f.jobs[id]
+	if !ok || j.StorageID != storageID {
+		return store.ErrNotFound
+	}
+	if (j.Status != store.JobDone && j.Status != store.JobFailed) || j.ImageFilename == nil {
+		return store.ErrConflict
+	}
+	j.Status, j.Payload, j.Error = store.JobPending, nil, nil
+	return nil
+}
+
 func (f *fakeStore) CompleteJob(_ context.Context, id uuid.UUID, payload json.RawMessage) error {
 	return f.finish(id, store.JobDone, payload, nil)
 }
@@ -354,4 +370,65 @@ func TestRecoverFailsWhatThePreviousProcessLeftPending(t *testing.T) {
 
 	got, _ := s.get(orphan.ID)
 	assert.Equal(t, store.JobFailed, got.Status)
+}
+
+// TestResubmitAnalysesAFinishedJobAgain — "Analyze again" puts a finished job
+// back to pending, runs the new work, and records its result on the same row.
+// A job the store refuses to requeue starts no work at all.
+func TestResubmitAnalysesAFinishedJobAgain(t *testing.T) {
+	t.Parallel()
+
+	s := newFakeStore()
+	r := New(s, quietLogger())
+	storageID := uuid.New()
+	photo := uuid.NewString() + ".jpg"
+
+	job, err := r.Submit(context.Background(), store.NewJob{StorageID: storageID, Kind: store.JobShelfIngestion, ImageFilename: &photo},
+		func(context.Context) (json.RawMessage, error) {
+			return nil, &UserError{Message: "The photo could not be analysed."}
+		})
+	require.NoError(t, err)
+	require.Equal(t, store.JobFailed, waitFor(t, s, job.ID).Status)
+
+	release := make(chan struct{})
+	require.NoError(t, r.Resubmit(context.Background(), storageID, job.ID,
+		func(context.Context) (json.RawMessage, error) {
+			<-release
+			return json.RawMessage(`{"rows":[{"row_id":"0"}]}`), nil
+		}))
+
+	pending, ok := s.get(job.ID)
+	require.True(t, ok)
+	assert.Equal(t, store.JobPending, pending.Status, "Resubmit returns before the work finishes")
+	assert.Nil(t, pending.Error, "the old failure is gone while the new analysis runs")
+
+	// A second request while the first re-analysis is running is refused, and
+	// its work never runs.
+	ran := make(chan struct{}, 1)
+	refused := func(context.Context) (json.RawMessage, error) {
+		ran <- struct{}{}
+		return json.RawMessage(`{}`), nil
+	}
+	assert.ErrorIs(t, r.Resubmit(context.Background(), storageID, job.ID, refused), store.ErrConflict)
+	assert.ErrorIs(t, r.Resubmit(context.Background(), uuid.New(), job.ID, refused), store.ErrNotFound, "another storage's job")
+
+	close(release)
+	got := waitFor(t, s, job.ID)
+	assert.Equal(t, store.JobDone, got.Status)
+	assert.JSONEq(t, `{"rows":[{"row_id":"0"}]}`, string(got.Payload))
+
+	noPhoto, err := r.Submit(context.Background(), store.NewJob{StorageID: storageID, Kind: store.JobShelfIngestion},
+		func(context.Context) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
+	require.NoError(t, err)
+	waitFor(t, s, noPhoto.ID)
+	assert.ErrorIs(t, r.Resubmit(context.Background(), storageID, noPhoto.ID, refused), store.ErrConflict, "nothing to analyse")
+
+	require.NoError(t, r.Shutdown(context.Background()))
+	assert.ErrorIs(t, r.Resubmit(context.Background(), storageID, job.ID, refused), ErrShutDown)
+
+	select {
+	case <-ran:
+		t.Fatal("work for a refused Resubmit ran")
+	default:
+	}
 }

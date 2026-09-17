@@ -288,7 +288,7 @@ func serve() error {
 	// Product pictures taken from a reviewed photo live apart from the photos
 	// themselves: those are swept after review, these are kept for as long as
 	// the product exists (docs/specs/07-shopping-list-reconciliation.md).
-	if pictures, err := uploads.NewDir(uploads.ProductImagesDir); err != nil {
+	if pictures, err := uploads.NewPictureDir(uploads.ProductImagesDir); err != nil {
 		slog.Error("product pictures from photos disabled: upload volume unusable", slog.Any("err", err))
 	} else {
 		productStore = pictures
@@ -304,6 +304,22 @@ func serve() error {
 		// kind-agnostic, matching every consumed job's image regardless of
 		// which service created it.
 		consumer = consume.NewService(jobRunner, vision.NewClient(cfg.GeminiAPIKey), checker, matcher, photos, slog.Default())
+	}
+
+	// Background removal (docs/specs/09-consumption-logging.md) exists only
+	// when GEMINI_IMAGE_MODEL names a model. Unset is not a degraded state, so
+	// it is not logged; an unusable upload volume is.
+	var (
+		backgrounds httpapi.BackgroundRemover
+		cutoutStore httpapi.CutoutStore
+	)
+	if cfg.GeminiImageModel != "" {
+		if dirs, err := uploads.NewJobDirs(uploads.CutoutsDir); err != nil {
+			slog.Error("background removal disabled: upload volume unusable", slog.Any("err", err))
+		} else {
+			backgrounds = ingest.NewBackgrounds(vision.NewClient(cfg.GeminiAPIKey), checker, cfg.GeminiImageModel)
+			cutoutStore = dirs
+		}
 	}
 
 	go runStoreSweeps(ctx, db, ingestSweep)
@@ -335,6 +351,8 @@ func serve() error {
 			Photos:          photoStore,
 			ProductImages:   productStore,
 			Consumer:        consumer,
+			Backgrounds:     backgrounds,
+			Cutouts:         cutoutStore,
 		}),
 		ReadHeaderTimeout: readHeaderTimeout,
 		WriteTimeout:      writeTimeout,

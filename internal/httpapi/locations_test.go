@@ -328,6 +328,9 @@ func storageRoutes(base string) []struct {
 	}{
 		{http.MethodGet, base + "/locations", ""},
 		{http.MethodGet, base + "/categories", ""},
+		{http.MethodPost, base + "/categories", `{"name":"Food"}`},
+		{http.MethodPatch, base + "/categories/" + id, `{"name":"Food"}`},
+		{http.MethodDelete, base + "/categories/" + id, ""},
 		{http.MethodPost, base + "/locations", `{"name":"Cellar"}`},
 		{http.MethodPatch, base + "/locations/" + id, `{"name":"Cellar"}`},
 		{http.MethodDelete, base + "/locations/" + id, ""},
