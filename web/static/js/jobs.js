@@ -10,9 +10,46 @@
 // underlying job stays queryable indefinitely
 // (docs/specs/06-vision-shelf-ingestion.md).
 
-import { get } from "./api.js";
+import { get, post, ApiError } from "./api.js";
 
 const POLL_INTERVAL_MS = 1500;
+
+/**
+ * reanalyzeJob asks for a finished job's photo to be analysed again —
+ * "Analyze again" (docs/specs/09-consumption-logging.md). The whole proposal is
+ * replaced, corrections included. It resolves once the job is pending again;
+ * pollJob then waits for the new proposal exactly as it did after upload.
+ *
+ * @param {string} storageId
+ * @param {string} jobId
+ * @returns {Promise<{job_id: string}>}
+ * @throws {ApiError} 409 for a job still being analysed, already applied, or
+ *   with no photo; 503 model_unavailable when the vision model is gone.
+ */
+export function reanalyzeJob(storageId, jobId) {
+  return post(`/api/storages/${storageId}/jobs/${jobId}/reanalyze`);
+}
+
+/**
+ * reanalyzeFailureMessage turns a failed reanalyzeJob into what the reviewer
+ * reads. The proposal on screen is untouched by a refusal, so each message says
+ * why, not that anything was lost.
+ *
+ * @param {unknown} err
+ * @returns {string}
+ */
+export function reanalyzeFailureMessage(err) {
+  if (!(err instanceof ApiError)) {
+    return "Could not reach the server. Check your connection and try again.";
+  }
+  if (err.code === "model_unavailable") {
+    return "The AI model is unavailable, so this photo cannot be analysed again right now. Ask an admin to choose another model.";
+  }
+  if (err.status === 409) {
+    return "This photo cannot be analysed again right now: it is already being analysed, or its proposal has been applied. Reload to see where it stands.";
+  }
+  return err.message;
+}
 
 /** JobFailedError is thrown when a job reaches status "failed". */
 export class JobFailedError extends Error {

@@ -22,9 +22,10 @@ import (
 // --- fakes ---
 
 type fakeRunner struct {
-	submitted []store.NewJob
-	work      jobs.Work
-	err       error
+	submitted   []store.NewJob
+	resubmitted []uuid.UUID
+	work        jobs.Work
+	err         error
 }
 
 func (f *fakeRunner) Submit(_ context.Context, in store.NewJob, work jobs.Work) (*store.Job, error) {
@@ -34,6 +35,15 @@ func (f *fakeRunner) Submit(_ context.Context, in store.NewJob, work jobs.Work) 
 	f.submitted = append(f.submitted, in)
 	f.work = work
 	return &store.Job{ID: uuid.New(), StorageID: in.StorageID, Kind: in.Kind, Status: store.JobPending}, nil
+}
+
+func (f *fakeRunner) Resubmit(_ context.Context, _, id uuid.UUID, work jobs.Work) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.resubmitted = append(f.resubmitted, id)
+	f.work = work
+	return nil
 }
 
 type fakeAnalyzer struct {
@@ -248,4 +258,40 @@ func TestAvailableReflectsTheModelChecker(t *testing.T) {
 	h.models.status = vision.StatusModelUnavailable
 	_, ok = h.svc.Available(context.Background())
 	assert.False(t, ok)
+}
+
+// TestReanalyzeRunsTheConsumptionAnalysisAgain — "Analyze again" re-runs the
+// same photo in ModeConsumption and builds a fresh proposal; a job this
+// service did not create, or one with no photo, is refused without touching
+// the runner.
+func TestReanalyzeRunsTheConsumptionAnalysisAgain(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness()
+	h.photos.files[photoName] = []byte("stripped jpeg")
+	h.analyzer.analysis = &vision.Analysis{Items: []vision.Item{{Label: "Empty Bean Can", Confidence: 0.9, Quantity: 2}}}
+
+	photo := photoName
+	job := &store.Job{ID: uuid.New(), StorageID: uuid.New(), Kind: store.JobConsumptionPhoto, Status: store.JobDone, ImageFilename: &photo}
+
+	require.NoError(t, h.svc.Reanalyze(context.Background(), job))
+	assert.Equal(t, []uuid.UUID{job.ID}, h.runner.resubmitted)
+	assert.Empty(t, h.runner.submitted, "the same job again, not a new one")
+
+	payload, err := h.runner.work(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, vision.ModeConsumption, h.analyzer.gotMode)
+	assert.Equal(t, []byte("stripped jpeg"), h.analyzer.gotImage, "the photo already stored is what gets analysed")
+
+	var proposal Proposal
+	require.NoError(t, json.Unmarshal(payload, &proposal))
+	require.Len(t, proposal.Rows, 1)
+	assert.Equal(t, 2, proposal.Rows[0].Quantity)
+
+	other := newHarness()
+	shelf := &store.Job{ID: uuid.New(), Kind: store.JobShelfIngestion, Status: store.JobDone, ImageFilename: &photo}
+	assert.ErrorIs(t, other.svc.Reanalyze(context.Background(), shelf), ErrUnsupportedKind)
+	noPhoto := &store.Job{ID: uuid.New(), Kind: store.JobConsumptionPhoto, Status: store.JobDone}
+	assert.ErrorIs(t, other.svc.Reanalyze(context.Background(), noPhoto), store.ErrConflict)
+	assert.Empty(t, other.runner.resubmitted)
 }

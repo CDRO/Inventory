@@ -399,6 +399,29 @@ th {
   margin: 0;
 }
 
+/* Background removal: the original picture and the one without its background,
+   side by side, so choosing between them is choosing what you see. The
+   checkerboard shows which parts are now transparent. */
+.cutout-compare {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.cutout-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.cutout-image {
+  object-fit: contain;
+  background-color: var(--color-surface);
+  background-image: conic-gradient(var(--color-border) 25%, transparent 0 50%, var(--color-border) 0 75%, transparent 0);
+  background-size: 0.75rem 0.75rem;
+}
+
 .review-row__error {
   color: var(--color-danger);
   font-size: var(--text-sm);

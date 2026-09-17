@@ -63,11 +63,19 @@ type VisionChecker interface {
 	Status(ctx context.Context) string
 }
 
+// ImageModelChecker reports whether the optional GEMINI_IMAGE_MODEL is
+// available, naming it (docs/specs/01-architecture-and-deployment.md). Nil is a
+// deployment that never configured one, and is never warned about.
+type ImageModelChecker interface {
+	Available(ctx context.Context) (model string, ok bool)
+}
+
 // Handler serves the admin pages.
 type Handler struct {
-	store  Store
-	vision VisionChecker
-	page   *template.Template
+	store      Store
+	vision     VisionChecker
+	imageModel ImageModelChecker
+	page       *template.Template
 	// currentUser names the caller, so the page can withhold the delete action
 	// from their own row. It is a callback rather than an import because the
 	// session lives in the httpapi package, which mounts this one.
@@ -83,6 +91,7 @@ type Handler struct {
 func New(
 	s Store,
 	visionChecker VisionChecker,
+	imageModel ImageModelChecker,
 	currentUser func(*http.Request) (uuid.UUID, bool),
 	fail func(http.ResponseWriter, *http.Request, error),
 ) (*Handler, error) {
@@ -94,7 +103,7 @@ func New(
 	if err != nil {
 		return nil, fmt.Errorf("admin: parse template: %w", err)
 	}
-	return &Handler{store: s, vision: visionChecker, page: page, currentUser: currentUser, fail: fail}, nil
+	return &Handler{store: s, vision: visionChecker, imageModel: imageModel, page: page, currentUser: currentUser, fail: fail}, nil
 }
 
 type userRow struct {
@@ -136,6 +145,11 @@ type pageData struct {
 	GeminiModel      string
 	AvailableModels  []string
 	ModelUnavailable bool
+	// ImageModelUnavailable is set only when GEMINI_IMAGE_MODEL is configured
+	// and not offered: a deployment that never wanted background removal is
+	// never told anything is wrong.
+	ImageModel            string
+	ImageModelUnavailable bool
 
 	// Catalog moderation: CatalogQuery echoes the search box so a reload
 	// (after a PATCH/DELETE, or just re-visiting the page) does not lose it.
@@ -266,6 +280,11 @@ func (h *Handler) load(r *http.Request) (*pageData, error) {
 			data.AvailableModels = models
 		} else {
 			slog.Warn("admin page: could not list vision models", slog.Any("err", err))
+		}
+	}
+	if h.imageModel != nil {
+		if model, ok := h.imageModel.Available(ctx); !ok {
+			data.ImageModel, data.ImageModelUnavailable = model, true
 		}
 	}
 

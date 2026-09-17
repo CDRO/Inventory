@@ -126,6 +126,7 @@ One shape for every error, produced by **exactly one serializer** in
 | Payload validation failure | 422 | `validation_failed` |
 | Upload exceeds size limit | 413 | `payload_too_large` |
 | Configured Gemini model unavailable | 503 | `model_unavailable` |
+| An AI call made inside the request failed, timed out, or answered with nothing usable (background removal, `09-consumption-logging.md`) | 502 | `upstream_failed` |
 | A documented route whose backing capability has not shipped yet | 501 | `not_implemented` |
 
 `501` is deliberately distinct from `404`: the route exists and the spec
@@ -205,12 +206,14 @@ metadata does not leave the host either.
 
 ### Image storage areas
 
-Three distinct areas under the `uploads` volume, with different lifetimes:
+Distinct areas under the `uploads` volume, and the suggestion cache beside
+it, with different lifetimes:
 
 | Path | Holds | Lifetime |
 |---|---|---|
 | `/data/uploads/ingest/` | Photos awaiting or backing a review job | Until the job is `consumed` or discarded, then 30 days |
 | `/data/uploads/products/` | The image finally chosen for a product | Permanent, until the product is deleted |
+| `/data/uploads/cutouts/{job_id}/` | Background-removed pictures offered during a review (`09-consumption-logging.md`) | Until that job is confirmed, discarded, or analysed again |
 | `/data/cache/imagesearch/` | Fetched SerpAPI/Iconify suggestion images | Evictable; hard 1GB cap (`07-shopping-list-reconciliation.md`) |
 
 No external image URL is ever handed to the browser: suggestions are
@@ -253,6 +256,12 @@ CREATE TABLE jobs (
   auto-expired while unreviewed (`06-vision-shelf-ingestion.md`).
 - On process restart, jobs left `pending` are marked `failed` with a
   retryable error at startup — never left hanging forever.
+- `POST /api/storages/{storage_id}/jobs/{job_id}/reanalyze` moves a `done`
+  or `failed` job that still has its photo back to `pending`, clearing its
+  payload and error, and runs its vision call again under the same job id
+  (`202 {"job_id": "..."}`). This is "Analyze again"
+  (`09-consumption-logging.md`): only ever a person's explicit request, never
+  an automatic retry. Any other status, or no photo, is `409 conflict`.
 - A job moves to `consumed` when its confirm endpoint has been applied, so
   the same proposal cannot be committed twice.
 - Frontend polls this endpoint (~1.5s interval) via the shared helper in

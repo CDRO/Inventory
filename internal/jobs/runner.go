@@ -54,6 +54,7 @@ const TimeoutFailure = "Processing took too long. Try uploading the photo again.
 // Store is the slice of the store the runner writes.
 type Store interface {
 	CreateJob(ctx context.Context, in store.NewJob) (*store.Job, error)
+	RequeueJob(ctx context.Context, storageID, id uuid.UUID) error
 	CompleteJob(ctx context.Context, id uuid.UUID, payload json.RawMessage) error
 	FailJob(ctx context.Context, id uuid.UUID, message string) error
 	FailInterruptedJobs(ctx context.Context) (int64, error)
@@ -155,6 +156,30 @@ func (r *Runner) Submit(ctx context.Context, in store.NewJob, work Work) (*store
 	r.wg.Add(1)
 	go r.run(job.ID, work)
 	return job, nil
+}
+
+// Resubmit moves a finished job back to pending and starts its work again —
+// "Analyze again" (docs/specs/09-consumption-logging.md).
+//
+// The store decides whether the job may move: only a done or failed job with a
+// photo does, and anything else comes back as its ErrConflict or ErrNotFound
+// with no work started. Once it has moved, the job ends the way a new one does,
+// so a re-analysis that fails, times out or is interrupted by a restart is
+// recorded on the row just the same.
+func (r *Runner) Resubmit(ctx context.Context, storageID, id uuid.UUID, work Work) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return ErrShutDown
+	}
+
+	if err := r.store.RequeueJob(ctx, storageID, id); err != nil {
+		return err
+	}
+
+	r.wg.Add(1)
+	go r.run(id, work)
+	return nil
 }
 
 // ErrShutDown is Submit after Shutdown.

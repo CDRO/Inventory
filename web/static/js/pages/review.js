@@ -12,6 +12,10 @@ import "../register-sw.js";
 //
 // Nothing is written until Confirm. The body sent then decides every row
 // explicitly, because the server refuses a confirm that leaves any row out.
+//
+// "Analyze again" replaces the whole proposal with a new analysis of the same
+// photo (docs/specs/09-consumption-logging.md), and a new product's picture
+// can have its background removed when the deployment offers that.
 
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
@@ -21,20 +25,28 @@ import { fetchLocations, appendLocationOptions } from "../location-options.js";
 import { fetchCategories, appendCategoryOptions } from "../category-options.js";
 import { fetchProducts } from "../product-options.js";
 import { get, post, del, ApiError } from "../api.js";
-import { pollJob, JobFailedError } from "../jobs.js";
-import { qs } from "../dom.js";
+import { pollJob, JobFailedError, reanalyzeJob, reanalyzeFailureMessage } from "../jobs.js";
+import { qs, qsa, clearChildren } from "../dom.js";
 
 const statusLine = qs("#status");
 const errorBox = qs("#error");
 const proposalSection = qs("#proposal");
 const rowsContainer = qs("#rows");
 const confirmButton = qs("#confirm");
+const reanalyzeButton = qs("#reanalyze");
 const discardButton = qs("#discard");
 
 let storageId = null;
 let jobId = null;
 let list = null;
-/** @type {Map<string, {row: Object, el: Element}>} */
+// backgroundRemoval is the job's own word on whether a picture's background
+// can be removed right now. Without it no such control is shown at all.
+let backgroundRemoval = false;
+/**
+ * cutout is the background-removed picture made for the row, if any: which
+ * source it was cut from, and its id for the confirm.
+ * @type {Map<string, {row: Object, el: Element, cutout: {source: string, id: string}|null}>}
+ */
 const rows = new Map();
 
 init();
@@ -66,6 +78,7 @@ async function init() {
   }
 
   confirmButton.addEventListener("click", onConfirm);
+  reanalyzeButton.addEventListener("click", onReanalyze);
   discardButton.addEventListener("click", onDiscard);
   await load();
 }
@@ -100,11 +113,15 @@ async function load() {
       setStatus(job.error || "This photo could not be analysed.");
       proposalSection.hidden = false;
       confirmButton.hidden = true;
+      // A failed analysis is exactly what analysing again is for.
+      reanalyzeButton.hidden = !job.has_image;
       return;
     case "consumed":
       setStatus("This proposal has already been added to your inventory.");
       return;
     case "done":
+      confirmButton.hidden = false;
+      reanalyzeButton.hidden = !job.has_image;
       await render(job);
       return;
     default:
@@ -126,13 +143,15 @@ async function render(job) {
   }
 
   const proposal = job.payload;
+  backgroundRemoval = Boolean(job.background_removal);
   list = new ReviewList(rowsContainer, qs("#row-template"));
   list.onCorrect = onCorrect;
   list.setItems(proposal.rows);
 
+  rows.clear();
   for (const row of proposal.rows) {
     const el = rowsContainer.querySelector(`[data-row-id="${CSS.escape(row.row_id)}"]`);
-    rows.set(row.row_id, { row, el });
+    rows.set(row.row_id, { row, el, cutout: null });
     setupRow(el, row, proposal, locations, categories, products, job.has_image);
   }
 
@@ -149,14 +168,7 @@ function setupRow(el, row, proposal, locations, categories, products, hasImage) 
   // item's bounding box shows. A product photo has no box and shows whole.
   const crop = qs('[data-role="crop"]', el);
   if (hasImage) {
-    crop.style.backgroundImage = `url("/api/storages/${storageId}/jobs/${jobId}/image")`;
-    const box = row.bounding_box;
-    if (box && box.width > 0 && box.height > 0) {
-      crop.style.backgroundSize = `${100 / box.width}% ${100 / box.height}%`;
-      const px = box.width >= 1 ? 0 : (box.x / (1 - box.width)) * 100;
-      const py = box.height >= 1 ? 0 : (box.y / (1 - box.height)) * 100;
-      crop.style.backgroundPosition = `${px}% ${py}%`;
-    }
+    paintCrop(crop, row.bounding_box);
     crop.setAttribute("aria-label", `Photo of ${row.label}`);
   }
   // Without a photo the crop stays an empty placeholder, keeping every row's
@@ -179,6 +191,21 @@ function setupRow(el, row, proposal, locations, categories, products, hasImage) 
   });
 }
 
+// paintCrop draws the job's photo into node as a background, scaled and
+// shifted so only box shows. With no usable box the whole photo shows.
+function paintCrop(node, box) {
+  node.style.backgroundImage = `url("/api/storages/${storageId}/jobs/${jobId}/image")`;
+  if (box && box.width > 0 && box.height > 0) {
+    node.style.backgroundSize = `${100 / box.width}% ${100 / box.height}%`;
+    const px = box.width >= 1 ? 0 : (box.x / (1 - box.width)) * 100;
+    const py = box.height >= 1 ? 0 : (box.y / (1 - box.height)) * 100;
+    node.style.backgroundPosition = `${px}% ${py}%`;
+  } else {
+    node.style.backgroundSize = "";
+    node.style.backgroundPosition = "";
+  }
+}
+
 // setupPictureChoice offers a new product a picture taken from this photo —
 // its own crop, or the whole photo — with no further AI call
 // (docs/specs/05-frontend-pwa-foundations.md, "Shared review component").
@@ -194,6 +221,66 @@ function setupPictureChoice(el, row, hasImage) {
   if (!(box && box.width > 0 && box.height > 0)) {
     qs('[data-role="new-product-image"] option[value="crop"]', el).remove();
   }
+  if (backgroundRemoval) setupCutout(el, row);
+}
+
+// setupCutout offers to remove the background of the picture just chosen
+// (docs/specs/09-consumption-logging.md): only once the reviewer has picked a
+// picture from their own photo, never on its own, and with the result shown
+// next to the original, which stays chosen until the other one is picked. If
+// it fails for any reason the original is simply kept — this is a nicety, and
+// must never stand in the way of confirming.
+function setupCutout(el, row) {
+  const wrap = qs('[data-role="cutout"]', el);
+  const picture = qs('[data-role="new-product-image"]', el);
+  const request = qs('[data-role="cutout-request"]', el);
+  const status = qs('[data-role="cutout-status"]', el);
+  const compare = qs('[data-role="cutout-compare"]', el);
+  const [keepOriginal, keepCutout] = qsa('[data-role="cutout-keep"]', el);
+  keepOriginal.name = keepCutout.name = `cutout-${row.row_id}`;
+  const entry = rows.get(row.row_id);
+
+  // A cutout belongs to the picture it was cut from: choosing another one
+  // starts over.
+  function reset() {
+    entry.cutout = null;
+    keepOriginal.checked = true;
+    compare.hidden = true;
+    status.hidden = true;
+    request.hidden = false;
+    request.disabled = false;
+    wrap.hidden = picture.value === "";
+  }
+
+  picture.addEventListener("change", reset);
+  request.addEventListener("click", async () => {
+    const source = picture.value;
+    if (!source) return;
+    request.disabled = true;
+    status.textContent = "Removing the background…";
+    status.hidden = false;
+
+    let result;
+    try {
+      result = await post(`/api/storages/${storageId}/ingest/${jobId}/cutouts`, { row_id: row.row_id, source });
+    } catch {
+      if (picture.value !== source) return;
+      status.textContent = "The background could not be removed. The original picture is kept.";
+      request.disabled = false;
+      return;
+    }
+    if (picture.value !== source) return; // the reviewer moved on meanwhile
+
+    entry.cutout = { source, id: result.cutout_id };
+    paintCrop(qs('[data-role="cutout-original"]', el), source === "crop" ? row.bounding_box : null);
+    qs('[data-role="cutout-image"]', el).src = result.url;
+    keepOriginal.checked = true;
+    status.hidden = true;
+    request.hidden = true;
+    compare.hidden = false;
+  });
+
+  reset();
 }
 
 function setupProduct(el, row, products) {
@@ -311,7 +398,7 @@ function buildItems() {
   const items = [];
   let valid = true;
 
-  for (const [rowId, { row, el }] of rows) {
+  for (const [rowId, { row, el, cutout }] of rows) {
     const rowError = qs('[data-role="row-error"]', el);
     rowError.hidden = true;
 
@@ -333,7 +420,13 @@ function buildItems() {
       const categoryId = qs('[data-role="new-product-category"]', el).value;
       if (categoryId) item.new_product.category_id = categoryId;
       const picture = qs('[data-role="new-product-image"]', el).value;
-      if (picture) item.new_product.image = picture;
+      const keep = qs('[data-role="cutout-keep"]:checked', el);
+      if (picture && cutout && cutout.source === picture && keep?.value === "cutout") {
+        item.new_product.image = "cutout";
+        item.new_product.cutout_id = cutout.id;
+      } else if (picture) {
+        item.new_product.image = picture;
+      }
     }
 
     const quantity = Number.parseInt(qs('[data-role="quantity"]', el).value, 10);
@@ -408,6 +501,33 @@ async function onConfirm() {
   }
 }
 
+// onReanalyze is "Analyze again": the same photo, a new proposal. It replaces
+// everything on this screen, corrections included, so it asks first — and it
+// is the only way the model ever sees this photo twice.
+async function onReanalyze() {
+  if (!window.confirm("Analyze this photo again? The current proposal, and any changes made to it here, will be replaced.")) {
+    return;
+  }
+  clearError();
+  setBusy(true);
+  try {
+    await reanalyzeJob(storageId, jobId);
+  } catch (err) {
+    setBusy(false);
+    showMessage(reanalyzeFailureMessage(err));
+    return;
+  }
+
+  // The old proposal is gone on the server; take it off the screen too, then
+  // wait for the new one the way a fresh upload is waited for.
+  rows.clear();
+  clearChildren(rowsContainer);
+  list = null;
+  proposalSection.hidden = true;
+  setBusy(false);
+  await load();
+}
+
 async function onDiscard() {
   if (!window.confirm("Discard this photo and its proposal? Nothing will be added to your inventory.")) {
     return;
@@ -431,6 +551,7 @@ function inboxHref(extra = {}) {
 
 function setBusy(busy) {
   confirmButton.disabled = busy;
+  reanalyzeButton.disabled = busy;
   discardButton.disabled = busy;
 }
 

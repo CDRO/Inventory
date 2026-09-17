@@ -118,30 +118,37 @@ work that was correct.
 
 A shelf crop has a cluttered background, which makes it a poor product
 thumbnail next to clean provider images. Offering to strip that background
-is worthwhile — with two constraints that shape how it is specified:
+is worthwhile — with one constraint that shapes how it is built:
 
-- **It needs a different model.** The configured `GEMINI_MODEL`
-  (`01-architecture-and-deployment.md`) is a vision *analysis* model: it
-  reads images and returns text, and cannot return an edited image.
-  Background removal requires a Gemini **image-generation/editing** model,
-  configured separately as `GEMINI_IMAGE_MODEL`. If that variable is
-  unset, or the model is unavailable, **the feature simply does not
-  appear** — no error, no degraded placeholder.
-- **An image model regenerates rather than masks.** It can subtly alter
-  the product itself, including inventing plausible-looking label text.
-  For an image whose only job is helping a human recognize a jar on a
-  shelf that is acceptable, but it must never happen invisibly.
+- **The model finds the subject; our own code cuts it out.** An image
+  model asked to *remove* a background regenerates the picture, and can
+  subtly alter the product itself, including inventing plausible-looking
+  label text. So no model ever draws the picture. The model configured as
+  `GEMINI_IMAGE_MODEL` is asked only to **segment** it: to return the main
+  product's bounding box (`box_2d`, `[y0, x0, y1, x1]` on a 0–1000 scale)
+  and a **mask** (a PNG probability map covering that box). The backend
+  crops the picture to the box and applies the mask as transparency, in Go,
+  keeping the photo's own pixels. The result is always a PNG.
+- **It needs a model that segments.** The analysis model (`GEMINI_MODEL`,
+  `01-architecture-and-deployment.md`) is not assumed to: `GEMINI_IMAGE_MODEL`
+  names one that returns segmentation masks (at the time of writing,
+  `gemini-2.5-flash` does, and Gemini 3 models are not documented to). If
+  the variable is unset, or the model is unavailable, **the feature simply
+  does not appear** — no error, no degraded placeholder.
 
 Therefore:
 
-- The offer appears **after** the user picks their own photo, as a
+- The offer appears **after** the user picks a picture from their own photo
+  (the item's crop or the whole photo, `06-vision-shelf-ingestion.md`), as a
   suggestion — never automatic, never applied to provider images, never
-  blocking the flow.
+  blocking the flow. Consumption never gives a product a picture, so only
+  the ingestion review screen offers it.
 - The result is shown **side by side with the original**, and the user
   chooses which to keep. The original remains selected until they actively
   pick the processed version.
-- If the call fails, times out, or returns something unusable, the
-  original is kept silently. This is a cosmetic nicety; it must never cost
+- If the call fails, times out, or returns something unusable — a mask that
+  keeps nothing, a reply with no mask at all — the original is kept, with a
+  short note and no error. This is a cosmetic nicety; it must never cost
   someone their photo or their place in the flow.
 - The kept image is stored locally like any other user photo, and — like
   any user photo — is never published to the catalog
@@ -150,6 +157,36 @@ Therefore:
   analysis model (`01-architecture-and-deployment.md`): a deprecated
   `GEMINI_IMAGE_MODEL` disables the offer and surfaces in the admin
   banner, rather than failing a review.
+
+How it is exposed:
+
+- `GET /api/storages/{storage_id}/jobs/{job_id}` carries
+  `background_removal: true|false`: whether a picture from this proposal can
+  have its background removed right now — a `done` shelf or product job
+  with a photo, on a deployment whose image model is available. The review
+  screen renders the control from this flag alone.
+- `POST /api/storages/{storage_id}/ingest/{job_id}/cutouts` — body
+  `{row_id, source}`, `source` being `"crop"` or `"photo"` as in the confirm
+  body. The server cuts the same picture a confirm would, sends it to the
+  image model, and keeps the cutout **with the job**, not with any product,
+  under `/data/uploads/cutouts/{job_id}/`. It answers
+  `201 {cutout_id, url}`; `url` is
+  `GET /api/storages/{storage_id}/ingest/{job_id}/cutouts/{cutout_id}`,
+  storage-scoped through its job like the photo it was cut from. This is the
+  one AI call made synchronously inside a request, because the reviewer is
+  waiting for it; it is bounded at 60 seconds. A row not in the proposal, a
+  crop of a row without a box, or a job whose photo is gone is `422`; a job
+  not waiting for review is `409`; an unavailable image model is
+  `503 model_unavailable`; any other failure of the model is
+  `502 upstream_failed` (`04-backend-api-conventions.md`). With no image
+  model configured the route does not exist.
+- The confirm names a kept cutout as `new_product.image: "cutout"` with
+  `new_product.cutout_id`, and the server copies that exact file into the
+  product's permanent picture (`06-vision-shelf-ingestion.md`). A cutout id
+  this job never produced is `422`.
+- A job's cutouts are removed when its proposal is confirmed, discarded, or
+  analysed again: the ones not kept were never wanted, and the kept one is a
+  product picture by then.
 
 **Manual correction is terminal — the AI is never retried automatically.**
 Once a person has said what an item is, the system does not second-guess
@@ -160,6 +197,29 @@ exactly the case where vision keeps failing: niche, regional, homemade, or
 unlabeled products, where the model will not get it right on the second
 attempt either, and where the user's own photo *is* the best possible
 product image.
+
+#### "Analyze again"
+
+`POST /api/storages/{storage_id}/jobs/{job_id}/reanalyze` — no body. Offered
+on both review screens (`review.html` for shelf and product photos,
+`consume-review.html` here) whenever the job is `done` or `failed` and still
+has its photo, and behind a confirmation, because it throws the screen's
+work away:
+
+- The job moves back to `pending` with its proposal and error cleared, and
+  the same photo is analysed again by the service of its own kind, in its own
+  mode, keeping a product photo's location hint. It answers
+  `202 {job_id}` with the **same** job id; nothing new is created, and the
+  review screen waits for the new proposal by polling, exactly as after an
+  upload. The new proposal replaces the old one entirely, including every
+  correction made to it.
+- A job still `pending` or already `consumed`, one without a photo, and a
+  shopping-list job (whose photo flow is not built) are `409 conflict`. So is
+  a request that loses a race with a confirm or another re-analysis: the job
+  row is locked for the move, the same lock the confirm takes.
+- An unavailable analysis model is `503 model_unavailable`, as for an upload;
+  the proposal on screen stays untouched.
+- Like every other review action, any member of the storage may ask.
 
 **3. Reject** — *"this is not here, write nothing."* Rejected rows stay
 visible but struck through and greyed, so the reviewer can see what was
@@ -260,3 +320,8 @@ transaction per confirm call:
   (`04-backend-api-conventions.md`).
 - With `GEMINI_IMAGE_MODEL` unset, no background-removal control is
   rendered anywhere and every other flow behaves identically.
+- A background-removed picture keeps the photo's own pixels: the model only
+  outlines the subject, and never redraws it.
+- "Analyze again" replaces a `done` or `failed` job's proposal with a new
+  analysis of the same photo, under the same job id, only when a reviewer asks
+  for it.

@@ -41,13 +41,22 @@ var inboxStatuses = []store.JobStatus{store.JobPending, store.JobDone, store.Job
 type JobHandler struct {
 	store  JobStore
 	photos PhotoStore
-	errors *ErrorWriter
+	// reanalyzers run a job's vision call again, by the kind of job each one
+	// created. A kind with none cannot be analysed again.
+	reanalyzers map[store.JobKind]Reanalyzer
+	// cutouts and backgrounds are background removal
+	// (docs/specs/09-consumption-logging.md): what a job's response says is on
+	// offer, and what discarding or re-analysing a job clears away.
+	cutouts     CutoutStore
+	backgrounds BackgroundRemover
+	errors      *ErrorWriter
 }
 
 // NewJobHandler wires the job routes. photos may be nil for a deployment with
 // no photo jobs; the image route then answers 404 and discards remove no files.
-func NewJobHandler(s JobStore, photos PhotoStore, errs *ErrorWriter) *JobHandler {
-	return &JobHandler{store: s, photos: photos, errors: errs}
+// cutouts and backgrounds are nil for a deployment without background removal.
+func NewJobHandler(s JobStore, photos PhotoStore, reanalyzers map[store.JobKind]Reanalyzer, cutouts CutoutStore, backgrounds BackgroundRemover, errs *ErrorWriter) *JobHandler {
+	return &JobHandler{store: s, photos: photos, reanalyzers: reanalyzers, cutouts: cutouts, backgrounds: backgrounds, errors: errs}
 }
 
 // Image serves GET /api/storages/{storage_id}/jobs/{id}/image — the photo a
@@ -112,9 +121,14 @@ type jobResponse struct {
 	Error   *string         `json:"error"`
 	// HasImage says whether GET .../image will serve a photo, so a review
 	// screen does not request one that is not there.
-	HasImage  bool      `json:"has_image"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	HasImage bool `json:"has_image"`
+	// BackgroundRemoval says whether a picture taken from this proposal's
+	// photo can have its background removed right now, so a review screen
+	// renders no such control when it cannot
+	// (docs/specs/09-consumption-logging.md).
+	BackgroundRemoval bool      `json:"background_removal"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // jobSummary is a job as the inbox lists it. No payload: a proposal can hold a
@@ -156,8 +170,27 @@ func (h *JobHandler) Get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, jobResponse{
 		ID: job.ID, Kind: job.Kind, Status: job.Status, Payload: job.Payload,
 		Error: job.Error, HasImage: job.ImageFilename != nil,
-		CreatedAt: job.CreatedAt, UpdatedAt: job.UpdatedAt,
+		BackgroundRemoval: h.offersBackgroundRemoval(r.Context(), job),
+		CreatedAt:         job.CreatedAt, UpdatedAt: job.UpdatedAt,
 	})
+}
+
+// offersBackgroundRemoval reports whether a review of job may offer background
+// removal: a proposal waiting for review, that can create products, with a
+// photo to take pictures from, on a deployment whose image model is available.
+//
+// The model is checked last, and only for such a job, so a screen polling a
+// pending job never asks about it. The check reads the cached model list either
+// way.
+func (h *JobHandler) offersBackgroundRemoval(ctx context.Context, job *store.Job) bool {
+	if h.backgrounds == nil || h.cutouts == nil || job.Status != store.JobDone || job.ImageFilename == nil {
+		return false
+	}
+	if job.Kind != store.JobShelfIngestion && job.Kind != store.JobProductPhoto {
+		return false
+	}
+	_, ok := h.backgrounds.Available(ctx)
+	return ok
 }
 
 // List serves GET /api/storages/{storage_id}/jobs?status=…&limit=…&cursor=…,
@@ -256,5 +289,6 @@ func (h *JobHandler) Delete(w http.ResponseWriter, r *http.Request) {
 			h.errors.Log(r.Context(), "removing a discarded job's photo failed", err)
 		}
 	}
+	removeJobCutouts(r.Context(), h.cutouts, h.errors, id)
 	writeJSON(w, http.StatusNoContent, nil)
 }

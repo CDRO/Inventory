@@ -298,8 +298,8 @@ ADMIN_INITIAL_PASSWORD=changeme-set-on-first-boot
 # --- Vision LLM ---
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-3.6-flash  # may be overridden in-app; see "AI model resilience"
-GEMINI_IMAGE_MODEL=            # optional image-editing model; empty disables
-                               # background removal (09-consumption-logging.md)
+GEMINI_IMAGE_MODEL=            # optional segmentation model (e.g. gemini-2.5-flash);
+                               # empty disables background removal (09-consumption-logging.md)
 
 # --- Shopping-list image suggestions ---
 SERPAPI_API_KEY=
@@ -336,7 +336,9 @@ degrade visibly rather than failing opaquely:
 - `GET /healthz` reports `{"status":"ok","vision":"ok"|"model_unavailable"}`
   so the degraded state is visible without opening the UI.
 
-**The optional image-editing model** (`GEMINI_IMAGE_MODEL`) follows the
+**The optional image model** (`GEMINI_IMAGE_MODEL`) — one that returns
+segmentation masks, which background removal cuts along without the model
+ever redrawing the picture (`09-consumption-logging.md`) — follows the
 same rules, with one difference: it is **optional by design**. An empty or
 unavailable value is not a degraded state — the background-removal offer
 in `09-consumption-logging.md` simply does not appear, and nothing else in

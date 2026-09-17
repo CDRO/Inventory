@@ -21,16 +21,27 @@ import (
 // fakeConsumer is an in-memory Consumer, mirroring fakeIngester in
 // ingest_test.go.
 type fakeConsumer struct {
-	mu        sync.Mutex
-	available bool
-	started   []consume.Upload
-	err       error
+	mu         sync.Mutex
+	available  bool
+	started    []consume.Upload
+	reanalyzed []uuid.UUID
+	err        error
 }
 
 func (f *fakeConsumer) Available(context.Context) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return "gemini-test", f.available
+}
+
+func (f *fakeConsumer) Reanalyze(_ context.Context, job *store.Job) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.reanalyzed = append(f.reanalyzed, job.ID)
+	return nil
 }
 
 func (f *fakeConsumer) Start(_ context.Context, u consume.Upload) (*store.Job, error) {

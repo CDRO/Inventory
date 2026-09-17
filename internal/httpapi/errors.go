@@ -19,6 +19,7 @@ const (
 	CodeValidationFailed = "validation_failed"
 	CodePayloadTooLarge  = "payload_too_large"
 	CodeModelUnavailable = "model_unavailable"
+	CodeUpstreamFailed   = "upstream_failed"
 	CodeInternal         = "internal_error"
 )
 
@@ -230,6 +231,20 @@ func ModelUnavailable(model string) *Failure {
 	}
 }
 
+// UpstreamFailed is an AI call made during the request that failed, timed out,
+// or answered with nothing usable — for the one synchronous AI call there is,
+// background removal (docs/specs/09-consumption-logging.md). The provider's
+// own error is logged, never serialized, for the same reason a job's failure
+// message is written for the user rather than copied from the provider.
+func UpstreamFailed(err error) *Failure {
+	return &Failure{
+		Status:  http.StatusBadGateway,
+		Code:    CodeUpstreamFailed,
+		Message: "The AI provider could not complete this request.",
+		Err:     err,
+	}
+}
+
 // Internal is an unexpected failure. The cause is logged, never serialized.
 func Internal(err error) *Failure {
 	return &Failure{
@@ -275,6 +290,8 @@ func defaultMessage(code string) string {
 		return "The uploaded file is too large."
 	case CodeModelUnavailable:
 		return "The configured vision model is unavailable."
+	case CodeUpstreamFailed:
+		return "The AI provider could not complete this request."
 	default:
 		return "Internal error."
 	}
