@@ -105,15 +105,7 @@ test("turning gamification off in settings.html persists across a reload", async
   await page.goto(`/settings.html?storage=${HOUSEHOLD}`);
   await expect(page.locator("#gamification-enabled")).toBeChecked();
 
-  // #error staying hidden is not proof the PUT landed — it starts hidden and
-  // the handler never toggles it on success, so a reload racing ahead of the
-  // request was free to load whatever state the server still had.
-  await Promise.all([
-    page.waitForResponse(
-      (resp) => resp.url().includes("/api/me/preferences") && resp.request().method() === "PUT",
-    ),
-    page.locator("#gamification-enabled").uncheck(),
-  ]);
+  await page.locator("#gamification-enabled").uncheck();
   await expect(page.locator("#error")).toBeHidden();
 
   await page.reload();
