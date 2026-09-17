@@ -49,6 +49,11 @@ let categories = [];
 init();
 
 async function init() {
+  // A list matched before the storage's locations and categories have loaded
+  // would render every line with an empty "Put it in" picker, so matching
+  // waits until they have.
+  submitButton.disabled = true;
+
   let me;
   try {
     me = await fetchMe();
@@ -82,6 +87,8 @@ async function init() {
     [locations, categories] = await Promise.all([fetchLocations(storageId), fetchCategories(storageId)]);
   } catch (err) {
     showError(err);
+  } finally {
+    submitButton.disabled = false;
   }
 }
 
