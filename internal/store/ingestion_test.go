@@ -135,6 +135,49 @@ func TestConfirmIngestionAppliesEveryDecisionInOneGo(t *testing.T) {
 	assert.Equal(t, 3, f.batchCount(t))
 }
 
+// TestConfirmIngestionGivesANewProductItsPictureButNeverTheCatalog — a picture
+// cut from the reviewed photo is the storage's own. It lands on the product,
+// never on the anonymous catalog row, and only the storage whose product uses
+// it can be told it exists.
+func TestConfirmIngestionGivesANewProductItsPictureButNeverTheCatalog(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	f := newIngestFixture(t, s, 2)
+
+	first := "/api/storages/" + f.storageID.String() + "/product-images/" + uuid.Must(uuid.NewV7()).String() + ".jpg"
+	second := "/api/storages/" + f.storageID.String() + "/product-images/" + uuid.Must(uuid.NewV7()).String() + ".jpg"
+
+	_, err := s.ConfirmIngestion(ctx, f.storageID, f.jobID, &f.userID, []store.IngestDecision{
+		{RowID: "0", Accept: true, Quantity: 1, LocationID: &f.pantry,
+			NewProduct: &store.NewIngestProduct{Name: "Quince Jam", ImageURL: &first}},
+		// The same new product again, with a different picture: the product is
+		// created once, and keeps the first row's.
+		{RowID: "1", Accept: true, Quantity: 1, LocationID: &f.pantry,
+			NewProduct: &store.NewIngestProduct{Name: "quince jam", ImageURL: &second}},
+	})
+	require.NoError(t, err)
+
+	var productImage, catalogImage *string
+	require.NoError(t, testPool.QueryRow(ctx, `
+		SELECT p.image_url, c.image_url FROM products p JOIN catalog_products c ON c.id = p.catalog_id
+		 WHERE p.storage_id = $1 AND p.name = $2`, f.storageID, "Quince Jam").Scan(&productImage, &catalogImage))
+	require.NotNil(t, productImage)
+	assert.Equal(t, first, *productImage)
+	assert.Nil(t, catalogImage, "a user's photo is never published to the catalog")
+
+	used, err := s.ProductImageInStorage(ctx, f.storageID, first)
+	require.NoError(t, err)
+	assert.True(t, used, "the storage whose product uses the picture")
+
+	used, err = s.ProductImageInStorage(ctx, f.storageID, second)
+	require.NoError(t, err)
+	assert.False(t, used, "a picture written for a row whose product was folded into another's")
+
+	used, err = s.ProductImageInStorage(ctx, newStorage(t, ctx), first)
+	require.NoError(t, err)
+	assert.False(t, used, "any other storage, even asking for the exact URL")
+}
+
 // TestConfirmIngestionRequiresExactlyTheIssuedRows — a missing row is not an
 // implicit rejection, and an unknown or doubled row is a client bug.
 func TestConfirmIngestionRequiresExactlyTheIssuedRows(t *testing.T) {

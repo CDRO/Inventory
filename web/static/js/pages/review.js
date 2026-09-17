@@ -162,6 +162,8 @@ function setupRow(el, row, proposal, locations, categories, products, hasImage) 
   // Without a photo the crop stays an empty placeholder, keeping every row's
   // columns aligned.
 
+  setupPictureChoice(el, row, hasImage);
+
   qs('[data-role="confidence"]', el).textContent = `${Math.round((row.confidence || 0) * 100)}%`;
 
   setupProduct(el, row, products);
@@ -175,6 +177,23 @@ function setupRow(el, row, proposal, locations, categories, products, hasImage) 
     expiry.disabled = noExpiry.checked;
     if (noExpiry.checked) expiry.value = "";
   });
+}
+
+// setupPictureChoice offers a new product a picture taken from this photo —
+// its own crop, or the whole photo — with no further AI call
+// (docs/specs/05-frontend-pwa-foundations.md, "Shared review component").
+// The server cuts the picture; this only names which one. With no photo there
+// is nothing to offer, and a row with no usable box has no crop to offer.
+function setupPictureChoice(el, row, hasImage) {
+  const field = qs('[data-role="new-product-image-field"]', el);
+  if (!hasImage) {
+    field.hidden = true;
+    return;
+  }
+  const box = row.bounding_box;
+  if (!(box && box.width > 0 && box.height > 0)) {
+    qs('[data-role="new-product-image"] option[value="crop"]', el).remove();
+  }
 }
 
 function setupProduct(el, row, products) {
@@ -313,6 +332,8 @@ function buildItems() {
       item.new_product = { name, item_type: qs('[data-role="item-type"]', el).value };
       const categoryId = qs('[data-role="new-product-category"]', el).value;
       if (categoryId) item.new_product.category_id = categoryId;
+      const picture = qs('[data-role="new-product-image"]', el).value;
+      if (picture) item.new_product.image = picture;
     }
 
     const quantity = Number.parseInt(qs('[data-role="quantity"]', el).value, 10);

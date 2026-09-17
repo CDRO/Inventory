@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
 
+	"github.com/CDRO/Inventory/internal/images"
 	"github.com/CDRO/Inventory/internal/ingest"
 	"github.com/CDRO/Inventory/internal/store"
 )
@@ -31,9 +33,14 @@ type Ingester interface {
 	Start(ctx context.Context, u ingest.Upload) (*store.Job, error)
 }
 
-// IngestStore applies a reviewed proposal.
+// IngestStore applies a reviewed proposal. Job and ProductImageInStorage are
+// what taking a new product's picture from the reviewed photo needs: the
+// photo and its boxes before the transaction, and which of the pictures
+// written for it a product ended up using after.
 type IngestStore interface {
 	ConfirmIngestion(ctx context.Context, storageID, jobID uuid.UUID, userID *uuid.UUID, decisions []store.IngestDecision) (*store.IngestResult, error)
+	Job(ctx context.Context, storageID, id uuid.UUID) (*store.Job, error)
+	ProductImageStore
 }
 
 // IngestHandler serves the ingestion routes of
@@ -41,12 +48,33 @@ type IngestStore interface {
 type IngestHandler struct {
 	ingester Ingester
 	store    IngestStore
-	errors   *ErrorWriter
+	// photos holds the photos being reviewed, and productImages is permanent
+	// storage for the product pictures cut from them. Either may be nil when
+	// the upload volume is unusable; a confirm asking for a picture is then
+	// refused, and every other confirm works as before.
+	photos        PhotoStore
+	productImages PhotoStore
+	errors        *ErrorWriter
 }
 
 // NewIngestHandler wires the ingestion routes.
-func NewIngestHandler(i Ingester, s IngestStore, errs *ErrorWriter) *IngestHandler {
-	return &IngestHandler{ingester: i, store: s, errors: errs}
+func NewIngestHandler(i Ingester, s IngestStore, photos, productImages PhotoStore, errs *ErrorWriter) *IngestHandler {
+	return &IngestHandler{ingester: i, store: s, photos: photos, productImages: productImages, errors: errs}
+}
+
+// Where a new product's picture comes from, as a confirm names it. Both are
+// taken from the photo being reviewed and cost no further AI call
+// (docs/specs/05-frontend-pwa-foundations.md, "Shared review component").
+const (
+	productImageCrop  = "crop"  // the row's own bounding_box
+	productImagePhoto = "photo" // the whole photo — for a single-product photo, usually the right one
+)
+
+// productImageChoice is one accepted row that asked for a picture: which
+// decision it is, and from where.
+type productImageChoice struct {
+	index  int
+	source string
 }
 
 // ShelfPhoto serves POST /api/storages/{storage_id}/ingest/shelf-photos.
@@ -134,6 +162,9 @@ type confirmItem struct {
 		Name       string     `json:"name"`
 		CategoryID *uuid.UUID `json:"category_id"`
 		ItemType   string     `json:"item_type"`
+		// Image is "crop" or "photo" to give the new product a picture taken
+		// from the photo under review; absent or null for none.
+		Image *string `json:"image"`
 	} `json:"new_product"`
 
 	Quantity int `json:"quantity"`
@@ -181,7 +212,13 @@ func (h *IngestHandler) Confirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	decisions, failure := parseDecisions(body)
+	decisions, choices, failure := parseDecisions(body)
+	if failure != nil {
+		h.errors.WriteError(w, r, failure)
+		return
+	}
+
+	written, failure := h.writeProductImages(r.Context(), storageID, jobID, decisions, choices)
 	if failure != nil {
 		h.errors.WriteError(w, r, failure)
 		return
@@ -189,6 +226,9 @@ func (h *IngestHandler) Confirm(w http.ResponseWriter, r *http.Request) {
 
 	userID := user.ID
 	result, err := h.store.ConfirmIngestion(r.Context(), storageID, jobID, &userID, decisions)
+	// Whatever the outcome, no picture written above may outlive the confirm
+	// without a product using it.
+	h.discardUnusedProductImages(r.Context(), storageID, written, err == nil)
 	switch {
 	case errors.Is(err, store.ErrValidation):
 		h.errors.WriteError(w, r, ValidationFailed(map[string][]string{
@@ -210,16 +250,176 @@ func (h *IngestHandler) Confirm(w http.ResponseWriter, r *http.Request) {
 	}{result.BatchIDs, result.ProductsCreated, result.LocationsCreated})
 }
 
+// writeProductImages cuts each requested picture out of the reviewed photo,
+// writes it to permanent storage, and points its decision's new product at it.
+//
+// Files cannot join the database transaction, so they are written first and
+// the confirm follows. A picture written for a confirm that then fails — a
+// double submit, a foreign category id — is removed by
+// discardUnusedProductImages; a crash in between leaves an unreferenced file,
+// which is unreachable (ProductImageInStorage) and costs only disk space. That
+// is the safe direction: the reverse order could commit a product pointing at
+// a picture that was never written.
+//
+// A job that is not ready for review gets no pictures cut at all: the confirm
+// that follows is refused anyway, so there is nothing to spend a decode on.
+func (h *IngestHandler) writeProductImages(ctx context.Context, storageID, jobID uuid.UUID, decisions []store.IngestDecision, choices []productImageChoice) ([]string, *Failure) {
+	if len(choices) == 0 {
+		return nil, nil
+	}
+
+	job, err := h.store.Job(ctx, storageID, jobID)
+	if err != nil {
+		return nil, FromStoreError(err, "job not found in storage")
+	}
+	if job.Status != store.JobDone {
+		return nil, nil
+	}
+
+	noPhoto := func(index int) *Failure {
+		return ValidationFailed(map[string][]string{
+			fmt.Sprintf("items[%d].new_product.image", index): {"This proposal has no photo to take a picture from."},
+		}, nil)
+	}
+
+	if job.ImageFilename == nil || h.photos == nil || h.productImages == nil {
+		return nil, noPhoto(choices[0].index)
+	}
+	photo, err := h.photos.Read(*job.ImageFilename)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, noPhoto(choices[0].index)
+	}
+	if err != nil {
+		return nil, Internal(err)
+	}
+
+	boxes, err := proposalBoxes(job.Payload)
+	if err != nil {
+		return nil, Internal(err)
+	}
+
+	var written []string
+	fail := func(f *Failure) ([]string, *Failure) {
+		h.removeProductImages(ctx, written)
+		return nil, f
+	}
+
+	for _, choice := range choices {
+		d := &decisions[choice.index]
+
+		var box *images.Box
+		if choice.source == productImageCrop {
+			box = boxes[d.RowID]
+			if box == nil {
+				return fail(ValidationFailed(map[string][]string{
+					fmt.Sprintf("items[%d].new_product.image", choice.index): {"This item has no crop. Use the whole photo instead."},
+				}, nil))
+			}
+		}
+
+		picture, err := images.ProductImage(photo, box)
+		if errors.Is(err, images.ErrEmptyCrop) {
+			return fail(ValidationFailed(map[string][]string{
+				fmt.Sprintf("items[%d].new_product.image", choice.index): {"This item's crop is empty. Use the whole photo instead."},
+			}, nil))
+		}
+		if err != nil {
+			return fail(Internal(err))
+		}
+
+		id, err := uuid.NewV7()
+		if err != nil {
+			return fail(Internal(err))
+		}
+		name := id.String() + picture.Format.Extension()
+		if err := h.productImages.Save(name, picture.Data); err != nil {
+			return fail(Internal(err))
+		}
+		written = append(written, name)
+
+		url := productImageURL(storageID, name)
+		d.NewProduct.ImageURL = &url
+	}
+	return written, nil
+}
+
+// discardUnusedProductImages removes the pictures writeProductImages wrote
+// that no product ended up using: all of them when the confirm failed, and
+// after a success, any whose row was folded into another row's new product of
+// the same name — the store creates that product once, with the first row's
+// picture.
+func (h *IngestHandler) discardUnusedProductImages(ctx context.Context, storageID uuid.UUID, written []string, confirmed bool) {
+	if len(written) == 0 {
+		return
+	}
+	if !confirmed {
+		h.removeProductImages(ctx, written)
+		return
+	}
+
+	var unused []string
+	for _, name := range written {
+		used, err := h.store.ProductImageInStorage(ctx, storageID, productImageURL(storageID, name))
+		if err != nil {
+			// Keep the file: an unreferenced picture only costs disk space,
+			// and removing one a product does use would break its image.
+			h.errors.Log(ctx, "checking whether a product picture is in use failed", err)
+			continue
+		}
+		if !used {
+			unused = append(unused, name)
+		}
+	}
+	h.removeProductImages(ctx, unused)
+}
+
+func (h *IngestHandler) removeProductImages(ctx context.Context, names []string) {
+	for _, name := range names {
+		if err := h.productImages.Remove(name); err != nil {
+			h.errors.Log(ctx, "removing an unused product picture failed", err)
+		}
+	}
+}
+
+// proposalBoxes reads each row's bounding_box out of a proposal, keyed by
+// row_id. A row with no box — every row of a single-product photo, and any
+// detection the model could not place — is absent.
+func proposalBoxes(payload json.RawMessage) (map[string]*images.Box, error) {
+	var p struct {
+		Rows []struct {
+			RowID       string      `json:"row_id"`
+			BoundingBox *images.Box `json:"bounding_box"`
+		} `json:"rows"`
+	}
+	if len(payload) > 0 {
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return nil, fmt.Errorf("httpapi: read proposal boxes: %w", err)
+		}
+	}
+	boxes := make(map[string]*images.Box, len(p.Rows))
+	for _, row := range p.Rows {
+		if row.BoundingBox != nil {
+			boxes[row.RowID] = row.BoundingBox
+		}
+	}
+	return boxes, nil
+}
+
 // parseDecisions validates the body's shape. Whether the rows match the
 // proposal, and whether every id belongs to this storage, is the store's to
 // decide under the job's lock.
-func parseDecisions(body confirmRequest) ([]store.IngestDecision, *Failure) {
+//
+// It also returns the new products that asked for a picture from the photo,
+// by their index in the returned decisions.
+func parseDecisions(body confirmRequest) ([]store.IngestDecision, []productImageChoice, *Failure) {
 	if body.Items == nil {
-		return nil, ValidationFailed(map[string][]string{"items": {"A decision for every proposed row is required."}}, nil)
+		return nil, nil, ValidationFailed(map[string][]string{"items": {"A decision for every proposed row is required."}}, nil)
 	}
 	if len(*body.Items) > maxIngestRows {
-		return nil, ValidationFailed(map[string][]string{"items": {"Too many rows."}}, nil)
+		return nil, nil, ValidationFailed(map[string][]string{"items": {"Too many rows."}}, nil)
 	}
+
+	var choices []productImageChoice
 
 	fields := map[string][]string{}
 	add := func(i int, field, msg string) {
@@ -267,6 +467,15 @@ func parseDecisions(body confirmRequest) ([]store.IngestDecision, *Failure) {
 				add(i, "new_product.item_type", "Must be perishable, long_shelf_life or non_perishable.")
 			}
 			d.NewProduct = &store.NewIngestProduct{Name: name, CategoryID: item.NewProduct.CategoryID, ItemType: itemType}
+
+			if img := item.NewProduct.Image; img != nil {
+				switch *img {
+				case productImageCrop, productImagePhoto:
+					choices = append(choices, productImageChoice{index: len(out), source: *img})
+				default:
+					add(i, "new_product.image", "Must be crop, photo or null.")
+				}
+			}
 		}
 
 		if item.Quantity < 1 || item.Quantity > maxIngestQuantity {
@@ -307,7 +516,7 @@ func parseDecisions(body confirmRequest) ([]store.IngestDecision, *Failure) {
 	}
 
 	if len(fields) > 0 {
-		return nil, ValidationFailed(fields, nil)
+		return nil, nil, ValidationFailed(fields, nil)
 	}
-	return out, nil
+	return out, choices, nil
 }

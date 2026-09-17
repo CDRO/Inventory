@@ -176,6 +176,26 @@ func (s *Store) SetProductCategoryAsUser(ctx context.Context, storageID, id uuid
 	})
 }
 
+// ProductImageInStorage reports whether any product in this storage uses
+// imageURL as its picture.
+//
+// It is the authorization check for serving a stored product photo: the file
+// on disk carries no owner, so a photo belongs to a storage exactly when one
+// of that storage's products points at it. Any other storage — and any URL no
+// product uses, such as a photo left behind by a failed confirm — answers
+// false, which the caller turns into the same 404 as a name that never
+// existed.
+func (s *Store) ProductImageInStorage(ctx context.Context, storageID uuid.UUID, imageURL string) (bool, error) {
+	var found bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM products WHERE storage_id = $1 AND image_url = $2)`,
+		storageID, imageURL).Scan(&found)
+	if err != nil {
+		return false, fmt.Errorf("store: product image lookup: %w", err)
+	}
+	return found, nil
+}
+
 // SetProductImageAsUser sets a product's image or icon, recording a
 // metadata_filled contribution when it fills in a picture that was
 // previously unset (docs/specs/51-gamification-scoring.md,

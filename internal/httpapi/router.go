@@ -140,6 +140,10 @@ type Deps struct {
 	// work.
 	Ingester Ingester
 	Photos   PhotoStore
+	// ProductImages is permanent storage for product pictures taken from a
+	// reviewed photo. Nil disables taking one — a confirm asking for a picture
+	// is refused — and every stored picture answers 404.
+	ProductImages PhotoStore
 	// Consumer starts consumption-photo ingestion
 	// (docs/specs/09-consumption-logging.md), the same way Ingester starts
 	// shelf and product ingestion. With no Consumer the upload route is
@@ -322,12 +326,17 @@ func NewRouter(d Deps) http.Handler {
 			sr.Delete("/jobs/{id}", jobsAPI.Delete)
 
 			// Photo ingestion (docs/specs/06-vision-shelf-ingestion.md).
-			ingestAPI := NewIngestHandler(d.Ingester, d.Store, errs)
+			ingestAPI := NewIngestHandler(d.Ingester, d.Store, d.Photos, d.ProductImages, errs)
 			if d.Ingester != nil {
 				sr.Post("/ingest/shelf-photos", ingestAPI.ShelfPhoto)
 				sr.Post("/ingest/product-photos", ingestAPI.ProductPhoto)
 			}
 			sr.Post("/ingest/{job_id}/confirm", ingestAPI.Confirm)
+
+			// Product pictures cut from a reviewed photo, behind the same
+			// membership gate as everything else here.
+			productImages := NewProductImageHandler(d.Store, d.ProductImages, errs)
+			sr.Get("/product-images/{name}", productImages.Serve)
 
 			// Consumption logging (docs/specs/09-consumption-logging.md), the
 			// same upload-then-confirm shape as ingestion above.

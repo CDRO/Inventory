@@ -279,11 +279,20 @@ func serve() error {
 	// on the first photo. An unusable upload volume disables uploads and
 	// nothing else.
 	var (
-		ingester    httpapi.Ingester
-		consumer    httpapi.Consumer
-		photoStore  httpapi.PhotoStore
-		ingestSweep func(context.Context, time.Time) (int, error)
+		ingester     httpapi.Ingester
+		consumer     httpapi.Consumer
+		photoStore   httpapi.PhotoStore
+		productStore httpapi.PhotoStore
+		ingestSweep  func(context.Context, time.Time) (int, error)
 	)
+	// Product pictures taken from a reviewed photo live apart from the photos
+	// themselves: those are swept after review, these are kept for as long as
+	// the product exists (docs/specs/07-shopping-list-reconciliation.md).
+	if pictures, err := uploads.NewDir(uploads.ProductImagesDir); err != nil {
+		slog.Error("product pictures from photos disabled: upload volume unusable", slog.Any("err", err))
+	} else {
+		productStore = pictures
+	}
 	if photos, err := uploads.NewDir(uploads.IngestDir); err != nil {
 		slog.Error("photo uploads disabled: upload volume unusable", slog.Any("err", err))
 	} else {
@@ -324,6 +333,7 @@ func serve() error {
 			InsecureCookies: cfg.IsDev(),
 			Ingester:        ingester,
 			Photos:          photoStore,
+			ProductImages:   productStore,
 			Consumer:        consumer,
 		}),
 		ReadHeaderTimeout: readHeaderTimeout,

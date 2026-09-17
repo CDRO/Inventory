@@ -171,6 +171,7 @@ type apiFixture struct {
 	ingest       *fakeIngestStore
 	ingester     *fakeIngester
 	photos       *fakePhotoStore
+	pictures     *fakePhotoStore
 	matcher      *fakeMatcher
 	images       *fakeSuggester
 	imageData    *fakeImageCache
@@ -208,6 +209,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	ingestStore := &fakeIngestStore{}
 	ingester := &fakeIngester{available: true}
 	photos := &fakePhotoStore{files: map[string][]byte{}}
+	pictures := &fakePhotoStore{files: map[string][]byte{}}
 	consumeStore := &fakeConsumeStore{}
 	consumer := &fakeConsumer{available: true}
 	products := &fakeProductStore{}
@@ -227,20 +229,21 @@ func newAPIFixture(t *testing.T) *apiFixture {
 			fakeReorderStore: reorder, fakeAnalyticsStore: analytics,
 			fakeGamification: gamification,
 		},
-		Matcher:     matcher,
-		Images:      images,
-		ImageCache:  imageData,
-		Ingester:    ingester,
-		Photos:      photos,
-		Consumer:    consumer,
-		AdminVision: adminVision,
-		Config:      &config.Config{GeminiModel: "gemini-2.0-flash", AppEnv: "dev", HTTPPort: "8000"},
+		Matcher:       matcher,
+		Images:        images,
+		ImageCache:    imageData,
+		Ingester:      ingester,
+		Photos:        photos,
+		ProductImages: pictures,
+		Consumer:      consumer,
+		AdminVision:   adminVision,
+		Config:        &config.Config{GeminiModel: "gemini-2.0-flash", AppEnv: "dev", HTTPPort: "8000"},
 	})
 
 	return &apiFixture{
 		router: router, auth: auth, locations: locations, categories: categories, batches: batches,
 		lists: lists, expiry: expiry, jobs: jobs, idem: idem,
-		ingest: ingestStore, ingester: ingester, photos: photos,
+		ingest: ingestStore, ingester: ingester, photos: photos, pictures: pictures,
 		matcher: matcher, images: images, imageData: imageData,
 		consume: consumeStore, consumer: consumer, products: products,
 		reorder:      reorder,

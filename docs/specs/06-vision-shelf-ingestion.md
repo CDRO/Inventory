@@ -237,8 +237,23 @@ local to the storage and is never published to the catalog
 entry per proposed row, each carrying `row_id` and an explicit
 `decision` of `accept` or `reject` (`09-consumption-logging.md`), with
 accepted rows adding `{product_id | new_product: {name, category_id,
-item_type}, quantity, location_id, expiration_date}`. The server rejects a
+item_type, image}, quantity, location_id, expiration_date}`. The server rejects a
 payload whose `row_id` set does not exactly match the proposal it issued.
+
+`new_product.image` is `"crop"` (the row's own `bounding_box`), `"photo"`
+(the whole photo), or absent for no picture. The **server** cuts the
+picture from the job's stored photo — the client never uploads it — with
+the EXIF orientation applied before cropping, writes it to permanent
+storage under `/data/uploads/products/`
+(`07-shopping-list-reconciliation.md`), and records it on the product as
+`/api/storages/{storage_id}/product-images/{name}`. That route serves a
+picture only when a product in that storage uses it, and answers `404`
+otherwise (`03-auth-and-multi-tenancy.md`). A crop requested for a row with
+no box, or for a job whose photo is gone, is a `422`. Because files cannot
+join the transaction, the picture is written first; a confirm that then
+fails removes it, as does one whose row was folded into another row's new
+product of the same name.
+
 Backend, in one transaction per confirm call:
 
 1. Creates any `new_product` entries, and **inserts** each into

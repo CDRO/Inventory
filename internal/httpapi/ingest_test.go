@@ -52,6 +52,9 @@ type fakeIngestStore struct {
 	storageID uuid.UUID
 	userID    *uuid.UUID
 	err       error
+	// usedImages is what ProductImageInStorage answers from, keyed by storage
+	// id and image URL: every picture a successful confirm gave a product.
+	usedImages map[string]bool
 }
 
 func (f *fakeIngestStore) ConfirmIngestion(_ context.Context, storageID, jobID uuid.UUID, userID *uuid.UUID, decisions []store.IngestDecision) (*store.IngestResult, error) {
@@ -61,7 +64,39 @@ func (f *fakeIngestStore) ConfirmIngestion(_ context.Context, storageID, jobID u
 	if f.err != nil {
 		return nil, f.err
 	}
-	return &store.IngestResult{BatchIDs: []uuid.UUID{uuid.New()}, ProductsCreated: 1}, nil
+
+	// Like the real store, rows naming the same new product create it once,
+	// with the first of those rows' pictures.
+	created := map[string]bool{}
+	for _, d := range decisions {
+		if !d.Accept || d.NewProduct == nil {
+			continue
+		}
+		key := store.NormalizeCatalogName(d.NewProduct.Name)
+		if created[key] {
+			continue
+		}
+		created[key] = true
+		if d.NewProduct.ImageURL != nil {
+			f.markImageUsed(storageID, *d.NewProduct.ImageURL)
+		}
+	}
+	return &store.IngestResult{BatchIDs: []uuid.UUID{uuid.New()}, ProductsCreated: len(created)}, nil
+}
+
+// markImageUsed records a picture as some product's in storageID. Callers
+// hold f.mu, or are a test setting up before any request runs.
+func (f *fakeIngestStore) markImageUsed(storageID uuid.UUID, url string) {
+	if f.usedImages == nil {
+		f.usedImages = map[string]bool{}
+	}
+	f.usedImages[storageID.String()+" "+url] = true
+}
+
+func (f *fakeIngestStore) ProductImageInStorage(_ context.Context, storageID uuid.UUID, url string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.usedImages[storageID.String()+" "+url], nil
 }
 
 type fakePhotoStore struct {

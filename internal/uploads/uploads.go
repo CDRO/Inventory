@@ -20,6 +20,13 @@ import (
 // IngestDir is where photos backing a review job live.
 const IngestDir = "/data/uploads/ingest"
 
+// ProductImagesDir is permanent storage for product pictures taken from a
+// user's own photo (docs/specs/07-shopping-list-reconciliation.md, "Product
+// images — permanent"). Unlike IngestDir it has no retention sweep, and unlike
+// the image-suggestion cache it has no eviction: a picture someone chose for a
+// product must never disappear because a cleanup ran.
+const ProductImagesDir = "/data/uploads/products"
+
 // ErrInvalidName is a filename that is not one the server generates.
 var ErrInvalidName = errors.New("uploads: not a generated filename")
 
