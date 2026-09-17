@@ -243,7 +243,13 @@ func (h *Handler) load(r *http.Request) (*pageData, error) {
 		})
 	}
 
-	if h.vision != nil {
+	if h.vision == nil {
+		// No vision provider at all is the most unavailable a model can be.
+		// The banner says so, matching GetSettings' model_unavailable for the
+		// same configuration (internal/httpapi/admin.go), rather than an
+		// admin page that looks healthy while every vision feature is off.
+		data.ModelUnavailable = true
+	} else {
 		model, err := h.vision.EffectiveModel(ctx)
 		if err != nil {
 			return nil, err

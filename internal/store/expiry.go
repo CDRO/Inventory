@@ -208,7 +208,30 @@ func recomputeDerivedExpiry(ctx context.Context, tx pgx.Tx, storageID, productID
 // "Food → Dairy → Cheese", because that product's chain climbs through the row
 // that just changed.
 func (s *Store) RecomputeDerivedExpiryForCategory(ctx context.Context, storageID, categoryID uuid.UUID) (int, error) {
-	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
+	productIDs, err := productsUnderCategory(ctx, s.pool, storageID, categoryID)
+	if err != nil {
+		return 0, err
+	}
+
+	total := 0
+	for _, productID := range productIDs {
+		affected, err := s.RecomputeDerivedExpiry(ctx, storageID, productID)
+		if err != nil {
+			return total, err
+		}
+		total += affected
+	}
+	return total, nil
+}
+
+// productsUnderCategory returns every product of one storage filed under
+// categoryID or anywhere beneath it.
+//
+// The subtree walk matters for every caller: a product filed under
+// "Food → Dairy → Cheese" resolves its shelf life through "Food", so a change
+// to "Food" — its rule, or where it sits in the tree — reaches it.
+func productsUnderCategory(ctx context.Context, q querier, storageID, categoryID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.Query(ctx, fmt.Sprintf(`
 		WITH RECURSIVE subtree AS (
 		    SELECT id, 1 AS depth FROM categories WHERE id = $1 AND storage_id = $2
 		    UNION ALL
@@ -223,83 +246,102 @@ func (s *Store) RecomputeDerivedExpiryForCategory(ctx context.Context, storageID
 		   AND p.category_id IN (SELECT id FROM subtree)`, maxTreeDepth),
 		categoryID, storageID)
 	if err != nil {
-		return 0, fmt.Errorf("store: find products under category: %w", err)
+		return nil, fmt.Errorf("store: find products under category: %w", err)
 	}
+	defer rows.Close()
 
 	var productIDs []uuid.UUID
 	for rows.Next() {
 		var id uuid.UUID
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return 0, fmt.Errorf("store: scan product under category: %w", err)
+			return nil, fmt.Errorf("store: scan product under category: %w", err)
 		}
 		productIDs = append(productIDs, id)
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("store: find products under category: %w", err)
+		return nil, fmt.Errorf("store: find products under category: %w", err)
 	}
-
-	total := 0
-	for _, productID := range productIDs {
-		affected, err := s.RecomputeDerivedExpiry(ctx, storageID, productID)
-		if err != nil {
-			return total, err
-		}
-		total += affected
-	}
-	return total, nil
+	return productIDs, nil
 }
 
-// RecomputeDerivedExpiryForCatalog recomputes every product, across every
-// storage, that resolves through one catalog entry, after an admin corrected
-// that entry's shelf life (docs/specs/08-expiration-and-classification.md's
-// "Cascade against current state").
+// CorrectCatalogShelfLife sets one catalog entry's shelf life and recomputes
+// every product, across every storage, that resolves through it
+// (docs/specs/08-expiration-and-classification.md's "Cascade against current
+// state"). It returns how many batch dates changed.
 //
 // This is the one cross-storage recompute in the package: catalog_products is
 // the one table with no storage_id (docs/specs/02-data-model.md), so an
 // admin's correction to it is a correction for every household that picked
 // that catalog entry, not just one. It still touches only
 // expiration_source = 'derived' batches, through the same
-// RecomputeDerivedExpiry each storage-scoped caller uses.
+// recomputeDerivedExpiry each storage-scoped caller uses.
+//
+// **The write and the whole cascade are one transaction.** A correction that
+// stops part-way — the admin's request cancelled, a timeout, a database error
+// on the tenth product — rolls back entirely: the entry keeps its old value
+// and no batch has moved. Committing per product instead would leave some
+// households on the new date and some on the old one with nothing recording
+// how far it got, and the entry's new value would stop the admin from seeing
+// that anything was left undone. All or nothing makes a retry the whole fix.
+// The cost is a longer transaction holding row locks on the batches it has
+// recomputed so far, which at household scale — a handful of products per
+// entry — is not a cost.
+//
+// RecomputeDerivedExpiryForCategory keeps its per-product transactions on
+// purpose, a decision recorded on issue #35: there the person who changed the
+// rule is the one who sees the error and can save it again, and the partial
+// state is confined to their own household. A catalog correction lands in
+// households whose members made no change and would never learn it stopped.
 //
 // A product with its own products.default_shelf_life_days is excluded up
 // front: that override outranks the catalog value in ExpiryRulesFor's
 // priority order, so the catalog change does not apply to it and recomputing
-// would touch the row for no reason.
-func (s *Store) RecomputeDerivedExpiryForCatalog(ctx context.Context, catalogID uuid.UUID) (int, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT storage_id, id FROM products
-		 WHERE catalog_id = $1 AND default_shelf_life_days IS NULL`, catalogID)
-	if err != nil {
-		return 0, fmt.Errorf("store: find products under catalog entry: %w", err)
-	}
-
-	type productRef struct {
-		storageID uuid.UUID
-		productID uuid.UUID
-	}
-	var products []productRef
-	for rows.Next() {
-		var p productRef
-		if err := rows.Scan(&p.storageID, &p.productID); err != nil {
-			rows.Close()
-			return 0, fmt.Errorf("store: scan product under catalog entry: %w", err)
-		}
-		products = append(products, p)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("store: find products under catalog entry: %w", err)
-	}
-
+// would touch the row for no reason. Products are visited in a fixed order so
+// that two corrections racing each other lock rows in the same sequence.
+func (s *Store) CorrectCatalogShelfLife(ctx context.Context, catalogID uuid.UUID, days *int) (int, error) {
 	total := 0
-	for _, p := range products {
-		affected, err := s.RecomputeDerivedExpiry(ctx, p.storageID, p.productID)
-		if err != nil {
-			return total, err
+	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		if err := setCatalogShelfLife(ctx, tx, catalogID, days); err != nil {
+			return err
 		}
-		total += affected
+
+		rows, err := tx.Query(ctx, `
+			SELECT storage_id, id FROM products
+			 WHERE catalog_id = $1 AND default_shelf_life_days IS NULL
+			 ORDER BY storage_id, id`, catalogID)
+		if err != nil {
+			return fmt.Errorf("store: find products under catalog entry: %w", err)
+		}
+
+		type productRef struct {
+			storageID uuid.UUID
+			productID uuid.UUID
+		}
+		var products []productRef
+		for rows.Next() {
+			var p productRef
+			if err := rows.Scan(&p.storageID, &p.productID); err != nil {
+				rows.Close()
+				return fmt.Errorf("store: scan product under catalog entry: %w", err)
+			}
+			products = append(products, p)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("store: find products under catalog entry: %w", err)
+		}
+
+		for _, p := range products {
+			affected, err := recomputeDerivedExpiry(ctx, tx, p.storageID, p.productID)
+			if err != nil {
+				return err
+			}
+			total += affected
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
 	return total, nil
 }

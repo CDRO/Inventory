@@ -317,6 +317,9 @@ func NewRouter(d Deps) http.Handler {
 
 			categories := NewCategoryHandler(d.Store, errs)
 			sr.Get("/categories", categories.List)
+			sr.Post("/categories", categories.Create)
+			sr.Patch("/categories/{id}", categories.Update)
+			sr.Delete("/categories/{id}", categories.Delete)
 
 			// Background jobs (docs/specs/04-backend-api-conventions.md). The
 			// endpoints that create them are the upload routes of spec 06.

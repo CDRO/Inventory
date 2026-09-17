@@ -135,7 +135,10 @@ inventory. Implement that list once:
 Used for both `locations` and `categories` (identical shape per
 `02-data-model.md`): expand/collapse, inline add-child, rename, a
 "move to…" picker, and required drag-and-drop re-parenting via native
-HTML5 drag events (`06-vision-shelf-ingestion.md`).
+HTML5 drag events (`06-vision-shelf-ingestion.md`). A page may pass an
+optional `renderDetail` callback to draw something beside each node's name
+— the category tree uses it for each node's shelf-life rule
+(`08-expiration-and-classification.md`); the location tree does not.
 
 ## Styling
 
