@@ -28,7 +28,8 @@ knows.
 
 **`/ship`** — one issue → one branch → one PR → three adversarial reviews →
 auto-merge when all three approve and tests pass. `/seed-issues` bootstraps the
-queue from the specs (once).
+queue from the specs and keeps the Build Runbook in step with it; re-run it when
+issues are added, closed or packaged into PRs.
 
 Every change is reviewed by three subagents that cannot edit code:
 `review-go`, `review-tests`, `review-docs`. They post verdicts as PR comments.

@@ -95,22 +95,37 @@ The markup, the CSS and the script stay as they are:
 - `<script id="plan" type="application/json">` — `{"phases":[{key, name, note, items:[…]}]}`
 - `<script id="state" type="application/json">` — `{"status":{"<item id>":"todo|working|done"}, "updated":"<ISO time>"}`
 
+[`runbook.pl`](runbook.pl), next to this file, does the checking and the
+writing back, so neither is done by eye. Git Bash ships perl, so it needs no
+host toolchain. Work in a scratch directory, not the repository.
+
 ### Procedure
 
 1. Load the `artifact-design` skill; it must be loaded before any artifact file
    is written. Leave `artifact-capabilities` alone unless you are changing the
    page's script, which a data update never does.
-2. `Artifact(action: "read", url: <runbook>)`. It returns the stored HTML, inline
-   when the page is small or saved to a local file when it is not. Build every
-   republish from that exact HTML (write the inline form to a scratch file
-   first), never retyped. The page arrives inside the platform's own
+2. Read the page twice. `Artifact(action: "read", url: <runbook>)` is what lets
+   the later publish go through. `Artifact(action: "read", url: <runbook>,
+   path: "index.html", out_dir: <scratch dir>)` saves the same page as a local
+   file, `page.html` below. Every republish is built from that file, never
+   retyped. The page arrives inside the platform's own
    `<!doctype html><head>…` skeleton, which is expected and republishes as-is.
-3. **Check the file is clean before editing it.** It must contain exactly one
-   `<script id="plan"`, exactly one `<script id="state"`, and no
-   `<!-- frame-runtime -->` or `FRAME_PREAMBLE`. Injected runtime means the
-   page's own save has regressed into serializing the live DOM: stop, report
-   it, and do not republish that copy.
-4. Edit the `plan` block:
+3. **Check the file is clean before editing it:**
+   `perl .claude/skills/seed-issues/runbook.pl check page.html`. It exits 0 with
+   a one-line summary, or exits 1 and names each problem: a script the page did
+   not write, a node of the page's own that appears twice, the viewer's runtime
+   baked in, a script closed early, a data block that is not valid JSON or holds
+   a literal `<`, a duplicated id, a status for no item. Any of those means the
+   page's own save has regressed, or someone edited it by hand: stop, report
+   the output, and do not republish that copy.
+4. `perl .claude/skills/seed-issues/runbook.pl extract page.html plan.json state.json`
+   writes the two blocks out as readable JSON. Edit those two files.
+5. Edit `plan.json`:
+   - **Look before adding.** Search the plan for the issue number first. A
+     spec issue that already has an item, or a package whose PR already has
+     one, is updated in place and never added a second time, so a re-run
+     changes nothing that is already there. One issue can still sit in two
+     packages when each finishes part of it.
    - **One item per issue** for spec issues, in the phase their spec belongs to
      (`01`–`05` Foundations, `06`–`11` Features, `50`–`52` Later), id `m<next>`.
    - **One item per PR** for follow-up issues in the Follow-ups phase, id
@@ -124,21 +139,27 @@ The markup, the CSS and the script stay as they are:
      and `after` (what to check by hand once it lands).
    - **Ids are permanent.** Never delete an item or reuse an id: the `state`
      block keys on them, and a removed id orphans its status.
-5. Edit the `state` block from GitHub, which is authoritative:
-   - every issue an item covers is closed → `"done"`
+6. Edit `state.json` from GitHub, which is authoritative. The first rule that
+   holds wins:
+   - every issue the item covers is closed → `"done"`
    - an open PR exists for the item → `"working"`
-   - otherwise leave the value as it is. A person may have marked it `working`
-     for a reason GitHub cannot see.
+   - otherwise leave an existing value as it is: a person may have marked it
+     `working` for a reason GitHub cannot see. A new item gets no entry, which
+     the page shows as not started.
    - Set `"updated"` to the current time. Without that, a viewer's older copy in
      their browser storage outranks what you publish.
-6. Before writing each block back: validate the JSON
-   (`perl -MJSON::PP -e 'local $/; JSON::PP->new->decode(<STDIN>)' < block.json`
-   — Git Bash ships perl, so this needs no host toolchain), and escape every `<`
-   as `<` so no text can close the script tag.
-7. `Artifact(action: "publish", url: <runbook>, file_path: <edited file>)`.
+7. `perl .claude/skills/seed-issues/runbook.pl inject page.html plan.json state.json out.html`
+   writes the two blocks back into an otherwise byte-identical page. It refuses,
+   and writes nothing, when either file is not valid JSON, when an item or a
+   status that the page had is gone, when an id is used twice or a status names
+   no item, or when `"updated"` is not later than the page's. It escapes every
+   `<` in the data as `\u003c`, so no text can close the script tag, and checks
+   the result is clean before writing it.
+8. `Artifact(action: "publish", url: <runbook>, file_path: out.html)`.
    Omit `favicon`, `capabilities` and `contract`: omitting `capabilities` carries
    the page's `artifact` grant forward, which is what lets a status click save.
-8. The public share link is pinned to a version. Link viewers see an update only
+   A `conflict` means a viewer saved in between: start again from step 2.
+9. The public share link is pinned to a version. Link viewers see an update only
    once the owner moves the pin in the share menu, so say so in the report.
 
 ## 5. Report
