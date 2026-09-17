@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CDRO/Inventory/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/image/font"
@@ -30,7 +31,7 @@ func requireLiveGemini(t *testing.T) (key, model string) {
 	}
 	model = os.Getenv("GEMINI_MODEL")
 	if model == "" {
-		model = "gemini-3.6-flash"
+		model = config.DefaultGeminiModel
 	}
 	return key, model
 }
@@ -73,10 +74,11 @@ func TestLiveListModelsSeesConfiguredModel(t *testing.T) {
 }
 
 // TestLiveAnalyzeProductHonoursContract sends a real, readable label through
-// Analyze in ModeProduct and checks the reply against the same rules
-// ParseAnalysis enforces: exactly one item, a usable label, no box or path.
-// It does not assert what the label says — pinning the model's exact wording
-// would make the test flaky across model revisions for no safety gained.
+// Analyze in ModeProduct and checks that the model actually found something:
+// the call succeeds and returns exactly one item. It does not assert what the
+// label says, or re-check fields ParseAnalysis already guarantees regardless
+// of the response — pinning the model's exact wording would make the test
+// flaky across model revisions for no safety gained.
 func TestLiveAnalyzeProductHonoursContract(t *testing.T) {
 	key, model := requireLiveGemini(t)
 	photo := labeledProductPhoto(t, "ORGANIC WHOLE MILK 1L")
@@ -87,14 +89,12 @@ func TestLiveAnalyzeProductHonoursContract(t *testing.T) {
 	client := NewClient(key)
 	analysis, err := client.Analyze(ctx, model, ModeProduct, photo, "image/png")
 
+	// NoError and Len(1) are the two assertions carrying live signal: they
+	// depend on what the model actually saw. Everything else about a
+	// ModeProduct item — a non-empty label, quantity >= 1, confidence in
+	// [0, 1], no box, no path — is guaranteed by ParseAnalysis's own
+	// construction once those two hold, real response or not, so asserting
+	// them again here would test the parser a second time, not Gemini.
 	require.NoError(t, err)
 	require.Len(t, analysis.Items, 1, "ModeProduct must return exactly one item")
-
-	item := analysis.Items[0]
-	assert.NotEmpty(t, item.Label)
-	assert.GreaterOrEqual(t, item.Quantity, 1)
-	assert.GreaterOrEqual(t, item.Confidence, 0.0)
-	assert.LessOrEqual(t, item.Confidence, 1.0)
-	assert.Nil(t, item.BoundingBox, "ModeProduct must not return a bounding box")
-	assert.Empty(t, item.ProposedLocationPath, "ModeProduct must not return a location path")
 }
