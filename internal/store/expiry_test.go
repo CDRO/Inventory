@@ -702,13 +702,13 @@ func TestRecomputeDerivedExpiryForCategoryCascadeIsRecoverable(t *testing.T) {
 	}
 }
 
-// TestRecomputeDerivedExpiryForCatalogReachesEveryStorage is the admin
-// catalog cascade of docs/specs/08-expiration-and-classification.md
-// (#36, PatchCatalog): an admin correcting a catalog entry's shelf life is a
-// correction for every household that picked it, not just one — the one
-// cascade in this package that is not storage-scoped, because
-// catalog_products itself has no storage_id.
-func TestRecomputeDerivedExpiryForCatalogReachesEveryStorage(t *testing.T) {
+// TestCorrectCatalogShelfLifeReachesEveryStorage is the admin catalog cascade
+// of docs/specs/08-expiration-and-classification.md (#36, PatchCatalog): an
+// admin correcting a catalog entry's shelf life is a correction for every
+// household that picked it, not just one — the one cascade in this package
+// that is not storage-scoped, because catalog_products itself has no
+// storage_id.
+func TestCorrectCatalogShelfLifeReachesEveryStorage(t *testing.T) {
 	s := requireDB(t)
 	ctx := context.Background()
 
@@ -758,8 +758,7 @@ func TestRecomputeDerivedExpiryForCatalogReachesEveryStorage(t *testing.T) {
 	overrideDateBefore, _ := batchExpiry(t, ctx, overrideBatch.ID)
 	require.NotNil(t, overrideDateBefore)
 
-	require.NoError(t, s.SetCatalogShelfLife(ctx, entry.ID, shelfLife(400)))
-	affected, err := s.RecomputeDerivedExpiryForCatalog(ctx, entry.ID)
+	affected, err := s.CorrectCatalogShelfLife(ctx, entry.ID, shelfLife(400))
 	require.NoError(t, err)
 	assert.Equal(t, 2, affected, "the two derived batches across both storages, not the user one or the override one")
 
@@ -783,4 +782,69 @@ func TestRecomputeDerivedExpiryForCatalogReachesEveryStorage(t *testing.T) {
 	require.NotNil(t, overrideDateAfter)
 	assert.Equal(t, overrideDateBefore.Format(time.DateOnly), overrideDateAfter.Format(time.DateOnly),
 		"a product with its own shelf-life override is not reached by the catalog's value")
+}
+
+// TestCorrectCatalogShelfLifeThatCannotFinishChangesNothing is issue #61's
+// "silent partial correction": a cascade stopped part-way — here by its
+// context expiring, the same thing an admin cancelling the request does —
+// must leave neither the entry's new value nor any batch it had already
+// recomputed behind.
+//
+// The stop is forced, not raced. Another transaction holds the second
+// product's batch row, so the cascade recomputes the first product, then
+// blocks on the second until its deadline passes. Products are visited in
+// (storage_id, id) order and ids are UUIDv7, so the product created first is
+// the one visited first.
+func TestCorrectCatalogShelfLifeThatCannotFinishChangesNothing(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+
+	entry, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{
+		DisplayName: "Catalog Rollback " + randomSuffix(), ItemType: store.ItemLongShelfLife,
+		DefaultShelfLifeDays: shelfLife(30),
+	})
+	require.NoError(t, err)
+
+	storageID := newStorage(t, ctx)
+	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Shelf"})
+	require.NoError(t, err)
+	first, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "First", CatalogID: &entry.ID})
+	require.NoError(t, err)
+	second, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Second", CatalogID: &entry.ID})
+	require.NoError(t, err)
+	firstBatch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: first.ID, LocationID: location.ID, Quantity: 1, Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+	secondBatch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: second.ID, LocationID: location.ID, Quantity: 1, Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+	firstBefore, _ := batchExpiry(t, ctx, firstBatch.ID)
+	require.NotNil(t, firstBefore)
+
+	blocker, err := testPool.Begin(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = blocker.Rollback(context.Background()) })
+	_, err = blocker.Exec(ctx, `SELECT id FROM inventory_batches WHERE id = $1 FOR UPDATE`, secondBatch.ID)
+	require.NoError(t, err)
+
+	deadline, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	_, err = s.CorrectCatalogShelfLife(deadline, entry.ID, shelfLife(400))
+	require.Error(t, err, "the cascade cannot finish while the second product's batch is held")
+
+	require.NoError(t, blocker.Rollback(ctx))
+
+	var days *int
+	require.NoError(t, testPool.QueryRow(ctx,
+		`SELECT default_shelf_life_days FROM catalog_products WHERE id = $1`, entry.ID).Scan(&days))
+	require.NotNil(t, days)
+	assert.Equal(t, 30, *days, "an unfinished correction must not leave the entry showing the new value")
+
+	firstAfter, source := batchExpiry(t, ctx, firstBatch.ID)
+	require.NotNil(t, firstAfter)
+	assert.Equal(t, firstBefore.Format(time.DateOnly), firstAfter.Format(time.DateOnly),
+		"the product recomputed before the stop must be rolled back with the rest")
+	assert.Equal(t, "derived", source)
 }

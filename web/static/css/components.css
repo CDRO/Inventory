@@ -250,6 +250,17 @@
   white-space: nowrap;
 }
 
+/* What a tree's renderDetail hook draws beside a name — the category tree's
+   shelf-life rule. It keeps its width so a long name is what truncates. */
+.tree-detail {
+  flex: none;
+  color: var(--color-text-muted);
+}
+
+.tree-shelf-life-input {
+  width: 6rem;
+}
+
 /* --- Review list (js/review.js): 06/07/09 ingestion proposals --- */
 
 .review-list {

@@ -20,7 +20,7 @@
 // a test opening a cache the service worker never uses — caches.open() creates
 // a missing cache rather than failing, which would have made that test pass
 // while checking nothing.
-const CACHE_VERSION = "v6";
+const CACHE_VERSION = "v7";
 const CACHE_NAME = `inventory-shell-${CACHE_VERSION}`;
 
 // The app shell: everything a cold load needs before the network is asked
@@ -40,6 +40,7 @@ const SHELL_ASSETS = [
   "/",
   "/storages.html",
   "/locations.html",
+  "/categories.html",
   "/shopping-list.html",
   "/ingest.html",
   "/inbox.html",
@@ -109,6 +110,7 @@ const CACHEABLE_EXACT = new Set([
   "/manifest.json",
   "/storages.html",
   "/locations.html",
+  "/categories.html",
   "/shopping-list.html",
   "/ingest.html",
   "/inbox.html",

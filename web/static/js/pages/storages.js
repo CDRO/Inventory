@@ -104,6 +104,9 @@ function renderLanding(me, storage) {
         el("a", { class: "btn", href: withStorageParam(storage.id, "/locations.html") }, [
           text("Locations"),
         ]),
+        el("a", { class: "btn", href: withStorageParam(storage.id, "/categories.html") }, [
+          text("Categories"),
+        ]),
         el("a", { class: "btn", href: withStorageParam(storage.id, "/shopping-list.html") }, [
           text("Shopping list"),
         ]),

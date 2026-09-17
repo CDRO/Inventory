@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/CDRO/Inventory/internal/gamification"
 )
 
 // Category is one node of a storage's category tree. Same shape and same
@@ -42,22 +44,9 @@ func (s *Store) CreateCategory(ctx context.Context, storageID uuid.UUID, in NewC
 		if err := lockStorageTree(ctx, tx, storageID); err != nil {
 			return err
 		}
-		if err := resolveParent(ctx, tx, treeCategories, storageID, nil, in.ParentID); err != nil {
-			return err
-		}
-
-		row := tx.QueryRow(ctx, `
-			INSERT INTO categories (id, storage_id, parent_id, name, default_shelf_life_days)
-			VALUES ($1, $2, $3, $4, $5)
-			RETURNING id, storage_id, parent_id, name, default_shelf_life_days, created_at, updated_at`,
-			id, storageID, in.ParentID, in.Name, in.DefaultShelfLifeDays)
-
-		cat, err := scanCategory(row)
-		if err != nil {
-			return err
-		}
+		cat, err := insertCategory(ctx, tx, storageID, id, in)
 		out = cat
-		return nil
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -65,29 +54,139 @@ func (s *Store) CreateCategory(ctx context.Context, storageID uuid.UUID, in NewC
 	return out, nil
 }
 
+// CreateCategoryAsUser is CreateCategory, additionally recording a
+// category_created contribution in the same transaction
+// (docs/specs/51-gamification-scoring.md) — the category-tree counterpart of
+// CreateLocationAsUser's location_mapped.
+func (s *Store) CreateCategoryAsUser(ctx context.Context, storageID uuid.UUID, in NewCategory, userID uuid.UUID) (*Category, error) {
+	id, err := newID()
+	if err != nil {
+		return nil, err
+	}
+
+	var out *Category
+	err = s.inTx(ctx, func(tx pgx.Tx) error {
+		if err := lockStorageTree(ctx, tx, storageID); err != nil {
+			return err
+		}
+		cat, err := insertCategory(ctx, tx, storageID, id, in)
+		if err != nil {
+			return err
+		}
+		out = cat
+		return recordContribution(ctx, tx, storageID, userID, gamification.KindCategoryCreated, &cat.ID, nil)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// insertCategory writes one node inside a caller's transaction. The caller
+// holds the storage's tree lock.
+//
+// A new node needs no expiry recompute, whatever shelf life it carries: no
+// product can be filed under a category that did not exist until this
+// statement.
+func insertCategory(ctx context.Context, tx pgx.Tx, storageID, id uuid.UUID, in NewCategory) (*Category, error) {
+	if err := resolveParent(ctx, tx, treeCategories, storageID, nil, in.ParentID); err != nil {
+		return nil, err
+	}
+	return scanCategory(tx.QueryRow(ctx, `
+		INSERT INTO categories (id, storage_id, parent_id, name, default_shelf_life_days)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, storage_id, parent_id, name, default_shelf_life_days, created_at, updated_at`,
+		id, storageID, in.ParentID, in.Name, in.DefaultShelfLifeDays))
+}
+
 // MoveCategory re-parents a node, with the same same-storage and cycle rules
 // as MoveLocation.
+//
+// It is UpdateCategory with only the parent set, rather than a second write
+// path, so a move can never skip the expiry recompute UpdateCategory does.
 func (s *Store) MoveCategory(ctx context.Context, storageID, id uuid.UUID, parentID *uuid.UUID) error {
-	return s.inTx(ctx, func(tx pgx.Tx) error {
+	_, err := s.UpdateCategory(ctx, storageID, id, CategoryPatch{ParentID: parentID, SetParentID: true})
+	return err
+}
+
+// CategoryPatch is a partial update to one node, with the same
+// absent-versus-null contract as LocationPatch: a nil ParentID with
+// SetParentID makes the node a root, and without it leaves the parent alone.
+//
+// The shelf-life rule is deliberately not a field. Changing it is a
+// correction that reports how many dates it moved
+// (docs/specs/08-expiration-and-classification.md), which is what
+// SetCategoryShelfLife and its own route are for.
+type CategoryPatch struct {
+	// Name nil leaves the name unchanged.
+	Name *string
+	// ParentID is applied only when SetParentID is true.
+	ParentID    *uuid.UUID
+	SetParentID bool
+}
+
+// UpdateCategory renames and/or re-parents one node in a single transaction,
+// for the same half-applied-PATCH reason UpdateLocation gives.
+//
+// A re-parent also recomputes the derived expiry dates of every product in the
+// moved subtree, in the same transaction. Those products' category chains now
+// climb through different ancestors, so an inherited shelf life may have
+// changed under them — the same consequence as re-filing a single product
+// (SetProductCategory), and silent for the same reason: the move is performed
+// to reorganise the tree, and the dates follow from it. Dates a person set are
+// untouched, as everywhere.
+//
+// A node or parent in another storage is ErrNotFound; a parent inside the
+// node's own subtree is ErrConflict.
+func (s *Store) UpdateCategory(ctx context.Context, storageID, id uuid.UUID, patch CategoryPatch) (*Category, error) {
+	var out *Category
+	err := s.inTx(ctx, func(tx pgx.Tx) error {
 		if err := lockStorageTree(ctx, tx, storageID); err != nil {
 			return err
 		}
 		if err := requireSameStorage(ctx, tx, treeCategories, storageID, id); err != nil {
 			return err
 		}
-		if err := resolveParent(ctx, tx, treeCategories, storageID, &id, parentID); err != nil {
-			return err
+		if patch.SetParentID {
+			if err := resolveParent(ctx, tx, treeCategories, storageID, &id, patch.ParentID); err != nil {
+				return err
+			}
 		}
 
-		_, err := tx.Exec(ctx, `
-			UPDATE categories SET parent_id = $1, updated_at = now()
-			 WHERE id = $2 AND storage_id = $3`,
-			parentID, id, storageID)
+		// The casts pin each parameter's type for the CASE arms, as in
+		// UpdateLocation.
+		cat, err := scanCategory(tx.QueryRow(ctx, `
+			UPDATE categories SET
+			    name       = COALESCE($1::varchar, name),
+			    parent_id  = CASE WHEN $2::bool THEN $3::uuid ELSE parent_id END,
+			    updated_at = now()
+			 WHERE id = $4 AND storage_id = $5
+			RETURNING id, storage_id, parent_id, name, default_shelf_life_days, created_at, updated_at`,
+			patch.Name, patch.SetParentID, patch.ParentID, id, storageID))
 		if err != nil {
-			return fmt.Errorf("store: move category: %w", err)
+			return err
+		}
+		out = cat
+
+		if !patch.SetParentID {
+			// A rename changes no rule a product resolves through.
+			return nil
+		}
+		products, err := productsUnderCategory(ctx, tx, storageID, id)
+		if err != nil {
+			return err
+		}
+		for _, productID := range products {
+			if _, err := recomputeDerivedExpiry(ctx, tx, storageID, productID); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // DeleteCategory removes a node and its descendants.

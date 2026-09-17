@@ -101,7 +101,7 @@ func (h *LocationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fields := map[string][]string{}
-	name := validateLocationName(body.Name, fields)
+	name := validateTreeNodeName(body.Name, fields)
 
 	var parentID *uuid.UUID
 	if body.ParentID != nil {
@@ -169,7 +169,7 @@ func (h *LocationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	patch := store.LocationPatch{}
 
 	if body.Name != nil {
-		name := validateLocationName(*body.Name, fields)
+		name := validateTreeNodeName(*body.Name, fields)
 		patch.Name = &name
 	}
 
@@ -281,14 +281,17 @@ func locationIDFromPath(r *http.Request) (uuid.UUID, *Failure) {
 	return id, nil
 }
 
-// validateLocationName trims and bounds a name, recording any problem under
-// "name" in fields.
-func validateLocationName(raw string, fields map[string][]string) string {
+// validateTreeNodeName trims and bounds a location or category name, recording
+// any problem under "name" in fields. Both trees share it because
+// categories.name has the same VARCHAR(255) width as locations.name
+// (docs/specs/02-data-model.md: "same shape ... as locations").
+func validateTreeNodeName(raw string, fields map[string][]string) string {
 	name := strings.TrimSpace(raw)
 	switch {
 	case name == "":
 		// A whitespace-only name renders as an invisible node in the tree: it
-		// is there, it holds inventory, and there is nothing to click.
+		// is there, it may hold inventory or file products, and there is
+		// nothing to click.
 		fields["name"] = append(fields["name"], "A name is required.")
 	case utf8.RuneCountInString(name) > maxLocationName:
 		fields["name"] = append(fields["name"], "Must be at most 255 characters.")

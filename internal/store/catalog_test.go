@@ -161,11 +161,11 @@ func TestUnknownShownIDDoesNotFailTheInsert(t *testing.T) {
 	assert.Nil(t, created.BaseID)
 }
 
-// TestSetCatalogShelfLifeIsTheOnlyPermittedUpdate documents the single
+// TestCorrectCatalogShelfLifeIsTheOnlyPermittedUpdate documents the single
 // exception to insert-only. It is a bounded integer written by an admin, so it
 // cannot carry a message to another household — unlike the free-text and image
 // fields, which stay permanently immutable.
-func TestSetCatalogShelfLifeIsTheOnlyPermittedUpdate(t *testing.T) {
+func TestCorrectCatalogShelfLifeIsTheOnlyPermittedUpdate(t *testing.T) {
 	s := requireDB(t)
 	ctx := context.Background()
 
@@ -175,7 +175,8 @@ func TestSetCatalogShelfLifeIsTheOnlyPermittedUpdate(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, s.SetCatalogShelfLife(ctx, created.ID, ptrInt(90)))
+	_, err = s.CorrectCatalogShelfLife(ctx, created.ID, ptrInt(90))
+	require.NoError(t, err)
 
 	after, err := s.FindCatalogProduct(ctx, created.DisplayName)
 	require.NoError(t, err)
@@ -185,6 +186,9 @@ func TestSetCatalogShelfLifeIsTheOnlyPermittedUpdate(t *testing.T) {
 	// Everything else is unchanged.
 	assert.Equal(t, created.DisplayName, after.DisplayName)
 	assert.Equal(t, created.ItemType, after.ItemType)
+
+	_, err = s.CorrectCatalogShelfLife(ctx, newUUID(t), ptrInt(90))
+	assert.ErrorIs(t, err, store.ErrNotFound, "an entry that does not exist is a 404 to the admin, not a silent no-op")
 }
 
 // TestDeleteCatalogProductLeavesStorageProductsAlone — moderation removes the

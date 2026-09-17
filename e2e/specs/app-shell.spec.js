@@ -10,10 +10,6 @@
 //   6  reconcile a list across all match states ... shopping-list.spec.js
 //   7  non-admin gets 404 for the admin area ...... non-disclosure.spec.js
 //   8  storage B id gets the nonexistent-id 404 ... non-disclosure.spec.js
-//
-// One is incomplete because the product behind it is: journey 3 has no
-// category step, since no route or page can create a category (#72). It is
-// tracked on #30 until that lands.
 
 import { test, expect } from "@playwright/test";
 
@@ -58,6 +54,7 @@ test("every shared JS module is reachable and served as JavaScript", async ({ re
     "/js/pages/index.js",
     "/js/pages/storages.js",
     "/js/pages/locations.js",
+    "/js/pages/categories.js",
     "/js/pages/shopping-list.js",
     "/js/pages/ingest.js",
     "/js/pages/inbox.js",

@@ -234,15 +234,18 @@ func (s *Store) SearchCatalog(ctx context.Context, q string) ([]CatalogProduct, 
 	return out, nil
 }
 
-// SetCatalogShelfLife is the ONLY permitted update to a catalog_products row,
-// and only an admin may call it.
+// setCatalogShelfLife is the ONLY permitted update to a catalog_products row,
+// and only an admin may cause it. Its one caller is CorrectCatalogShelfLife
+// (expiry.go), which runs the cascade the change requires in the same
+// transaction — there is deliberately no exported way to change the value
+// without it.
 //
 // It does not reopen the abuse hole the insert-only rule closes: the field is
 // a bounded integer written by an admin, so it cannot carry a message to
 // another household — unlike the free-text and image fields, which stay
 // permanently immutable.
-func (s *Store) SetCatalogShelfLife(ctx context.Context, id uuid.UUID, days *int) error {
-	tag, err := s.pool.Exec(ctx,
+func setCatalogShelfLife(ctx context.Context, q querier, id uuid.UUID, days *int) error {
+	tag, err := q.Exec(ctx,
 		`UPDATE catalog_products SET default_shelf_life_days = $1 WHERE id = $2`, days, id)
 	if err != nil {
 		return fmt.Errorf("store: set catalog shelf life: %w", err)

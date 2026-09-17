@@ -137,7 +137,11 @@
   <h2 id="model-heading">AI Model</h2>
   {{- if .ModelUnavailable}}
   <p class="alert" role="alert">
+    {{- if .GeminiModel}}
     The configured model (<code>{{.GeminiModel}}</code>) is not currently offered by the provider.
+    {{- else}}
+    No vision model is configured.
+    {{- end}}
     Vision features (photo ingestion, consumption photos, shopping-list image search) are unavailable
     until a working model is selected below.
   </p>

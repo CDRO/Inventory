@@ -7,8 +7,8 @@ import "../register-sw.js";
 //
 // None of that interaction lives here. It is all in the shared TreeView
 // (js/tree.js, docs/specs/05-frontend-pwa-foundations.md), which the category
-// tree will reuse unchanged; this module only resolves the storage, calls the
-// API, and re-renders from the server's answer.
+// tree (js/pages/categories.js) reuses too; this module only resolves the
+// storage, calls the API, and re-renders from the server's answer.
 //
 // Deleting a location is deliberately absent. The endpoint exists and refuses
 // with 409 while the subtree still holds stock, but spec 06's frontend bullet

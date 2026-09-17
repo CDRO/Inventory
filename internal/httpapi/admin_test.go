@@ -217,23 +217,17 @@ func (f *fakeAuth) SearchCatalog(_ context.Context, q string) ([]store.CatalogPr
 	return out, nil
 }
 
-func (f *fakeAuth) SetCatalogShelfLife(_ context.Context, id uuid.UUID, days *int) error {
+func (f *fakeAuth) CorrectCatalogShelfLife(_ context.Context, id uuid.UUID, days *int) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for i, c := range f.catalog {
 		if c.ID == id {
 			f.catalog[i].DefaultShelfLifeDays = days
-			return nil
+			f.catalogRecomputeCalls = append(f.catalogRecomputeCalls, id)
+			return f.catalogRecompute[id], nil
 		}
 	}
-	return store.ErrNotFound
-}
-
-func (f *fakeAuth) RecomputeDerivedExpiryForCatalog(_ context.Context, id uuid.UUID) (int, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.catalogRecomputeCalls = append(f.catalogRecomputeCalls, id)
-	return f.catalogRecompute[id], nil
+	return 0, store.ErrNotFound
 }
 
 func (f *fakeAuth) DeleteCatalogProduct(_ context.Context, id uuid.UUID) error {
@@ -249,9 +243,9 @@ func (f *fakeAuth) DeleteCatalogProduct(_ context.Context, id uuid.UUID) error {
 }
 
 // newAdminFixture is newAPIFixture with the caller promoted to admin.
-func newAdminFixture(t *testing.T) *apiFixture {
+func newAdminFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 	t.Helper()
-	f := newAPIFixture(t)
+	f := newAPIFixture(t, opts...)
 	f.auth.setAdmin(f.user.ID, true)
 	f.user.IsAdmin = true
 	return f
@@ -756,6 +750,74 @@ func TestAdminPageHidesBannerWhenModelIsFine(t *testing.T) {
 	rec := f.do(http.MethodGet, "/admin", "")
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.NotContains(t, rec.Body.String(), "not currently offered")
+}
+
+// TestAdminAreaWorksWithNoVisionProvider is issue #61's missing coverage: a
+// router built with no AdminVision at all — the deployment mode NewAdminHandler,
+// admin.New and Deps.AdminVision each document as supported — must serve every
+// route that reads the checker instead of panicking on the nil dependency.
+// Every other fixture wires a fake, so a change that dereferenced it
+// unconditionally would pass the rest of the suite.
+func TestAdminAreaWorksWithNoVisionProvider(t *testing.T) {
+	t.Parallel()
+
+	noVision := func(d *httpapi.Deps) { d.AdminVision = nil }
+
+	t.Run("settings report the model as unavailable", func(t *testing.T) {
+		t.Parallel()
+
+		f := newAdminFixture(t, noVision)
+		rec := f.do(http.MethodGet, "/api/admin/settings", "")
+
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body struct {
+			GeminiModel     string   `json:"gemini_model"`
+			AvailableModels []string `json:"available_models"`
+			Status          string   `json:"status"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, "model_unavailable", body.Status)
+		assert.Empty(t, body.GeminiModel)
+		assert.NotNil(t, body.AvailableModels, "an empty list, not null, like every other collection")
+		assert.Empty(t, body.AvailableModels)
+	})
+
+	t.Run("saving a model still writes the override", func(t *testing.T) {
+		t.Parallel()
+
+		f := newAdminFixture(t, noVision)
+		rec := f.do(http.MethodPut, "/api/admin/settings", `{"gemini_model":"gemini-2.5-flash"}`)
+
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		value, ok, err := f.auth.Setting(context.Background(), "gemini_model")
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, "gemini-2.5-flash", value)
+	})
+
+	t.Run("the page renders the unavailable banner", func(t *testing.T) {
+		t.Parallel()
+
+		f := newAdminFixture(t, noVision)
+		rec := f.do(http.MethodGet, "/admin", "")
+
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		page := rec.Body.String()
+		assert.Contains(t, page, f.user.Username, "the rest of the page renders")
+		assert.Contains(t, page, "No vision model is configured.",
+			"an admin page must not look healthy while every vision feature is off")
+		assert.Contains(t, page, `<input name="gemini_model"`, "with no model list, the picker falls back to a text field")
+	})
+
+	t.Run("the env file falls back to the configured model", func(t *testing.T) {
+		t.Parallel()
+
+		f := newAdminFixture(t, noVision)
+		rec := f.do(http.MethodGet, "/api/admin/settings/env-file", "")
+
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "GEMINI_MODEL=gemini-2.0-flash")
+	})
 }
 
 // TestAdminPageRendersCatalogSearchResults covers the catalog moderation
