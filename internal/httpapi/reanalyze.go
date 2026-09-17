@@ -64,6 +64,10 @@ func (h *JobHandler) Reanalyze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Advisory only: these checks read the job before any lock and exist to
+	// give a precise message. The guard is store.RequeueJob, which re-checks
+	// the same conditions under FOR UPDATE and refuses a job a confirm got to
+	// first.
 	reanalyzer, ok := h.reanalyzers[job.Kind]
 	switch {
 	case !ok:

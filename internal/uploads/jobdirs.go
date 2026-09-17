@@ -35,7 +35,7 @@ func NewJobDirs(root string) (*JobDirs, error) {
 }
 
 func (d *JobDirs) dir(job uuid.UUID) *Dir {
-	return &Dir{root: filepath.Join(d.root, job.String())}
+	return &Dir{root: filepath.Join(d.root, job.String()), names: generatedName}
 }
 
 // Save writes a file for a job.
