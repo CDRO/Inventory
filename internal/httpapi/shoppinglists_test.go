@@ -33,8 +33,8 @@ type fakeShoppingLists struct {
 	lastRawText  string
 	resolves     int
 	// catalog holds the rows FindCatalogProduct can return, by name.
-	catalog map[string]*store.CatalogProduct
-	lastStorage  uuid.UUID
+	catalog     map[string]*store.CatalogProduct
+	lastStorage uuid.UUID
 }
 
 func (f *fakeShoppingLists) CreateShoppingList(_ context.Context, storageID uuid.UUID, source store.ShoppingListSource, createdBy *uuid.UUID, items []store.NewShoppingListItem) (*store.ShoppingList, []store.ShoppingListItem, error) {

@@ -326,7 +326,7 @@ type resolveRequest struct {
 	// ProductID is an existing product: the exact match, or the candidate
 	// picked for an ambiguous line. NewProduct creates one. Neither dismisses
 	// the line, which then records nothing but its resolution.
-	ProductID  *uuid.UUID          `json:"product_id"`
+	ProductID  *uuid.UUID         `json:"product_id"`
 	NewProduct *resolveNewProduct `json:"new_product"`
 }
 
@@ -672,9 +672,9 @@ func buildItemResponse(item store.ShoppingListItem, result matching.Result) shop
 			variants = append(variants, v.DisplayName)
 		}
 		out.Catalog = &catalogCard{
-			DisplayName:          result.Catalog.DisplayName,
-			CategoryPath:         result.Catalog.CategoryPath,
-			ItemType:             result.Catalog.ItemType,
+			DisplayName:  result.Catalog.DisplayName,
+			CategoryPath: result.Catalog.CategoryPath,
+			ItemType:     result.Catalog.ItemType,
 			// ImageURL is left nil: the catalog holds a provider URL, which
 			// must never reach a browser. showCatalogImages fills in our own.
 			IconName:             result.Catalog.IconName,

@@ -328,11 +328,11 @@ func (h *ReorderHandler) AddItem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Name                 string  `json:"name"`
-		ProductID            *string `json:"product_id"`
-		MinStock             *int    `json:"min_stock"`
-		CategoryID           *string `json:"category_id"`
-		ItemType             string  `json:"item_type"`
+		Name       string  `json:"name"`
+		ProductID  *string `json:"product_id"`
+		MinStock   *int    `json:"min_stock"`
+		CategoryID *string `json:"category_id"`
+		ItemType   string  `json:"item_type"`
 		// Image is the hash of a picked image suggestion, promoted into
 		// permanent storage. A picture is never taken by URL: see productPictures.
 		Image                *string `json:"image"`
