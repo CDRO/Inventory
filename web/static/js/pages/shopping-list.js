@@ -82,14 +82,16 @@ async function init() {
   submitButton.addEventListener("click", submitList);
 
   // Where things go, and how a new product is filed. Loaded once: a line is
-  // resolved against the storage as it was when the list was opened.
+  // resolved against the storage as it was when the list was opened. If that
+  // fails the button stays disabled: the error says what went wrong, and a
+  // reload is the way to retry.
   try {
     [locations, categories] = await Promise.all([fetchLocations(storageId), fetchCategories(storageId)]);
   } catch (err) {
     showError(err);
-  } finally {
-    submitButton.disabled = false;
+    return;
   }
+  submitButton.disabled = false;
 }
 
 function basePath() {
