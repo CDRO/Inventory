@@ -9,6 +9,10 @@
 # clean markup. `inject` refuses to write unless the source page is clean, the
 # edited blocks keep every rule step 4 states, and the result checks clean too.
 #
+# `inject` writes the page's own nodes only, never a document around them:
+# publishing wraps a file in the platform's skeleton, so a whole document would
+# land inside another one, one level deeper on every publish.
+#
 # Core Perl modules only: Git Bash ships perl, so this needs no host toolchain.
 use strict;
 use warnings;
@@ -65,7 +69,7 @@ sub scripts {
   my ($html) = @_;
   my @found;
   while ($html =~ /<script\b([^>]*)>(.*?)<\/script\s*>/gis) {
-    my %s = (raw => $1, body => $2, body_start => $-[2], body_end => $+[2]);
+    my %s = (raw => $1, body => $2, start => $-[0], end => $+[0], body_start => $-[2], body_end => $+[2]);
     $s{id} = $1 if $s{raw} =~ /\bid\s*=\s*"([^"]*)"/i;
     push @found, \%s;
   }
@@ -113,6 +117,26 @@ sub check_page {
   }
   return (\@problems) if @problems;
 
+  # The page is its marked nodes, from the first one to the app script, which
+  # the page writes last. Around them only document skeletons may sit: the
+  # platform's, and the one the page's own save writes. Anything else was put
+  # there by something other than the page.
+  my @starts;
+  while ($html =~ /<[a-z][a-z0-9]*\b[^>]*\bdata-rb\b[^>]*>/gi) {
+    my $at = $-[0];
+    push @starts, $at unless grep { $at > $_->{start} && $at < $_->{end} } @scripts;
+  }
+  my @span = ((sort { $a <=> $b } @starts)[0], $scripts[-1]{end});
+  (my $before = substr($html, 0, $span[0])) =~
+    s{<!doctype[^>]*>|</?(?:html|head|body)\b[^>]*>|<meta\b[^>]*>|<style\b(?![^>]*\bdata-rb\b)[^>]*>.*?</style\s*>}{}gis;
+  (my $after = substr($html, $span[1])) =~ s{</(?:body|html)\s*>}{}gi;
+  for ($before, $after) { s/\s+/ /g; s/^ | $//g }
+  push @problems, 'more than a document skeleton before the page: ' . substr($before, 0, 80) if length $before;
+  push @problems, 'something after the app script, which the page writes last: ' . substr($after, 0, 80) if length $after;
+  push @problems, 'the app script is not the last node' unless !defined $scripts[-1]{id};
+  return (\@problems) if @problems;
+  my $skeletons = () = substr($html, 0, $span[0]) =~ /<!doctype/gi;
+
   my ($plan_script)  = grep { ($_->{id} // '') eq 'plan' } @scripts;
   my ($state_script) = grep { ($_->{id} // '') eq 'state' } @scripts;
   my ($plan, $plan_problems)   = parse_block('plan', $plan_script->{body});
@@ -122,9 +146,9 @@ sub check_page {
   return (\@problems) if @problems;
 
   my $items = () = map { @{ $_->{items} } } @{ $plan->{phases} };
-  my $summary = sprintf 'clean: %d phases, %d items, %d statuses, updated %s',
-    scalar @{ $plan->{phases} }, $items, scalar keys %{ $state->{status} }, $state->{updated} // '(never)';
-  return (\@problems, $summary, $plan, $state, $plan_script, $state_script);
+  my $summary = sprintf 'clean: %d phases, %d items, %d statuses, updated %s, inside %d document skeleton(s)',
+    scalar @{ $plan->{phases} }, $items, scalar keys %{ $state->{status} }, $state->{updated} // '(never)', $skeletons;
+  return (\@problems, $summary, $plan, $state, $plan_script, $state_script, \@span);
 }
 
 # parse_block decodes one data block as the page stores it: UTF-8 JSON with no
@@ -247,6 +271,10 @@ sub inject {
   for my $s (sort { $b->{body_start} <=> $a->{body_start} } $plan_script, $state_script) {
     substr($html, $s->{body_start}, $s->{body_end} - $s->{body_start}) = $body{ $s->{id} };
   }
+
+  # The page's own nodes, without whatever skeletons surround them.
+  my (undef, undef, undef, undef, undef, undef, $span) = check_page($html);
+  $html = substr($html, $span->[0], $span->[1] - $span->[0]) . "\n" if $span;
 
   my ($after, $after_summary) = check_page($html);
   if (@$after) {

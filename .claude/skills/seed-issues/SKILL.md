@@ -111,13 +111,15 @@ the repository.
    `<scratch dir>/index.html`. Below, `index.html`, `plan.json`, `state.json`
    and `out.html` all mean files in that scratch directory; run the commands
    from the repository root and give them those paths. Every republish is built
-   from that file, never retyped. The page arrives inside the platform's own
-   `<!doctype html><head>…` skeleton, which is expected and republishes as-is.
+   from that file, never retyped. The page arrives inside one or more
+   `<!doctype html>…<body>` skeletons: the platform's, and the one the page's
+   own save writes. That is expected.
 3. **Check the file is clean before editing it:**
    `perl .claude/skills/seed-issues/runbook.pl check index.html`. It exits 0 with
    a one-line summary, or exits 1 and names each problem: a script the page did
-   not write, a node of the page's own that appears twice, the viewer's runtime
-   baked in, a script closed early, a data block that is not valid JSON or holds
+   not write, a node of the page's own that appears twice, anything but a
+   skeleton around the page's nodes, the viewer's runtime baked in, a script
+   closed early, a data block that is not valid JSON or holds
    a literal `<`, a duplicated id, a status for no item. Any of those means the
    page's own save has regressed, or someone edited it by hand: stop, report
    the output, and do not republish that copy.
@@ -152,10 +154,13 @@ the repository.
    - Set `"updated"` to the current time. Without that, a viewer's older copy in
      their browser storage outranks what you publish.
 7. `perl .claude/skills/seed-issues/runbook.pl inject index.html plan.json state.json out.html`
-   writes the two blocks back into an otherwise byte-identical page. It refuses,
-   and writes nothing, when either file is not valid JSON, when an item or a
-   status that the page had is gone, when an id is used twice or a status names
-   no item, or when `"updated"` is not later than the page's. It escapes every
+   writes the two blocks back and saves the page's own nodes, byte-identical
+   apart from those blocks, with no skeleton around them: publishing adds the
+   platform's, and a whole document would nest one level deeper on every
+   publish. It refuses, and writes nothing, when either file is not valid JSON,
+   when an item or a status that the page had is gone, when an id is used twice
+   or a status names no item, or when `"updated"` is not later than the page's.
+   It escapes every
    `<` in the data as `\u003c`, so no text can close the script tag, and checks
    the result is clean before writing it.
 8. `Artifact(action: "publish", url: <runbook>, file_path: out.html)`.
