@@ -64,6 +64,46 @@ test("shopping-list.html loads for a member with no console errors", async ({ pa
   expect(consoleErrors, `unexpected console errors: ${consoleErrors.join("; ")}`).toEqual([]);
 });
 
+// A list matched before the storage's locations and categories arrive would
+// render every line with empty "Put it in" and category pickers, so the button
+// waits for both, and a load that fails leaves it disabled for good.
+test("Match waits for the storage's locations and categories, and stays disabled if they fail", async ({ page }) => {
+  const isCategories = (url) => new URL(url).pathname.endsWith("/categories");
+
+  const login = await page.request.post("/api/auth/login", {
+    data: { username: "e2e-bob", password: PASSWORD },
+  });
+  expect(login.status(), "fixture login").toBe(200);
+
+  // Hold the categories response until the button has been seen disabled.
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  await page.route(isCategories, async (route) => {
+    await held;
+    await route.continue();
+  });
+  await page.goto("/shopping-list.html");
+  await expect(page).toHaveURL(/storage=/);
+  await expect(page.locator("#submit")).toBeDisabled();
+  release();
+  await expect(page.locator("#submit")).toBeEnabled();
+  await page.unroute(isCategories);
+
+  // Now the same load failing: the error is shown and Match never enables.
+  await page.route(isCategories, (route) =>
+    route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "internal", message: "Something went wrong on our side." } }),
+    }),
+  );
+  const failed = page.waitForResponse((res) => isCategories(res.url()) && res.status() === 500);
+  await page.reload();
+  await failed;
+  await expect(page.locator("#error")).toBeVisible();
+  await expect(page.locator("#submit")).toBeDisabled();
+});
+
 test("shopping-list.html without a session redirects to the login page", async ({ page }) => {
   await page.goto("/shopping-list.html");
 
