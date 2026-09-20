@@ -29,6 +29,13 @@ copying `.env`) — every substantive action is done by the sessions it
 starts. **Planning a new wave therefore means: extend the JSON file and set
 up the GitHub prerequisites. The script itself is never changed.**
 
+Docker isolation between parallel package worktrees (`COMPOSE_PROJECT_NAME`,
+`HTTP_PORT`, `TRAEFIK_PORT`) is automatic and needs no attention when
+planning a wave — the script assigns each package a deterministic, unique
+set of these from its position in the wave file the moment a worktree is
+created. See `docs/specs/01-architecture-and-deployment.md`, "Running more
+than one instance of the stack locally", for the mechanism itself.
+
 ## GitHub prerequisites a wave needs
 
 Before the orchestrator can work through a wave, these must exist:

@@ -105,7 +105,7 @@
       "number": 4,
       "waveIssue": 101,
       "integrationBranch": "integration/specs-13-20-welle-4",
-      "sequential": false,
+      "sequential": true,
       "packages": [
         {
           "specIssue": 96,
@@ -114,7 +114,16 @@
           "spec": "Spec 20",
           "model": "claude-opus-5",
           "effort": "xhigh",
-          "focus": "Migration 00011_barcodes.sql adds product_barcodes and catalog_barcodes, no other number. Read 00-overview.md's amended non-goal first: recall of an already-associated barcode is in scope, an external UPC/EAN database lookup is not - do not add one. catalog_barcodes follows the exact same insert-only, no-storage-reference, no-counts privacy invariants as catalog_products (spec 02) - do not give it a looser rule. The quick-log sheet is the confirm step: nothing may be written from the scan event itself, only from the explicit confirm tap, and every batch write still pairs with an inventory_logs row."
+          "focus": "Migration 00011_barcodes.sql adds product_barcodes and catalog_barcodes, plus users.barcode_prompt_enabled and users.barcode_prompt_seen_at for the capture-time offer - one migration, no other number. Read 00-overview.md's amended non-goal first: recall of an already-associated barcode is in scope, an external UPC/EAN database lookup is not - do not add one. catalog_barcodes follows the exact same insert-only, no-storage-reference, no-counts privacy invariants as catalog_products (spec 02) - do not give it a looser rule. The quick-log sheet is the confirm step: nothing may be written from the scan event itself, only from the explicit confirm tap, and every batch write still pairs with an inventory_logs row. The capture-time offer (new product via 06/07/10, no barcode yet) always shows exactly three choices - scan now, not this time, turn off - never fewer, and turning it off is a per-user PATCH /api/auth/barcode-prompt, not a new field on spec 14's PATCH /api/auth/me. The server-side decode-from-photo fallback must never write the uploaded image to disk under any circumstance, success or failure."
+        },
+        {
+          "specIssue": 103,
+          "slug": "w4-barcode-hot-cache",
+          "branch": "specs-13-20/w4-barcode-hot-cache",
+          "spec": "Spec 24",
+          "model": "claude-sonnet-5",
+          "effort": "high",
+          "focus": "Sequential after Spec 20 in this wave - needs its catalog_barcodes table and lookup endpoint to exist first. Migration 00012_barcode_hot_cache.sql adds catalog_barcodes.scan_count, no other number. The increment on a successful lookup is asynchronous and best-effort, same pattern as the suggestion-cache's last_accessed_at update in spec 07 - it must never add latency to the lookup response, and a failed count update must never fail the lookup. No response anywhere - including GET /api/barcodes/hot itself - ever serializes scan_count; rank is conveyed by array order only. The client-side hot-cache hit is an optimistic preview only: the real per-storage lookup (spec 20) is called for every scan regardless, and its answer always wins over the cached preview when they differ. This is explicitly not an offline-editing feature - the one network call is never skipped."
         }
       ]
     },

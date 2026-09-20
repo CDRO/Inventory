@@ -40,6 +40,7 @@ scheme.
 | 21 | [Native Android app with on-device vision (Gemma)](21-native-android-app.md) | App deferred; server-side contract accepted as spec `12`; barcode portion promoted to spec `20` on 2026-09-20 |
 | 22 | [Units & partial quantities](22-units-and-partial-quantities.md) | Under evaluation |
 | 23 | [Cross-brand product groups](23-cross-brand-product-groups.md) | Under evaluation — gated in part on 22 |
+| 25 | [Per-storage barcode cache for full offline-speed recall](25-per-storage-barcode-cache.md) | Under evaluation — gated on real usage data from spec `24` |
 
 ## Entry format
 

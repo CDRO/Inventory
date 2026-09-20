@@ -127,6 +127,60 @@ each round-trip costs a push and a runner boot — so it is a fallback, not a
 replacement: use local Docker when it is available, and this loop only when
 it is not.
 
+**`test.yml` is the merge gate; `e2e.yml` deliberately is not.** A second
+workflow, `.github/workflows/e2e.yml`, runs the same suite's E2E counterpart
+(`docker-compose.e2e.yml`, `05-frontend-pwa-foundations.md`) on
+GitHub-hosted runners for the same Docker-availability reason — but only on
+push to `main` and on `workflow_dispatch`, **not** on `pull_request`. A PR's
+only required status check is `test.yml` (`go vet` + `go test`): E2E is the
+pre-deployment gate described in "Deployment model" below, not a per-PR one
+— it is materially slower (a full stack plus a real browser) and running it
+on every push would make ordinary review cycles wait on it for no benefit,
+since `review-tests` (the ship loop's test reviewer) already treats E2E
+journeys as work it explicitly could not verify locally rather than a
+blocking requirement. Anyone who wants an E2E signal on a specific branch
+before it merges triggers `workflow_dispatch` on it explicitly, using the
+same dispatch-and-poll recipe as `test.yml`, above.
+
+## Running more than one instance of the stack locally
+
+Two ordinary situations need this: developing two branches side by side, and
+the wave orchestrator (`scripts/wellen-orchestrator.ps1`) running several
+package worktrees at once. Neither is solved by editing a compose file —
+it is solved by giving each checkout's `.env` its own values for three
+variables that `docker compose` and the app both already read:
+
+- **`COMPOSE_PROJECT_NAME`** — a Compose-native variable (not one the app
+  reads). Setting it in a checkout's `.env` namespaces that checkout's
+  containers, network, and named volumes away from every other checkout's,
+  with no compose-file change needed at all. Left unset, Compose derives it
+  from the directory name, which already differs between worktrees — setting
+  it explicitly just makes that guarantee visible and independent of the
+  directory naming happening to stay unique.
+- **`HTTP_PORT`** — already an application variable
+  (`internal/config/config.go`): the app listens on whatever this says, not
+  a hardcoded `8000`. `docker-compose.override.yml`'s port mapping reads the
+  same variable on both sides (`${HTTP_PORT:-8000}:${HTTP_PORT:-8000}`), so
+  a checkout with a distinct `HTTP_PORT` publishes a distinct host port
+  automatically — no separate "which port did I map this to" bookkeeping.
+- **`TRAEFIK_PORT`** — new, Compose-native, defaults to `80`. Only the host
+  side of `docker-compose.yml`'s `traefik` port mapping reads it
+  (`${TRAEFIK_PORT:-80}:80`); Traefik's own listener stays on `80`
+  internally. A real deployment never sets this, so production keeps
+  publishing `80` unchanged.
+
+`db` needs no such variable: it publishes no host port at all, only the
+internal Docker network Compose already namespaces per `COMPOSE_PROJECT_NAME`.
+
+None of this needs a compose-file flag on every invocation — Compose reads
+`.env` from the working directory automatically, for both its own special
+variables and the applications's — so setting these three lines once in a
+checkout's `.env` is enough; every `docker compose` command run from that
+checkout picks them up for free. The wave orchestrator sets exactly these
+three per package worktree, deterministically, so two package sessions
+running `docker compose up -d` at the same time — or a crashed session's
+containers left running — never collide on a host port or a container name.
+
 ## Repository layout
 
 ```

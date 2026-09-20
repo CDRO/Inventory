@@ -107,16 +107,17 @@ vanilla JavaScript with no build step — see
 | — | Operations: logging, audit trail, upgrades | `18-operations-and-observability.md` |
 | — | Localization (i18n) | `19-localization.md` |
 | — | Barcode recall | `20-barcode-recall.md` |
+| — | Barcode hot cache (instance-wide, client-side) | `24-barcode-hot-cache.md` |
 | — | *Later phase:* gamification of inventory upkeep | `50`, `51`, `52` |
 
-**Numbering:** `00`–`11` are the core system in build order; `12`–`20` are
-further accepted core work. **Specs and spikes share one number space**:
-a number in `docs/specs/` is accepted work, a number in `docs/spikes/` is a
-candidate (`21`–`23` are currently claimed by spikes), and a promoted spike
-keeps its number as it moves folders. `24`–`49` are still free; numbers are
-never reused. `50`+ is a later, optional phase — nothing in `00`–`20` may
-depend on it, and the system must be complete and shippable with the `50`
-range unimplemented.
+**Numbering:** `00`–`11` are the core system in build order; `12`–`20` and
+`24` are further accepted core work. **Specs and spikes share one number
+space**: a number in `docs/specs/` is accepted work, a number in
+`docs/spikes/` is a candidate (`21`–`23` and `25` are currently claimed by
+spikes), and a promoted spike keeps its number as it moves folders. `26`–`49`
+are still free; numbers are never reused. `50`+ is a later, optional phase —
+nothing in `00`–`24` may depend on it, and the system must be complete and
+shippable with the `50` range unimplemented.
 
 **Candidate work** that has not been accepted lives in `docs/spikes/`, which is
 not a contract and must never be implemented from.

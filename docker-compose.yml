@@ -11,8 +11,13 @@ services:
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
       - --entrypoints.web.address=:80
+    # Overridable for the same reason as $HTTP_PORT below: a concurrent local
+    # instance (a second worktree brought up with `docker compose up -d` for
+    # manual verification) must not fight the primary checkout over host port
+    # 80. Real deployments never set TRAEFIK_PORT, so this stays 80 by
+    # default — the NAS still publishes the one port it always has.
     ports:
-      - "80:80"
+      - "${TRAEFIK_PORT:-80}:80"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: unless-stopped

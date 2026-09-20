@@ -12,6 +12,22 @@
     scripts\wellen-planen.md (including the prompt for a Claude session that
     builds the plan).
 
+.DOCKER ISOLATION
+    Every package session runs its own `docker compose` invocations
+    (CLAUDE.md's ship loop) inside its own worktree. Before starting
+    anything, the script checks that docker compose actually has the rights
+    it needs (`docker info` must succeed for the current user) and fails
+    fast, with an actionable message, if it does not - a permission problem
+    found only after nine sessions are already running helps no one.
+    Once a worktree is created, its copied .env gets its own
+    COMPOSE_PROJECT_NAME, HTTP_PORT, and TRAEFIK_PORT (deterministic per
+    package, see Set-WorktreeEnvOverrides), so two worktrees running
+    `docker compose up` at once - or a crashed session's orphaned
+    containers sitting around in one - never collide on a host port or a
+    container/network/volume name. Full rationale:
+    docs/specs/01-architecture-and-deployment.md, "Running more than one
+    instance of the stack locally".
+
 .ARCHITECTURE
     This script itself makes NO git/GitHub write operations other than
     "worktree add" and copying .env - every substantive action (branching,
@@ -103,6 +119,22 @@ $RepoName   = Split-Path -Path $RepoRoot -Leaf
 $ParentDir  = Split-Path -Path $RepoRoot -Parent
 $LogFile    = Join-Path $PSScriptRoot 'wellen-orchestrator.log'
 $GhRepo     = $null   # derived from origin after validation
+
+# slug -> a stable, small, unique integer, assigned once the wave file is
+# loaded (every package's ordinal position across every wave, in file
+# order). Used only to derive a deterministic HTTP_PORT/TRAEFIK_PORT per
+# worktree (below) - never used for anything that needs to survive editing
+# the wave file, since inserting a package earlier in the file reassigns
+# every later index.
+$script:PackagePortIndex = @{}
+
+# The first of a contiguous block of host ports handed out per package, one
+# pair (HTTP_PORT, TRAEFIK_PORT) per package index - see
+# Set-WorktreeEnvOverrides. Chosen high and round purely so a collision with
+# something else the operator happens to run locally is unlikely; there is
+# nothing more significant about the exact numbers.
+$HttpPortBase    = 18000
+$TraefikPortBase = 19000
 
 $ValidEfforts = @('low', 'medium', 'high', 'xhigh', 'max')
 
@@ -299,6 +331,45 @@ function Wait-ForRemoteBranch {
 # Worktrees and Claude sessions
 # ---------------------------------------------------------------------------
 
+# Ensures (adds or replaces) a KEY=value line in a .env file. Used to
+# override, not append blindly - a worktree's .env starts as a copy of the
+# main checkout's and may already define the same keys.
+function Set-EnvValue {
+    param([string]$EnvPath, [string]$Key, [string]$Value)
+    $lines = @(Get-Content -LiteralPath $EnvPath -ErrorAction SilentlyContinue)
+    $pattern = "^$([regex]::Escape($Key))="
+    $found = $false
+    $lines = $lines | ForEach-Object {
+        if ($_ -match $pattern) { $found = $true; "$Key=$Value" } else { $_ }
+    }
+    if (-not $found) { $lines += "$Key=$Value" }
+    Set-Content -LiteralPath $EnvPath -Value $lines
+}
+
+# Gives a package worktree's .env its own COMPOSE_PROJECT_NAME, HTTP_PORT,
+# and TRAEFIK_PORT (see "Running more than one instance of the stack
+# locally" in docs/specs/01-architecture-and-deployment.md), so that
+# `docker compose up` (or `run`) in two worktrees at once - or a crashed
+# session's containers still sitting around in one - never collides with
+# another worktree's containers, network, volumes, or host ports. This is
+# the only place the orchestrator changes a copied .env's content; every
+# other value (secrets, POSTGRES_*, GEMINI_*, …) is passed through
+# unmodified from the main checkout.
+function Set-WorktreeEnvOverrides {
+    param([string]$EnvPath, [string]$Slug)
+    if (-not $script:PackagePortIndex.ContainsKey($Slug)) {
+        throw "No port index assigned for slug '$Slug' - this is an orchestrator bug, not a wave-file problem (PackagePortIndex should be populated for every package before any worktree is created)."
+    }
+    $index = $script:PackagePortIndex[$Slug]
+    $projectName = "$RepoName-$Slug"
+    $httpPort = $HttpPortBase + $index
+    $traefikPort = $TraefikPortBase + $index
+    Set-EnvValue -EnvPath $EnvPath -Key 'COMPOSE_PROJECT_NAME' -Value $projectName
+    Set-EnvValue -EnvPath $EnvPath -Key 'HTTP_PORT' -Value $httpPort
+    Set-EnvValue -EnvPath $EnvPath -Key 'TRAEFIK_PORT' -Value $traefikPort
+    Write-Log "Worktree env for '$Slug': COMPOSE_PROJECT_NAME=$projectName HTTP_PORT=$httpPort TRAEFIK_PORT=$traefikPort"
+}
+
 function New-PackageWorktree {
     param([string]$Slug, [string]$Branch, [string]$BaseBranch)
     $path = Join-Path $ParentDir "$RepoName-$Slug"
@@ -318,7 +389,9 @@ function New-PackageWorktree {
         }
         throw "git worktree add for '$Slug' failed."
     }
-    Copy-Item -Path (Join-Path $RepoRoot '.env') -Destination (Join-Path $path '.env') -Force
+    $worktreeEnv = Join-Path $path '.env'
+    Copy-Item -Path (Join-Path $RepoRoot '.env') -Destination $worktreeEnv -Force
+    Set-WorktreeEnvOverrides -EnvPath $worktreeEnv -Slug $Slug
     Write-Log "Worktree '$path' created (branch '$Branch' from origin/$BaseBranch)."
     return $path
 }
@@ -538,6 +611,17 @@ if ($Validate) {
     exit 0
 }
 
+# Every package's ordinal position across the whole file, in file order -
+# see Set-WorktreeEnvOverrides. Computed once, here, so it stays stable for
+# the life of this run regardless of which packages are already done.
+$portIndex = 0
+foreach ($wave in $waves) {
+    foreach ($package in @(Get-Field $wave 'packages' @())) {
+        $script:PackagePortIndex[$package.slug] = $portIndex
+        $portIndex++
+    }
+}
+
 Write-Log "Orchestrator started. WaveFile=$WaveFile Plan='$($plan.name)' StartWave=$StartWave PollSeconds=$PollSeconds DryRun=$($DryRun.IsPresent)"
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw "git not found on PATH." }
@@ -551,6 +635,21 @@ if (-not (claude --help 2>$null | Out-String).Contains('--remote-control')) {
     throw "The installed claude version does not know the --remote-control flag. Please run 'claude update' - this script relies on passing Remote Control and the prompt as CLI arguments."
 }
 if (-not (Test-Path (Join-Path $RepoRoot '.env'))) { throw ".env is missing in the repo root - every worktree needs a copy of it." }
+
+# Every package session runs `docker compose run --rm app go test ./...`
+# (CLAUDE.md) as part of its own ship loop, in its own worktree, so this
+# has to work BEFORE any worktree/session is created - a permission problem
+# discovered only after nine sessions are already running is nine sessions
+# stuck at the same point. `docker compose version` only proves the CLI and
+# plugin exist; `docker info` is what actually needs the daemon and
+# therefore actually proves the current user can reach it.
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw "docker not found on PATH." }
+docker compose version *> $null
+if ($LASTEXITCODE -ne 0) { throw "docker compose (the CLI plugin) is not available - install/update Docker Desktop or the compose plugin." }
+docker info *> $null
+if ($LASTEXITCODE -ne 0) {
+    throw "docker compose does not have the rights it needs: 'docker info' failed, which means the Docker daemon is either not running or not reachable by this user (on Linux, typically: this user is not in the 'docker' group, or the socket needs sudo). Fix that first - every package session will otherwise fail its own ship loop at the same first 'docker compose run' in every worktree."
+}
 
 $GhRepo = (gh repo view --json nameWithOwner -q '.nameWithOwner' 2>$null)
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($GhRepo)) {
