@@ -125,6 +125,7 @@ One shape for every error, produced by **exactly one serializer** in
 | Resource exists in the caller's storage but action is illegal (e.g. deleting a location that still holds inventory) | 409 | `conflict` |
 | Payload validation failure | 422 | `validation_failed` |
 | Upload exceeds size limit | 413 | `payload_too_large` |
+| Too many failed attempts at a rate-limited auth endpoint (`14-account-self-service.md`) | 429 | `rate_limited` |
 | Configured Gemini model unavailable | 503 | `model_unavailable` |
 | An AI call made inside the request failed, timed out, or answered with nothing usable (background removal, `09-consumption-logging.md`) | 502 | `upstream_failed` |
 | A documented route whose backing capability has not shipped yet | 501 | `not_implemented` |
