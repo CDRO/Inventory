@@ -97,8 +97,9 @@ docker compose -f docker-compose.yml up -d
 > **The operator's Synology DS923+ is a different setup** — bind-mounted data and
 > a Tailscale sidecar instead of Traefik, as one extra compose file. On it, the
 > commands above are the wrong ones (they start Traefik on DSM's port 80); use
-> `deploy/synology/compose` instead, which pins both files. See "Synology NAS
-> variant" in
+> `docker-compose -p inventory -f docker-compose.yml -f docker-compose.nas.yml …`
+> instead (`docker-compose` with the hyphen; `deploy/synology/compose` is an
+> optional script for the same prefix). See "Synology NAS variant" in
 > [`docs/specs/01-architecture-and-deployment.md`](docs/specs/01-architecture-and-deployment.md).
 
 Before deploying, run the E2E gate
