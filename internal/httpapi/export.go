@@ -152,7 +152,7 @@ type exportedShoppingList struct {
 
 // exportDocument is export.json.
 type exportDocument struct {
-	Format     string `json:"format"`
+	Format     string    `json:"format"`
 	ExportedAt time.Time `json:"exported_at"`
 	Storage    struct {
 		Name string `json:"name"`
