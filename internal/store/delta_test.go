@@ -73,6 +73,92 @@ func TestStaleCursorIsRefusedEvenWithNoTombstonesLeft(t *testing.T) {
 		"an empty tombstone table must not read as 'nothing was ever deleted'")
 }
 
+// TestDeltaCursorSurvivesAConcurrentUncommittedWrite is the regression for the
+// Go review's round-1 finding, and it is the subtlest failure this feature has.
+//
+// Postgres `now()` is transaction-START time, and every timestamp here is
+// stamped with it. So a write that begins before a delta request and commits
+// after it carries a timestamp EARLIER than the wall clock the delta saw, while
+// being invisible to that delta's queries. Handing the client `now()` as its
+// cursor would therefore skip that row on every future request — the deletion
+// would never reach the client at all, with nothing anywhere reporting a
+// problem.
+//
+// The test holds a tombstone open in a second connection's transaction across
+// the delta, exactly as a slow confirm or cascade would, then commits it. The
+// row must appear in the delta taken from the cursor the first one returned.
+func TestDeltaCursorSurvivesAConcurrentUncommittedWrite(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+
+	// A cursor inside the retention window, so this exercises the watermark
+	// rather than the resync boundary.
+	cursor := timeNow(t, ctx).Add(-time.Minute)
+
+	// A separate connection, so the transaction really is concurrent with the
+	// delta rather than serialized behind it.
+	conn, err := testPool.Acquire(ctx)
+	require.NoError(t, err)
+	defer conn.Release()
+
+	tx, err := conn.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// deleted_at defaults to now(), which for this row is the moment tx began —
+	// already in the past by the time the delta below runs.
+	doomed := uuid.New()
+	_, err = tx.Exec(ctx, `
+		INSERT INTO tombstones (id, storage_id, entity_type, entity_id)
+		VALUES ($1, $2, 'product', $3)`, uuid.New(), storageID, doomed)
+	require.NoError(t, err)
+
+	// The delta cannot see the uncommitted row. What matters is the cursor it
+	// hands back.
+	first, err := s.ProductsChangedSince(ctx, storageID, cursor)
+	require.NoError(t, err)
+	require.NotContains(t, first.Deleted, doomed, "an uncommitted deletion is not visible yet")
+
+	require.NoError(t, tx.Commit(ctx))
+
+	second, err := s.ProductsChangedSince(ctx, storageID, first.SyncedAt)
+	require.NoError(t, err)
+
+	assert.Contains(t, second.Deleted, doomed,
+		"a write that committed after the cursor was taken, but was stamped before it, "+
+			"must still reach the client — otherwise the deletion is lost forever")
+}
+
+// TestDeltaWatermarkNeverOutrunsAnOpenTransaction states the same rule directly
+// on the cursor rather than through its consequence: while a write is in
+// flight, no delta may hand out a cursor later than that write's timestamp.
+func TestDeltaWatermarkNeverOutrunsAnOpenTransaction(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	cursor := timeNow(t, ctx).Add(-time.Minute)
+
+	conn, err := testPool.Acquire(ctx)
+	require.NoError(t, err)
+	defer conn.Release()
+
+	tx, err := conn.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Force the transaction to take its snapshot, so xact_start is set.
+	var startedAt time.Time
+	require.NoError(t, tx.QueryRow(ctx, `SELECT now()`).Scan(&startedAt))
+
+	delta, err := s.LocationsChangedSince(ctx, storageID, cursor)
+	require.NoError(t, err)
+
+	assert.False(t, delta.SyncedAt.After(startedAt),
+		"the cursor must not pass a transaction that is still open, or that "+
+			"transaction's rows fall permanently behind it")
+}
+
 // TestProductDeltaReportsChangesAndDeletions is the ordinary path: what moved,
 // what went, and a cursor to come back with.
 func TestProductDeltaReportsChangesAndDeletions(t *testing.T) {

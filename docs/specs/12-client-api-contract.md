@@ -192,9 +192,24 @@ that reads these endpoints today — unaffected. With it, the envelope is:
   serialize `updated_at` on their items, so without it a client has nothing to
   compute its next cursor from, and using its own clock would shift every sync
   by the skew between the phone and the NAS — in the direction that skips
-  changes. The server reads it **before** the rows, so a write landing during
-  the request is reported by the next one rather than by neither. Delta sync
-  here is at-least-once; a row may arrive twice, and never zero times.
+  changes.
+
+  **`synced_at` is not the wall clock**, and the difference is a data-loss bug
+  rather than a nicety. Postgres `now()` is transaction-*start* time, and every
+  row here is stamped with it. A write that begins at 10:00:00.000 and commits
+  at 10:00:00.500 therefore carries the timestamp 10:00:00.000, while being
+  invisible to a delta running at 10:00:00.200 — so handing that delta's client
+  `10:00:00.200` as its cursor would skip a row stamped `10:00:00.000` on every
+  future request, and that deletion would never reach the client at all. The
+  server instead takes the start of the oldest transaction still in flight: no
+  row it cannot yet see can carry a timestamp earlier than that. `updated_since`
+  is compared **inclusively** (`>=`) for the boundary this creates, since a row
+  belonging to the transaction that set the watermark carries exactly that
+  timestamp.
+
+  Together these make delta sync **at-least-once**: a row may arrive in two
+  consecutive deltas, which a client overwrites with the same value, and never
+  in none.
 - **`next_cursor`** is present for the same reason it is on every collection.
   These three endpoints return their collections whole, so it is always null
   today; when one gains pagination, the delta rides on the same cursor.

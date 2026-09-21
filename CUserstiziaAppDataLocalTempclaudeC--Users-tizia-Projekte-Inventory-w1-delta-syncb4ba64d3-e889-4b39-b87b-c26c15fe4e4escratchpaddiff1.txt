@@ -1,0 +1,246 @@
+diff --git a/internal/httpapi/clientversion.go b/internal/httpapi/clientversion.go
+new file mode 100644
+index 0000000..8ef3f3c
+--- /dev/null
++++ b/internal/httpapi/clientversion.go
+@@ -0,0 +1,39 @@
++package httpapi
++
++import "net/http"
++
++// ClientVersionHeader is what a native client names itself with,
++// `<name>/<version>` (docs/specs/12-client-api-contract.md).
++const ClientVersionHeader = "X-Client-Version"
++
++// maxClientVersionLog bounds what is copied into a log line. The header is
++// attacker-controlled in the ordinary sense that any client sets it, and an
++// unbounded string would let one client make every log entry about a failed
++// request as large as it liked. It is not a sanitizer: slog quotes the value,
++// and this is a household inventory server, not a log-ingestion pipeline.
++const maxClientVersionLog = 128
++
++// clientVersionFrom reads the client's self-reported version.
++//
++// **This is read in exactly one place — WriteError, for the log line.** The
++// spec's rule is that the header is for diagnostics only and must never gate
++// behavior, and structure is how that rule is kept rather than discipline:
++// the one function that sees this header cannot change a status, a body, or a
++// query, because all it does is produce a response that was already decided.
++// Version-sniffing to alter a response is how one API quietly becomes several,
++// and there is nowhere in this package to write that code.
++//
++// It is deliberately not request-logging middleware either. Logging every
++// request belongs to docs/specs/18-operations-logging-audit-upgrades.md; until
++// that ships, the moment a client's version actually matters to anyone is the
++// moment its request failed, and that is where it is recorded.
++func clientVersionFrom(r *http.Request) string {
++	if r == nil {
++		return ""
++	}
++	version := r.Header.Get(ClientVersionHeader)
++	if len(version) > maxClientVersionLog {
++		return version[:maxClientVersionLog]
++	}
++	return version
++}
+diff --git a/internal/httpapi/delta.go b/internal/httpapi/delta.go
+new file mode 100644
+index 0000000..a0a06e5
+--- /dev/null
++++ b/internal/httpapi/delta.go
+@@ -0,0 +1,72 @@
++package httpapi
++
++import (
++	"net/http"
++	"time"
++
++	"github.com/google/uuid"
++)
++
++// DeltaSinceParam is the query parameter that turns a list request into a
++// delta request (docs/specs/12-client-api-contract.md).
++const DeltaSinceParam = "updated_since"
++
++// deltaCollection is what a list endpoint answers when updated_since is
++// present: the same items the full list would carry, narrowed to what changed,
++// plus what went away and the cursor for next time.
++//
++// It is a separate envelope from collection rather than three more fields on
++// it. A request without updated_since gets byte-identical output to before —
++// the PWA reads these endpoints and never sends the parameter — so adding
++// delta sync cannot change what the browser sees. Additive, exactly as the
++// versioning rules in spec 12 require.
++type deltaCollection[T any] struct {
++	Items []T `json:"items"`
++	// Deleted is ids, not rows: the row is gone, and an id is everything a
++	// client needs to drop it. Never null — an empty delta is an empty array,
++	// so a client can iterate it without a special case.
++	Deleted []uuid.UUID `json:"deleted"`
++	// SyncedAt is the instant this delta was taken, to send back as the next
++	// updated_since.
++	//
++	// Without it delta sync does not work at all. None of these endpoints
++	// serialize updated_at on their items, so a client has nothing else to
++	// compute its next cursor from, and using its own clock would make every
++	// sync wrong by the skew between the phone and the NAS — in the direction
++	// that silently skips changes. The server's clock is the only one that
++	// orders these rows, so the server hands it back.
++	SyncedAt time.Time `json:"synced_at"`
++	// NextCursor is present for the same reason collection carries it: the
++	// envelope is documented to have the key, and a client that stops when it
++	// is null must be able to tell null from absent. These three endpoints
++	// return their collections whole, so it is always null today.
++	NextCursor *string `json:"next_cursor"`
++}
++
++// readDeltaSince parses ?updated_since=<RFC3339>, returning nil when the
++// caller did not ask for a delta.
++//
++// A malformed value is 422 naming the parameter, the same answer readPage
++// gives for an unusable limit or cursor — it says the request was malformed
++// without saying anything about what the storage contains. That distinction
++// only stays safe because the storage gate runs in front of this: a delta
++// request against a storage the caller cannot see is refused by
++// RequireStorageMember with the usual 404 and never reaches a handler, so the
++// 422 can never become a tell that a storage exists.
++//
++// RFC3339 only, with no fallbacks. Accepting a date without a time, or a
++// timestamp without a zone, would mean guessing a zone on the client's behalf
++// and silently shifting the window by hours.
++func readDeltaSince(r *http.Request) (*time.Time, *Failure) {
++	raw := r.URL.Query().Get(DeltaSinceParam)
++	if raw == "" {
++		return nil, nil
++	}
++	at, err := time.Parse(time.RFC3339, raw)
++	if err != nil {
++		return nil, ValidationFailed(map[string][]string{
++			DeltaSinceParam: {"Must be an RFC 3339 timestamp, e.g. 2026-09-21T14:30:00Z."},
++		}, err)
++	}
++	return &at, nil
++}
+diff --git a/internal/httpapi/errors.go b/internal/httpapi/errors.go
+index 0f0d3ad..9fd1c05 100644
+--- a/internal/httpapi/errors.go
++++ b/internal/httpapi/errors.go
+@@ -17,6 +17,7 @@ const (
+ 	CodeNotFound         = "not_found"
+ 	CodeConflict         = "conflict"
+ 	CodeValidationFailed = "validation_failed"
++	CodeResyncRequired   = "resync_required"
+ 	CodePayloadTooLarge  = "payload_too_large"
+ 	CodeModelUnavailable = "model_unavailable"
+ 	CodeUpstreamFailed   = "upstream_failed"
+@@ -133,6 +134,11 @@ func (w *ErrorWriter) WriteError(rw http.ResponseWriter, r *http.Request, failur
+ 			slog.String("reason", failure.Reason),
+ 			slog.String("method", r.Method),
+ 			slog.String("path", r.URL.Path),
++			// The client's self-reported version, and the only thing anything
++			// in this package does with that header — see clientversion.go for
++			// why it is read here and nowhere else. It is an attribute of a
++			// response already decided, so it cannot influence one.
++			slog.String("client_version", clientVersionFrom(r)),
+ 			slog.Any("err", failure.Err),
+ 		)
+ 	}
+@@ -201,6 +207,28 @@ func Conflict(message string, err error) *Failure {
+ 	return &Failure{Status: http.StatusConflict, Code: CodeConflict, Message: message, Err: err}
+ }
+ 
++// ResyncRequired tells a client its cached copy cannot be brought up to date
++// incrementally and must be thrown away.
++//
++// It is a 409 with its own code rather than a plain conflict because it is an
++// instruction, not a refusal: the request was correct, the server simply no
++// longer remembers far enough back to describe every deletion since. A client
++// that switched on `conflict` alone could not tell this from "that category
++// still has products in it" and would have no way to know it should re-fetch
++// (docs/specs/12-client-api-contract.md).
++//
++// The alternative — answering 200 with whatever the surviving tombstones
++// happen to cover — is the failure the spec exists to prevent: the client
++// keeps a deleted row for months with nothing anywhere reporting a problem.
++func ResyncRequired(reason string) *Failure {
++	return &Failure{
++		Status:  http.StatusConflict,
++		Code:    CodeResyncRequired,
++		Message: "Your cached copy is too old to update. Fetch the full list again.",
++		Reason:  reason,
++	}
++}
++
+ // ValidationFailed carries the per-field messages a form needs.
+ func ValidationFailed(fields map[string][]string, err error) *Failure {
+ 	return &Failure{
+@@ -271,6 +299,13 @@ func FromStoreError(err error, reason string) *Failure {
+ 		return Conflict(err.Error(), err)
+ 	case errors.Is(err, store.ErrValidation):
+ 		return ValidationFailed(nil, err)
++	case errors.Is(err, store.ErrResyncRequired):
++		// Mapped here rather than in each delta handler for the reason every
++		// other mapping is here: three list endpoints answer deltas, and a
++		// handler that forgot this case would turn "your cache is too old"
++		// into a 500 — an error the client retries forever instead of the
++		// instruction it needed.
++		return ResyncRequired(err.Error())
+ 	default:
+ 		return Internal(err)
+ 	}
+@@ -286,6 +321,8 @@ func defaultMessage(code string) string {
+ 		return "That action conflicts with the current state."
+ 	case CodeValidationFailed:
+ 		return "The request could not be processed."
++	case CodeResyncRequired:
++		return "Your cached copy is too old to update. Fetch the full list again."
+ 	case CodePayloadTooLarge:
+ 		return "The uploaded file is too large."
+ 	case CodeModelUnavailable:
+diff --git a/internal/httpapi/middleware.go b/internal/httpapi/middleware.go
+index 8489298..c2cedd0 100644
+--- a/internal/httpapi/middleware.go
++++ b/internal/httpapi/middleware.go
+@@ -155,6 +155,17 @@ func (m *Middleware) RequireSession(next http.Handler) http.Handler {
+ // A non-admin receives the same `404` as an unknown resource, byte for byte.
+ // The admin area does not announce its own existence: a `403` would tell an
+ // ordinary user that `/admin` is a real thing worth attacking.
++//
++// **A paired device session is refused here too, whatever its user's is_admin
++// says.** The admin area is browser-only and server-rendered, and
++// docs/specs/12-client-api-contract.md puts it outside the client contract
++// entirely: "a paired client is never an admin client". Without this check an
++// admin who pairs a phone hands that phone every admin route, because a device
++// session resolves to the same user as their browser — and `Kind` is the only
++// thing that tells the two apart. The rule is on the session row rather than on
++// the Authorization header for exactly that reason: a header is a transport a
++// client chooses, while the kind was fixed server-side when the session was
++// minted and no client can move it.
+ func (m *Middleware) RequireAdmin(next http.Handler) http.Handler {
+ 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		user, ok := UserFrom(r.Context())
+@@ -165,6 +176,11 @@ func (m *Middleware) RequireAdmin(next http.Handler) http.Handler {
+ 			return
+ 		}
+ 
++		// The lookup runs before the session-kind check, not after, so that
++		// is_admin really is re-queried on every admin request — including the
++		// ones that were always going to be refused. Ordering it the other way
++		// would make the invariant "on every admin request from a browser",
++		// which is a weaker sentence that reads the same.
+ 		isAdmin, err := m.store.IsAdmin(r.Context(), user.ID)
+ 		if err != nil {
+ 			m.errors.WriteError(w, r, Internal(err))
+@@ -175,6 +191,12 @@ func (m *Middleware) RequireAdmin(next http.Handler) http.Handler {
+ 			return
+ 		}
+ 
++		session, ok := SessionFrom(r.Context())
++		if !ok || session.Kind != store.SessionBrowser {
++			m.errors.WriteError(w, r, NotFound(ReasonAdminAreaHidden))
++			return
++		}
++
+ 		next.ServeHTTP(w, r)
+ 	})
+ }

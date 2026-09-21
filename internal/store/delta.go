@@ -53,14 +53,20 @@ func DeltaIsResumable(since, now time.Time) bool {
 	return !since.Before(now.Add(-TombstoneRetention))
 }
 
-// ProductsChangedSince answers a delta request for this storage's products.
+// ProductsChangedSince answers a delta request for this storage's products:
+// the rows whose updated_at is after since, the ids tombstoned since then, and
+// the sync point to come back with.
+//
+// Returns ErrResyncRequired when since predates the tombstone retention
+// window — the caller must answer 409 rather than serve an incomplete delta
+// (docs/specs/12-client-api-contract.md).
 func (s *Store) ProductsChangedSince(ctx context.Context, storageID uuid.UUID, since time.Time) (*Delta[Product], error) {
 	return loadDelta(ctx, s, storageID, TombstoneProduct, since, func(ctx context.Context, at time.Time) ([]Product, error) {
 		rows, err := s.pool.Query(ctx, `
 			SELECT id, storage_id, name, category_id, catalog_id, item_type,
 			       default_shelf_life_days, min_stock, image_url, icon_name, created_at, updated_at
 			  FROM products
-			 WHERE storage_id = $1 AND updated_at > $2
+			 WHERE storage_id = $1 AND updated_at >= $2
 			 ORDER BY name`, storageID, at)
 		if err != nil {
 			return nil, fmt.Errorf("store: products changed since: %w", err)
@@ -82,13 +88,18 @@ func (s *Store) ProductsChangedSince(ctx context.Context, storageID uuid.UUID, s
 	})
 }
 
-// CategoriesChangedSince answers a delta request for this storage's categories.
+// CategoriesChangedSince answers a delta request for this storage's
+// categories, in the same shape and with the same ErrResyncRequired rule as
+// ProductsChangedSince.
+//
+// Changed carries flat rows with their ParentID, not a tree: a delta holds
+// only what moved, so the caller rebuilds the tree rather than receiving one.
 func (s *Store) CategoriesChangedSince(ctx context.Context, storageID uuid.UUID, since time.Time) (*Delta[Category], error) {
 	return loadDelta(ctx, s, storageID, TombstoneCategory, since, func(ctx context.Context, at time.Time) ([]Category, error) {
 		rows, err := s.pool.Query(ctx, `
 			SELECT id, storage_id, parent_id, name, default_shelf_life_days, created_at, updated_at
 			  FROM categories
-			 WHERE storage_id = $1 AND updated_at > $2
+			 WHERE storage_id = $1 AND updated_at >= $2
 			 ORDER BY created_at, id`, storageID, at)
 		if err != nil {
 			return nil, fmt.Errorf("store: categories changed since: %w", err)
@@ -110,13 +121,16 @@ func (s *Store) CategoriesChangedSince(ctx context.Context, storageID uuid.UUID,
 	})
 }
 
-// LocationsChangedSince answers a delta request for this storage's locations.
+// LocationsChangedSince answers a delta request for this storage's locations,
+// in the same shape and with the same ErrResyncRequired rule as
+// ProductsChangedSince. Changed carries flat rows with their ParentID, for the
+// reason CategoriesChangedSince gives.
 func (s *Store) LocationsChangedSince(ctx context.Context, storageID uuid.UUID, since time.Time) (*Delta[Location], error) {
 	return loadDelta(ctx, s, storageID, TombstoneLocation, since, func(ctx context.Context, at time.Time) ([]Location, error) {
 		rows, err := s.pool.Query(ctx, `
 			SELECT id, storage_id, parent_id, name, description, created_at, updated_at
 			  FROM locations
-			 WHERE storage_id = $1 AND updated_at > $2
+			 WHERE storage_id = $1 AND updated_at >= $2
 			 ORDER BY created_at, id`, storageID, at)
 		if err != nil {
 			return nil, fmt.Errorf("store: locations changed since: %w", err)
@@ -138,24 +152,60 @@ func (s *Store) LocationsChangedSince(ctx context.Context, storageID uuid.UUID, 
 	})
 }
 
+// deltaWatermark computes the instant a client may safely send back as its
+// next updated_since.
+//
+// **It is not `now()`, and the difference is a data-loss bug rather than a
+// nicety.** Postgres `now()` is transaction-*start* time, and every row here is
+// stamped with it — `updated_at = now()` on the write paths, `deleted_at
+// DEFAULT now()` on tombstones. So a write that began at 10:00:00.000 and
+// commits at 10:00:00.500 carries the timestamp 10:00:00.000. A delta running
+// at 10:00:00.200 cannot see that row (it is uncommitted), and if it handed the
+// client 10:00:00.200 as the cursor, the next request would ask for
+// `> 10:00:00.200` and skip a row stamped 10:00:00.000 — forever. The deletion
+// would never reach that client, which is precisely the silently-wrong cache
+// docs/specs/12-client-api-contract.md exists to prevent.
+//
+// The watermark is therefore the start of the oldest transaction still in
+// flight: no row that is invisible to this request can carry a timestamp
+// earlier than that, because its transaction is one of the ones being counted.
+// Anything already committed is either in this response or older than the
+// watermark, and anything still open will be picked up next time. The clock is
+// the upper bound for the case where nothing at all is running.
+//
+// The comparison is `>=` rather than `>` for the boundary this creates: a row
+// belonging to the very transaction that set the watermark carries exactly that
+// timestamp. The cost is that a row on the boundary can arrive in two
+// consecutive deltas, which a client overwrites with the same value. Delta sync
+// here is at-least-once, and that is the direction the error has to fall.
+//
+// Other roles' backends are not visible in pg_stat_activity, so a write held
+// open by a psql session logged in as someone else is not counted. Every write
+// in this system comes from the application's own role, which is.
+const deltaWatermark = `
+	SELECT least(
+	         now(),
+	         coalesce((SELECT min(xact_start)
+	                     FROM pg_stat_activity
+	                    WHERE datname = current_database()
+	                      AND xact_start IS NOT NULL),
+	                  now()))`
+
 // loadDelta assembles one entity kind's delta: the resync check, the changed
 // rows, and the tombstones for the same window.
 //
-// **SyncedAt is read before either query, never after.** A client sends it
-// back as its next cursor, so anything that happens after it is read must
-// still be caught by the following request. Reading it afterwards would leave
-// a window — a write landing between the row query and the clock read would be
-// reported by neither request, and the client would keep a stale row with
-// nothing anywhere to notice. Reading it first can only make a row appear in
-// two consecutive deltas, which is a duplicate the client overwrites with the
-// same value. Delta sync here is at-least-once by construction, and that is the
-// direction the error has to fall.
+// **The watermark is read before either query, never after.** A client sends it
+// back as its next cursor, so anything that happens after it is read must still
+// be caught by the following request. Reading it afterwards would leave a
+// window — a write landing between the row query and the clock read would be
+// reported by neither request.
 //
-// The three queries are deliberately not wrapped in a transaction. With
-// SyncedAt read first, a deletion landing between the changed-rows query and
+// The three queries are deliberately not wrapped in a transaction. With the
+// watermark read first, a deletion landing between the changed-rows query and
 // the tombstone query is simply reported by the next request; a snapshot would
-// buy nothing a client can observe and would hold a transaction open across
-// the whole response.
+// buy nothing a client can observe and would hold a transaction open across the
+// whole response — which would in turn drag every concurrent delta's watermark
+// back to this request's start.
 func loadDelta[T any](
 	ctx context.Context,
 	s *Store,
@@ -165,7 +215,7 @@ func loadDelta[T any](
 	changed func(ctx context.Context, since time.Time) ([]T, error),
 ) (*Delta[T], error) {
 	var syncedAt time.Time
-	if err := s.pool.QueryRow(ctx, `SELECT now()`).Scan(&syncedAt); err != nil {
+	if err := s.pool.QueryRow(ctx, deltaWatermark).Scan(&syncedAt); err != nil {
 		return nil, fmt.Errorf("store: delta sync point: %w", err)
 	}
 	if !DeltaIsResumable(since, syncedAt) {
@@ -197,7 +247,7 @@ func (s *Store) deletedSince(ctx context.Context, storageID uuid.UUID, kind Enti
 	rows, err := s.pool.Query(ctx, `
 		SELECT entity_id
 		  FROM tombstones
-		 WHERE storage_id = $1 AND entity_type = $2 AND deleted_at > $3
+		 WHERE storage_id = $1 AND entity_type = $2 AND deleted_at >= $3
 		 ORDER BY deleted_at, id`, storageID, string(kind), since)
 	if err != nil {
 		return nil, fmt.Errorf("store: list %s tombstones: %w", kind, err)

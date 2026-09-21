@@ -100,6 +100,13 @@ func TestDeltaRequestCarriesDeletedAndSyncPoint(t *testing.T) {
 	assert.Equal(t, []uuid.UUID{gone}, body.Deleted)
 	assert.True(t, fixedSyncPoint.Equal(body.SyncedAt),
 		"the client needs the server's own clock back to use as its next cursor")
+	// Asserted on the raw JSON, not on the decoded pointer: a decoded nil
+	// cannot tell an explicit null from a key that is not there, so an
+	// `omitempty` slipping onto the field would pass a nil check while
+	// breaking the envelope contract — a client that stops when next_cursor is
+	// null would see an absent key as undefined.
+	assert.Contains(t, rec.Body.String(), `"next_cursor":null`,
+		"the key is part of the envelope even when the collection is exhausted")
 	assert.Nil(t, body.NextCursor, "these collections are returned whole")
 
 	assert.Equal(t, 1, f.products.deltaCalls)
