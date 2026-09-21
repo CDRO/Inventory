@@ -2,12 +2,13 @@
 # NAS variant: Tailscale sidecar, bind-mounted data").
 #
 # Layered ON TOP of docker-compose.yml, so the clone on the NAS never carries a
-# local edit that a `git pull` could trip over. It is loaded by a wrapper:
+# local edit that a `git pull` could trip over. Every command on the NAS is
+# `docker-compose` (with the hyphen) followed by this prefix, written out in full:
 #
-#   deploy/synology/compose <docker-compose arguments>
+#   docker-compose -p inventory -f docker-compose.yml -f docker-compose.nas.yml <arguments>
 #
-# which passes `-p inventory -f docker-compose.yml -f docker-compose.nas.yml` on
-# every call and does not depend on any untracked file. That is deliberate. An
+# (deploy/synology/compose is the same prefix as an optional script; nothing here
+# depends on it.) It does not depend on any untracked file. That is deliberate. An
 # explicit -f is the pin the spec calls a security control: it keeps
 # docker-compose.override.yml (the dev override: APP_ENV=dev, debug_reason in
 # error responses, port 8000 past the ingress) from being merged in. A guard
@@ -15,7 +16,7 @@
 #
 # So on the NAS never run a bare `docker-compose up`, and do not copy the
 # command the setup wizard prints at the end: neither has a -f, and both load the
-# dev override. `deploy/synology/compose config --services` must list app, db and
+# dev override. The prefix plus `config --services` must list app, db and
 # ts-inventory and must not list traefik.
 #
 # Deviations from the base stack, all deliberate:
@@ -52,13 +53,13 @@ services:
 
   ts-inventory:
     # Unpinned on purpose, like the operator's other Tailscale sidecars;
-    # `deploy/synology/compose pull` refreshes it.
+    # `pull ts-inventory` (with the prefix above) refreshes it.
     image: tailscale/tailscale:latest
     container_name: ts-inventory
     # Shares app's network namespace. If app restarts on its own - including
     # Docker's automatic restart after a crash - this container keeps the dead
     # namespace and the tailnet URL stops answering until it is restarted too:
-    #   deploy/synology/compose restart ts-inventory
+    #   restart ts-inventory (with the prefix above)
     network_mode: service:app
     environment:
       # Becomes https://inventory.<tailnet>.ts.net (needs MagicDNS and HTTPS
@@ -73,7 +74,7 @@ services:
       TS_SERVE_CONFIG: /config/serve.json
       # Needed only on the very first start; the node identity then persists in
       # ./ts_inventory_state. Pass it on the command line, not in a tracked file:
-      #   TS_AUTHKEY=tskey-auth-... deploy/synology/compose up -d
+      #   TS_AUTHKEY=tskey-auth-... docker-compose -p inventory -f docker-compose.yml -f docker-compose.nas.yml up -d
       # It still lands in the shell history and, through interpolation, in this
       # container's configuration (`docker inspect`) until the container is
       # recreated. Use a one-off key with a short expiry, and revoke it if the

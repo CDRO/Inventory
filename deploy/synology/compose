@@ -1,6 +1,12 @@
 #!/bin/sh
 # docker-compose for the Synology NAS variant, with both files pinned.
 #
+# OPTIONAL: this script only types the prefix `docker-compose -p inventory -f
+# docker-compose.yml -f docker-compose.nas.yml` for you. The docs write that
+# prefix out in full (`$DC`), so nothing depends on this file. It must be
+# executable and have LF line endings; if it will not run, use the prefix, or
+# start it as `sh deploy/synology/compose ...`.
+#
 #   deploy/synology/compose up -d --build
 #   deploy/synology/compose run --rm app migrate up
 #

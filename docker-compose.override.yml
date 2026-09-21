@@ -15,7 +15,8 @@
 #   docker compose -f docker-compose.yml up -d
 #
 # (The Synology NAS pins two files instead - docker-compose.yml and
-# docker-compose.nas.yml - through deploy/synology/compose.)
+# docker-compose.nas.yml - on every call; see the "Synology NAS variant" section
+# of docs/specs/01-architecture-and-deployment.md.)
 
 services:
   app:

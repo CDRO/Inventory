@@ -1,0 +1,4 @@
+# The NAS wrapper is run by the Synology's busybox shell. A CRLF checkout (this
+# repository is developed on Windows with core.autocrlf=true) would turn its
+# shebang into "#!/bin/sh\r" and it would stop running.
+deploy/synology/compose text eol=lf
