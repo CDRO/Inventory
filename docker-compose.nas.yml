@@ -1,0 +1,77 @@
+# Synology NAS variant (docs/specs/01-architecture-and-deployment.md, "Synology
+# NAS variant: Tailscale sidecar, bind-mounted data").
+#
+# Layered ON TOP of docker-compose.yml and selected by two lines in the NAS
+# clone's untracked .env, so the clone itself never carries a local edit that a
+# `git pull` could trip over:
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.nas.yml
+#   COMPOSE_PROJECT_NAME=inventory
+#
+# COMPOSE_FILE replaces Compose's default file discovery. That is also what
+# keeps docker-compose.override.yml (the dev override: APP_ENV=dev, debug_reason
+# in error responses, port 8000 past the ingress) from being merged in on the
+# NAS - the same guarantee as the `-f docker-compose.yml` pin the spec calls a
+# security control, without having to type it on every command. Do not add
+# COMPOSE_FILE to .env.example: the setup wizard prompts for every line there,
+# and a development checkout needs the override auto-loaded.
+#
+# Deviations from the base stack, all deliberate:
+#
+#  1. Runtime data lives in bind mounts inside the clone (./pgdata, ./uploads,
+#     ./imagecache) instead of named volumes. They are gitignored and
+#     dockerignored. Compose merges `volumes` by container path, so each entry
+#     below replaces the base file's named volume of the same target.
+#
+#  2. Traefik is switched off. Tailscale (below) is the only ingress, so the app
+#     needs no host port at all: nothing to clash with DSM's own 80/443/5000/
+#     5001, and the Docker socket is no longer mounted into a container.
+#
+#  3. Tailscale runs as a sidecar container and publishes the app over HTTPS on
+#     the tailnet through `tailscale serve` (deploy/synology/tailscale/serve.json).
+
+services:
+  # A profile no one enables. A service cannot be deleted by an override, but a
+  # service whose profile is inactive is not started by `up`.
+  traefik:
+    profiles: ["disabled"]
+
+  app:
+    container_name: inventory_app
+    volumes:
+      - ./uploads:/data/uploads
+      - ./imagecache:/data/cache
+
+  db:
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+
+  ts-inventory:
+    image: tailscale/tailscale:latest
+    container_name: ts-inventory
+    environment:
+      # Becomes https://inventory.<tailnet>.ts.net (needs MagicDNS and HTTPS
+      # certificates enabled for the tailnet).
+      TS_HOSTNAME: inventory
+      TS_STATE_DIR: /var/lib/tailscale
+      # The proxy rule lives in serve.json. `tailscale up` has no --serve flag,
+      # so TS_EXTRA_ARGS=--serve=... does not configure anything.
+      TS_SERVE_CONFIG: /config/serve.json
+      # Needed only on the very first start; the node identity then persists in
+      # ./ts_inventory_state. Pass it on the command line, never in a file:
+      #   TS_AUTHKEY=tskey-auth-... docker-compose up -d
+      # Use a one-off (non-reusable) key. The default keeps `up` quiet when the
+      # variable is unset.
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+    # No NET_ADMIN and no /dev/net/tun: the image defaults to userspace
+    # networking, which is all `tailscale serve` needs, and DSM does not reliably
+    # provide /dev/net/tun (a bind mount of a missing device path makes Docker
+    # create a directory in its place instead of failing clearly).
+    volumes:
+      - ./ts_inventory_state:/var/lib/tailscale    # holds the node key: keep it private
+      # The directory, not the single file: Tailscale only notices changes to a
+      # bind-mounted serve config when the directory is mounted.
+      - ./deploy/synology/tailscale:/config:ro
+    depends_on:
+      - app
+    restart: unless-stopped

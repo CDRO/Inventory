@@ -508,7 +508,9 @@ control is never a substitute for it.
 - **Active default — Tailscale:** installed as a Synology package, joining
   the NAS to a private WireGuard network. No router ports are opened; the
   app is reached at the NAS's Tailscale address. Nothing in the
-  application is Tailscale-specific.
+  application is Tailscale-specific. (The operator's own NAS runs it as a
+  sidecar container instead, in place of Traefik — see "Synology NAS
+  variant" below.)
 - **Documented alternative — Cloudflare Tunnel:** if Tailscale proves
   impractical, add a `cloudflared` service to the compose file pointing at
   `http://traefik:80` and disable/ignore the Tailscale package. Keep this
@@ -518,6 +520,96 @@ control is never a substitute for it.
 Because the app must work on a LAN-only / Tailscale-only NAS with no
 inbound internet exposure, the frontend must not depend on any CDN at
 runtime — see the vendoring rule in `11-reporting-and-analytics.md`.
+
+## Synology NAS variant: Tailscale sidecar, bind-mounted data
+
+The operator's NAS (a DS923+ running Container Manager) deviates from the
+general design above in three deliberate ways. All three are one tracked file,
+[`docker-compose.nas.yml`](../../docker-compose.nas.yml), layered on top of the
+unchanged base file — so the clone on the NAS never carries a local edit, and
+`git pull` has nothing to trip over.
+
+**Selecting it.** Two lines in the NAS clone's untracked `.env`:
+
+```dotenv
+COMPOSE_FILE=docker-compose.yml:docker-compose.nas.yml
+COMPOSE_PROJECT_NAME=inventory
+```
+
+`COMPOSE_FILE` replaces Compose's default file discovery, which is also what
+keeps `docker-compose.override.yml` out: it gives the same guarantee as the
+`-f docker-compose.yml` pin in "Deployment model", without typing it on every
+command. It does **not** belong in `.env.example` — the setup wizard prompts
+for every line there, and a development checkout needs the override
+auto-loaded. The separator is `:` on Linux; Compose on Windows defaults to `;`.
+
+**Never put a `compose.yml` (or `compose.yaml`) into the clone.** Compose
+prefers `compose.yaml`/`compose.yml` over `docker-compose.yml` and silently
+ignores the latter (it prints only a warning), so a private copy would quietly
+replace the repository's file and every later change to it would have no effect
+— while `docker-compose.override.yml` would still be merged into it.
+
+**Ingress: a Tailscale sidecar instead of Traefik.** `ts-inventory` publishes
+the app on the tailnet over HTTPS (`https://inventory.<tailnet>.ts.net`) by
+proxying to `http://app:8000` through `tailscale serve`, configured by
+[`deploy/synology/tailscale/serve.json`](../../deploy/synology/tailscale/serve.json)
+via `TS_SERVE_CONFIG`. (`tailscale up` has no `--serve` flag, so that cannot be
+passed through `TS_EXTRA_ARGS`.) Traefik is disabled by an inactive profile, so
+the stack publishes no host port at all: nothing can clash with DSM's own
+80/443/5000/5001, and the Docker socket is no longer mounted into a container.
+
+- The tailnet needs **MagicDNS and HTTPS certificates** enabled. HTTPS is not
+  optional: the session cookie is `Secure` (`03-auth-and-multi-tenancy.md`), so
+  plain HTTP would log no one in.
+- The container uses userspace networking (the image default), which is all
+  `tailscale serve` needs, so it requests neither `NET_ADMIN` nor
+  `/dev/net/tun`. DSM does not reliably provide that device.
+- **The auth key is passed once, on the command line, and never written to a
+  file** — least of all a tracked one: `TS_AUTHKEY=tskey-auth-… docker-compose
+  up -d`. Use a one-off, non-reusable key. The node identity then persists in
+  `./ts_inventory_state`, which holds the node key and is treated like a secret.
+
+**Data in the clone.** `./pgdata`, `./uploads` and `./imagecache` are bind
+mounts inside the clone instead of named volumes, so they are visible in File
+Station. They are gitignored and dockerignored, and both matter: without the
+`.dockerignore` entries the build context would contain the live Postgres data
+directory (files the context reader cannot always read, a copy of the database
+in every `COPY . .` layer, gigabytes per build). Two consequences to keep in
+mind:
+
+- `git clean -x` / `-X` in that clone deletes all of it. Do not run it there.
+- A file-level copy of a *running* Postgres data directory — Hyper Backup
+  included — is not a consistent backup. Back the database up with `pg_dump`.
+
+**Compose version.** The files use the long-form `env_file` with
+`required: false`, which needs **Compose ≥ 2.24** (see "Minimum Docker Compose
+version" above). Container Manager bundles v2.20.1, which rejects the whole
+file. Install a newer standalone binary in a shared folder — one a DSM update
+does not overwrite — and put it first on `PATH` for the SSH session (v2.31.0 is
+what the development machines run):
+
+```console
+$ mkdir -p /volume1/docker/bin && cd /volume1/docker/bin
+$ curl -fLO https://github.com/docker/compose/releases/download/v2.31.0/docker-compose-linux-x86_64
+$ curl -fLO https://github.com/docker/compose/releases/download/v2.31.0/docker-compose-linux-x86_64.sha256
+$ sha256sum -c docker-compose-linux-x86_64.sha256
+$ chmod +x docker-compose-linux-x86_64 && mv docker-compose-linux-x86_64 docker-compose
+$ export PATH=/volume1/docker/bin:$PATH
+```
+
+Use `docker-compose …` (with the hyphen) on the NAS: a `docker compose` plugin,
+if present, is the bundled old version. Container Manager's Project tab uses
+that same bundled Compose and cannot load these files, so the stack is operated
+over SSH, and the UI is only good for looking at running containers.
+
+**Updating.** With `COMPOSE_FILE` set, no `-f` is needed:
+
+```console
+$ git pull
+$ docker-compose build
+$ docker-compose run --rm app migrate up
+$ docker-compose up -d
+```
 
 ## Health/readiness
 
