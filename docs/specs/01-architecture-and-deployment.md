@@ -287,11 +287,6 @@ variable is silently missed:
   after an *empty* value as part of the value
   ([`30-setup-wizard-derived-config.md`](30-setup-wizard-derived-config.md)).
 
-*Amended by [`30-setup-wizard-derived-config.md`](30-setup-wizard-derived-config.md)
-(not yet built):* `DATABASE_URL` is derived from the `POSTGRES_*` answers
-instead of being prompted for, and the generated `.env` carries no inline
-comments (Compose reads one after an empty value as the value).
-
 The `setup` service in `docker-compose.yml` mounts the project directory
 and runs with `stdin_open: true` / `tty: true` so prompts work.
 
