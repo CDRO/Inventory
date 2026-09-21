@@ -183,6 +183,34 @@ three per package worktree, deterministically, so two package sessions
 running `docker compose up -d` at the same time — or a crashed session's
 containers left running — never collide on a host port or a container name.
 
+**Removing what a worktree leaves behind.** Every such checkout leaves, per
+Compose project, a database container, a network, three named volumes
+(`pgdata`, `uploads`, `imagecache`) and the images it built, and nothing removes
+them when the work is merged. `scripts/wellen-docker-cleanup.ps1` does, for the
+worktrees of a finished wave (the orchestrator runs it after the wave's
+consolidation for every wave with `"dockerCleanup": true`; by hand:
+`.\scripts\wellen-docker-cleanup.ps1 -Wave <n> -DryRun`, then without `-DryRun`).
+It decides ownership from Docker's own labels, not from names: a Compose project
+belongs to the wave if one of its containers has a
+`com.docker.compose.project.working_dir` inside one of the wave's worktrees (which
+also catches a project a session started under a name of its own), or if its name
+is the orchestrator's `<repo>-<slug>` (which catches the network, volumes and
+images of a project whose containers are already gone). It removes those
+projects' containers, networks, volumes and image tags, and it **never** touches:
+
+- the main checkout's own stack (any project with a container in the repository
+  root, or named after the repository);
+- images without such a project label and tag — above all `inventory-app-dev`,
+  which the dev override gives one fixed name that every worktree *and* the main
+  checkout share — plus `postgres`, `traefik`, `tailscale`, the Playwright image
+  and the build cache;
+- anything of another repository. A resource that merely mentions a slug but
+  cannot be attributed to a worktree is listed as "kept", not removed.
+
+Images are removed by tag and never by id: two projects that built the same
+content share an image id, and removing by id would take the other project's tag
+with it.
+
 ## Repository layout
 
 ```

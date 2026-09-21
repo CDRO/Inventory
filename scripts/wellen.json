@@ -96,6 +96,7 @@
       "waveIssue": 100,
       "integrationBranch": "integration/specs-13-20-welle-3",
       "sequential": false,
+      "dockerCleanup": true,
       "packages": [
         {
           "specIssue": 92,
@@ -122,6 +123,7 @@
       "waveIssue": 108,
       "integrationBranch": "integration/specs-13-20-welle-4",
       "sequential": true,
+      "dockerCleanup": true,
       "packages": [
         {
           "specIssue": 105,
@@ -151,6 +153,7 @@
       "waveIssue": 101,
       "integrationBranch": "integration/specs-13-20-welle-5",
       "sequential": true,
+      "dockerCleanup": true,
       "packages": [
         {
           "specIssue": 96,
@@ -177,6 +180,7 @@
       "waveIssue": 102,
       "integrationBranch": "integration/specs-13-20-welle-6",
       "sequential": false,
+      "dockerCleanup": true,
       "packages": [
         {
           "specIssue": 95,

@@ -22,12 +22,18 @@ and reviewers" below.
    (`claude --model … --effort … --advisor … --remote-control …`).
 3. It polls GitHub until every spec issue of the wave is closed, then starts
    the consolidation session in the main checkout and waits until the wave
-   issue is closed. Only then does the next wave begin.
+   issue is closed.
+4. For a wave with `"dockerCleanup": true` it then removes the Docker
+   resources that the wave's package worktrees created (see "Docker cleanup
+   after a wave"). Only then does the next wave begin.
 
 The script itself never writes to git/GitHub (other than `worktree add` and
 copying `.env`) — every substantive action is done by the sessions it
-starts. **Planning a new wave therefore means: extend the JSON file and set
-up the GitHub prerequisites. The script itself is never changed.**
+starts. The one other thing it does is that Docker cleanup, and that is
+deliberate: removing Docker resources is mechanical and must be exact, and a
+session that is told to tidy up Docker is a session that might run a prune.
+**Planning a new wave therefore means: extend the JSON file and set up the
+GitHub prerequisites. The script itself is never changed.**
 
 Docker isolation between parallel package worktrees (`COMPOSE_PROJECT_NAME`,
 `HTTP_PORT`, `TRAEFIK_PORT`) is automatic and needs no attention when
@@ -35,6 +41,59 @@ planning a wave — the script assigns each package a deterministic, unique
 set of these from its position in the wave file the moment a worktree is
 created. See `docs/specs/01-architecture-and-deployment.md`, "Running more
 than one instance of the stack locally", for the mechanism itself.
+
+## Docker cleanup after a wave
+
+Every package worktree leaves Docker state behind: a database container, a
+network, three named volumes (`pgdata`, `uploads`, `imagecache`) and the
+images built for it, and package sessions sometimes start a further Compose
+project under a name of their own to run a check. Left alone, this grows by
+several volumes and images per package, per wave.
+
+A wave with `"dockerCleanup": true` gets it removed **after its consolidation
+has finished** (the wave issue is closed, so no session is using any of it),
+by `scripts/wellen-docker-cleanup.ps1`. In this plan the field is set on waves
+3 to 6.
+
+- **What is removed:** the containers (with their anonymous volumes), networks,
+  named volumes and image tags of every Compose project that belongs to the
+  wave's worktrees. Ownership comes from Docker's labels, not from names: a
+  project belongs to the wave if a container of it has
+  `com.docker.compose.project.working_dir` inside one of the wave's worktrees
+  (whatever the project is called), or if its name is `<repo>-<slug>` or starts
+  with that plus a hyphen (which finds a project whose containers are already
+  gone).
+- **What is never removed:** the main checkout's own stack; the shared
+  `inventory-app-dev` image (the dev override gives it one fixed name, so the
+  main checkout uses it too) and every other image without a worktree project's
+  label and tag (`postgres`, `traefik`, `tailscale`, the Playwright image); the
+  build cache; anything of another repository. Something that merely mentions a
+  slug but cannot be attributed is printed as "kept".
+- **The worktrees themselves and their branches stay.** Only Docker state goes,
+  and a package worktree recreates what it needs the next time someone runs
+  `docker compose` in it.
+- **A failure only logs.** Cleanup is housekeeping: a warning names what could
+  not be removed (an image still used by something else, say), and the next
+  wave starts anyway. It is idempotent, so running it again is harmless. A wave
+  that is already complete when the orchestrator starts is cleaned too.
+- **The consolidation session is told not to clean Docker up itself** and never
+  to run a prune.
+
+By hand, for any wave (look first, then remove):
+
+```powershell
+.\scripts\wellen-docker-cleanup.ps1 -Wave 3 -DryRun
+.\scripts\wellen-docker-cleanup.ps1 -Wave 3
+.\scripts\wellen-docker-cleanup.ps1 -Slug w3-operations,w3-product-maintenance
+```
+
+**When a change to this takes effect.** The orchestrator reads the script and
+the wave file once, when it starts. A run that was already going keeps the
+behavior it started with: a wave that finished under it is not cleaned, and the
+consolidation prompt it builds for the current wave does not carry the note.
+Restart it (it is restart-safe) to pick the change up for the waves after that,
+and clean a wave that already finished by hand as above. `-StartWave n` skips
+the waves before `n` without cleaning them.
 
 ## GitHub prerequisites a wave needs
 
@@ -81,6 +140,8 @@ Before the orchestrator can work through a wave, these must exist:
       "waveIssue": 93,                      // wave issue; closed = wave done
       "integrationBranch": "integration/specs-13-20-welle-2",
       "sequential": false,                  // true: packages run one after another, not in parallel
+      "dockerCleanup": true,                // true: after the consolidation, remove the Docker
+                                             //       state the wave's worktrees created (default: false)
       "external": false,                    // true: wave runs outside this script,
                                              //       only waveIssue is waited on
                                              //       (then "packages": [])
@@ -197,7 +258,9 @@ Before assigning packages to a wave, check what each one touches:
    `/seed-issues`, wave issues, the first integration branch pushed, the
    wave-plan issue created/extended.
 4. Extend `scripts/wellen.json` (or, for a new plan, create a new file and
-   start it later with `-WaveFile`).
+   start it later with `-WaveFile`). Set `"dockerCleanup": true` on every new
+   wave; leave it off only for a wave whose Docker state someone wants to
+   inspect afterwards.
 5. Check:
    ```powershell
    powershell -NoProfile -File scripts\wellen-orchestrator.ps1 -Validate
