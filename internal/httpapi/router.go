@@ -417,6 +417,18 @@ func NewRouter(d Deps) http.Handler {
 			sr.Patch("/products/{product_id}/category", products.SetCategory)
 			sr.Patch("/products/{product_id}/image", products.SetImage)
 
+			// Product maintenance (docs/specs/16-product-maintenance.md): the
+			// detail read behind products.html, the full edit surface — which
+			// is also the endpoint spec 08 noted as missing for
+			// products.default_shelf_life_days — the duplicate merge, and the
+			// delete. They join the group above rather than forming one of
+			// their own: membership is the whole of their access control, like
+			// every other route here.
+			sr.Get("/products/{product_id}", products.Get)
+			sr.Patch("/products/{product_id}", products.Update)
+			sr.Post("/products/{product_id}/merge", products.Merge)
+			sr.Delete("/products/{product_id}", products.Delete)
+
 			if d.Matcher != nil {
 				lists := NewShoppingListHandler(d.Store, d.Matcher, d.ImageCache, d.ProductImages, errs)
 				sr.Post("/shopping-lists", lists.Create)

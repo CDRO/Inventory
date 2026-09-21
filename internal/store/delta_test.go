@@ -54,7 +54,8 @@ func TestStaleCursorIsRefusedEvenWithNoTombstonesLeft(t *testing.T) {
 	ctx := context.Background()
 
 	storageID, productID, _, _ := stocked(t, ctx, s, 1)
-	require.NoError(t, s.DeleteProduct(ctx, storageID, productID))
+	_, deleteErr := s.DeleteProduct(ctx, storageID, productID)
+	require.NoError(t, deleteErr)
 
 	// Age the tombstone past retention and sweep it, exactly as the nightly
 	// job would.
@@ -184,7 +185,8 @@ func TestProductDeltaReportsChangesAndDeletions(t *testing.T) {
 	category, err := s.CreateCategory(ctx, storageID, store.NewCategory{Name: "Dairy"})
 	require.NoError(t, err)
 	require.NoError(t, s.SetProductCategory(ctx, storageID, kept.ID, &category.ID))
-	require.NoError(t, s.DeleteProduct(ctx, storageID, doomed.ID))
+	_, deleteErr := s.DeleteProduct(ctx, storageID, doomed.ID)
+	require.NoError(t, deleteErr)
 
 	delta, err := s.ProductsChangedSince(ctx, storageID, cursor)
 	require.NoError(t, err)
@@ -239,7 +241,8 @@ func TestDeltaIsScopedToOneStorage(t *testing.T) {
 	require.NoError(t, err)
 	foreign, err := s.CreateProduct(ctx, theirs, store.NewProduct{Name: "Their Butter"})
 	require.NoError(t, err)
-	require.NoError(t, s.DeleteProduct(ctx, theirs, foreign.ID))
+	_, deleteErr := s.DeleteProduct(ctx, theirs, foreign.ID)
+	require.NoError(t, deleteErr)
 
 	delta, err := s.ProductsChangedSince(ctx, mine, cursor)
 	require.NoError(t, err)
@@ -314,7 +317,8 @@ func TestDeltaDoesNotMixEntityKinds(t *testing.T) {
 	require.NoError(t, err)
 
 	cursor := timeNow(t, ctx)
-	require.NoError(t, s.DeleteProduct(ctx, storageID, product.ID))
+	_, deleteErr := s.DeleteProduct(ctx, storageID, product.ID)
+	require.NoError(t, deleteErr)
 	require.NoError(t, s.DeleteCategory(ctx, storageID, category.ID))
 	require.NoError(t, s.DeleteLocation(ctx, storageID, location.ID))
 
