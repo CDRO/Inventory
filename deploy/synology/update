@@ -209,9 +209,17 @@ fi
 # --- Get the new code and image -----------------------------------------------
 
 if [ "$pull" -eq 1 ]; then
+  # The clone is meant to carry no local edit (that is what the layered compose
+  # file is for). What is deployed must be what was pulled, so refuse instead of
+  # building someone's leftovers; --no-pull deploys the tree as it is.
+  if ! git diff --quiet HEAD -- 2>/dev/null; then
+    git status --short --untracked-files=no >&2
+    die "the clone has local changes to tracked files (listed above). Commit, stash or discard them, or use --no-pull to deploy the tree as it is."
+  fi
   say "git pull --ff-only ($(git rev-parse --abbrev-ref HEAD))"
   before=$(git rev-parse HEAD)
-  git pull --ff-only
+  # --no-rebase: a user's pull.rebase setting must not turn this into a rebase.
+  git pull --ff-only --no-rebase
   after=$(git rev-parse HEAD)
   if [ "$before" != "$after" ]; then
     echo "    $(git rev-parse --short "$before") -> $(git rev-parse --short "$after")"
@@ -301,9 +309,9 @@ if [ "$rc" -ne 0 ]; then
   echo "--- last log lines of the new instance:" >&2
   docker logs --tail 30 "$new" >&2 || true
   if [ "$rc" -eq 2 ]; then
-    die "the new instance stopped. It is removed; the old instance was not touched."
+    die "the new instance stopped. The old instance was not touched."
   fi
-  die "the new instance did not become healthy. It is removed; the old instance was not touched."
+  die "the new instance did not become healthy. The old instance was not touched."
 fi
 
 # The old instance kept accepting jobs while the new one started, and stopping it
@@ -314,8 +322,8 @@ rc=0
 wait_no_pending || rc=$?
 case $rc in
   0) ;;
-  1) die "$pending_left job(s) still pending after ${DRAIN_TIMEOUT}s. The new instance is removed; the old one was not touched (the database is migrated)." ;;
-  *) die "cannot read the pending-job count. The new instance is removed; the old one was not touched (the database is migrated)." ;;
+  1) die "$pending_left job(s) still pending after ${DRAIN_TIMEOUT}s. The old instance was not touched (the database is migrated)." ;;
+  *) die "cannot read the pending-job count. The old instance was not touched (the database is migrated)." ;;
 esac
 
 # The new instance is proven. From here on the update is committed: the old
