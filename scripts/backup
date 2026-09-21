@@ -157,7 +157,12 @@ do_restore() {
         -c "CREATE DATABASE \"$POSTGRES_DB\"" \
         || fail "could not recreate \"$POSTGRES_DB\""
 
-    psql -h "$DB_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -q -v ON_ERROR_STOP=1 \
+    # -o /dev/null discards the dump's own incidental result rows — the
+    # set_config and setval tables pg_dump emits — so what reaches the operator
+    # is this script's account of the restore rather than a wall of noise with
+    # the real messages buried in it. Errors are unaffected: they go to stderr,
+    # and ON_ERROR_STOP still aborts the load.
+    psql -h "$DB_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -q -o /dev/null -v ON_ERROR_STOP=1 \
         -f "$work/db.sql" \
         || fail "loading db.sql failed; \"$POSTGRES_DB\" holds only as much as the dump got through. Fix the cause and run the restore again — it starts by dropping the database, so a second attempt starts clean."
 

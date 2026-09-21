@@ -203,6 +203,10 @@ Notes on the steps, in the order you will wonder about them:
 - **The restore refuses to run while anything else is connected to the
   database** — that is why only `db` is started in step two. A restore into a
   running stack corrupts both.
+- **On Git Bash for Windows, prefix the restore with `MSYS_NO_PATHCONV=1`.**
+  It rewrites the `/backups/...` argument into a Windows path before Docker
+  sees it, and the restore then reports an archive it cannot find. Every other
+  shell, and the NAS, are unaffected.
 - **`migrate up` applies only what is newer than the backup.** The dump carries
   goose's version table, so restoring a current archive is a no-op here, and
   restoring an old one upgrades it.
