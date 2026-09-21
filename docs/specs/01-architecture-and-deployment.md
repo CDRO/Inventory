@@ -754,41 +754,64 @@ $ TS_AUTHKEY=tskey-auth-… $DC up -d
 
 The wizard ends by printing `docker compose up -d`; ignore it and use `$DC up -d`.
 `sh deploy/synology/update` runs the build, migrate and start of this sequence for
-you when no app instance is running.
+you when no app instance is running (mind the `TS_AUTHKEY` note under "Updating").
 
-**Updating: `sh deploy/synology/update`.** The script updates the stack so that a
+**Updating: `sh deploy/synology/update`.** The upgrade rules of
+[`18-operations-and-observability.md`](18-operations-and-observability.md)
+("Upgrades") apply: **back up first**, and migrations only go forward. The script
+takes no backup and cannot undo a migration. What it does is update so that a
 release that does not start never replaces one that does. It pulls the code and
 the sidecar image, builds, runs `migrate up`, waits until no job is pending, starts
 a **second** app instance from the new image next to the old one, waits until that
-one answers `GET /healthz`, then stops and removes the old one and recreates the
-sidecar. Its contract:
+one answers `GET /healthz`, waits once more until no job is pending, then stops and
+removes the old one and recreates the sidecar. Its contract:
 
 - **The old instance is not touched until the new one is healthy.** A failed
-  build, migration or start leaves the old app serving; a new instance that does
-  not become healthy is removed again.
+  build, migration or start leaves the old app serving; a new instance that fails
+  to start, does not become healthy, or is interrupted is removed again, and no
+  stopped instance is left behind. The database stays migrated in every one of
+  those cases.
 - **Both `-f` files on every compose call**, and it refuses to run if the merged
-  model lists `traefik` or lacks `app`, `db` or `ts-inventory` (the NAS layer is
-  not active), or if Compose is older than 2.24.
+  model — checked after `git pull`, on the files it will use — lists `traefik` or
+  lacks `app`, `db` or `ts-inventory` (the NAS layer is not active), or if Compose
+  is older than 2.24.
+- **It refuses, before it pulls anything,** when more than one app instance runs or
+  a stopped one is left over, and it runs one at a time (a lock directory).
 - **`--classic`** stops the app and the sidecar first, then migrates, then starts:
-  for a release whose migration the previous release cannot run against.
-- **Nothing to do** is detected (same image layers as the running app) and changes
-  nothing.
+  for a release whose migration the previous release cannot run against. If the
+  migration fails, the stack stays stopped, and the script says so.
+- **Nothing to do** is detected by asking Compose whether it would recreate, create
+  or start anything (`up --dry-run`); if not, nothing is touched.
 
 What it does not give you, and the reasons:
 
 - **Not zero downtime.** The sidecar shares the app's network namespace and must be
-  recreated with it: a few seconds without the tailnet URL.
+  recreated with it: a few seconds without the tailnet URL. While the new instance
+  starts, the name `app` also resolves to both instances, so a request can reach the
+  new one before its health check has passed.
 - **Two releases overlap:** the migration runs against the old app, and the old app
   runs on the migrated schema until it is retired.
 - **The app assumes a single process.** `FailInterruptedJobs` marks every pending
-  job failed on start (`04-backend-api-conventions.md`), so a second instance can
-  fail a job the first is still working on. The script waits for pending jobs to
-  finish before it starts the second instance; a job submitted in the seconds
-  between that check and the new start is still failed, and the user re-runs the
-  analysis. Closing that window needs the recovery to be aware of which process
-  owns a job, which is application work, not deployment.
+  job failed on start (`04-backend-api-conventions.md`), and a normal stop cancels
+  the jobs the app is running and fails them as interrupted. So a second instance can
+  fail a job the first is still working on, and stopping the first can fail a job
+  submitted to it during the overlap. The script waits for pending jobs to finish
+  before it starts the second instance and again before it stops the old one; a job
+  submitted in the seconds after either check is still failed, and the user re-runs
+  the analysis. Closing that needs the recovery to be aware of which process owns a
+  job, which is application work, not deployment (issue #121).
+- **No way back without the backup.** Going back to an earlier release after a
+  migration means restoring the backup (`18`); an old binary on a newer schema is a
+  fatal start-up error there.
 
-Options, environment and troubleshooting are in
+Two operational notes. The app container is **no longer named `inventory_app`**: a
+fixed name would forbid the second instance, so Compose names them
+`inventory-app-<n>`. And the very first start of the sidecar needs the one-off key:
+`TS_AUTHKEY=tskey-auth-… sh deploy/synology/update --no-pull`, or the sidecar starts
+without joining the tailnet and the script still exits 0.
+
+Options, environment, the Task Scheduler command and a checklist for verifying a
+change to the script are in
 [`deploy/synology/README.md`](../../deploy/synology/README.md). Without the script,
 the same update by hand is `git pull`, then `$DC pull ts-inventory`, `$DC build`,
 `$DC run --rm app migrate up`, `$DC up -d`, which stops the app before it starts

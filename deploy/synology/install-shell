@@ -10,7 +10,9 @@
 # an SSH login as root). The block holds absolute paths into this clone, so `dc`
 # and $DC work from any directory, and they always carry both -f files: the dev
 # override is never merged in. Run it again after moving the clone; it replaces
-# its own block and touches nothing else in the file.
+# its own block and touches nothing else in the file. Before it changes a profile
+# it copies it to <profile>.inventory-bak, and it refuses to touch one whose
+# markers are unbalanced (a start line without its end line, or the reverse).
 #
 # See docs/specs/01-architecture-and-deployment.md, "Synology NAS variant".
 
@@ -22,7 +24,7 @@ END='# <<< inventory NAS shell <<<'
 die() { echo "install-shell: $*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 mode=install
@@ -41,9 +43,38 @@ done
 
 repo=$(cd "$(dirname "$0")/../.." && pwd) || die "cannot resolve the clone's path"
 [ -f "$repo/docker-compose.nas.yml" ] || die "$repo does not look like the clone (no docker-compose.nas.yml)"
+# The path goes into a double-quoted line of the profile, which the shell expands
+# at every login: a dollar sign, a backtick, a quote or a backslash in it would run
+# as code, and whitespace would split $DC. Allow only plain path characters.
 case "$repo" in
-  *[[:space:]]*) die "the clone's path contains whitespace ($repo): \$DC cannot hold it" ;;
+  *[!A-Za-z0-9._/+-]*)
+    die "the clone's path ($repo) has characters other than letters, digits and . _ / + - : they would be expanded or split by the shell at every login. Move the clone." ;;
 esac
+
+# --- Look at the profile before changing anything -----------------------------
+
+if [ -f "$profile" ]; then
+  # Balanced markers: every start line is closed by an end line, none nested.
+  awk -v s="$START" -v e="$END" '
+    $0 == s { if (open) bad = 1; open = 1; next }
+    $0 == e { if (!open) bad = 1; open = 0; next }
+    END { exit (bad || open) ? 1 : 0 }' "$profile" \
+    || die "$profile has an unbalanced inventory block (a start or end marker line without its partner). Nothing was changed. Fix or delete the marker lines by hand, then run this again."
+  has_block=$(awk -v s="$START" '$0 == s { print "yes"; exit }' "$profile")
+else
+  has_block=
+fi
+
+if [ "$mode" = remove ]; then
+  if [ ! -f "$profile" ]; then
+    echo "Nothing to remove: $profile does not exist."; exit 0
+  fi
+  if [ -z "$has_block" ]; then
+    echo "Nothing to remove: no inventory block in $profile."; exit 0
+  fi
+fi
+
+# --- Build the new profile in a temporary file --------------------------------
 
 # The profile without any earlier block of ours.
 strip_block() {
@@ -72,7 +103,13 @@ if [ "$mode" = install ]; then
   } >> "$tmp"
 fi
 
-# Rewrite in place (cat, not mv) so the file keeps its owner and mode.
+# --- Write --------------------------------------------------------------------
+
+# Keep what was there. Rewrite in place (cat, not mv) so the file keeps its owner
+# and mode.
+if [ -f "$profile" ]; then
+  cp -p "$profile" "$profile.inventory-bak" || die "cannot write $profile.inventory-bak; $profile was not changed"
+fi
 cat "$tmp" > "$profile"
 
 if [ "$mode" = install ]; then
