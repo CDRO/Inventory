@@ -199,13 +199,26 @@ func validate(key, value string) string {
 		}
 		return key + " cannot be empty."
 	}
-	if key == "POSTGRES_PASSWORD" && strings.ContainsRune(value, '$') {
-		// Compose interpolates POSTGRES_PASSWORD from .env when it builds the
-		// db service's environment (docker-compose.yml), but DATABASE_URL is
-		// handed to the app via env_file, which Compose does not interpolate.
-		// A '$' would then reach the two services differently, recreating the
-		// exact password mismatch this spec exists to remove.
-		return `POSTGRES_PASSWORD cannot contain "$": Compose interpolates this value for the db container but not inside DATABASE_URL, so the two would end up disagreeing.`
+	if key == "POSTGRES_PASSWORD" {
+		if strings.ContainsRune(value, '$') {
+			// Compose interpolates POSTGRES_PASSWORD from .env when it builds
+			// the db service's environment (docker-compose.yml), but
+			// DATABASE_URL is handed to the app via env_file, which Compose
+			// does not interpolate. A '$' would then reach the two services
+			// differently, recreating the exact password mismatch this spec
+			// exists to remove.
+			return `POSTGRES_PASSWORD cannot contain "$": Compose interpolates this value for the db container but not inside DATABASE_URL, so the two would end up disagreeing.`
+		}
+		if _, trailing := splitTrailingComment(value); trailing != "" {
+			// The same whitespace-then-'#' rule that makes Compose read a
+			// comment as part of an empty value also makes it silently
+			// truncate this one when it reads .env to build the db
+			// container's environment. DATABASE_URL keeps the full password
+			// intact because net/url percent-encodes '#', so the two would
+			// again end up disagreeing — the same mismatch class the '$'
+			// check above exists to remove.
+			return `POSTGRES_PASSWORD cannot contain whitespace followed by "#": Compose reads that as a comment when it builds the db container's environment, but the derived DATABASE_URL keeps the full password, so the two would end up disagreeing.`
+		}
 	}
 	return ""
 }

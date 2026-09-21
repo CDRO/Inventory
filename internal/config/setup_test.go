@@ -237,6 +237,42 @@ func TestWizardRejectsDollarInPostgresPassword(t *testing.T) {
 	assert.Contains(t, readEnv(t, dir)["DATABASE_URL"], "good-password")
 }
 
+// TestWizardRejectsWhitespaceHashInPostgresPassword covers the same mismatch
+// class as the '$' rejection, but via the other route: Compose reads a '#'
+// preceded by whitespace as a comment when it reads .env to build the db
+// container's environment (the exact rule docs/specs/30 names as the second
+// defect), silently truncating POSTGRES_PASSWORD there. DATABASE_URL keeps
+// the password intact because net/url percent-encodes '#', so an unrejected
+// "pass word#tail" would leave db and the app with two different passwords.
+func TestWizardRejectsWhitespaceHashInPostgresPassword(t *testing.T) {
+	t.Parallel()
+
+	dir := newProject(t)
+
+	transcript, err := runWizard(t, dir, "", "", "", "", "pass word #tail", "good-password", "", "gemini-key", "")
+	require.NoError(t, err)
+
+	assert.Contains(t, transcript, `POSTGRES_PASSWORD cannot contain whitespace followed by "#"`)
+	assert.Equal(t, "good-password", readEnv(t, dir)["POSTGRES_PASSWORD"])
+	assert.Contains(t, readEnv(t, dir)["DATABASE_URL"], "good-password")
+}
+
+// TestWizardAcceptsHashWithoutPrecedingWhitespaceInPostgresPassword checks the
+// validation is not overbroad: a '#' with no whitespace before it is not a
+// comment to Compose either (that is the first defect this spec fixes, for an
+// empty value), so it must remain a legal password character.
+func TestWizardAcceptsHashWithoutPrecedingWhitespaceInPostgresPassword(t *testing.T) {
+	t.Parallel()
+
+	dir := newProject(t)
+
+	const password = "pass#word"
+	_, err := runWizard(t, dir, "", "", "", "", password, "", "gemini-key", "")
+	require.NoError(t, err)
+
+	assert.Equal(t, password, readEnv(t, dir)["POSTGRES_PASSWORD"])
+}
+
 // TestWizardRefusesToOverwriteWithoutConfirmation protects a configured
 // deployment from a stray `docker compose run --rm setup`.
 func TestWizardRefusesToOverwriteWithoutConfirmation(t *testing.T) {
