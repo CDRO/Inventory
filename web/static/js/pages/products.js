@@ -318,14 +318,27 @@ async function save(product, inputs) {
 }
 
 /**
- * closestOtherProduct is the courtesy check behind a rename: the one other
- * product whose normalized name matches the new one. It is deliberately a
- * plain equality over normalized text rather than a fuzzy score — this is an
- * offer, and a wrong offer costs the user a dialog.
+ * closestOtherProduct is the courtesy check behind a rename: an existing
+ * product whose normalized name contains the new one, or is contained by it.
+ * That is what catches the case the spec names — renaming "Penne" to "Penne
+ * Barilla 500g" while "Barilla Penne" already exists.
+ *
+ * Containment rather than a similarity score, deliberately: this is an offer,
+ * not a rule, the dialog is cancellable, and a rule nobody can predict is
+ * worse than one that occasionally stays quiet. The server never blocks a
+ * rename over similarity either way
+ * (docs/specs/16-product-maintenance.md).
  */
 function closestOtherProduct(name, ownId) {
   const needle = normalize(name);
-  return products.find((p) => p.id !== ownId && normalize(p.name) === needle) ?? null;
+  if (!needle) return null;
+  return (
+    products.find((p) => {
+      if (p.id === ownId) return false;
+      const other = normalize(p.name);
+      return other.includes(needle) || needle.includes(other);
+    }) ?? null
+  );
 }
 
 async function offerMerge(survivor, source) {

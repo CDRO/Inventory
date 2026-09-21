@@ -3,6 +3,7 @@ package httpapi_test
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,6 +138,26 @@ func TestPatchProductValidatesEveryField(t *testing.T) {
 			assert.Zero(t, f.products.updateCalls, "nothing invalid reaches the store")
 		})
 	}
+}
+
+// TestPatchProductNameLengthIsCountedInRunes: VARCHAR(255) counts characters,
+// so a 200-character Cyrillic name is 400 bytes and perfectly legal. Counting
+// bytes here would refuse it with a 422 the database never asked for.
+func TestPatchProductNameLengthIsCountedInRunes(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	product := seedProduct(f, "Penne")
+	cyrillic := strings.Repeat("ж", 200)
+
+	rec := f.do(http.MethodPatch, f.base()+"/products/"+product.ID.String(),
+		`{"name":"`+cyrillic+`"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec = f.do(http.MethodPatch, f.base()+"/products/"+product.ID.String(),
+		`{"name":"`+strings.Repeat("ж", 256)+`"}`)
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+	assert.Contains(t, errorFields(t, rec), "name")
 }
 
 // TestPatchProductReportsRecomputedBatchesOnlyForShelfLife is the line

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -461,7 +462,7 @@ func (h *ProductHandler) Update(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case name == "":
 			fields["name"] = append(fields["name"], "Give the product a name.")
-		case len(name) > maxProductNameLength:
+		case utf8.RuneCountInString(name) > maxProductNameLength:
 			fields["name"] = append(fields["name"], "Keep the name under 255 characters.")
 		}
 		patch.Name = &name
@@ -528,7 +529,7 @@ func (h *ProductHandler) Update(w http.ResponseWriter, r *http.Request) {
 				// Cleared by null, not by an empty string: two spellings of
 				// "no icon" would be two states the client has to reconcile.
 				fields["icon_name"] = append(fields["icon_name"], "Send null to clear the icon.")
-			} else if len(name) > maxIconNameLength {
+			} else if utf8.RuneCountInString(name) > maxIconNameLength {
 				fields["icon_name"] = append(fields["icon_name"], "Keep the icon name under 100 characters.")
 			}
 			patch.IconName = &name
@@ -564,6 +565,11 @@ func (h *ProductHandler) Update(w http.ResponseWriter, r *http.Request) {
 // They are checked here so an over-long value is the 422 it is rather than the
 // 500 a database-level truncation error would become. The column is still the
 // authority; this is the caller-facing half of the same number.
+//
+// Counted in runes, not bytes, because that is what VARCHAR(n) counts. Using
+// len() would reject a 200-character Cyrillic name the column would have
+// accepted — no leak, since bytes are never fewer than runes, but a refusal
+// the database did not ask for.
 const (
 	maxProductNameLength = 255
 	maxIconNameLength    = 100
