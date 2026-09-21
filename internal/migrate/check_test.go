@@ -221,3 +221,29 @@ func TestShippedVersionsSkipsFilesGooseWouldNotAccept(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []int64{1, 2}, versions)
 }
+
+// TestCheckAcceptsTheRepositorysOwnMigrations is the end-to-end guard the
+// synthetic cases above cannot give.
+//
+// Every other test in this file writes its own migration files, so all of them
+// would keep passing if the real ones were named in a way goose's parser reads
+// differently from this package's — and the symptom would be a production
+// server refusing to start against a database that is perfectly up to date,
+// with a message telling the operator to run a migration that has already run.
+// This applies the actual migrations/ directory and then asks Check about it.
+func TestCheckAcceptsTheRepositorysOwnMigrations(t *testing.T) {
+	// Not parallel: chdir mutates process state.
+	dsn := newTestDatabase(t)
+	chdir(t, filepath.Join("..", ".."))
+
+	versions, err := shippedVersions("migrations")
+	require.NoError(t, err)
+	require.NotEmpty(t, versions, "the repository ships migrations")
+	require.Equal(t, int64(len(versions)), versions[len(versions)-1],
+		"versions are 1..N with no gaps, so a count is a version")
+
+	require.NoError(t, Run(context.Background(), dsn, "up", io.Discard))
+
+	assert.NoError(t, Check(context.Background(), dsn),
+		"a database migrated with the shipped files must satisfy the shipped binary")
+}
