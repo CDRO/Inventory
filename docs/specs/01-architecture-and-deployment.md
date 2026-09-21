@@ -577,9 +577,17 @@ the stack publishes no host port at all: nothing can clash with DSM's own
 - The tailnet needs **MagicDNS and HTTPS certificates** enabled. HTTPS is not
   optional: the session cookie is `Secure` (`03-auth-and-multi-tenancy.md`), so
   plain HTTP would log no one in.
-- The container uses userspace networking (the image default), which is all
-  `tailscale serve` needs, so it requests neither `NET_ADMIN` nor
-  `/dev/net/tun`. DSM does not reliably provide that device.
+- The sidecar joins the app's network namespace (`network_mode: service:app`,
+  the same pattern as the operator's other Tailscale sidecars) and, like
+  those, gets `NET_ADMIN` and the `/dev/net/tun` device. The image still
+  defaults to userspace networking, which is all `tailscale serve` needs;
+  `TS_USERSPACE` is not changed. The device must exist on the NAS: for a
+  missing path Docker creates a directory in its place instead of failing.
+- **Restart `ts-inventory` whenever `app` is restarted on its own.** The
+  sidecar keeps the network namespace of the app container it started
+  against and cannot reach a restarted one until it is restarted too.
+  `docker-compose up -d` recreates both, so the update flow below needs no
+  extra step.
 - **The auth key is passed once, on the command line, and never written to a
   file** — least of all a tracked one: `TS_AUTHKEY=tskey-auth-… docker-compose
   up -d`. Use a one-off, non-reusable key. The node identity then persists in
@@ -617,6 +625,18 @@ Use `docker-compose …` (with the hyphen) on the NAS: a `docker compose` plugin
 if present, is the bundled old version. Container Manager's Project tab uses
 that same bundled Compose and cannot load these files, so the stack is operated
 over SSH, and the UI is only good for looking at running containers.
+
+**First start.** The stack does not migrate on its own: without `migrate up`
+the app starts, then logs `relation "jobs" does not exist` from every
+background sweep and serves nothing useful. The bind-mounted `./pgdata` starts
+empty, so this applies to every new clone.
+
+```console
+$ docker-compose run --rm setup            # writes .env; then add the two COMPOSE_ lines
+$ docker-compose build
+$ docker-compose run --rm app migrate up   # also creates the initial admin
+$ TS_AUTHKEY=tskey-auth-… docker-compose up -d
+```
 
 **Updating.** With `COMPOSE_FILE` set, no `-f` is needed:
 

@@ -69,10 +69,6 @@ services:
       # Use a one-off (non-reusable) key. The default keeps `up` quiet when the
       # variable is unset.
       TS_AUTHKEY: ${TS_AUTHKEY:-}
-    # No NET_ADMIN and no /dev/net/tun: the image defaults to userspace
-    # networking, which is all `tailscale serve` needs, and DSM does not reliably
-    # provide /dev/net/tun (a bind mount of a missing device path makes Docker
-    # create a directory in its place instead of failing clearly).
     volumes:
       - ./ts_inventory_state:/var/lib/tailscale    # holds the node key: keep it private
       # The directory, not the single file: Tailscale only notices changes to a
