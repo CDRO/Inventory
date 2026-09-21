@@ -125,9 +125,17 @@ do_restore() {
     # Docker socket cannot ask "is the app service up" any other way that a
     # network hiccup could not answer wrongly — and answering wrongly in the
     # permissive direction is the one outcome that must not happen here.
-    busy=$(psql -h "$DB_HOST" -U "$POSTGRES_USER" -d postgres -tAX -v ON_ERROR_STOP=1 \
-        -v db="$POSTGRES_DB" \
-        -c "SELECT count(*) FROM pg_stat_activity WHERE datname = :'db' AND pid <> pg_backend_pid()") \
+    #
+    # The query goes in on stdin rather than through -c, because psql
+    # substitutes :'db' only when it reads a script — with -c the command is
+    # passed through untouched and the server sees a literal colon. Quoting the
+    # database name through a psql variable rather than pasting it into the SQL
+    # is worth keeping: POSTGRES_DB is whatever the operator answered the setup
+    # wizard, and :'db' quotes it correctly whatever that was.
+    busy=$(printf "%s\n" \
+        "SELECT count(*) FROM pg_stat_activity WHERE datname = :'db' AND pid <> pg_backend_pid();" \
+        | psql -h "$DB_HOST" -U "$POSTGRES_USER" -d postgres -tAX -v ON_ERROR_STOP=1 \
+            -v db="$POSTGRES_DB") \
         || fail "cannot reach the database. Start it on its own first: docker compose -f docker-compose.yml up -d db"
     [ "$busy" -eq 0 ] 2>/dev/null \
         || fail "refusing to restore: $busy other connection(s) to \"$POSTGRES_DB\". A restore into a running stack corrupts both. Stop the app first: docker compose -f docker-compose.yml stop app"
