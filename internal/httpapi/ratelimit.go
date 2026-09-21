@@ -80,8 +80,12 @@ func newRateLimiter(limit int, window time.Duration) *rateLimiter {
 	return &rateLimiter{limit: limit, window: window, windows: map[string]*rateWindow{}}
 }
 
-// blocked reports whether any of these keys has already reached the limit, and
-// how long until the earliest-freeing of the blocked ones opens up.
+// blocked reports whether any of these keys has already reached the limit,
+// and how long until the last of the blocked ones frees.
+//
+// The longest wait, not the shortest: the caller stays refused until every
+// counter that matched them has rolled over, so a Retry-After naming the
+// earliest would invite a retry that is still going to be refused.
 //
 // It counts nothing. Checking before doing the expensive work is what keeps a
 // caller who is already over the limit from costing an argon2 verification per

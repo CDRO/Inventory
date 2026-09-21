@@ -242,6 +242,13 @@ func TestNewPasswordMinimumIsTenCharacters(t *testing.T) {
 
 // TestPasswordRoutesLeakNothing — the last acceptance criterion: no route in
 // this spec returns is_admin, a password, or a hash.
+//
+// The two password routes answer 204, so their bodies are empty and scanning
+// them for a leaked secret would prove nothing: the assertion that carries
+// weight for those is that the body is empty *and* the status really is 204,
+// which is the strongest form of "nothing was returned" there is. Only
+// PATCH /api/auth/me has a body worth reading, so that is the one the scan
+// runs against.
 func TestPasswordRoutesLeakNothing(t *testing.T) {
 	t.Parallel()
 
@@ -252,20 +259,56 @@ func TestPasswordRoutesLeakNothing(t *testing.T) {
 
 	target, _ := f.auth.addUser(t, false)
 
-	bodies := []string{
-		f.do(http.MethodPost, "/api/auth/password",
-			`{"current_password":"correct horse","new_password":"a much longer one"}`).Body.String(),
-		f.do(http.MethodPatch, "/api/auth/me", `{"display_name":"Renamed"}`).Body.String(),
-		f.do(http.MethodPost, "/api/admin/users/"+target.ID.String()+"/password",
-			`{"new_password":"a temporary one"}`).Body.String(),
+	changed := f.do(http.MethodPost, "/api/auth/password",
+		`{"current_password":"correct horse","new_password":"a much longer one"}`)
+	require.Equal(t, http.StatusNoContent, changed.Code, changed.Body.String())
+	assert.Empty(t, changed.Body.String(), "a password change echoes success and nothing else")
+
+	reset := f.do(http.MethodPost, "/api/admin/users/"+target.ID.String()+"/password",
+		`{"new_password":"a temporary one"}`)
+	require.Equal(t, http.StatusNoContent, reset.Code, reset.Body.String())
+	assert.Empty(t, reset.Body.String(),
+		"an admin reset must not echo the password it was handed")
+
+	renamed := f.do(http.MethodPatch, "/api/auth/me", `{"display_name":"Renamed"}`)
+	require.Equal(t, http.StatusOK, renamed.Code)
+	body := renamed.Body.String()
+	require.NotEmpty(t, body, "this one does have a body, so the scan below means something")
+	assert.Contains(t, body, "Renamed", "and it is the response we think it is")
+	assert.NotContains(t, body, "is_admin")
+	assert.NotContains(t, body, "password")
+	assert.NotContains(t, body, "argon2")
+	assert.NotContains(t, body, "hash")
+}
+
+// TestPasswordChangeFailuresDoNotLockTheOwnerOutOfLogin is the regression
+// test for keying that route by address alone.
+//
+// Somebody with a borrowed unlocked phone holds a valid session. Ten wrong
+// current_password guesses from it must not cost the account's real owner —
+// sitting at a different address — their ability to log in and take the
+// session away. Keying the password route by username would have done
+// exactly that for fifteen minutes.
+func TestPasswordChangeFailuresDoNotLockTheOwnerOutOfLogin(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	f.auth.withPassword(t, f.user, "correct horse")
+
+	for i := range 11 {
+		rec := f.do(http.MethodPost, "/api/auth/password",
+			`{"current_password":"wrong","new_password":"a much longer one"}`)
+		if i < 10 {
+			require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "guess %d", i+1)
+		} else {
+			require.Equal(t, http.StatusTooManyRequests, rec.Code, "the borrowed session is cut off")
+		}
 	}
 
-	for _, body := range bodies {
-		assert.NotContains(t, body, "is_admin")
-		assert.NotContains(t, body, "password")
-		assert.NotContains(t, body, "argon2")
-		assert.NotContains(t, body, "hash")
-	}
+	// The owner, from their own address, logs in unaffected.
+	rec, cookie := login(t, f.router, f.user.Username, "correct horse", "198.51.100.77:4444")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotNil(t, cookie)
 }
 
 // TestAdminResetRevokesEveryTargetSession — the resetter cannot know which of

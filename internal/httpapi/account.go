@@ -82,7 +82,21 @@ func (h *AccountHandler) ChangePassword(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	keys := credentialKeys(clientIP(r), user.Username)
+	// Keyed by address only, not by username.
+	//
+	// docs/specs/14-account-self-service.md scopes the username dimension to
+	// login — "counted separately per client IP and — for login — per
+	// submitted username" — and the reason shows up here. This route is
+	// reached with a session, so charging the caller's username would let
+	// somebody holding a borrowed phone submit ten wrong current_passwords
+	// and lock the account's owner out of /api/auth/login from every address
+	// for fifteen minutes, while the borrowed session went on working. That
+	// turns a guard against guessing into a way to keep the real owner from
+	// intervening.
+	//
+	// The address key is still the shared one, so these failures count
+	// against the same budget login and pairing draw from.
+	keys := credentialKeys(clientIP(r), "")
 	if retryAfter, blocked := h.credentials.blocked(keys...); blocked {
 		h.errors.WriteError(w, r, rateLimited(retryAfter, "password-change rate limit for "+user.ID.String()))
 		return
