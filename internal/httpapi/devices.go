@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -21,15 +20,17 @@ const (
 	// protocol field — but it is still typed by whoever holds the code.
 	maxDeviceLabel = 64
 
-	// pairAttemptsPerWindow and pairWindow throttle POST /api/auth/pair, the
-	// one unauthenticated endpoint that can mint a session.
+	// pairingCodesPerWindow and pairingCodeWindow throttle
+	// POST /api/auth/pairing-codes — the "per user" half of spec 03's pairing
+	// limit, counted here because every outstanding code is a live way into
+	// that account for the next two minutes.
 	//
-	// A pairing code is 256 CSPRNG bits, so guessing one is not the threat this
-	// defends against — it is there so a stolen or shoulder-surfed code cannot
-	// be brute-forced for variants, and so this endpoint cannot be used to
-	// hammer the database from an unauthenticated position.
-	pairAttemptsPerWindow = 10
-	pairWindow            = time.Minute
+	// Minting a code cannot fail, so this one counts attempts rather than
+	// failures and stays separate from the shared credential limiter that
+	// guards POST /api/auth/pair itself
+	// (docs/specs/14-account-self-service.md, ratelimit.go).
+	pairingCodesPerWindow = 10
+	pairingCodeWindow     = time.Minute
 )
 
 // DeviceHandler serves pairing and device management.
@@ -37,27 +38,30 @@ const (
 // Pairing is rate-limited "per IP and per user", as spec 03 puts it, and the
 // two halves necessarily sit on different endpoints. POST /api/auth/pair is
 // unauthenticated — until a code is redeemed there is no user to count
-// against — so it is limited by address. The user-side limit lives where the
-// user is known: minting codes, since every outstanding code is a live way into
-// that account for the next two minutes.
+// against — so it is limited by address, on the credential limiter it shares
+// with login and password change (docs/specs/14-account-self-service.md). The
+// user-side limit lives where the user is known: minting codes.
 type DeviceHandler struct {
-	store   AuthStoreFull
-	errors  *ErrorWriter
-	limiter *rateLimiter
+	store  AuthStoreFull
+	errors *ErrorWriter
+	// credentials is the process-wide limiter shared with
+	// POST /api/auth/login and POST /api/auth/password, so ten failures is
+	// ten failures across all three rather than ten at each.
+	credentials *rateLimiter
+	// pairingCodes is the separate per-user attempt counter for minting a
+	// code, which has no failure to count against the shared limiter.
+	pairingCodes *rateLimiter
 }
 
-// NewDeviceHandler wires the pairing and device routes.
-func NewDeviceHandler(s AuthStoreFull, errs *ErrorWriter) *DeviceHandler {
-	return &DeviceHandler{store: s, errors: errs, limiter: newRateLimiter(pairAttemptsPerWindow, pairWindow)}
-}
-
-// rateLimited is the refusal both pairing limits share.
-func rateLimited(reason string) *Failure {
-	return &Failure{
-		Status:  http.StatusTooManyRequests,
-		Code:    "rate_limited",
-		Message: "Too many pairing attempts. Wait a moment and try again.",
-		Reason:  reason,
+// NewDeviceHandler wires the pairing and device routes. credentials is the
+// shared credential limiter built in NewRouter; it must be the same instance
+// the auth and account handlers hold.
+func NewDeviceHandler(s AuthStoreFull, errs *ErrorWriter, credentials *rateLimiter) *DeviceHandler {
+	return &DeviceHandler{
+		store:        s,
+		errors:       errs,
+		credentials:  credentials,
+		pairingCodes: newRateLimiter(pairingCodesPerWindow, pairingCodeWindow),
 	}
 }
 
@@ -77,10 +81,11 @@ func (h *DeviceHandler) CreatePairingCode(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Keyed apart from the address keys Pair uses, so one cannot exhaust the
-	// other.
-	if !h.limiter.allow("user:" + user.ID.String()) {
-		h.errors.WriteError(w, r, rateLimited("pairing-code rate limit for user "+user.ID.String()))
+	// Its own limiter, so minting codes cannot exhaust the credential
+	// counters an honest login needs, nor be exhausted by them.
+	if retryAfter, allowed := h.pairingCodes.allow("user:" + user.ID.String()); !allowed {
+		h.errors.WriteError(w, r, rateLimited(retryAfter,
+			"pairing-code rate limit for user "+user.ID.String()))
 		return
 	}
 
@@ -102,9 +107,14 @@ func (h *DeviceHandler) CreatePairingCode(w http.ResponseWriter, r *http.Request
 // The session id comes back in the response body rather than as a cookie: the
 // caller is a native client, which cannot hold an HttpOnly browser cookie and
 // will send the id as a Bearer header from here on.
+//
+// Rejected codes are charged to the shared credential limiter by address —
+// there is no username to key on until a code is redeemed, and by then the
+// attempt has succeeded.
 func (h *DeviceHandler) Pair(w http.ResponseWriter, r *http.Request) {
-	if !h.limiter.allow("ip:" + clientIP(r)) {
-		h.errors.WriteError(w, r, rateLimited("pairing rate limit for "+clientIP(r)))
+	keys := credentialKeys(clientIP(r), "")
+	if retryAfter, blocked := h.credentials.blocked(keys...); blocked {
+		h.errors.WriteError(w, r, rateLimited(retryAfter, "pairing rate limit for "+clientIP(r)))
 		return
 	}
 
@@ -130,6 +140,7 @@ func (h *DeviceHandler) Pair(w http.ResponseWriter, r *http.Request) {
 	userID, err := h.store.RedeemPairingCode(r.Context(), body.Code)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConflict) {
+			h.credentials.record(keys...)
 			// Expired, already used, and never existed are one answer. Telling
 			// them apart would say whether a code was ever real, which is the
 			// only thing an attacker holding a guess wants to know.
@@ -150,6 +161,7 @@ func (h *DeviceHandler) Pair(w http.ResponseWriter, r *http.Request) {
 		h.errors.WriteError(w, r, Internal(err))
 		return
 	}
+	h.credentials.reset(keys...)
 
 	writeJSON(w, http.StatusCreated, struct {
 		SessionID string    `json:"session_id"`
@@ -284,67 +296,4 @@ func baseURLOf(r *http.Request) string {
 		host = r.Host
 	}
 	return scheme + "://" + host
-}
-
-// clientIP is the address the rate limiter counts against.
-//
-// chi's RealIP middleware has already normalised X-Forwarded-For into
-// RemoteAddr by the time a handler runs, so this reads the result rather than
-// re-parsing headers and reaching a different answer.
-func clientIP(r *http.Request) string {
-	host := r.RemoteAddr
-	if idx := strings.LastIndex(host, ":"); idx > 0 {
-		host = host[:idx]
-	}
-	return host
-}
-
-// rateLimiter is a fixed-window counter, keyed by caller.
-//
-// Deliberately in-memory and deliberately simple: this guards one
-// unauthenticated endpoint on a single-process household server, and a
-// distributed limiter would be machinery for a deployment shape this project
-// does not have (docs/specs/01-architecture-and-deployment.md). Restarting the
-// server clears the counters, which is acceptable for the same reason.
-type rateLimiter struct {
-	mu      sync.Mutex
-	limit   int
-	window  time.Duration
-	windows map[string]*rateWindow
-}
-
-type rateWindow struct {
-	count int
-	start time.Time
-}
-
-func newRateLimiter(limit int, window time.Duration) *rateLimiter {
-	return &rateLimiter{limit: limit, window: window, windows: map[string]*rateWindow{}}
-}
-
-// allow records an attempt and reports whether it is within the limit.
-func (l *rateLimiter) allow(key string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	now := time.Now()
-	w, ok := l.windows[key]
-	if !ok || now.Sub(w.start) > l.window {
-		l.windows[key] = &rateWindow{count: 1, start: now}
-		l.sweep(now)
-		return true
-	}
-
-	w.count++
-	return w.count <= l.limit
-}
-
-// sweep drops windows that have expired, so a long-running server does not
-// accumulate one map entry per address that ever tried to pair.
-func (l *rateLimiter) sweep(now time.Time) {
-	for key, w := range l.windows {
-		if now.Sub(w.start) > l.window {
-			delete(l.windows, key)
-		}
-	}
 }

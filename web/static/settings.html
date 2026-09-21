@@ -27,6 +27,61 @@
 
     <div id="error" class="alert" role="alert" hidden></div>
 
+    <!--
+      Account (docs/specs/14-account-self-service.md). Deliberately first:
+      it is the only section here that is not optional, and the one a person
+      arrives at settings looking for.
+
+      No admin affordance appears on this page, ever
+      (docs/specs/03-auth-and-multi-tenancy.md). The admin password reset
+      lives on the server-rendered /admin page; there is nothing here for a
+      client-side check to reveal, because there is no client-side check.
+    -->
+    <section id="account-section" class="card stack">
+      <h3>Account</h3>
+
+      <div class="field">
+        <label for="display-name">Display name</label>
+        <input type="text" id="display-name" maxlength="255" autocomplete="name">
+      </div>
+      <div class="row">
+        <button id="display-name-save" type="button" class="btn btn--primary">Save display name</button>
+        <span id="display-name-status" class="empty-state" hidden></span>
+      </div>
+
+      <h4>Change password</h4>
+      <p class="empty-state">
+        Changing your password signs out every other browser and paired
+        device straight away. This one stays signed in. Paired devices need
+        to be paired again afterwards.
+      </p>
+      <form id="password-form" class="stack">
+        <div class="field">
+          <label for="current-password">Current password</label>
+          <input type="password" id="current-password" autocomplete="current-password" required>
+        </div>
+        <div class="field">
+          <label for="new-password">New password</label>
+          <input type="password" id="new-password" autocomplete="new-password" minlength="10" required>
+          <span class="empty-state">At least 10 characters. Nothing else is required of it.</span>
+        </div>
+        <div class="field">
+          <label for="repeat-password">Repeat new password</label>
+          <input type="password" id="repeat-password" autocomplete="new-password" minlength="10" required>
+        </div>
+        <p id="password-error" class="field-error" hidden></p>
+        <p id="password-status" class="alert alert--success" role="status" hidden></p>
+        <button type="submit" class="btn btn--primary">Change password</button>
+      </form>
+
+      <h4>Signed-in devices</h4>
+      <p class="empty-state">
+        Every browser and paired device currently signed in as you. Revoking
+        one takes effect immediately.
+      </p>
+      <div id="devices" class="stack"></div>
+    </section>
+
     <section class="card stack">
       <h3>Gamification</h3>
       <p class="empty-state">
