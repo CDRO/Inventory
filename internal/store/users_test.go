@@ -125,7 +125,14 @@ func TestChangePasswordRollsBackTheHashWhenRevocationFails(t *testing.T) {
 	blockSessionDeletes(t, ctx, userID)
 
 	err = s.ChangePassword(ctx, userID, "$argon2id$must-not-survive", "")
-	require.Error(t, err, "a revocation that fails must fail the whole change")
+	// Pinned to the trigger's own message, not merely to "some error". A bare
+	// require.Error would go vacuous the moment ChangePassword regressed into
+	// refusing this user before it wrote anything — ErrNotFound would satisfy
+	// it, and so would the two assertions below, because nothing would have
+	// happened. The failure has to be the delete, or this test proves nothing.
+	require.ErrorContains(t, err, "session delete blocked for test",
+		"the failure must come from the revocation, after the update has run")
+	require.NotErrorIs(t, err, store.ErrNotFound)
 
 	after, err := s.UserByID(ctx, userID)
 	require.NoError(t, err)
