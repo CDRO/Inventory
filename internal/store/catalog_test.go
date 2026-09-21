@@ -175,7 +175,7 @@ func TestCorrectCatalogShelfLifeIsTheOnlyPermittedUpdate(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = s.CorrectCatalogShelfLife(ctx, created.ID, ptrInt(90))
+	_, err = s.CorrectCatalogShelfLife(ctx, store.SystemActor, created.ID, ptrInt(90))
 	require.NoError(t, err)
 
 	after, err := s.FindCatalogProduct(ctx, created.DisplayName)
@@ -187,7 +187,7 @@ func TestCorrectCatalogShelfLifeIsTheOnlyPermittedUpdate(t *testing.T) {
 	assert.Equal(t, created.DisplayName, after.DisplayName)
 	assert.Equal(t, created.ItemType, after.ItemType)
 
-	_, err = s.CorrectCatalogShelfLife(ctx, newUUID(t), ptrInt(90))
+	_, err = s.CorrectCatalogShelfLife(ctx, store.SystemActor, newUUID(t), ptrInt(90))
 	assert.ErrorIs(t, err, store.ErrNotFound, "an entry that does not exist is a 404 to the admin, not a silent no-op")
 }
 
@@ -210,7 +210,7 @@ func TestDeleteCatalogProductLeavesStorageProductsAlone(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, s.DeleteCatalogProduct(ctx, entry.ID))
+	require.NoError(t, s.DeleteCatalogProduct(ctx, store.SystemActor, entry.ID))
 
 	assert.Equal(t, 1, countRows(t, ctx, `SELECT count(*) FROM products WHERE id = $1`, product.ID),
 		"deleting a catalog row never touches a storage's own products")

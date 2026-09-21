@@ -339,7 +339,7 @@ func TestCreateStorageSeedsTheStarterCategories(t *testing.T) {
 	s := requireDB(t)
 	ctx := context.Background()
 
-	storage, err := s.CreateStorage(ctx, "Seeded Household")
+	storage, err := s.CreateStorage(ctx, store.SystemActor, "Seeded Household")
 	require.NoError(t, err)
 
 	categories, err := s.CategoryTree(ctx, storage.ID)
@@ -374,9 +374,9 @@ func TestSeededCategoriesAreScopedToTheirStorage(t *testing.T) {
 	s := requireDB(t)
 	ctx := context.Background()
 
-	first, err := s.CreateStorage(ctx, "First Household")
+	first, err := s.CreateStorage(ctx, store.SystemActor, "First Household")
 	require.NoError(t, err)
-	second, err := s.CreateStorage(ctx, "Second Household")
+	second, err := s.CreateStorage(ctx, store.SystemActor, "Second Household")
 	require.NoError(t, err)
 
 	firstTree, err := s.CategoryTree(ctx, first.ID)
@@ -405,7 +405,7 @@ func TestAFailedSeedRollsBackTheStorage(t *testing.T) {
 	before := countRows(t, ctx, `SELECT count(*) FROM storages WHERE name = $1`, "Atomic Household")
 	require.Zero(t, before)
 
-	storage, err := s.CreateStorage(ctx, "Atomic Household")
+	storage, err := s.CreateStorage(ctx, store.SystemActor, "Atomic Household")
 	require.NoError(t, err)
 
 	// The storage and its whole tree land together.
@@ -758,7 +758,7 @@ func TestCorrectCatalogShelfLifeReachesEveryStorage(t *testing.T) {
 	overrideDateBefore, _ := batchExpiry(t, ctx, overrideBatch.ID)
 	require.NotNil(t, overrideDateBefore)
 
-	affected, err := s.CorrectCatalogShelfLife(ctx, entry.ID, shelfLife(400))
+	affected, err := s.CorrectCatalogShelfLife(ctx, store.SystemActor, entry.ID, shelfLife(400))
 	require.NoError(t, err)
 	assert.Equal(t, 2, affected, "the two derived batches across both storages, not the user one or the override one")
 
@@ -831,7 +831,7 @@ func TestCorrectCatalogShelfLifeThatCannotFinishChangesNothing(t *testing.T) {
 
 	deadline, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
-	_, err = s.CorrectCatalogShelfLife(deadline, entry.ID, shelfLife(400))
+	_, err = s.CorrectCatalogShelfLife(deadline, store.SystemActor, entry.ID, shelfLife(400))
 	require.Error(t, err, "the cascade cannot finish while the second product's batch is held")
 
 	require.NoError(t, blocker.Rollback(ctx))

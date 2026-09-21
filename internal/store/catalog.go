@@ -259,15 +259,37 @@ func setCatalogShelfLife(ctx context.Context, q querier, id uuid.UUID, days *int
 // DeleteCatalogProduct is admin moderation, the only way a bad entry is
 // removed. It never touches any storage's own products: products.catalog_id is
 // ON DELETE SET NULL, so a household keeps the product it created.
-func (s *Store) DeleteCatalogProduct(ctx context.Context, id uuid.UUID) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM catalog_products WHERE id = $1`, id)
-	if err != nil {
-		return fmt.Errorf("store: delete catalog product: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+//
+// Moderation crosses every household, so it is audited: the delete and the
+// admin_audit_log row are one transaction
+// (docs/specs/18-operations-and-observability.md). The display name is read
+// first — catalog_products is insert-only, so after this there is no other
+// record anywhere of what the removed entry was called.
+func (s *Store) DeleteCatalogProduct(ctx context.Context, actor, id uuid.UUID) error {
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		var displayName string
+		err := tx.QueryRow(ctx, `SELECT display_name FROM catalog_products WHERE id = $1`, id).Scan(&displayName)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("store: delete catalog product: %w", err)
+		}
+
+		tag, err := tx.Exec(ctx, `DELETE FROM catalog_products WHERE id = $1`, id)
+		if err != nil {
+			return fmt.Errorf("store: delete catalog product: %w", err)
+		}
+		// See DeleteUser (internal/store/users.go): the name lookup above is
+		// not proof the delete landed, and the trail must not record a
+		// moderation this request did not perform.
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return writeAdminAudit(ctx, tx, actor, ActionCatalogEntryDeleted, id.String(), AuditDetails{
+			DisplayName: displayName,
+		})
+	})
 }
 
 // FindCatalogProduct looks a row up by its normalized name.

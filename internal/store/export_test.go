@@ -115,7 +115,7 @@ func TestExportStorageCarriesNoCredentialMaterial(t *testing.T) {
 		IsAdmin:      true,
 	})
 	require.NoError(t, err)
-	require.NoError(t, s.AddMember(ctx, storageID, admin.ID))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, admin.ID))
 
 	session, err := s.CreateSession(ctx, admin.ID, store.SessionBrowser, nil, time.Hour)
 	require.NoError(t, err)
@@ -167,7 +167,7 @@ func TestExportStorageHandlesALedgerRowWhoseUserIsGone(t *testing.T) {
 		Reason: store.ReasonPurchase, CreatedBy: &gone,
 	})
 	require.NoError(t, err)
-	require.NoError(t, s.DeleteUser(ctx, gone))
+	require.NoError(t, s.DeleteUser(ctx, store.SystemActor, gone))
 
 	export, err := s.ExportStorage(ctx, storageID)
 	require.NoError(t, err)

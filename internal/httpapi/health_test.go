@@ -92,7 +92,7 @@ func TestHealthHandler(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 
-			httpapi.HealthHandler(tc.db, tc.vision).ServeHTTP(rec, req)
+			httpapi.HealthHandler(tc.db, tc.vision, "").ServeHTTP(rec, req)
 
 			require.Equal(t, tc.wantCode, rec.Code)
 			assert.Equal(t, "application/json; charset=utf-8", rec.Header().Get("Content-Type"))

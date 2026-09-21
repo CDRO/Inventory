@@ -142,6 +142,12 @@ func (m *Middleware) resolveSession(r *http.Request) (*http.Request, *Failure) {
 		m.errors.Log(r.Context(), "touch session failed", err)
 	}
 
+	// Tell the request logger who this turned out to be
+	// (docs/specs/18-operations-and-observability.md). The id is a UUID and
+	// leaks nothing; the session id, which is a bearer credential, is
+	// deliberately not recorded anywhere.
+	noteUser(r.Context(), user.ID)
+
 	ctx := context.WithValue(r.Context(), ctxUser, user)
 	ctx = context.WithValue(ctx, ctxSession, session)
 	return r.WithContext(ctx), nil
@@ -299,6 +305,7 @@ func (m *Middleware) RequireStorageMember(next http.Handler) http.Handler {
 			return
 		}
 
+		noteStorage(r.Context(), storageID)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxStorageID, storageID)))
 	})
 }

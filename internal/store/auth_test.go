@@ -55,7 +55,7 @@ func TestIsAdminIsFalseForAUserThatNoLongerExists(t *testing.T) {
 	userID := newUser(t, ctx)
 
 	require.NoError(t, s.SetAdmin(ctx, userID, true))
-	require.NoError(t, s.DeleteUser(ctx, userID))
+	require.NoError(t, s.DeleteUser(ctx, store.SystemActor, userID))
 
 	isAdmin, err := s.IsAdmin(ctx, userID)
 
@@ -82,7 +82,7 @@ func TestDeletingAUserRevokesTheirSessionsImmediately(t *testing.T) {
 	othersSession, err := s.CreateSession(ctx, bystander, store.SessionDevice, ptrString("Pixel 9"), time.Hour)
 	require.NoError(t, err)
 
-	require.NoError(t, s.DeleteUser(ctx, victim))
+	require.NoError(t, s.DeleteUser(ctx, store.SystemActor, victim))
 
 	for _, id := range victimSessions {
 		_, err := s.LookupSession(ctx, id)
@@ -131,7 +131,7 @@ func TestIsStorageMemberCannotDistinguishMissingFromInaccessible(t *testing.T) {
 	member := newUser(t, ctx)
 	outsider := newUser(t, ctx)
 	storageID := newStorage(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, member))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, member))
 
 	invented := newUUID(t)
 
@@ -158,8 +158,8 @@ func TestAddMemberIsIdempotent(t *testing.T) {
 	userID := newUser(t, ctx)
 	storageID := newStorage(t, ctx)
 
-	require.NoError(t, s.AddMember(ctx, storageID, userID))
-	require.NoError(t, s.AddMember(ctx, storageID, userID),
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, userID))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, userID),
 		"re-adding a member is the state the admin asked for")
 
 	assert.Equal(t, 1, countRows(t, ctx,
@@ -172,10 +172,10 @@ func TestAddMemberReportsAMissingUserOrStorage(t *testing.T) {
 	s := requireDB(t)
 	ctx := context.Background()
 
-	err := s.AddMember(ctx, uuid.New(), newUser(t, ctx))
+	err := s.AddMember(ctx, store.SystemActor, uuid.New(), newUser(t, ctx))
 	require.ErrorIs(t, err, store.ErrNotFound, "unknown storage")
 
-	err = s.AddMember(ctx, newStorage(t, ctx), uuid.New())
+	err = s.AddMember(ctx, store.SystemActor, newStorage(t, ctx), uuid.New())
 	require.ErrorIs(t, err, store.ErrNotFound, "unknown user")
 }
 
@@ -189,13 +189,13 @@ func TestRemoveMemberRevokesAccessButNotSessions(t *testing.T) {
 	userID := newUser(t, ctx)
 	kept := newStorage(t, ctx)
 	revoked := newStorage(t, ctx)
-	require.NoError(t, s.AddMember(ctx, kept, userID))
-	require.NoError(t, s.AddMember(ctx, revoked, userID))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, kept, userID))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, revoked, userID))
 
 	session, err := s.CreateSession(ctx, userID, store.SessionBrowser, nil, time.Hour)
 	require.NoError(t, err)
 
-	require.NoError(t, s.RemoveMember(ctx, revoked, userID))
+	require.NoError(t, s.RemoveMember(ctx, store.SystemActor, revoked, userID))
 
 	gone, err := s.IsStorageMember(ctx, revoked, userID)
 	require.NoError(t, err)
@@ -213,7 +213,7 @@ func TestRemoveMemberReportsANonMember(t *testing.T) {
 	s := requireDB(t)
 	ctx := context.Background()
 
-	err := s.RemoveMember(ctx, newStorage(t, ctx), newUser(t, ctx))
+	err := s.RemoveMember(ctx, store.SystemActor, newStorage(t, ctx), newUser(t, ctx))
 
 	require.ErrorIs(t, err, store.ErrNotFound)
 }
@@ -232,9 +232,9 @@ func TestStoragesForUserListsOnlyOwnMemberships(t *testing.T) {
 	alsoMine := newStorage(t, ctx)
 	theirs := newStorage(t, ctx)
 
-	require.NoError(t, s.AddMember(ctx, mine, me))
-	require.NoError(t, s.AddMember(ctx, alsoMine, me))
-	require.NoError(t, s.AddMember(ctx, theirs, someoneElse))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, mine, me))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, alsoMine, me))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, theirs, someoneElse))
 
 	got, err := s.StoragesForUser(ctx, me)
 	require.NoError(t, err)
@@ -298,9 +298,9 @@ func TestListMembersReturnsTheStoragesOwn(t *testing.T) {
 	bob := newUser(t, ctx)
 	carol := newUser(t, ctx)
 
-	require.NoError(t, s.AddMember(ctx, storageA, alice))
-	require.NoError(t, s.AddMember(ctx, storageA, bob))
-	require.NoError(t, s.AddMember(ctx, storageB, carol))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageA, alice))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageA, bob))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageB, carol))
 
 	members, err := s.ListMembers(ctx, storageA)
 	require.NoError(t, err)
@@ -321,9 +321,9 @@ func TestDeletingAStorageTakesItsMembershipsWithIt(t *testing.T) {
 
 	userID := newUser(t, ctx)
 	storageID := newStorage(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, userID))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, userID))
 
-	require.NoError(t, s.DeleteStorage(ctx, storageID))
+	require.NoError(t, s.DeleteStorage(ctx, store.SystemActor, storageID))
 
 	assert.Equal(t, 0, countRows(t, ctx,
 		`SELECT count(*) FROM storage_members WHERE storage_id = $1`, storageID))

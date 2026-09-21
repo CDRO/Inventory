@@ -2,10 +2,16 @@
 #
 # Brings up the full stack — traefik, app, db — against a disposable
 # database, and runs the browser suite from a pulled Playwright image. Run
-# explicitly and on demand, never as part of the dev loop or the image build:
+# explicitly and on demand, never as part of the dev loop or the image build.
 #
-#   docker compose -f docker-compose.e2e.yml up -d --build
+# Build, migrate, then start — in that order. `serve` refuses to start against
+# a schema behind the binary (docs/specs/18-operations-and-observability.md),
+# so an `app` container brought up before `migrate up` exits immediately and
+# the suite has nothing to talk to:
+#
+#   docker compose -f docker-compose.e2e.yml build
 #   docker compose -f docker-compose.e2e.yml run --rm app migrate up
+#   docker compose -f docker-compose.e2e.yml up -d
 #   docker compose -f docker-compose.e2e.yml exec -T db \
 #     psql -U e2e -d e2e -f /fixtures/seed.sql
 #   docker compose -f docker-compose.e2e.yml run --rm e2e

@@ -1,8 +1,18 @@
-// Package migrate applies the goose SQL migrations under /migrations.
+// Package migrate applies the goose SQL migrations under /migrations, and
+// checks at startup that the database's schema matches the binary's.
 //
 // It is a subcommand of the application binary rather than a separate tool so
 // that migrating needs no host toolchain — the same image that serves traffic
 // applies the schema (docs/specs/01-architecture-and-deployment.md).
+//
+// Two entry points, for the two halves of an upgrade:
+//
+//   - Run applies migrations: `inventory migrate up`, step 3 of the upgrade
+//     procedure.
+//   - Check compares the database's recorded version against the migrations
+//     this binary ships and refuses a mismatch, so skipping step 3 is loud
+//     rather than weird (docs/specs/18-operations-and-observability.md). It is
+//     read-only and is called by `serve` before the listener starts.
 package migrate
 
 import (

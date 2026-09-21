@@ -2,10 +2,13 @@ package httpapi_test
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +24,19 @@ import (
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// TestMain silences the default logger for this package.
+//
+// Since docs/specs/18-operations-and-observability.md every request through a
+// router logs a completion line, and a router built without an explicit
+// Deps.Logger uses slog.Default() — which in a test binary means several
+// thousand lines of JSON on stderr, burying the one line that says what
+// failed. A test that actually cares about log output installs its own logger
+// (requestlog_test.go, neverlogged_test.go) rather than reading the default.
+func TestMain(m *testing.M) {
+	slog.SetDefault(discardLogger())
+	os.Exit(m.Run())
 }
 
 // fakeAuth is an in-memory AuthStore, so the authorization rules are exercised
@@ -52,8 +68,77 @@ type fakeAuth struct {
 	catalogRecompute      map[uuid.UUID]int
 	catalogRecomputeCalls []uuid.UUID
 
+	// audit is what the audited store methods recorded, newest last
+	// (docs/specs/18-operations-and-observability.md).
+	//
+	// The real store writes these inside the mutation's own transaction, which
+	// only a database can prove — internal/store/audit_test.go does that. What
+	// this slice proves is the other half, and the half that lives up here:
+	// that each admin *route* reaches an audited store method, with the actor
+	// the gates resolved and no password material in the details.
+	audit []store.AdminAuditEntry
+
 	isAdminCalls int
 	touchCalls   int
+}
+
+// recordAudit appends one entry. Callers already hold f.mu.
+func (f *fakeAuth) recordAudit(actor uuid.UUID, action store.AdminAction, target string, details store.AuditDetails) {
+	username := ""
+	if u, ok := f.users[actor]; ok {
+		username = u.Username
+	}
+	encoded, err := json.Marshal(details)
+	if err != nil {
+		panic("fakeAuth: encode audit details: " + err.Error())
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		panic("fakeAuth: decode audit details: " + err.Error())
+	}
+	f.audit = append(f.audit, store.AdminAuditEntry{
+		ID: uuid.New(), ActorUsername: username, Action: action,
+		Target: target, Details: decoded, CreatedAt: time.Now(),
+	})
+}
+
+// auditEntries returns a copy of the trail so far.
+func (f *fakeAuth) auditEntries() []store.AdminAuditEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]store.AdminAuditEntry(nil), f.audit...)
+}
+
+// ListAdminAudit serves the trail newest first, like the store's own. The
+// cursor is the id of the last entry of the previous page.
+func (f *fakeAuth) ListAdminAudit(_ context.Context, cursor string, limit int) (*store.AuditPage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	newestFirst := make([]store.AdminAuditEntry, 0, len(f.audit))
+	for i := len(f.audit) - 1; i >= 0; i-- {
+		newestFirst = append(newestFirst, f.audit[i])
+	}
+
+	if cursor != "" {
+		found := false
+		for i, entry := range newestFirst {
+			if entry.ID.String() == cursor {
+				newestFirst, found = newestFirst[i+1:], true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("%w: not a cursor from a previous page", store.ErrValidation)
+		}
+	}
+
+	page := &store.AuditPage{Entries: newestFirst}
+	if limit > 0 && len(page.Entries) > limit {
+		page.Entries = page.Entries[:limit]
+		page.Next = page.Entries[len(page.Entries)-1].ID.String()
+	}
+	return page, nil
 }
 
 func newFakeAuth() *fakeAuth {

@@ -56,13 +56,55 @@ type NewUser struct {
 
 // CreateUser inserts an account, returning ErrDuplicate when the username is
 // taken.
+//
+// **Unaudited, and reachable from exactly one place: the first-boot
+// bootstrap** (internal/auth/bootstrap.go), which is not an admin action —
+// nobody performed it and there is no session behind it. Account creation *by
+// an admin* goes through AdminCreateUser below, which writes the
+// admin_audit_log row in the same transaction; the admin handler's store
+// interface (internal/httpapi/admin.go) names only that one, so there is no
+// path from an admin route to this method.
 func (s *Store) CreateUser(ctx context.Context, in NewUser) (*User, error) {
+	return insertUser(ctx, s.pool, in)
+}
+
+// AdminCreateUser is CreateUser as an audited admin action: the insert and the
+// admin_audit_log row commit together or not at all
+// (docs/specs/18-operations-and-observability.md).
+//
+// The audited details are the username, display name and admin flag — what was
+// created. **The password hash is not among them**, and cannot be: AuditDetails
+// has no field it would fit in (internal/store/audit.go).
+func (s *Store) AdminCreateUser(ctx context.Context, actor uuid.UUID, in NewUser) (*User, error) {
+	var out *User
+	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		user, err := insertUser(ctx, tx, in)
+		if err != nil {
+			return err
+		}
+		out = user
+		isAdmin := in.IsAdmin
+		return writeAdminAudit(ctx, tx, actor, ActionUserCreated, user.ID.String(), AuditDetails{
+			Username:    user.Username,
+			DisplayName: user.DisplayName,
+			AdminRights: &isAdmin,
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// insertUser is the statement both of the above run, so the audited and
+// unaudited paths cannot drift on what a user row is.
+func insertUser(ctx context.Context, q querier, in NewUser) (*User, error) {
 	id, err := newID()
 	if err != nil {
 		return nil, err
 	}
 
-	row := s.pool.QueryRow(ctx, `
+	row := q.QueryRow(ctx, `
 		INSERT INTO users (id, username, password_hash, display_name, is_admin)
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id, username, password_hash, display_name, is_admin, created_at`,
@@ -130,22 +172,45 @@ func (s *Store) SetAdmin(ctx context.Context, userID uuid.UUID, isAdmin bool) er
 	return nil
 }
 
-// DeleteUser removes an account.
+// DeleteUser removes an account and records who did it.
 //
 // Their sessions go with it, which is what makes the revocation immediate:
 // sessions.user_id is ON DELETE CASCADE, so every credential the person held
 // stops working in the same transaction that removes them. A deletion that
 // left live sessions behind would be a deletion in name only until those
 // sessions happened to expire.
-func (s *Store) DeleteUser(ctx context.Context, id uuid.UUID) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
-	if err != nil {
-		return fmt.Errorf("store: delete user: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+//
+// The audit row is written in that same transaction
+// (docs/specs/18-operations-and-observability.md), so a deletion cannot commit
+// unrecorded. The username is copied into the details first: after the DELETE
+// there is nothing left to resolve the id against, and "user_deleted, target
+// <uuid>" with no name is a trail that answers nothing.
+func (s *Store) DeleteUser(ctx context.Context, actor, id uuid.UUID) error {
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		var username string
+		err := tx.QueryRow(ctx, `SELECT username FROM users WHERE id = $1`, id).Scan(&username)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("store: delete user: %w", err)
+		}
+
+		tag, err := tx.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
+		if err != nil {
+			return fmt.Errorf("store: delete user: %w", err)
+		}
+		// Re-checked rather than assumed from the SELECT above. Between the
+		// two statements another transaction may have committed the same
+		// delete, and writing the audit row anyway would record a deletion
+		// this request did not perform — while also reporting success for it.
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return writeAdminAudit(ctx, tx, actor, ActionUserDeleted, id.String(), AuditDetails{
+			Username: username,
+		})
+	})
 }
 
 // ChangePassword replaces a user's password hash and revokes their sessions,
@@ -167,26 +232,60 @@ func (s *Store) DeleteUser(ctx context.Context, id uuid.UUID) error {
 //
 // A user id that matches nothing is ErrNotFound, and the transaction rolls
 // back, so no sessions are deleted for an id that named no account.
+// It is the *self-service* change of spec 14 and is deliberately unaudited:
+// admin_audit_log is the operator surface, and a person changing their own
+// password is not an admin action (docs/specs/18-operations-and-observability.md).
+// An admin resetting somebody else's goes through AdminResetPassword below.
 func (s *Store) ChangePassword(ctx context.Context, userID uuid.UUID, passwordHash, keepSessionID string) error {
 	return s.inTx(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2`, passwordHash, userID)
-		if err != nil {
-			return fmt.Errorf("store: set password hash: %w", err)
-		}
-		if tag.RowsAffected() == 0 {
-			return ErrNotFound
-		}
-
-		// $2 = '' is never a real session id (they are 43-character base64url
-		// tokens), so the empty string cleanly means "keep nothing" without a
-		// second statement or a nullable parameter.
-		if _, err := tx.Exec(ctx, `
-			DELETE FROM sessions
-			 WHERE user_id = $1 AND ($2 = '' OR id <> $2)`, userID, keepSessionID); err != nil {
-			return fmt.Errorf("store: revoke sessions: %w", err)
-		}
-		return nil
+		return changePassword(ctx, tx, userID, passwordHash, keepSessionID)
 	})
+}
+
+// AdminResetPassword is the admin reset of docs/specs/14-account-self-service.md,
+// audited. The hash update, the revocation of every one of the target's
+// sessions, and the admin_audit_log row are one transaction.
+//
+// **The details record only who was reset**, never the new password or its
+// hash — AuditDetails has no field either could occupy
+// (internal/store/audit.go), so this is a property of the type rather than of
+// this call site remembering.
+func (s *Store) AdminResetPassword(ctx context.Context, actor, userID uuid.UUID, passwordHash string) error {
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		// "" keeps no session: the resetter cannot know which of the target's
+		// sessions are legitimate, so none of them are.
+		if err := changePassword(ctx, tx, userID, passwordHash, ""); err != nil {
+			return err
+		}
+		var username string
+		if err := tx.QueryRow(ctx, `SELECT username FROM users WHERE id = $1`, userID).Scan(&username); err != nil {
+			return fmt.Errorf("store: read reset target: %w", err)
+		}
+		return writeAdminAudit(ctx, tx, actor, ActionUserPasswordReset, userID.String(), AuditDetails{
+			Username: username,
+		})
+	})
+}
+
+// changePassword is the statement pair both variants run.
+func changePassword(ctx context.Context, tx pgx.Tx, userID uuid.UUID, passwordHash, keepSessionID string) error {
+	tag, err := tx.Exec(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2`, passwordHash, userID)
+	if err != nil {
+		return fmt.Errorf("store: set password hash: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+
+	// $2 = '' is never a real session id (they are 43-character base64url
+	// tokens), so the empty string cleanly means "keep nothing" without a
+	// second statement or a nullable parameter.
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM sessions
+		 WHERE user_id = $1 AND ($2 = '' OR id <> $2)`, userID, keepSessionID); err != nil {
+		return fmt.Errorf("store: revoke sessions: %w", err)
+	}
+	return nil
 }
 
 // SetDisplayName renames a user, returning the updated row.

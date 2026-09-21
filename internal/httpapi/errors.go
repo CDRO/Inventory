@@ -36,6 +36,18 @@ const (
 	ReasonStorageNotFound  = "storage_not_found"
 	ReasonNotAdmin         = "not_admin"
 	ReasonAdminAreaHidden  = "admin_area_hidden"
+
+	// ReasonNoRouteMatch and ReasonMethodNotAllowed are the router's own two
+	// refusals (router.go).
+	//
+	// Fixed strings, not "no route matches "+r.URL.Path as they once were. A
+	// reason is logged on every refusal and serialized as debug_reason in dev,
+	// so building one from the request's path echoed whatever was probed into
+	// the log file — the same thing the request line takes care to keep out
+	// (docs/specs/18-operations-and-observability.md). The caller already
+	// knows the path it asked for.
+	ReasonNoRouteMatch     = "no_route_match"
+	ReasonMethodNotAllowed = "method_not_allowed_here"
 )
 
 // APIError is what a caller sees. It is unexported-by-convention in the sense
@@ -139,13 +151,33 @@ func (w *ErrorWriter) WriteError(rw http.ResponseWriter, r *http.Request, failur
 
 	// The reason always reaches the log, in both environments. Production
 	// hides it from the response, not from the operator.
-	if failure.Reason != "" || failure.Err != nil {
-		w.log.LogAttrs(r.Context(), slog.LevelInfo, "request failed",
+	//
+	// The level follows docs/specs/18-operations-and-observability.md: error
+	// for a 5xx, info for everything below it. A refused session or a 404 for
+	// a storage somebody may not see is the system working exactly as
+	// designed, and logging those at warn would make an ordinary day look like
+	// an incident.
+	//
+	// A 5xx is logged whatever it carries. Internal() sets Err rather than
+	// Reason, so the condition below would already cover it — but a 500 that
+	// somehow reached here with neither is precisely the one an operator must
+	// not have to find out about from a user.
+	if failure.Reason != "" || failure.Err != nil || failure.Status >= http.StatusInternalServerError {
+		w.log.LogAttrs(r.Context(), levelForStatus(failure.Status), "request failed",
 			slog.Int("status", failure.Status),
 			slog.String("code", failure.Code),
 			slog.String("reason", failure.Reason),
 			slog.String("method", r.Method),
-			slog.String("path", r.URL.Path),
+			// The route *pattern*, exactly as the completion line uses
+			// (requestlog.go) — never r.URL.Path.
+			//
+			// This line is the second half of the log pipeline, and it is the
+			// half that is easy to forget: a raw URL here would put the ids a
+			// request addressed into the log on every single refusal, and a
+			// miss would echo whatever was probed straight back into the file
+			// (docs/specs/18-operations-and-observability.md). The completion
+			// line getting it right is not enough if this one does not.
+			slog.String("path", routePattern(r)),
 			// The client's self-reported version, and the only thing anything
 			// in this package does with that header — see clientversion.go for
 			// why it is read here and nowhere else. It is an attribute of a

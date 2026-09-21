@@ -42,6 +42,7 @@ package httpapi
 import (
 	"context"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"path"
 	"strings"
@@ -178,6 +179,16 @@ type Deps struct {
 	// notification settings working and makes the test route absent — the
 	// scheduler that sends the real digests lives in cmd/inventory, not here.
 	Notifier Notifier
+	// Logger receives the one completion line per request
+	// (docs/specs/18-operations-and-observability.md). Nil uses
+	// slog.Default(), which in the running server is the JSON-to-stdout
+	// logger cmd/inventory installs.
+	Logger *slog.Logger
+	// Version is the build's version string, reported by GET /healthz and
+	// shown in the admin footer, so "what is the NAS actually running" is
+	// answerable without SSH. Empty reports "dev", which is what an
+	// unstamped build is.
+	Version string
 }
 
 // NewRouter builds the application's HTTP handler.
@@ -195,7 +206,16 @@ func NewRouter(d Deps) http.Handler {
 	}
 
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID)
+	// Our own RequestLogger replaces chi's middleware.RequestID, rather than
+	// stacking on top of it: two ids for one request is one id too many, and
+	// only ours is a UUIDv7 that reaches the X-Request-Id header and every log
+	// line of the request (docs/specs/18-operations-and-observability.md).
+	// Nothing read chi's — middleware.GetReqID had no callers.
+	//
+	// It is registered **before** Recoverer, which makes it the outer of the
+	// two, so a panic is already a 500 by the time the completion line is
+	// written. See RequestLogger's own comment (requestlog.go).
+	r.Use(RequestLogger(d.Logger))
 	// TrustedRealIP, not chi's middleware.RealIP: the latter rewrites
 	// RemoteAddr from X-Forwarded-For whoever the peer is, and the credential
 	// rate limiter keys on the result (ratelimit.go,
@@ -207,19 +227,26 @@ func NewRouter(d Deps) http.Handler {
 	// neither the API's error shape nor something a client can switch on. Both
 	// go through the one serializer instead, so there is exactly one error
 	// format in the system.
+	//
+	// **Neither reason names the path.** A Failure's reason is written to the
+	// log on every refusal and serialized as debug_reason in dev, so a reason
+	// built from req.URL.Path echoes whatever was probed into the log file —
+	// the very thing docs/specs/18-operations-and-observability.md keeps out
+	// of the request line. The caller already knows the path it asked for, so
+	// nothing is lost by leaving it out.
 	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
-		errs.WriteError(w, req, NotFound("no route matches "+req.URL.Path))
+		errs.WriteError(w, req, NotFound(ReasonNoRouteMatch))
 	})
 	r.MethodNotAllowed(func(w http.ResponseWriter, req *http.Request) {
 		errs.WriteError(w, req, &Failure{
 			Status:  http.StatusMethodNotAllowed,
 			Code:    "method_not_allowed",
 			Message: "That method is not allowed here.",
-			Reason:  req.Method + " on " + req.URL.Path,
+			Reason:  ReasonMethodNotAllowed,
 		})
 	})
 
-	r.Get("/healthz", HealthHandler(d.DB, d.Vision))
+	r.Get("/healthz", HealthHandler(d.DB, d.Vision, d.Version))
 
 	if d.Store != nil {
 		// One sub-router carries the gate chain, and every storage-scoped route
@@ -293,7 +320,7 @@ func NewRouter(d Deps) http.Handler {
 		if d.Backgrounds != nil {
 			imageModel = d.Backgrounds
 		}
-		adminPages, err := admin.New(d.Store, d.AdminVision, imageModel,
+		adminPages, err := admin.New(d.Store, d.AdminVision, imageModel, d.Version,
 			func(req *http.Request) (uuid.UUID, bool) {
 				u, ok := UserFrom(req.Context())
 				if !ok {
@@ -301,8 +328,13 @@ func NewRouter(d Deps) http.Handler {
 				}
 				return u.ID, true
 			},
+			// Through the one serializer, and through the one store-error
+			// mapper: an admin page reads the store like any handler, so a
+			// mangled audit cursor must be the same 422 a JSON route would
+			// give it rather than a 500 that blames the server for the
+			// operator's edited URL.
 			func(w http.ResponseWriter, req *http.Request, err error) {
-				errs.WriteError(w, req, Internal(err))
+				errs.WriteError(w, req, FromStoreError(err, "not found"))
 			},
 		)
 		if err != nil {
@@ -339,6 +371,13 @@ func NewRouter(d Deps) http.Handler {
 			ad.Get("/api/admin/catalog", adminAPI.SearchCatalog)
 			ad.Patch("/api/admin/catalog/{id}", adminAPI.PatchCatalog)
 			ad.Delete("/api/admin/catalog/{id}", adminAPI.DeleteCatalog)
+
+			// The admin audit trail
+			// (docs/specs/18-operations-and-observability.md). Server-rendered
+			// and read-only, on this group like every other admin route: a
+			// non-admin gets the same 404 for it as for a path that does not
+			// exist, and there is no JSON counterpart anywhere.
+			ad.Get("/admin/audit", adminPages.Audit)
 		})
 
 		r.Route("/api/storages/{storage_id}", func(sr chi.Router) {
@@ -571,7 +610,7 @@ func staticHandler(files fs.FS, errs *ErrorWriter) http.HandlerFunc {
 	fileServer := http.FileServer(http.FS(files))
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			errs.WriteError(w, r, NotFound("no route matches "+r.Method+" "+r.URL.Path))
+			errs.WriteError(w, r, NotFound(ReasonNoRouteMatch))
 			return
 		}
 		// The same name resolution http.FileServer performs, checked first so
@@ -582,7 +621,7 @@ func staticHandler(files fs.FS, errs *ErrorWriter) http.HandlerFunc {
 			name = "."
 		}
 		if _, err := fs.Stat(files, name); err != nil {
-			errs.WriteError(w, r, NotFound("no route matches "+r.URL.Path))
+			errs.WriteError(w, r, NotFound(ReasonNoRouteMatch))
 			return
 		}
 		// The service worker's own update check must never be satisfied from

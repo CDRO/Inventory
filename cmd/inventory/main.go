@@ -33,6 +33,7 @@ import (
 	"github.com/CDRO/Inventory/internal/imagesearch"
 	"github.com/CDRO/Inventory/internal/ingest"
 	"github.com/CDRO/Inventory/internal/jobs"
+	"github.com/CDRO/Inventory/internal/logging"
 	"github.com/CDRO/Inventory/internal/matching"
 	"github.com/CDRO/Inventory/internal/migrate"
 	"github.com/CDRO/Inventory/internal/notify"
@@ -52,7 +53,22 @@ const (
 	shutdownGrace     = 15 * time.Second
 )
 
+// version is the build stamped in by the Dockerfile with
+// -ldflags "-X main.version=…" (docs/specs/18-operations-and-observability.md).
+//
+// It stays "dev" for every `go build` and `go run` that does not pass the
+// flag, which is every build outside the production image — so a binary
+// reporting "dev" on GET /healthz is telling the truth about itself rather
+// than reporting a version nobody stamped.
+var version = "dev"
+
 func main() {
+	// Structured JSON to stdout, before anything can log
+	// (docs/specs/18-operations-and-observability.md). Installed here rather
+	// than inside serve() so the migration runner and the wizard write the
+	// same shape into the same place; Docker's log driver does the rest.
+	slog.SetDefault(logging.New(os.Stdout))
+
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, errorMessage(err))
 		os.Exit(exitCodeFor(err))
@@ -61,27 +77,43 @@ func main() {
 
 // exitCodeFor maps a failure to the process exit code.
 //
-// A configuration failure gets config.ExitConfig rather than a generic 1
-// because it is fatal and non-retryable: the operator must act before the
-// container can ever succeed. Restart policies do not discriminate on exit
-// code, so the distinct code is what lets an operator (and the logs) tell
-// "misconfigured, stop trying" apart from "crashed, worth restarting"
-// (docs/specs/01-architecture-and-deployment.md).
+// Two failures get config.ExitConfig rather than a generic 1: missing
+// configuration, and a database schema that does not match this binary
+// (docs/specs/01-architecture-and-deployment.md,
+// docs/specs/18-operations-and-observability.md). They share the code because
+// they share the property that matters — both are fatal and non-retryable, and
+// the operator must act before the container can ever succeed. Restart
+// policies do not discriminate on exit code, so the distinct code is what lets
+// an operator (and the logs) tell "the deployment is wrong, stop trying" apart
+// from "crashed, worth restarting". Which of the two it was is in the message,
+// which names the exact command that fixes it.
+//
+// **A database that is merely unreachable is not one of them.** That is an
+// ordinary error and gets the generic 1, because it is genuinely worth
+// retrying: PostgreSQL may still be starting.
 func exitCodeFor(err error) int {
 	var missing *config.MissingError
 	if errors.As(err, &missing) {
 		return config.ExitConfig
 	}
+	var schema *migrate.SchemaMismatchError
+	if errors.As(err, &schema) {
+		return config.ExitConfig
+	}
 	return 1
 }
 
-// errorMessage renders err for the operator. A configuration failure is
-// printed bare, because its message is already the full remediation block and
-// prefixing it would bury the first line.
+// errorMessage renders err for the operator. A configuration failure and a
+// schema mismatch are printed bare, because each message is already the full
+// remediation block and prefixing it would bury the first line.
 func errorMessage(err error) string {
 	var missing *config.MissingError
 	if errors.As(err, &missing) {
 		return missing.Error()
+	}
+	var schema *migrate.SchemaMismatchError
+	if errors.As(err, &schema) {
+		return schema.Error()
 	}
 	return "inventory: " + err.Error()
 }
@@ -169,12 +201,12 @@ func runMigrate(ctx context.Context, args []string) error {
 		return nil
 	}
 
-	// Bootstrapping here as well as at serve is what makes first-deploy order
-	// irrelevant. On a fresh install the server usually starts *before*
-	// migrations have run, so its own bootstrap attempt meets a users table
-	// that does not exist yet and can only log a warning. This is the step
-	// that brings the schema into existence, so it is the one place the
-	// bootstrap is guaranteed to have somewhere to write.
+	// Bootstrapping here as well as at serve is what makes the first deploy
+	// work in one step. This is the command that brings the schema into
+	// existence, so it is the one place the bootstrap is guaranteed to have
+	// somewhere to write — and since serve now refuses to start against a
+	// pending schema (docs/specs/18-operations-and-observability.md), it is
+	// also the command that must run first on a fresh install.
 	db, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
@@ -221,6 +253,22 @@ func serve() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Before anything else touches the database: does its schema match this
+	// binary (docs/specs/18-operations-and-observability.md)?
+	//
+	// Skipping `migrate up` during an upgrade used to produce a server that
+	// started, then failed whichever query first met a missing column — a
+	// 500 with a driver message, minutes or hours later, from a component
+	// unrelated to the actual mistake. It is a fatal, named refusal instead,
+	// with the exact command in the message, and a distinct exit code so the
+	// restart policy's retries are visibly pointless rather than silently so.
+	//
+	// It runs before store.Open because it is the deploy order that is wrong,
+	// not the connection: there is nothing to serve until it passes.
+	if err := migrate.Check(ctx, cfg.DatabaseURL); err != nil {
+		return err
+	}
+
 	db, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
@@ -251,20 +299,24 @@ func serve() error {
 	// crash's leftovers are cleaned at boot rather than up to an hour later.
 	go imageCache.RunSweeps(ctx)
 
-	// Non-fatal here, unlike in `migrate up`. On a fresh install the server
-	// often starts before migrations have run, so this can legitimately meet a
-	// users table that does not exist yet; refusing to start would make the
-	// documented deploy order a crash loop. `migrate up` repeats the bootstrap
-	// once the schema exists, so the admin is created either way.
+	// Non-fatal here, unlike in `migrate up`.
+	//
+	// Since the schema check above, a users table that does not exist is no
+	// longer reachable — serve refuses to start before it gets here. What
+	// remains is the ordinary run of database failures, and refusing to serve
+	// the whole application because one bootstrap insert failed would be the
+	// wrong trade: `migrate up` repeats the bootstrap, and an install that
+	// already has users needs nothing from this call at all.
 	if err := bootstrapAdmin(ctx, db, cfg); err != nil {
-		slog.Warn("initial admin not created yet; `migrate up` will retry it", slog.Any("err", err))
+		slog.Warn("initial admin not created; `migrate up` will retry it", slog.Any("err", err))
 	}
 
 	// Background jobs (docs/specs/04-backend-api-conventions.md). Recover runs
 	// before the listener, while no goroutine of this process can own a
 	// pending job, so everything pending is orphaned by the previous one. Like
-	// the bootstrap it tolerates a schema that does not exist yet: on a fresh
-	// install there are no jobs to recover either.
+	// the bootstrap it is warned about rather than fatal: the schema is known
+	// to be current by now, so a failure here is a database problem, and an
+	// unrecovered job is a stuck review rather than a broken deployment.
 	jobRunner := jobs.New(db, slog.Default())
 	if err := jobRunner.Recover(ctx); err != nil {
 		slog.Warn("could not recover interrupted jobs", slog.Any("err", err))
@@ -363,6 +415,11 @@ func serve() error {
 			Backgrounds:     backgrounds,
 			Cutouts:         cutoutStore,
 			Notifier:        notifier,
+			// One completion line per request, and the build string on
+			// /healthz and in the admin footer
+			// (docs/specs/18-operations-and-observability.md).
+			Logger:  slog.Default(),
+			Version: version,
 		}),
 		ReadHeaderTimeout: readHeaderTimeout,
 		WriteTimeout:      writeTimeout,
@@ -371,7 +428,16 @@ func serve() error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Printf("inventory: listening on :%s (env=%s)\n", cfg.HTTPPort, cfg.AppEnv)
+		// A lifecycle event, so slog at info rather than fmt.Printf: the spec
+		// puts startup and shutdown on the same structured stream as the
+		// requests, so one `docker compose logs app` is the whole story
+		// (docs/specs/18-operations-and-observability.md). The subcommands'
+		// own fmt output stays as it is — that is a person's terminal, not a
+		// log.
+		slog.Info("listening",
+			slog.String("port", cfg.HTTPPort),
+			slog.String("env", cfg.AppEnv),
+			slog.String("version", version))
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("http server: %w", err)
 			return
@@ -383,7 +449,7 @@ func serve() error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		fmt.Println("inventory: shutting down")
+		slog.Info("shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {

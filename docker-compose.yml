@@ -33,6 +33,14 @@ services:
     build:
       context: .
       target: prod
+      args:
+        # Stamped into the binary and reported by GET /healthz
+        # (docs/specs/18-operations-and-observability.md). Set it on the build
+        # to label a release — VERSION=2026-09-21 docker compose ... build —
+        # and leave it alone otherwise. The :-dev default is what keeps
+        # Compose from warning about an unset variable on every invocation,
+        # and "dev" is the correct answer for an unlabelled build.
+        VERSION: ${VERSION:-dev}
     # Optional at the Compose layer on purpose. `docker compose run --rm setup`
     # is the command that *writes* .env, so a required env_file here aborts the
     # whole project model before setup can run — the first documented step

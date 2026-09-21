@@ -325,7 +325,13 @@ func productsUnderCategory(ctx context.Context, q querier, storageID, categoryID
 // priority order, so the catalog change does not apply to it and recomputing
 // would touch the row for no reason. Products are visited in a fixed order so
 // that two corrections racing each other lock rows in the same sequence.
-func (s *Store) CorrectCatalogShelfLife(ctx context.Context, catalogID uuid.UUID, days *int) (int, error) {
+//
+// The admin_audit_log row rides the same transaction
+// (docs/specs/18-operations-and-observability.md), and carries both the new
+// value and the number of batches the cascade reached — a cross-household
+// correction is exactly the kind of admin action whose *blast radius* has to
+// be reconstructable, not just the fact that it happened.
+func (s *Store) CorrectCatalogShelfLife(ctx context.Context, actor, catalogID uuid.UUID, days *int) (int, error) {
 	total := 0
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
 		if err := setCatalogShelfLife(ctx, tx, catalogID, days); err != nil {
@@ -365,7 +371,11 @@ func (s *Store) CorrectCatalogShelfLife(ctx context.Context, catalogID uuid.UUID
 			}
 			total += affected
 		}
-		return nil
+
+		recomputed := total
+		return writeAdminAudit(ctx, tx, actor, ActionCatalogEntryUpdated, catalogID.String(), AuditDetails{
+			ShelfLifeDays: days, RecomputedBatches: &recomputed,
+		})
 	})
 	if err != nil {
 		return 0, err

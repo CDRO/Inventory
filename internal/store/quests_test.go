@@ -44,7 +44,7 @@ func newAllCleanStorage(t *testing.T, ctx context.Context) uuid.UUID {
 	}
 
 	member := newUser(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, member))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, member))
 	insertHolidayWeek(t, ctx, member, mostRecentMonday(t, time.Now()))
 
 	return storageID
@@ -118,7 +118,7 @@ func TestGenerateWeeklyQuestsNeverPadsBelowThree(t *testing.T) {
 		require.NoError(t, err)
 	}
 	member := newUser(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, member))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, member))
 	insertHolidayWeek(t, ctx, member, mostRecentMonday(t, time.Now()))
 
 	require.NoError(t, s.GenerateWeeklyQuests(ctx, storageID, time.Now()))
@@ -181,7 +181,7 @@ func TestAdvanceQuestsCompletesAndPaysEveryContributor(t *testing.T) {
 	// Suppresses consumption_hygiene, which would otherwise also fire: this
 	// storage has never logged a consumption.
 	holidayMember := newUser(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, holidayMember))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, holidayMember))
 	insertHolidayWeek(t, ctx, holidayMember, mostRecentMonday(t, time.Now()))
 
 	require.NoError(t, s.GenerateWeeklyQuests(ctx, storageID, time.Now()))
@@ -189,8 +189,8 @@ func TestAdvanceQuestsCompletesAndPaysEveryContributor(t *testing.T) {
 
 	alice := newUser(t, ctx)
 	bob := newUser(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, alice))
-	require.NoError(t, s.AddMember(ctx, storageID, bob))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, alice))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, bob))
 
 	// Alice closes four of the five; the quest must not complete yet.
 	for _, p := range products[:4] {
@@ -255,7 +255,7 @@ func TestAdvanceQuestsIgnoresATargetNotInTheQuestsCandidateSet(t *testing.T) {
 	}
 
 	holidayMember := newUser(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, holidayMember))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, holidayMember))
 	insertHolidayWeek(t, ctx, holidayMember, mostRecentMonday(t, time.Now()))
 
 	require.NoError(t, s.GenerateWeeklyQuests(ctx, storageID, time.Now()))
@@ -269,7 +269,7 @@ func TestAdvanceQuestsIgnoresATargetNotInTheQuestsCandidateSet(t *testing.T) {
 	require.NoError(t, err)
 
 	alice := newUser(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, alice))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, alice))
 	require.NoError(t, s.SetProductCategoryAsUser(ctx, storageID, late.ID, &category.ID, alice))
 
 	contributorCount := countRows(t, ctx, `
@@ -312,7 +312,7 @@ func TestAdvanceQuestsCreditsOnlyTheGeneratorTheFieldActuallyAdvanced(t *testing
 	}
 
 	holidayMember := newUser(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, holidayMember))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, holidayMember))
 	insertHolidayWeek(t, ctx, holidayMember, mostRecentMonday(t, time.Now()))
 
 	require.NoError(t, s.GenerateWeeklyQuests(ctx, storageID, time.Now()))
@@ -320,7 +320,7 @@ func TestAdvanceQuestsCreditsOnlyTheGeneratorTheFieldActuallyAdvanced(t *testing
 		"uncategorized, imageless and untracked_reorder must all fire — the scenario this test needs")
 
 	alice := newUser(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, alice))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, alice))
 	require.NoError(t, s.SetProductCategoryAsUser(ctx, storageID, blank[0], &category.ID, alice))
 
 	isContributor := func(generator string) bool {

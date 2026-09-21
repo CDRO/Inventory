@@ -33,20 +33,26 @@ const (
 // AdminStore is the slice of the store the admin JSON routes use.
 type AdminStore interface {
 	ListUsers(ctx context.Context) ([]store.User, error)
-	CreateUser(ctx context.Context, in store.NewUser) (*store.User, error)
-	DeleteUser(ctx context.Context, id uuid.UUID) error
+	AdminCreateUser(ctx context.Context, actor uuid.UUID, in store.NewUser) (*store.User, error)
+	DeleteUser(ctx context.Context, actor, id uuid.UUID) error
 
-	// ChangePassword is the admin reset of
-	// docs/specs/14-account-self-service.md. The same store method the
-	// self-service route uses; an empty keepSessionID is what makes this one
-	// revoke *all* of the target's sessions rather than all but one.
-	ChangePassword(ctx context.Context, userID uuid.UUID, passwordHash, keepSessionID string) error
+	// AdminResetPassword is the admin reset of
+	// docs/specs/14-account-self-service.md: the target's hash is replaced,
+	// *all* of their sessions are revoked rather than all but one, and the
+	// admin_audit_log row is written in the same transaction.
+	//
+	// The plain ChangePassword the self-service route uses is deliberately
+	// **not** in this interface. It writes no audit row — someone changing
+	// their own password is not an admin action — so an admin handler able to
+	// reach it would be a mutating admin route with no trail, which is the one
+	// failure this interface's shape exists to make impossible.
+	AdminResetPassword(ctx context.Context, actor, userID uuid.UUID, passwordHash string) error
 	ListStorages(ctx context.Context) ([]store.Storage, error)
-	CreateStorage(ctx context.Context, name string) (*store.Storage, error)
-	DeleteStorage(ctx context.Context, id uuid.UUID) error
+	CreateStorage(ctx context.Context, actor uuid.UUID, name string) (*store.Storage, error)
+	DeleteStorage(ctx context.Context, actor, id uuid.UUID) error
 	ListMembers(ctx context.Context, storageID uuid.UUID) ([]store.Member, error)
-	AddMember(ctx context.Context, storageID, userID uuid.UUID) error
-	RemoveMember(ctx context.Context, storageID, userID uuid.UUID) error
+	AddMember(ctx context.Context, actor, storageID, userID uuid.UUID) error
+	RemoveMember(ctx context.Context, actor, storageID, userID uuid.UUID) error
 
 	// Setting/SetSetting back the app-settings routes (docs/specs/01-architecture-and-deployment.md's
 	// AI model resilience) — currently just the gemini_model override, read
@@ -59,8 +65,31 @@ type AdminStore interface {
 	// (docs/specs/02-data-model.md), so an admin correcting or removing a bad
 	// entry is the only remedy.
 	SearchCatalog(ctx context.Context, q string) ([]store.CatalogProduct, error)
-	CorrectCatalogShelfLife(ctx context.Context, catalogID uuid.UUID, days *int) (int, error)
-	DeleteCatalogProduct(ctx context.Context, id uuid.UUID) error
+	CorrectCatalogShelfLife(ctx context.Context, actor, catalogID uuid.UUID, days *int) (int, error)
+	DeleteCatalogProduct(ctx context.Context, actor, id uuid.UUID) error
+
+	// ListAdminAudit backs GET /admin/audit
+	// (docs/specs/18-operations-and-observability.md). It is the only read of
+	// admin_audit_log in the system, and there is no write, update or delete
+	// method for the table anywhere: the trail is append-only because the
+	// application has no other verb for it.
+	ListAdminAudit(ctx context.Context, cursor string, limit int) (*store.AuditPage, error)
+}
+
+// adminActor is the caller an audited admin mutation is attributed to.
+//
+// It re-reads the user from the request context rather than taking an id from
+// anywhere in the request, so the actor recorded in admin_audit_log is the one
+// RequireSession resolved and RequireAdmin just re-verified against the
+// database. The second result is false only if this ran outside the gate
+// chain, which is a wiring mistake rather than a caller error — the handlers
+// answer it with the same 404 the gates would have.
+func adminActor(r *http.Request) (uuid.UUID, bool) {
+	user, ok := UserFrom(r.Context())
+	if !ok {
+		return uuid.Nil, false
+	}
+	return user.ID, true
 }
 
 // AdminHandler serves the admin JSON routes of
@@ -133,6 +162,12 @@ func (h *AdminHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 // This and the initial-admin bootstrap are the only two ways an account comes
 // into existence. There is no public registration, by design.
 func (h *AdminHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
+	actor, ok := adminActor(r)
+	if !ok {
+		h.errors.WriteError(w, r, NotFound(ReasonAdminAreaHidden))
+		return
+	}
+
 	var body createUserInput
 	if failure := decodeJSON(w, r, &body); failure != nil {
 		h.errors.WriteError(w, r, failure)
@@ -171,7 +206,7 @@ func (h *AdminHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := h.store.CreateUser(r.Context(), store.NewUser{
+	user, err := h.store.AdminCreateUser(r.Context(), actor, store.NewUser{
 		Username: username, PasswordHash: hash, DisplayName: displayName, IsAdmin: body.IsAdmin,
 	})
 	if errors.Is(err, store.ErrDuplicate) {
@@ -203,18 +238,24 @@ func (h *AdminHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 // it would lock the household out of its own server with no way back short of
 // emptying the users table.
 func (h *AdminHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
+	actor, ok := adminActor(r)
+	if !ok {
+		h.errors.WriteError(w, r, NotFound(ReasonAdminAreaHidden))
+		return
+	}
+
 	id, failure := idFromPath(r, "id", "malformed user id")
 	if failure != nil {
 		h.errors.WriteError(w, r, failure)
 		return
 	}
 
-	if caller, ok := UserFrom(r.Context()); ok && caller.ID == id {
+	if actor == id {
 		h.errors.WriteError(w, r, Conflict("You cannot delete your own account.", nil))
 		return
 	}
 
-	if err := h.store.DeleteUser(r.Context(), id); err != nil {
+	if err := h.store.DeleteUser(r.Context(), actor, id); err != nil {
 		h.errors.WriteError(w, r, FromStoreError(err, "user not found"))
 		return
 	}
@@ -244,6 +285,12 @@ func (h *AdminHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 // login state machine to every client for something that happens twice a
 // year.
 func (h *AdminHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
+	actor, ok := adminActor(r)
+	if !ok {
+		h.errors.WriteError(w, r, NotFound(ReasonAdminAreaHidden))
+		return
+	}
+
 	id, failure := idFromPath(r, "id", "malformed user id")
 	if failure != nil {
 		h.errors.WriteError(w, r, failure)
@@ -269,7 +316,7 @@ func (h *AdminHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.ChangePassword(r.Context(), id, hash, ""); err != nil {
+	if err := h.store.AdminResetPassword(r.Context(), actor, id, hash); err != nil {
 		h.errors.WriteError(w, r, FromStoreError(err, "user not found"))
 		return
 	}
@@ -304,6 +351,12 @@ func (h *AdminHandler) ListStorages(w http.ResponseWriter, r *http.Request) {
 // The new storage arrives with its starter category tree, seeded in the same
 // transaction (docs/specs/08-expiration-and-classification.md).
 func (h *AdminHandler) CreateStorage(w http.ResponseWriter, r *http.Request) {
+	actor, ok := adminActor(r)
+	if !ok {
+		h.errors.WriteError(w, r, NotFound(ReasonAdminAreaHidden))
+		return
+	}
+
 	var body struct {
 		Name string `json:"name"`
 	}
@@ -325,7 +378,7 @@ func (h *AdminHandler) CreateStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	storage, err := h.store.CreateStorage(r.Context(), name)
+	storage, err := h.store.CreateStorage(r.Context(), actor, name)
 	if err != nil {
 		h.errors.WriteError(w, r, Internal(err))
 		return
@@ -335,12 +388,18 @@ func (h *AdminHandler) CreateStorage(w http.ResponseWriter, r *http.Request) {
 
 // DeleteStorage serves DELETE /api/admin/storages/{id}.
 func (h *AdminHandler) DeleteStorage(w http.ResponseWriter, r *http.Request) {
+	actor, ok := adminActor(r)
+	if !ok {
+		h.errors.WriteError(w, r, NotFound(ReasonAdminAreaHidden))
+		return
+	}
+
 	id, failure := idFromPath(r, "id", "malformed storage id")
 	if failure != nil {
 		h.errors.WriteError(w, r, failure)
 		return
 	}
-	if err := h.store.DeleteStorage(r.Context(), id); err != nil {
+	if err := h.store.DeleteStorage(r.Context(), actor, id); err != nil {
 		h.errors.WriteError(w, r, FromStoreError(err, "storage not found"))
 		return
 	}
@@ -368,6 +427,12 @@ func (h *AdminHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 
 // AddMember serves POST /api/admin/storages/{id}/members.
 func (h *AdminHandler) AddMember(w http.ResponseWriter, r *http.Request) {
+	actor, ok := adminActor(r)
+	if !ok {
+		h.errors.WriteError(w, r, NotFound(ReasonAdminAreaHidden))
+		return
+	}
+
 	storageID, failure := idFromPath(r, "id", "malformed storage id")
 	if failure != nil {
 		h.errors.WriteError(w, r, failure)
@@ -388,7 +453,7 @@ func (h *AdminHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Idempotent: re-adding an existing member is a 204, not a 409.
-	if err := h.store.AddMember(r.Context(), storageID, userID); err != nil {
+	if err := h.store.AddMember(r.Context(), actor, storageID, userID); err != nil {
 		h.errors.WriteError(w, r, FromStoreError(err, "storage or user not found"))
 		return
 	}
@@ -400,6 +465,12 @@ func (h *AdminHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 // Revocation is immediate: RequireStorageMember re-checks membership on every
 // request, so the very next call from that user to this storage is a 404.
 func (h *AdminHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
+	actor, ok := adminActor(r)
+	if !ok {
+		h.errors.WriteError(w, r, NotFound(ReasonAdminAreaHidden))
+		return
+	}
+
 	storageID, failure := idFromPath(r, "id", "malformed storage id")
 	if failure != nil {
 		h.errors.WriteError(w, r, failure)
@@ -410,7 +481,7 @@ func (h *AdminHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 		h.errors.WriteError(w, r, failure)
 		return
 	}
-	if err := h.store.RemoveMember(r.Context(), storageID, userID); err != nil {
+	if err := h.store.RemoveMember(r.Context(), actor, storageID, userID); err != nil {
 		h.errors.WriteError(w, r, FromStoreError(err, "membership not found"))
 		return
 	}
@@ -448,7 +519,7 @@ func (h *AdminHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
 	if models, err := h.vision.Models(r.Context()); err == nil {
 		out.AvailableModels = models
 	} else {
-		slog.Warn("admin settings: could not list vision models", slog.Any("err", err))
+		slog.WarnContext(r.Context(), "admin settings: could not list vision models", slog.Any("err", err))
 	}
 
 	writeJSON(w, http.StatusOK, out)
@@ -593,6 +664,12 @@ func (h *AdminHandler) SearchCatalog(w http.ResponseWriter, r *http.Request) {
 // rolled back whole, so the entry is never left showing a value its batches
 // do not follow.
 func (h *AdminHandler) PatchCatalog(w http.ResponseWriter, r *http.Request) {
+	actor, ok := adminActor(r)
+	if !ok {
+		h.errors.WriteError(w, r, NotFound(ReasonAdminAreaHidden))
+		return
+	}
+
 	id, failure := idFromPath(r, "id", "malformed catalog id")
 	if failure != nil {
 		h.errors.WriteError(w, r, failure)
@@ -619,7 +696,7 @@ func (h *AdminHandler) PatchCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	affected, err := h.store.CorrectCatalogShelfLife(r.Context(), id, days)
+	affected, err := h.store.CorrectCatalogShelfLife(r.Context(), actor, id, days)
 	if err != nil {
 		h.errors.WriteError(w, r, FromStoreError(err, "catalog entry not found"))
 		return
@@ -635,12 +712,18 @@ func (h *AdminHandler) PatchCatalog(w http.ResponseWriter, r *http.Request) {
 // touches any storage's own products: products.catalog_id is
 // ON DELETE SET NULL (docs/specs/02-data-model.md).
 func (h *AdminHandler) DeleteCatalog(w http.ResponseWriter, r *http.Request) {
+	actor, ok := adminActor(r)
+	if !ok {
+		h.errors.WriteError(w, r, NotFound(ReasonAdminAreaHidden))
+		return
+	}
+
 	id, failure := idFromPath(r, "id", "malformed catalog id")
 	if failure != nil {
 		h.errors.WriteError(w, r, failure)
 		return
 	}
-	if err := h.store.DeleteCatalogProduct(r.Context(), id); err != nil {
+	if err := h.store.DeleteCatalogProduct(r.Context(), actor, id); err != nil {
 		h.errors.WriteError(w, r, FromStoreError(err, "catalog entry not found"))
 		return
 	}
