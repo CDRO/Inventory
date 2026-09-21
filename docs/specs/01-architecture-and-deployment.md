@@ -776,7 +776,9 @@ removes the old one and recreates the sidecar. Its contract:
   lacks `app`, `db` or `ts-inventory` (the NAS layer is not active), or if Compose
   is older than 2.24.
 - **It refuses, before it pulls anything,** when more than one app instance runs or
-  a stopped one is left over, and it runs one at a time (a lock directory).
+  a stopped one is left over, and it runs one at a time (a lock directory). It also
+  refuses to pull into a clone that has local changes to tracked files: what is
+  deployed is what was pulled (`--no-pull` deploys the tree as it is).
 - **`--classic`** stops the app and the sidecar first, then migrates, then starts:
   for a release whose migration the previous release cannot run against. If the
   migration fails, the stack stays stopped, and the script says so.
