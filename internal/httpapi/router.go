@@ -227,15 +227,22 @@ func NewRouter(d Deps) http.Handler {
 	// neither the API's error shape nor something a client can switch on. Both
 	// go through the one serializer instead, so there is exactly one error
 	// format in the system.
+	//
+	// **Neither reason names the path.** A Failure's reason is written to the
+	// log on every refusal and serialized as debug_reason in dev, so a reason
+	// built from req.URL.Path echoes whatever was probed into the log file —
+	// the very thing docs/specs/18-operations-and-observability.md keeps out
+	// of the request line. The caller already knows the path it asked for, so
+	// nothing is lost by leaving it out.
 	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
-		errs.WriteError(w, req, NotFound("no route matches "+req.URL.Path))
+		errs.WriteError(w, req, NotFound(ReasonNoRouteMatch))
 	})
 	r.MethodNotAllowed(func(w http.ResponseWriter, req *http.Request) {
 		errs.WriteError(w, req, &Failure{
 			Status:  http.StatusMethodNotAllowed,
 			Code:    "method_not_allowed",
 			Message: "That method is not allowed here.",
-			Reason:  req.Method + " on " + req.URL.Path,
+			Reason:  ReasonMethodNotAllowed,
 		})
 	})
 
@@ -591,7 +598,7 @@ func staticHandler(files fs.FS, errs *ErrorWriter) http.HandlerFunc {
 	fileServer := http.FileServer(http.FS(files))
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			errs.WriteError(w, r, NotFound("no route matches "+r.Method+" "+r.URL.Path))
+			errs.WriteError(w, r, NotFound(ReasonNoRouteMatch))
 			return
 		}
 		// The same name resolution http.FileServer performs, checked first so
@@ -602,7 +609,7 @@ func staticHandler(files fs.FS, errs *ErrorWriter) http.HandlerFunc {
 			name = "."
 		}
 		if _, err := fs.Stat(files, name); err != nil {
-			errs.WriteError(w, r, NotFound("no route matches "+r.URL.Path))
+			errs.WriteError(w, r, NotFound(ReasonNoRouteMatch))
 			return
 		}
 		// The service worker's own update check must never be satisfied from

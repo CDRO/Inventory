@@ -123,7 +123,7 @@ func (s *Service) Deliver(ctx context.Context, settings store.NotificationSettin
 func (s *Service) SendTest(ctx context.Context, settings store.NotificationSettings) error {
 	err := deliver(ctx, s.client, settings, testTitle, testMessage, nil)
 	if err != nil {
-		s.log.Warn("test notification failed", slog.String("storage_id", settings.StorageID.String()), slog.Any("err", err))
+		s.log.WarnContext(ctx, "test notification failed", slog.String("storage_id", settings.StorageID.String()), slog.Any("err", err))
 		s.record(ctx, settings.StorageID, summaryOf(err))
 		return err
 	}
@@ -136,7 +136,7 @@ func (s *Service) SendTest(ctx context.Context, settings store.NotificationSetti
 // bookkeeping is not worth turning into the caller's problem.
 func (s *Service) record(ctx context.Context, storageID uuid.UUID, result string) {
 	if err := s.store.RecordNotificationResult(ctx, storageID, result); err != nil {
-		s.log.Warn("recording notification result failed",
+		s.log.WarnContext(ctx, "recording notification result failed",
 			slog.String("storage_id", storageID.String()), slog.Any("err", err))
 	}
 }

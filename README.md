@@ -21,10 +21,15 @@ check with `docker compose version` before deploying.
 ## First run
 
 ```bash
-docker compose run --rm setup       # interactive wizard, writes ./.env
-docker compose run --rm app migrate up
+docker compose run --rm setup                                   # writes ./.env
+docker compose -f docker-compose.yml run --rm app migrate up    # creates the schema
 docker compose up -d
 ```
+
+The `-f docker-compose.yml` pin on the middle line is not optional: without
+it Compose auto-loads `docker-compose.override.yml` and `run` lands in the dev
+image, which has no `ENTRYPOINT` and answers
+`exec: "migrate": executable file not found`. See **Compose files** below.
 
 `setup` reads `.env.example` as the canonical variable list, prompts for each
 variable with its default, and generates `SESSION_SECRET` itself.

@@ -304,7 +304,15 @@ func TestAnUnmatchedPathIsLoggedAsUnmatchedRatherThanEchoedBack(t *testing.T) {
 	t.Parallel()
 
 	capture, logger := newCapturedLog()
-	f := newAPIFixture(t, func(d *httpapi.Deps) { d.Logger = logger })
+	f := newAPIFixture(t, func(d *httpapi.Deps) {
+		d.Logger = logger
+		// **Both** halves of the pipeline on the capture. Wiring only
+		// Deps.Logger makes this test pass while the error serializer — which
+		// logs a line of its own for every refusal, and a 404 is a refusal —
+		// writes the raw path to a discard logger nobody looks at. That is
+		// exactly how this assertion passed while the leak it names was live.
+		d.Errors = httpapi.NewErrorWriter(false, logger)
+	})
 
 	const probe = "/nothing/here/zzz-probe-value-zzz"
 	rec := f.anonymous(http.MethodGet, probe, "")
@@ -312,9 +320,51 @@ func TestAnUnmatchedPathIsLoggedAsUnmatchedRatherThanEchoedBack(t *testing.T) {
 
 	lines := capture.completions(t)
 	require.Len(t, lines, 1)
-	assert.NotContains(t, lines[0].Path, "zzz-probe-value-zzz")
+	assert.Equal(t, "unmatched", lines[0].Path)
 	assert.NotContains(t, capture.text(), "zzz-probe-value-zzz",
-		"the probed path appears nowhere in the log")
+		"the probed path appears nowhere in the log — not on the completion "+
+			"line, and not in the serializer's reason either")
+}
+
+// TestTheServerNeverLogsARawURL is the general form of the test above.
+//
+// The spec's reason for logging the route pattern is not tidiness: a raw URL
+// carries the ids of whatever it addressed, and a query string carries
+// whatever a person typed into a search box. Both halves of the log pipeline
+// have to honour that, so this drives a matched route, a refusal, and a miss,
+// each with a sentinel in the path *and* in the query, and asserts none of
+// them survived anywhere.
+func TestTheServerNeverLogsARawURL(t *testing.T) {
+	t.Parallel()
+
+	capture, logger := newCapturedLog()
+	f := newAPIFixture(t, func(d *httpapi.Deps) {
+		d.Logger = logger
+		d.Errors = httpapi.NewErrorWriter(false, logger)
+	})
+
+	const inQuery = "zzz-typed-into-a-search-box-zzz"
+
+	// A route that exists, with a query string.
+	require.Equal(t, http.StatusOK,
+		f.do(http.MethodGet, f.base()+"/products?q="+inQuery, "").Code)
+	// A storage the caller may not see — the refusal the serializer logs.
+	require.Equal(t, http.StatusNotFound,
+		f.do(http.MethodGet, "/api/storages/"+uuid.NewString()+"/locations?q="+inQuery, "").Code)
+	// A path that does not exist at all, with a sentinel in the path itself.
+	require.Equal(t, http.StatusNotFound,
+		f.do(http.MethodGet, "/zzz-probed-path-zzz", "").Code)
+	// And a verb no route accepts.
+	require.Equal(t, http.StatusNotFound,
+		f.do(http.MethodPut, "/zzz-probed-path-zzz", "{}").Code)
+
+	captured := capture.text()
+	require.NotEmpty(t, captured)
+	require.GreaterOrEqual(t, len(capture.completions(t)), 4,
+		"all four requests logged, so the assertions below are not vacuous")
+
+	assert.NotContains(t, captured, inQuery, "no query string reaches the log")
+	assert.NotContains(t, captured, "zzz-probed-path-zzz", "and no raw path either")
 }
 
 // TestHealthzReportsTheBuiltVersion, and an unstamped build says "dev".

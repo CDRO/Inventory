@@ -36,6 +36,18 @@ const (
 	ReasonStorageNotFound  = "storage_not_found"
 	ReasonNotAdmin         = "not_admin"
 	ReasonAdminAreaHidden  = "admin_area_hidden"
+
+	// ReasonNoRouteMatch and ReasonMethodNotAllowed are the router's own two
+	// refusals (router.go).
+	//
+	// Fixed strings, not "no route matches "+r.URL.Path as they once were. A
+	// reason is logged on every refusal and serialized as debug_reason in dev,
+	// so building one from the request's path echoed whatever was probed into
+	// the log file — the same thing the request line takes care to keep out
+	// (docs/specs/18-operations-and-observability.md). The caller already
+	// knows the path it asked for.
+	ReasonNoRouteMatch     = "no_route_match"
+	ReasonMethodNotAllowed = "method_not_allowed_here"
 )
 
 // APIError is what a caller sees. It is unexported-by-convention in the sense
@@ -156,7 +168,16 @@ func (w *ErrorWriter) WriteError(rw http.ResponseWriter, r *http.Request, failur
 			slog.String("code", failure.Code),
 			slog.String("reason", failure.Reason),
 			slog.String("method", r.Method),
-			slog.String("path", r.URL.Path),
+			// The route *pattern*, exactly as the completion line uses
+			// (requestlog.go) — never r.URL.Path.
+			//
+			// This line is the second half of the log pipeline, and it is the
+			// half that is easy to forget: a raw URL here would put the ids a
+			// request addressed into the log on every single refusal, and a
+			// miss would echo whatever was probed straight back into the file
+			// (docs/specs/18-operations-and-observability.md). The completion
+			// line getting it right is not enough if this one does not.
+			slog.String("path", routePattern(r)),
 			// The client's self-reported version, and the only thing anything
 			// in this package does with that header — see clientversion.go for
 			// why it is read here and nowhere else. It is an attribute of a

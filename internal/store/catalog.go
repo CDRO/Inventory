@@ -276,8 +276,15 @@ func (s *Store) DeleteCatalogProduct(ctx context.Context, actor, id uuid.UUID) e
 			return fmt.Errorf("store: delete catalog product: %w", err)
 		}
 
-		if _, err := tx.Exec(ctx, `DELETE FROM catalog_products WHERE id = $1`, id); err != nil {
+		tag, err := tx.Exec(ctx, `DELETE FROM catalog_products WHERE id = $1`, id)
+		if err != nil {
 			return fmt.Errorf("store: delete catalog product: %w", err)
+		}
+		// See DeleteUser (internal/store/users.go): the name lookup above is
+		// not proof the delete landed, and the trail must not record a
+		// moderation this request did not perform.
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
 		}
 		return writeAdminAudit(ctx, tx, actor, ActionCatalogEntryDeleted, id.String(), AuditDetails{
 			DisplayName: displayName,

@@ -128,7 +128,10 @@ func (s *Service) Start(ctx context.Context, u Upload) (*store.Job, error) {
 	}, s.work(u.StorageID, mode, u.Filename, u.LocationHintID))
 	if err != nil {
 		if rmErr := s.photos.Remove(u.Filename); rmErr != nil {
-			s.log.Warn("removing the photo of a job that was never created failed", slog.Any("err", rmErr))
+			// WarnContext, not Warn: Start runs inside the upload request, so the
+			// context carries the request id that ties this line to it
+			// (docs/specs/18-operations-and-observability.md).
+			s.log.WarnContext(ctx, "removing the photo of a job that was never created failed", slog.Any("err", rmErr))
 		}
 		return nil, err
 	}

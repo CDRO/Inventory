@@ -196,8 +196,16 @@ func (s *Store) DeleteUser(ctx context.Context, actor, id uuid.UUID) error {
 			return fmt.Errorf("store: delete user: %w", err)
 		}
 
-		if _, err := tx.Exec(ctx, `DELETE FROM users WHERE id = $1`, id); err != nil {
+		tag, err := tx.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
+		if err != nil {
 			return fmt.Errorf("store: delete user: %w", err)
+		}
+		// Re-checked rather than assumed from the SELECT above. Between the
+		// two statements another transaction may have committed the same
+		// delete, and writing the audit row anyway would record a deletion
+		// this request did not perform — while also reporting success for it.
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
 		}
 		return writeAdminAudit(ctx, tx, actor, ActionUserDeleted, id.String(), AuditDetails{
 			Username: username,

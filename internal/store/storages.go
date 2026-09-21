@@ -158,8 +158,15 @@ func (s *Store) DeleteStorage(ctx context.Context, actor, id uuid.UUID) error {
 			return fmt.Errorf("store: delete storage: %w", err)
 		}
 
-		if _, err := tx.Exec(ctx, `DELETE FROM storages WHERE id = $1`, id); err != nil {
+		tag, err := tx.Exec(ctx, `DELETE FROM storages WHERE id = $1`, id)
+		if err != nil {
 			return fmt.Errorf("store: delete storage: %w", err)
+		}
+		// See DeleteUser: the name lookup above is not proof the delete landed,
+		// and an audit row for a deletion this request did not perform is worse
+		// than no row at all.
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
 		}
 		return writeAdminAudit(ctx, tx, actor, ActionStorageDeleted, id.String(), AuditDetails{
 			StorageName: name,

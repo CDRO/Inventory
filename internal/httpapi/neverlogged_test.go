@@ -75,10 +75,12 @@ func TestNothingSecretReachesTheLog(t *testing.T) {
 		// the serializer's own "request failed" lines
 		// (cmd/inventory/main.go). A capture that saw only one of them would
 		// miss whichever half leaked.
-		d.Errors = httpapi.NewErrorWriter(false, logger)
-		// APP_ENV=dev is the *worse* case for disclosure and therefore the one
-		// worth testing: debug_reason is serialized into responses here, and
-		// the spec still forbids the secrets below from reaching the log.
+		//
+		// dev, which is the *worse* case for disclosure and therefore the one
+		// worth testing: this is the mode in which a reason is serialized into
+		// the response as debug_reason, so it is the mode in which a handler
+		// is most tempted to put something useful into one.
+		d.Errors = httpapi.NewErrorWriter(true, logger)
 		d.Config = &config.Config{
 			AppEnv: "dev", HTTPPort: "8000",
 			GeminiAPIKey:  sentinelAPIKey,
