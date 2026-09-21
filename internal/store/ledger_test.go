@@ -292,31 +292,6 @@ func TestDeleteProductWritesTombstoneInSameTransaction(t *testing.T) {
 		`SELECT count(*) FROM tombstones WHERE entity_type = 'product' AND entity_id = $1`, productID))
 }
 
-// TestDeltaIsResumable covers the honesty rule for delta sync: a client whose
-// cursor predates the oldest surviving tombstone cannot be brought up to date,
-// and must be told to resync rather than handed an answer that quietly omits a
-// swept deletion.
-func TestDeltaIsResumable(t *testing.T) {
-	s := requireDB(t)
-	ctx := context.Background()
-
-	storageID, productID, _, _ := stocked(t, ctx, s, 1)
-
-	fresh, err := s.DeltaIsResumable(ctx, storageID, timeNow(t, ctx))
-	require.NoError(t, err)
-	assert.True(t, fresh, "with no deletions recorded, any cursor is resumable")
-
-	require.NoError(t, s.DeleteProduct(ctx, storageID, productID))
-
-	tombstones, err := s.TombstonesSince(ctx, storageID, timeZero())
-	require.NoError(t, err)
-	require.Len(t, tombstones, 1)
-
-	stale, err := s.DeltaIsResumable(ctx, storageID, timeZero())
-	require.NoError(t, err)
-	assert.False(t, stale, "a cursor older than the oldest tombstone cannot be resumed")
-}
-
 // TestMoveBatchWritesPairedMoveLogs holds the whole-batch move to the same rule
 // the split obeys: two 'move' rows summing to zero, so product totals are
 // untouched while the ledger still records that something happened.

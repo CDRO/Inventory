@@ -17,6 +17,7 @@ const (
 	CodeNotFound         = "not_found"
 	CodeConflict         = "conflict"
 	CodeValidationFailed = "validation_failed"
+	CodeResyncRequired   = "resync_required"
 	CodePayloadTooLarge  = "payload_too_large"
 	CodeModelUnavailable = "model_unavailable"
 	CodeUpstreamFailed   = "upstream_failed"
@@ -133,6 +134,11 @@ func (w *ErrorWriter) WriteError(rw http.ResponseWriter, r *http.Request, failur
 			slog.String("reason", failure.Reason),
 			slog.String("method", r.Method),
 			slog.String("path", r.URL.Path),
+			// The client's self-reported version, and the only thing anything
+			// in this package does with that header — see clientversion.go for
+			// why it is read here and nowhere else. It is an attribute of a
+			// response already decided, so it cannot influence one.
+			slog.String("client_version", clientVersionFrom(r)),
 			slog.Any("err", failure.Err),
 		)
 	}
@@ -199,6 +205,28 @@ func Conflict(message string, err error) *Failure {
 		message = "That action conflicts with the current state."
 	}
 	return &Failure{Status: http.StatusConflict, Code: CodeConflict, Message: message, Err: err}
+}
+
+// ResyncRequired tells a client its cached copy cannot be brought up to date
+// incrementally and must be thrown away.
+//
+// It is a 409 with its own code rather than a plain conflict because it is an
+// instruction, not a refusal: the request was correct, the server simply no
+// longer remembers far enough back to describe every deletion since. A client
+// that switched on `conflict` alone could not tell this from "that category
+// still has products in it" and would have no way to know it should re-fetch
+// (docs/specs/12-client-api-contract.md).
+//
+// The alternative — answering 200 with whatever the surviving tombstones
+// happen to cover — is the failure the spec exists to prevent: the client
+// keeps a deleted row for months with nothing anywhere reporting a problem.
+func ResyncRequired(reason string) *Failure {
+	return &Failure{
+		Status:  http.StatusConflict,
+		Code:    CodeResyncRequired,
+		Message: "Your cached copy is too old to update. Fetch the full list again.",
+		Reason:  reason,
+	}
 }
 
 // ValidationFailed carries the per-field messages a form needs.
@@ -271,6 +299,13 @@ func FromStoreError(err error, reason string) *Failure {
 		return Conflict(err.Error(), err)
 	case errors.Is(err, store.ErrValidation):
 		return ValidationFailed(nil, err)
+	case errors.Is(err, store.ErrResyncRequired):
+		// Mapped here rather than in each delta handler for the reason every
+		// other mapping is here: three list endpoints answer deltas, and a
+		// handler that forgot this case would turn "your cache is too old"
+		// into a 500 — an error the client retries forever instead of the
+		// instruction it needed.
+		return ResyncRequired(err.Error())
 	default:
 		return Internal(err)
 	}
@@ -286,6 +321,8 @@ func defaultMessage(code string) string {
 		return "That action conflicts with the current state."
 	case CodeValidationFailed:
 		return "The request could not be processed."
+	case CodeResyncRequired:
+		return "Your cached copy is too old to update. Fetch the full list again."
 	case CodePayloadTooLarge:
 		return "The uploaded file is too large."
 	case CodeModelUnavailable:
