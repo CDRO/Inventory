@@ -220,10 +220,10 @@ func TestWizardDatabaseURLRoundTripsSpecialCharacters(t *testing.T) {
 }
 
 // TestWizardRejectsDollarInPostgresPassword covers the explicit decision the
-// spec asks for: Compose interpolates POSTGRES_PASSWORD when it builds the
-// db container's environment but does not interpolate DATABASE_URL (handed
-// to the app via env_file), so a '$' would reach the two services
-// differently and recreate the very mismatch this spec removes.
+// spec asks for: Compose's own .env parser treats an unescaped '$' as the
+// start of a variable reference and mangles the value when it loads it, for
+// both the db container's interpolated environment and (identically)
+// DATABASE_URL's env_file — not a value worth shipping on either route.
 func TestWizardRejectsDollarInPostgresPassword(t *testing.T) {
 	t.Parallel()
 
@@ -271,6 +271,59 @@ func TestWizardAcceptsHashWithoutPrecedingWhitespaceInPostgresPassword(t *testin
 	require.NoError(t, err)
 
 	assert.Equal(t, password, readEnv(t, dir)["POSTGRES_PASSWORD"])
+}
+
+// TestWizardRejectsComposeSpecialCharactersInPostgresUserAndDB extends the
+// same validation to POSTGRES_USER and POSTGRES_DB: docker-compose.yml
+// interpolates all three POSTGRES_* variables into the db service's
+// environment identically (docker-compose.yml:82-84), and deriveDatabaseURL
+// embeds all three, percent-encoded, into DATABASE_URL, which reaches the
+// app via env_file. The mismatch class the POSTGRES_PASSWORD checks above
+// guard against — Compose truncating at a whitespace-then-'#' when it builds
+// the db container's environment, while DATABASE_URL keeps the full,
+// percent-encoded value — applies equally to POSTGRES_USER and POSTGRES_DB.
+func TestWizardRejectsComposeSpecialCharactersInPostgresUserAndDB(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		key     string
+		bad     string
+		good    string
+		wantMsg string
+	}{
+		{name: "dollar in POSTGRES_USER", key: "POSTGRES_USER", bad: "us$er", good: "good_user", wantMsg: `POSTGRES_USER cannot contain "$"`},
+		{name: "whitespace-hash in POSTGRES_USER", key: "POSTGRES_USER", bad: "inv user #x", good: "good_user", wantMsg: `POSTGRES_USER cannot contain whitespace followed by "#"`},
+		{name: "dollar in POSTGRES_DB", key: "POSTGRES_DB", bad: "in$v", good: "good_db", wantMsg: `POSTGRES_DB cannot contain "$"`},
+		{name: "whitespace-hash in POSTGRES_DB", key: "POSTGRES_DB", bad: "inv #test", good: "good_db", wantMsg: `POSTGRES_DB cannot contain whitespace followed by "#"`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := newProject(t)
+
+			// APP_ENV, HTTP_PORT, STATIC_DIR, POSTGRES_USER, POSTGRES_PASSWORD,
+			// POSTGRES_DB, GEMINI_API_KEY, GEMINI_IMAGE_MODEL, with the bad
+			// answer inserted at the variable under test, followed by a
+			// retry with the good one.
+			var answers []string
+			switch tc.key {
+			case "POSTGRES_USER":
+				answers = []string{"", "", "", tc.bad, tc.good, "", "", "gemini-key", ""}
+			case "POSTGRES_DB":
+				answers = []string{"", "", "", "", "", tc.bad, tc.good, "gemini-key", ""}
+			}
+
+			transcript, err := runWizard(t, dir, answers...)
+			require.NoError(t, err, transcript)
+
+			assert.Contains(t, transcript, tc.wantMsg)
+			assert.Equal(t, tc.good, readEnv(t, dir)[tc.key])
+			assert.Contains(t, readEnv(t, dir)["DATABASE_URL"], tc.good)
+		})
+	}
 }
 
 // TestWizardRefusesToOverwriteWithoutConfirmation protects a configured

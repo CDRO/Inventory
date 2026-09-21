@@ -44,6 +44,21 @@ var optionalVars = map[string]bool{
 	"SERPAPI_API_KEY": true,
 }
 
+// composeInterpolatedVars reach Postgres by two routes that must agree:
+// docker-compose.yml interpolates each of them from .env into the db
+// service's environment (`${POSTGRES_USER}` and so on), while
+// deriveDatabaseURL embeds the same answer, percent-encoded, into
+// DATABASE_URL, which reaches the app via env_file. A value Compose's own
+// .env parser treats specially — a '$' it tries to interpolate, or
+// whitespace followed by '#' it reads as a trailing comment — is mangled or
+// truncated on the first route but not the second, so validate rejects both
+// outright rather than let the two silently disagree.
+var composeInterpolatedVars = map[string]bool{
+	"POSTGRES_USER":     true,
+	"POSTGRES_PASSWORD": true,
+	"POSTGRES_DB":       true,
+}
+
 // sessionSecretBytes is 256 bits of entropy, base64url-encoded when written.
 const sessionSecretBytes = 32
 
@@ -199,25 +214,25 @@ func validate(key, value string) string {
 		}
 		return key + " cannot be empty."
 	}
-	if key == "POSTGRES_PASSWORD" {
+	if composeInterpolatedVars[key] {
 		if strings.ContainsRune(value, '$') {
-			// Compose interpolates POSTGRES_PASSWORD from .env when it builds
-			// the db service's environment (docker-compose.yml), but
-			// DATABASE_URL is handed to the app via env_file, which Compose
-			// does not interpolate. A '$' would then reach the two services
-			// differently, recreating the exact password mismatch this spec
-			// exists to remove.
-			return `POSTGRES_PASSWORD cannot contain "$": Compose interpolates this value for the db container but not inside DATABASE_URL, so the two would end up disagreeing.`
+			// docker-compose.yml interpolates POSTGRES_USER, POSTGRES_PASSWORD
+			// and POSTGRES_DB into the db service's environment from .env; the
+			// same .env parse feeds DATABASE_URL to the app via env_file. A raw
+			// '$' is mangled by Compose's own variable interpolation when it
+			// loads the value — identically on both routes, not divergently —
+			// so it is rejected outright rather than risk shipping a value
+			// nothing agrees on.
+			return key + ` cannot contain "$": Compose's own .env parsing treats it as the start of a variable reference and mangles the value when loading it.`
 		}
 		if _, trailing := splitTrailingComment(value); trailing != "" {
 			// The same whitespace-then-'#' rule that makes Compose read a
 			// comment as part of an empty value also makes it silently
 			// truncate this one when it reads .env to build the db
-			// container's environment. DATABASE_URL keeps the full password
-			// intact because net/url percent-encodes '#', so the two would
-			// again end up disagreeing — the same mismatch class the '$'
-			// check above exists to remove.
-			return `POSTGRES_PASSWORD cannot contain whitespace followed by "#": Compose reads that as a comment when it builds the db container's environment, but the derived DATABASE_URL keeps the full password, so the two would end up disagreeing.`
+			// container's environment. DATABASE_URL keeps the full value
+			// intact because net/url percent-encodes '#', so the db
+			// container and the app would end up disagreeing.
+			return key + ` cannot contain whitespace followed by "#": Compose reads that as a comment when it builds the db container's environment, but the derived DATABASE_URL keeps the full value, so the two would end up disagreeing.`
 		}
 	}
 	return ""
