@@ -113,6 +113,13 @@ func (f *fakeIngestStore) ProductImageInStorage(_ context.Context, storageID uui
 type fakePhotoStore struct {
 	mu    sync.Mutex
 	files map[string][]byte
+	// readErr makes every read fail with something other than "not there" — an
+	// unreadable upload volume rather than a missing file. The two are
+	// deliberately different outcomes for the export
+	// (docs/specs/15-backup-restore-and-export.md): one missing picture is
+	// skipped, a broken volume is an error, and without a fake that can
+	// produce the second there is no way to tell them apart in a test.
+	readErr error
 }
 
 func (f *fakePhotoStore) Save(name string, data []byte) error {
@@ -125,6 +132,9 @@ func (f *fakePhotoStore) Save(name string, data []byte) error {
 func (f *fakePhotoStore) Read(name string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
 	if d, ok := f.files[name]; ok {
 		return d, nil
 	}

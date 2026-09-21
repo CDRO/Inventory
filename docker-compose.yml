@@ -74,6 +74,42 @@ services:
     tty: true
     profiles: ["tools"]      # only runs when invoked explicitly
 
+  # Whole-instance backup and restore (docs/specs/15-backup-restore-and-export.md).
+  #
+  #   docker compose -f docker-compose.yml run --rm backup
+  #   docker compose -f docker-compose.yml run --rm backup restore /backups/<archive>
+  #
+  # Same image as `db`, so pg_dump, psql and BusyBox tar arrive with it and
+  # nothing is installed on the host or added to the app image. scripts/backup
+  # is the whole implementation; it is mounted read-only rather than baked into
+  # an image so that a restore can be run from any checkout against any
+  # archive.
+  #
+  # Deliberately no `depends_on: db`. `run` starts a service's dependencies,
+  # which would start the database — and "the database is unreachable" has to
+  # stay an outcome this command can actually report, since a cron-driven
+  # backup that quietly starts the thing it was meant to dump is how a failing
+  # backup goes unnoticed.
+  backup:
+    image: postgres:16-alpine
+    entrypoint: ["/bin/sh", "/usr/local/bin/inventory-backup"]
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./scripts/backup:/usr/local/bin/inventory-backup:ro
+      # The uploads volume twice, on purpose. A backup reads the tree through
+      # the read-only mount and so cannot damage it whatever the script does;
+      # a restore needs to write, and gets a separate writable path for that
+      # one job. imagecache is mounted nowhere here — it is re-fetchable by
+      # definition (docs/specs/07-shopping-list-reconciliation.md), and leaving
+      # it unmounted is what makes "never in the archive" structural rather
+      # than a line in a script someone could change.
+      - uploads:/data/uploads:ro
+      - uploads:/restore/uploads
+      - ./backups:/backups
+    profiles: ["tools"]      # only runs when invoked explicitly
+
   db:
     image: postgres:16-alpine
     env_file:

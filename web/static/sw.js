@@ -92,16 +92,18 @@ self.addEventListener("activate", (event) => {
 // (docs/specs/05-frontend-pwa-foundations.md).
 //
 // The first version of this file excluded known dynamic paths one at a time
-// (/api/*, then /admin, added only after it shipped without the exclusion
-// and kept serving a stale member list until a hard reload — PR #65). That
+// (/api/*, then the server-rendered admin page, added only after it shipped
+// without the exclusion and kept serving a stale member list until a hard
+// reload — PR #65). That
 // shape needs a human to remember every future server-rendered route before
 // it ships, and forgetting is silent: the route works the first time,
 // nothing is cached yet, and it only starts serving a stale response on
 // every request after that — indistinguishable from a working app until
 // someone notices. An allowlist inverts the risk: a route nobody has
-// thought about yet — /api/*, /admin, or whatever ships next — is safe by
-// default, and caching it is the thing someone opts into deliberately by
-// adding it here.
+// thought about yet — /api/*, the admin page, the navigation route of
+// docs/specs/29-first-run-admin-guidance.md, or whatever ships next — is
+// safe by default, and caching it is the thing someone opts into
+// deliberately by adding it here.
 //
 // "/index.html" is deliberately absent from CACHEABLE_EXACT, matching
 // SHELL_ASSETS above: it 301-redirects to "/", and a request for it should
@@ -138,8 +140,13 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Everything not recognized as a known static shape — /api/*, /admin, and
-  // any route that does not exist yet — falls through here. Falling through
+  // Everything not recognized as a known static shape — /api/*, the admin
+  // page, the navigation route that decides where a user with no storage
+  // goes, and any route that does not exist yet — falls through here. A
+  // navigation route in particular must never be answered from cache: it
+  // answers a redirect computed from the database on that request, and a
+  // remembered one would keep sending a user where they belonged before
+  // their memberships changed. Falling through
   // means the browser handles the request exactly as if this service worker
   // did not exist: no cached response is ever substituted for a live one.
   if (!isCacheable(url.pathname)) {

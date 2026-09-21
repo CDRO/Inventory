@@ -11,8 +11,9 @@ import "../register-sw.js";
 //
 // **Nothing here branches on admin status**, because no response this page
 // reads carries any (docs/specs/03-auth-and-multi-tenancy.md). The admin
-// password reset is on the server-rendered /admin page, and this file has no
-// way to know whether the caller can open it.
+// password reset is in the server-rendered admin area, and this file has no
+// way to know whether the caller can open it — nor, deliberately, does it
+// name the path: nothing shipped under web/static/ does (web/embed_test.go).
 
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";

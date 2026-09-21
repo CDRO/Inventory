@@ -21,6 +21,11 @@
 .claude/*.txt
 .claude/*.md
 
+# Backup archives (docs/specs/15-backup-restore-and-export.md). The `backup`
+# service writes them into ./backups inside the clone; they hold the whole
+# database and every image in it, so they must never reach the repository.
+/backups/
+
 # Go build output
 /inventory
 *.exe

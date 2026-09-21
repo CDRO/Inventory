@@ -88,6 +88,12 @@ link is always sufficient to describe where the user is.
 - On page load, call `GET /api/auth/me` once.
 - Zero storages → render the "ask an admin for access" empty state and
   stop. Do not imply that other storages exist.
+- *Amended by [`29-first-run-admin-guidance.md`](29-first-run-admin-guidance.md):*
+  the zero-storage case now navigates to `GET /no-storages` first and renders
+  that empty state only on the way back, when the server has answered
+  `?empty=1`. Nothing above is weakened — the copy and layout are unchanged,
+  and an admin is sent to the admin view by the **server**, so the page still
+  never learns `is_admin` and still renders no navigation to the admin area.
 - Exactly one storage → use it, and hide the switcher entirely.
 - More than one → render the header switcher listing the user's storages;
   selecting one navigates to the same page with the new `?storage=` value,
@@ -231,10 +237,13 @@ developing without being imposed on every save.
 
 - A separate `docker-compose.e2e.yml` brings up the full stack (`app`,
   `db`, `traefik`) against a **disposable database**, seeds a known
-  fixture (an admin, two users, and two storages — one shared by both
-  ordinary users with a small inventory, one held by only one of them, for
-  journey 2's switcher and journey 8's non-disclosure check), and runs the
-  browser suite against it.
+  fixture (two admins, three ordinary users, and three storages — one
+  shared by two ordinary users with a small inventory, one held by only one
+  of them, for journey 2's switcher and journey 8's non-disclosure check,
+  and one held by the second admin alone; the bootstrap admin and one
+  ordinary user deliberately belong to **no** storage, which is the
+  starting position `29-first-run-admin-guidance.md` is about), and runs
+  the browser suite against it.
 - The runner is a **pre-built browser-automation image pulled from a
   registry** (e.g. the official Playwright image), used as a throwaway
   test container. This does not violate the no-toolchain rule in
@@ -264,3 +273,12 @@ At minimum, these journeys must pass:
    (`03-auth-and-multi-tenancy.md`).
 8. A member of storage A gets `404` for a storage B id, with no
    distinction from a nonexistent id.
+9. A freshly seeded deployment's bootstrap admin — an admin belonging to no
+   storage — ends on the admin view after logging in, without typing a URL
+   (`29-first-run-admin-guidance.md`).
+10. A non-admin with no storage ends on the empty state and stays on it, and
+    an admin who belongs to a storage lands in it and is not redirected —
+    the boundary of journey 9 in both directions.
+11. The service worker never answers `GET /no-storages` from cache: the
+    route's redirect is computed per request, and a remembered one would
+    outlive the membership or admin rights it was computed from.
