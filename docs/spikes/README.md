@@ -41,6 +41,7 @@ scheme.
 | 22 | [Units & partial quantities](22-units-and-partial-quantities.md) | Under evaluation |
 | 23 | [Cross-brand product groups](23-cross-brand-product-groups.md) | Under evaluation — gated in part on 22 |
 | 25 | [Per-storage barcode cache for full offline-speed recall](25-per-storage-barcode-cache.md) | Under evaluation — gated on real usage data from spec `24` |
+| 31 | [Expiry reminders from the installed PWA, without a push service](31-on-device-expiry-reminders.md) | Under evaluation — gated on measuring `periodicsync` and badging on the owner's own devices; author recommends at most the on-open part |
 
 ## Entry format
 
