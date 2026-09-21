@@ -39,6 +39,20 @@ const newPasswordInput = qs("#new-password");
 const repeatPasswordInput = qs("#repeat-password");
 const passwordError = qs("#password-error");
 const passwordStatus = qs("#password-status");
+const notificationsSection = qs("#notifications-section");
+const notifyEnabled = qs("#notify-enabled");
+const notifyKind = qs("#notify-kind");
+const notifyUrl = qs("#notify-url");
+const notifyUrlHint = qs("#notify-url-hint");
+const notifyToken = qs("#notify-token");
+const notifyTokenRemoveRow = qs("#notify-token-remove-row");
+const notifyTokenRemove = qs("#notify-token-remove");
+const notifyHour = qs("#notify-hour");
+const notifyIncludeSoon = qs("#notify-include-soon");
+const notifyLastResult = qs("#notify-last-result");
+const notifySaveButton = qs("#notify-save");
+const notifyTestButton = qs("#notify-test");
+const notifyTestStatus = qs("#notify-test-status");
 const devicesList = qs("#devices");
 
 let storageId = null;
@@ -76,8 +90,14 @@ async function init() {
   holidayAddButton.addEventListener("click", addHolidayWeek);
   storageSaveButton.addEventListener("click", saveStorageSettings);
   resetLocalDataButton.addEventListener("click", resetLocalAppData);
+  notifySaveButton.addEventListener("click", saveNotificationSettings);
+  notifyTestButton.addEventListener("click", sendTestNotification);
+  notifyKind.addEventListener("change", renderNotifyUrlHint);
+  // Only now that a storage is resolved: the configuration is per storage
+  // (docs/specs/17-expiry-notifications.md).
+  notificationsSection.hidden = false;
 
-  await Promise.all([loadPreferences(), loadStorageSettings()]);
+  await Promise.all([loadPreferences(), loadStorageSettings(), loadNotificationSettings()]);
 }
 
 async function loadPreferences() {
@@ -320,6 +340,122 @@ async function saveStorageSettings() {
     weeklyGoalInput.value = String(settings.weekly_goal_items);
   } catch (err) {
     showError(err);
+  }
+}
+
+// --- Expiry notifications (docs/specs/17-expiry-notifications.md) ---
+//
+// Per storage, off by default, and about the food rather than about anyone's
+// use of the app — which is why this does not conflict with the "no
+// notifications" rules in specs 06 and 50.
+
+function notificationsPath() {
+  return `/api/storages/${storageId}/notification-settings`;
+}
+
+async function loadNotificationSettings() {
+  try {
+    renderNotificationSettings(await get(notificationsPath()));
+  } catch (err) {
+    showError(err);
+  }
+}
+
+// renderNotificationSettings fills the form from the server's copy.
+//
+// The token field is always left empty: the API never returns a stored token,
+// so there is nothing to put in it. What the form does show is *whether* one
+// is saved, which is the only part a person needs in order to decide whether
+// to replace or remove it.
+function renderNotificationSettings(settings) {
+  notifyEnabled.checked = settings.enabled;
+  notifyKind.value = settings.kind;
+  notifyUrl.value = settings.url;
+  notifyHour.value = String(settings.send_hour);
+  notifyIncludeSoon.checked = settings.include_soon;
+  notifyToken.value = "";
+  notifyTokenRemove.checked = false;
+  notifyTokenRemoveRow.hidden = !settings.has_token;
+  notifyToken.placeholder = settings.has_token ? "A token is saved" : "";
+  renderNotifyUrlHint();
+  renderLastResult(settings);
+}
+
+// renderLastResult shows how the last run went. A failure is only ever
+// visible here and in the test button's reply, because there is no retry
+// queue: the next day's run is the retry, and this line is how somebody
+// notices that the digest has been failing quietly.
+function renderLastResult(settings) {
+  if (!settings.last_result) {
+    notifyLastResult.hidden = true;
+    return;
+  }
+  const when = settings.last_run_at ? new Date(settings.last_run_at).toLocaleString() : "";
+  const outcome =
+    settings.last_result === "sent"
+      ? "Last digest sent"
+      : settings.last_result === "empty"
+        ? "Nothing to report on the last run"
+        : `Last run failed: ${settings.last_result}`;
+  notifyLastResult.textContent = when ? `${outcome} (${when}).` : `${outcome}.`;
+  notifyLastResult.hidden = false;
+}
+
+function renderNotifyUrlHint() {
+  const hints = {
+    ntfy: "The full topic URL, e.g. https://ntfy.example/inventory.",
+    gotify: "The Gotify server's base URL; /message is appended for you.",
+    webhook: "Any URL that accepts a JSON POST.",
+  };
+  notifyUrlHint.textContent = hints[notifyKind.value] ?? "";
+}
+
+// saveNotificationSettings sends the form, expressing the three token states
+// the API distinguishes: a typed value replaces the stored token, the
+// explicit "remove" checkbox sends null to clear it, and leaving both alone
+// omits the field so the stored one survives a save that was about the hour.
+async function saveNotificationSettings() {
+  clearError();
+  notifyTestStatus.hidden = true;
+  notifySaveButton.disabled = true;
+  try {
+    const body = {
+      enabled: notifyEnabled.checked,
+      kind: notifyKind.value,
+      url: notifyUrl.value.trim(),
+      send_hour: Number(notifyHour.value),
+      include_soon: notifyIncludeSoon.checked,
+    };
+    if (notifyToken.value !== "") {
+      body.token = notifyToken.value;
+    } else if (notifyTokenRemove.checked) {
+      body.token = null;
+    }
+    renderNotificationSettings(await put(notificationsPath(), body));
+  } catch (err) {
+    showError(err);
+  } finally {
+    notifySaveButton.disabled = false;
+  }
+}
+
+// sendTestNotification is the debugging tool the spec puts in place of a
+// retry queue: a typo in the URL is found now rather than days later, when a
+// digest quietly never arrived.
+async function sendTestNotification() {
+  clearError();
+  notifyTestButton.disabled = true;
+  notifyTestStatus.hidden = false;
+  notifyTestStatus.textContent = "Sending…";
+  try {
+    const outcome = await post(`${notificationsPath()}/test`, {});
+    notifyTestStatus.textContent = outcome.ok ? "Sent. Check your notifications." : `Failed: ${outcome.result}`;
+    await loadNotificationSettings();
+  } catch (err) {
+    notifyTestStatus.hidden = true;
+    showError(err);
+  } finally {
+    notifyTestButton.disabled = false;
   }
 }
 

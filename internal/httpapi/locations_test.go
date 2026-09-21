@@ -236,6 +236,7 @@ type fakeAPI struct {
 	*fakeAnalyticsStore
 	*fakeGamification
 	*fakeStocktake
+	*fakeNotifications
 }
 
 // newFakeAPI builds the whole fake store around an auth fake, with every other
@@ -248,6 +249,7 @@ func newFakeAPI(auth *fakeAuth) fakeAPI {
 		fakeConsumeStore: &fakeConsumeStore{}, fakeProductStore: &fakeProductStore{},
 		fakeReorderStore: &fakeReorderStore{}, fakeAnalyticsStore: &fakeAnalyticsStore{},
 		fakeGamification: newFakeGamification(), fakeStocktake: &fakeStocktake{},
+		fakeNotifications: &fakeNotifications{},
 	}
 }
 
@@ -276,7 +278,9 @@ type apiFixture struct {
 	reorder      *fakeReorderStore
 	analytics    *fakeAnalyticsStore
 	gamification *fakeGamification
-	stocktake    *fakeStocktake
+	stocktake     *fakeStocktake
+	notifications *fakeNotifications
+	notifier      *fakeNotifier
 	adminVision  *fakeAdminVision
 	storageID    uuid.UUID
 	user         *store.User
@@ -300,6 +304,8 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 	imageData := &fakeImageCache{}
 	gamification := newFakeGamification()
 	stocktake := &fakeStocktake{}
+	notifications := &fakeNotifications{}
+	notifier := &fakeNotifier{}
 	user, session := auth.addUser(t, false)
 	storageID := uuid.New()
 	auth.addMember(storageID, user.ID)
@@ -328,6 +334,7 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 			fakeConsumeStore: consumeStore, fakeProductStore: products,
 			fakeReorderStore: reorder, fakeAnalyticsStore: analytics,
 			fakeGamification: gamification, fakeStocktake: stocktake,
+			fakeNotifications: notifications,
 		},
 		Matcher:       matcher,
 		Images:        images,
@@ -337,6 +344,7 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 		ProductImages: pictures,
 		Consumer:      consumer,
 		AdminVision:   adminVision,
+		Notifier:      notifier,
 		Config:        &config.Config{GeminiModel: "gemini-2.0-flash", AppEnv: "dev", HTTPPort: "8000"},
 	}
 	for _, opt := range opts {
@@ -353,7 +361,9 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 		reorder:      reorder,
 		analytics:    analytics,
 		gamification: gamification,
-		stocktake:    stocktake,
+		stocktake:     stocktake,
+		notifications: notifications,
+		notifier:      notifier,
 		adminVision:  adminVision,
 		storageID:    storageID, user: user, session: session,
 	}

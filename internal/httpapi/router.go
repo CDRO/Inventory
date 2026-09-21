@@ -101,6 +101,7 @@ type APIStore interface {
 	AnalyticsStore
 	GamificationStore
 	StocktakeStore
+	NotificationStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -167,6 +168,11 @@ type Deps struct {
 	// downloadable .env for GET /api/admin/settings/env-file. Nil disables
 	// that one route; every other admin route is unaffected.
 	Config *config.Config
+	// Notifier delivers the expiry digest's test message
+	// (docs/specs/17-expiry-notifications.md). Nil leaves reading and saving
+	// notification settings working and makes the test route absent — the
+	// scheduler that sends the real digests lives in cmd/inventory, not here.
+	Notifier Notifier
 }
 
 // NewRouter builds the application's HTTP handler.
@@ -458,6 +464,18 @@ func NewRouter(d Deps) http.Handler {
 			sr.Post("/inventory-batches", stocktake.CreateBatch)
 			sr.Get("/locations/{id}/stocktake", stocktake.Sheet)
 			sr.Post("/locations/{id}/stocktake", stocktake.Confirm)
+
+			// Expiry notifications (docs/specs/17-expiry-notifications.md):
+			// one opt-in, per-storage digest configuration. Any member may
+			// change it — rights inside a storage are flat — and the test
+			// route is absent when no delivery service is wired, like every
+			// other route whose collaborator is optional.
+			notifications := NewNotificationHandler(d.Store, d.Notifier, errs)
+			sr.Get("/notification-settings", notifications.Get)
+			sr.Put("/notification-settings", notifications.Put)
+			if d.Notifier != nil {
+				sr.Post("/notification-settings/test", notifications.Test)
+			}
 		})
 	}
 
