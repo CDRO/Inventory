@@ -1,8 +1,8 @@
 {
   "plan": {
-    "name": "Extended core (specs 12-28)",
+    "name": "Extended core (specs 12-30)",
     "planIssue": 97,
-    "conventions": "Keep to the conventions in #97: internal/httpapi/router.go is append-only within a wave - add new routes, never reorder or regroup existing ones. Apply the silent invariants from CLAUDE.md throughout (404-not-403 for unknown and inaccessible storages, is_admin re-queried from the DB on every admin request, debug_reason gated at the single error serializer, same-storage validation on every id, every inventory_batches write paired in the same transaction with an inventory_logs row, EXIF orientation applied before stripping, derived-vs-user expiry cascades touching only derived dates). Every build, test, and migration runs through docker compose - no host toolchain, per docs/specs/01-architecture-and-deployment.md. Any package that adds or renames a file under web/static/ meant to be part of the cached app shell must add it to SHELL_ASSETS in web/static/sw.js and bump CACHE_VERSION (docs/specs/05-frontend-pwa-foundations.md) - on a conflict on that one line, keep the higher version and both packages' additions, because a stale cached shell fails silently."
+    "conventions": "Keep to the conventions in #97: internal/httpapi/router.go is append-only within a wave - add new routes, never reorder or regroup existing ones. Apply the silent invariants from CLAUDE.md throughout (404-not-403 for unknown and inaccessible storages, is_admin re-queried from the DB on every admin request, debug_reason gated at the single error serializer, same-storage validation on every id, every inventory_batches write paired in the same transaction with an inventory_logs row, EXIF orientation applied before stripping, derived-vs-user expiry cascades touching only derived dates). Every build, test, and migration runs through docker compose - no host toolchain, per docs/specs/01-architecture-and-deployment.md. Any package that adds or renames a file under web/static/ meant to be part of the cached app shell must add it to SHELL_ASSETS in web/static/sw.js and bump CACHE_VERSION (docs/specs/05-frontend-pwa-foundations.md) - on a conflict on that one line, keep the higher version and both packages' additions, because a stale cached shell fails silently. .env.example carries no inline comment after any value (docs/specs/30-setup-wizard-derived-config.md): Compose reads one after an empty value as the value - a package that adds a variable to .env.example puts its note on the line above."
   },
   "standards": {
     "model": "claude-sonnet-5",
@@ -46,6 +46,13 @@
           "model": "claude-opus-5",
           "effort": "xhigh",
           "focus": "Migration 00008_stocktake.sql adds locations.last_audited_at, no other number. Every quantity write here pairs, in the same transaction, with exactly one inventory_logs row carrying reason = 'audit' - except a genuinely unchanged quantity, which must write nothing; both cases need a test, since this is the first code path that ever writes 'audit'. The stocktake confirm reuses the exact-row-set pattern from spec 09 (missing/unknown batch_id is 422, never a silent skip) rather than inventing a looser variant."
+        },
+        {
+          "specIssue": 111,
+          "slug": "w1-setup-wizard",
+          "branch": "specs-13-20/w1-setup-wizard",
+          "spec": "Spec 30",
+          "focus": "Two fixes in internal/config/setup.go and .env.example, no migration. This package is in wave 1 on purpose: later packages add variables to .env.example and must follow the comment-free format it introduces. DATABASE_URL is derived with net/url (UserPassword plus a path), never by string concatenation, and is never prompted; derive it after all prompts from the FINAL POSTGRES_* answers, wherever the line sits in the template. Prove the inline-comment fix against Compose itself, not against the wizard's own parser: read the generated .env through a throwaway service's env_file and show that STATIC_DIR and GEMINI_IMAGE_MODEL come out empty - put that output in the PR. Decide the '$'-in-password case explicitly and test it: either reject it at the POSTGRES_PASSWORD prompt or prove it survives both the URL and Compose's interpolation. Do not add COMPOSE_FILE or any other deployment selector to .env.example, and do not try to preserve unknown lines of an existing .env - both are out of scope."
         }
       ]
     },
@@ -72,6 +79,15 @@
           "model": "claude-opus-5",
           "effort": "xhigh",
           "focus": "Migration 00009_notifications.sql adds notification_settings, no other number. Read the spec's own explanation of why this does not reopen the no-notifications rules in specs 06 and 50 before objecting to it on review - it is opt-in, per-storage, off by default, and about the food, never about app usage or a streak. No retry queue: the next day's scheduled run is the retry, and a stored delivery token must never be returned by any read."
+        },
+        {
+          "specIssue": 110,
+          "slug": "w2-first-run-admin",
+          "branch": "specs-13-20/w2-first-run-admin",
+          "spec": "Spec 29",
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "Read the spec's 'Why the obvious implementation is forbidden' before writing anything. The requested behavior (an admin with no storage reaches /admin) must NOT be built as a client-side link or a client-side check of is_admin: spec 03 forbids both, and is_admin must never appear in any JSON, cookie, or query string the server generates for the client. The whole decision lives in the new server route GET /no-storages, which reads is_admin from the database on every call - test that by revoking the flag between two calls on one session. It answers a 302 whose exact Location differs by state; assert the exact Location, not merely 'a redirect'. The route sits behind the session gate only and never inside the RequireAdmin group, or it would strand exactly the users it exists for. internal/httpapi/router.go stays append-only. storages.js changes only its zero-storage branch and uses location.replace so Back cannot loop; the embedded static tree must contain no '/admin' string, so extend web/embed_test.go from checking paths to checking content. Bump CACHE_VERSION in web/static/sw.js if storages.js is served from a cached copy. Add the three E2E journeys the spec lists."
         }
       ]
     },

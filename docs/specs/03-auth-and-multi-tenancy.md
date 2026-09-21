@@ -229,3 +229,8 @@ level; production logs it server-side only, never in the response.
   see.
 - The frontend never renders navigation to `/admin`; the admin area is
   reached by URL and gated server-side.
+- *Amended by [`29-first-run-admin-guidance.md`](29-first-run-admin-guidance.md)
+  (not yet built):* an admin with no storage is sent to `/admin` by the
+  **server** before this empty state is shown, through a neutral `GET
+  /no-storages` navigation route. Nothing above is weakened: the client still
+  never learns `is_admin` and still renders no navigation to `/admin`.

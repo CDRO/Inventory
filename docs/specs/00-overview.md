@@ -111,15 +111,17 @@ vanilla JavaScript with no build step — see
 | — | Quick-create a location without leaving a capture screen | `26-location-quick-create.md` |
 | — | Quick-create a category without leaving a capture screen | `27-category-quick-create.md` |
 | — | Quick-create a location from the batch move/split picker | `28-batch-move-quick-create.md` |
+| — | First-run guidance for admins (no storage yet → the admin view) | `29-first-run-admin-guidance.md` |
+| — | Setup wizard: derived database URL, comment-free `.env` | `30-setup-wizard-derived-config.md` |
 | — | *Later phase:* gamification of inventory upkeep | `50`, `51`, `52` |
 
 **Numbering:** `00`–`11` are the core system in build order; `12`–`20`, `24`
-and `26`–`28` are further accepted core work. **Specs and spikes share one
+and `26`–`30` are further accepted core work. **Specs and spikes share one
 number space**: a number in `docs/specs/` is accepted work, a number in
 `docs/spikes/` is a candidate (`21`–`23` and `25` are currently claimed by
-spikes), and a promoted spike keeps its number as it moves folders. `29`–`49`
+spikes), and a promoted spike keeps its number as it moves folders. `31`–`49`
 are still free; numbers are never reused. `50`+ is a later, optional phase —
-nothing in `00`–`28` may depend on it, and the system must be complete and
+nothing in `00`–`30` may depend on it, and the system must be complete and
 shippable with the `50` range unimplemented.
 
 **Candidate work** that has not been accepted lives in `docs/spikes/`, which is
