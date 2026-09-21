@@ -336,8 +336,136 @@ func (s *Store) SplitBatch(ctx context.Context, storageID, batchID uuid.UUID, qu
 	return out, nil
 }
 
-// MoveBatch relocates an entire batch, the whole-batch counterpart to
-// SplitBatch (docs/specs/06-vision-shelf-ingestion.md).
+// BatchPatch is a partial update to one batch: the whole-batch move of
+// docs/specs/06-vision-shelf-ingestion.md, the manual quantity correction of
+// docs/specs/13-stocktake-and-audit.md, or both at once.
+//
+// A nil field is "leave this alone". Neither field set is a request that
+// cannot be carried out, and is refused rather than answered 200 for a write
+// that never happened.
+//
+// Both in one call have to land together or not at all. Two sequential
+// transactions would leave a corrected quantity committed and a move lost —
+// a half-applied PATCH the caller cannot detect and the server cannot undo,
+// the same failure UpdateLocation's single transaction exists to prevent.
+type BatchPatch struct {
+	// Quantity is the batch's new absolute quantity, not a delta. Zero
+	// deletes the batch, exactly as a consumption reaching zero does.
+	Quantity *int
+	// LocationID is the shelf the whole batch moves to.
+	LocationID *uuid.UUID
+}
+
+// UpdateBatch applies a BatchPatch in one transaction and returns the batch as
+// it stands afterwards — or nil when the patch set the quantity to zero and so
+// deleted it.
+//
+// This is the only exported way to move a batch or set its quantity. One
+// public write path rather than several is what keeps the ledger invariant
+// enforceable: every branch below either goes through adjustBatch or writes
+// its own paired log rows, and there is no second entry point where a future
+// change could quietly skip that.
+//
+// Refusals:
+//   - ErrNotFound for a batch or a target location that is not in this
+//     storage — the same answer as one that does not exist.
+//   - ErrValidation for an empty patch, a negative quantity, or a patch that
+//     asks to empty a batch and move it in the same breath.
+func (s *Store) UpdateBatch(ctx context.Context, storageID, batchID uuid.UUID, patch BatchPatch, userID *uuid.UUID) (*Batch, error) {
+	if patch.Quantity == nil && patch.LocationID == nil {
+		return nil, fmt.Errorf("%w: a batch patch must name at least one field", ErrValidation)
+	}
+	// "The shelf is empty" and "carry it to the kitchen" contradict each
+	// other, and applying them in either order gives a different answer.
+	// Refusing is the only reading that cannot silently pick one.
+	if patch.Quantity != nil && *patch.Quantity == 0 && patch.LocationID != nil {
+		return nil, fmt.Errorf("%w: a batch set to zero is deleted, so it cannot also be moved", ErrValidation)
+	}
+
+	var out *Batch
+	err := s.inTx(ctx, func(tx pgx.Tx) error {
+		if patch.Quantity != nil {
+			if _, _, err := setBatchQuantity(ctx, tx, storageID, batchID, *patch.Quantity, userID); err != nil {
+				return err
+			}
+			if *patch.Quantity == 0 {
+				// The row is gone, so there is nothing to return and nothing
+				// left for a move to act on.
+				out = nil
+				return nil
+			}
+		}
+
+		if patch.LocationID != nil {
+			moved, err := moveBatch(ctx, tx, storageID, batchID, *patch.LocationID, userID)
+			if err != nil {
+				return err
+			}
+			out = moved
+			return nil
+		}
+
+		batch, err := loadBatch(ctx, tx, storageID, batchID)
+		if err != nil {
+			return err
+		}
+		out = batch
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// setBatchQuantity sets a batch's absolute quantity inside a caller's
+// transaction, reporting whether anything actually changed.
+//
+// It is the single place both correction paths of
+// docs/specs/13-stocktake-and-audit.md meet — the one-off PATCH and the
+// guided stocktake — so "exactly one 'audit' row per changed quantity, and
+// none at all for an unchanged one" is a property of one function rather than
+// a rule two call sites have to remember.
+//
+// The unchanged case writes nothing whatsoever, not a zero-delta row: the
+// ledger explains changes, and "the count was already right" is not one.
+// That is also why this cannot simply hand the computed delta to adjustBatch
+// and ignore the outcome — adjustBatch refuses a zero delta for exactly that
+// reason, and swallowing the refusal would hide real ones too.
+func setBatchQuantity(ctx context.Context, tx pgx.Tx, storageID, batchID uuid.UUID, quantity int, userID *uuid.UUID) (productID uuid.UUID, changed bool, err error) {
+	if quantity < 0 {
+		return uuid.Nil, false, fmt.Errorf("%w: batch quantity must be zero or more, got %d", ErrValidation, quantity)
+	}
+
+	var current int
+	err = tx.QueryRow(ctx, `
+		SELECT b.product_id, b.quantity
+		  FROM inventory_batches b
+		  JOIN products p ON p.id = b.product_id
+		 WHERE b.id = $1 AND p.storage_id = $2
+		 FOR UPDATE OF b`, batchID, storageID).Scan(&productID, &current)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, false, ErrNotFound
+	}
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("store: load batch to count: %w", err)
+	}
+
+	if quantity == current {
+		return productID, false, nil
+	}
+
+	// adjustBatch owns delete-on-zero and the paired log row; the only thing
+	// this function contributes is the absolute-to-delta conversion and the
+	// decision not to call it at all.
+	if _, err := adjustBatch(ctx, tx, storageID, batchID, quantity-current, ReasonAudit, userID); err != nil {
+		return uuid.Nil, false, err
+	}
+	return productID, true, nil
+}
+
+// moveBatch relocates an entire batch inside a caller's transaction — the
+// whole-batch counterpart to SplitBatch (docs/specs/06-vision-shelf-ingestion.md).
 //
 // Moving everything is deliberately not a split: SplitBatch refuses a quantity
 // equal to the whole batch, because the result would be an emptied row the
@@ -353,69 +481,63 @@ func (s *Store) SplitBatch(ctx context.Context, storageID, batchID uuid.UUID, qu
 // whom — not a per-location before-and-after. Reconstructing that would need a
 // location column on the ledger, which is a data-model change and belongs to
 // docs/specs/02-data-model.md, not here.
-func (s *Store) MoveBatch(ctx context.Context, storageID, batchID, targetLocationID uuid.UUID, userID *uuid.UUID) (*Batch, error) {
-	var out *Batch
-	err := s.inTx(ctx, func(tx pgx.Tx) error {
-		var productID, currentLocation uuid.UUID
-		var quantity int
-		err := tx.QueryRow(ctx, `
-			SELECT b.product_id, b.location_id, b.quantity
-			  FROM inventory_batches b
-			  JOIN products p ON p.id = b.product_id
-			 WHERE b.id = $1 AND p.storage_id = $2
-			 FOR UPDATE OF b`, batchID, storageID).Scan(&productID, &currentLocation, &quantity)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrNotFound
-		}
-		if err != nil {
-			return fmt.Errorf("store: load batch to move: %w", err)
-		}
+func moveBatch(ctx context.Context, tx pgx.Tx, storageID, batchID, targetLocationID uuid.UUID, userID *uuid.UUID) (*Batch, error) {
+	var productID, currentLocation uuid.UUID
+	var quantity int
+	err := tx.QueryRow(ctx, `
+		SELECT b.product_id, b.location_id, b.quantity
+		  FROM inventory_batches b
+		  JOIN products p ON p.id = b.product_id
+		 WHERE b.id = $1 AND p.storage_id = $2
+		 FOR UPDATE OF b`, batchID, storageID).Scan(&productID, &currentLocation, &quantity)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: load batch to move: %w", err)
+	}
 
-		if err := requireSameStorage(ctx, tx, treeLocations, storageID, targetLocationID); err != nil {
-			return err
-		}
+	if err := requireSameStorage(ctx, tx, treeLocations, storageID, targetLocationID); err != nil {
+		return nil, err
+	}
 
-		// Moving a batch to the shelf it is already on is a no-op, not an
-		// error: PATCH with the current value has to succeed, or a client that
-		// resends its own state gets a failure for changing nothing. The two
-		// log rows are skipped because they would explain nothing — the same
-		// reason AdjustBatch refuses a zero delta.
-		if currentLocation == targetLocationID {
-			row := tx.QueryRow(ctx, `
-				SELECT id, product_id, location_id, quantity, expiration_date, expiration_source, created_at
-				  FROM inventory_batches WHERE id = $1`, batchID)
-			batch, err := scanBatch(row)
-			if err != nil {
-				return err
-			}
-			out = batch
-			return nil
-		}
+	// Moving a batch to the shelf it is already on is a no-op, not an
+	// error: PATCH with the current value has to succeed, or a client that
+	// resends its own state gets a failure for changing nothing. The two
+	// log rows are skipped because they would explain nothing — the same
+	// reason AdjustBatch refuses a zero delta.
+	if currentLocation == targetLocationID {
+		return loadBatch(ctx, tx, storageID, batchID)
+	}
 
-		row := tx.QueryRow(ctx, `
-			UPDATE inventory_batches SET location_id = $1 WHERE id = $2
-			RETURNING id, product_id, location_id, quantity, expiration_date, expiration_source, created_at`,
-			targetLocationID, batchID)
+	row := tx.QueryRow(ctx, `
+		UPDATE inventory_batches SET location_id = $1 WHERE id = $2
+		RETURNING id, product_id, location_id, quantity, expiration_date, expiration_source, created_at`,
+		targetLocationID, batchID)
 
-		moved, err := scanBatch(row)
-		if err != nil {
-			return err
-		}
-
-		if err := writeLog(ctx, tx, productID, &batchID, -quantity, ReasonMove, userID); err != nil {
-			return err
-		}
-		if err := writeLog(ctx, tx, productID, &batchID, quantity, ReasonMove, userID); err != nil {
-			return err
-		}
-
-		out = moved
-		return nil
-	})
+	moved, err := scanBatch(row)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+
+	if err := writeLog(ctx, tx, productID, &batchID, -quantity, ReasonMove, userID); err != nil {
+		return nil, err
+	}
+	if err := writeLog(ctx, tx, productID, &batchID, quantity, ReasonMove, userID); err != nil {
+		return nil, err
+	}
+
+	return moved, nil
+}
+
+// loadBatch reads one batch scoped to a storage. A batch belonging to another
+// storage is ErrNotFound, the same answer as one that does not exist.
+func loadBatch(ctx context.Context, q querier, storageID, batchID uuid.UUID) (*Batch, error) {
+	return scanBatch(q.QueryRow(ctx, `
+		SELECT b.id, b.product_id, b.location_id, b.quantity, b.expiration_date, b.expiration_source, b.created_at
+		  FROM inventory_batches b
+		  JOIN products p ON p.id = b.product_id
+		 WHERE b.id = $1 AND p.storage_id = $2`, batchID, storageID))
 }
 
 // writeLog appends the inventory_logs row that explains a quantity change.

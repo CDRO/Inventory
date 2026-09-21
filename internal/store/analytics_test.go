@@ -281,7 +281,7 @@ func TestAnalyticsTurnoverExcludesMoveReason(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = s.MoveBatch(ctx, storageID, batch.ID, target.ID, nil)
+	_, err = moveBatch(ctx, s, storageID, batch.ID, target.ID, nil)
 	require.NoError(t, err)
 
 	turnover, err := s.AnalyticsTurnover(ctx, storageID, store.GranularityMonth)
@@ -357,4 +357,38 @@ func TestAnalyticsTurnoverWeekGranularityFormatsAnISOWeekPeriod(t *testing.T) {
 	require.Len(t, turnover, 1)
 	assert.Regexp(t, `^\d{4}-W\d{2}$`, turnover[0].Period)
 	assert.Equal(t, 1, turnover[0].Purchased)
+}
+
+// TestAnalyticsTurnoverExcludesAuditReason — a manual correction is neither a
+// purchase nor a consumption (docs/specs/13-stocktake-and-audit.md). Counting
+// one as shopping would let a stocktake that found three forgotten jars read
+// as a shopping trip that never happened.
+func TestAnalyticsTurnoverExcludesAuditReason(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+
+	shelf, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Pantry"})
+	require.NoError(t, err)
+	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Penne"})
+	require.NoError(t, err)
+	batch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: product.ID, LocationID: shelf.ID, Quantity: 5, Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+
+	// One correction down, and one "found stock" batch created as an audit.
+	two := 2
+	_, err = s.UpdateBatch(ctx, storageID, batch.ID, store.BatchPatch{Quantity: &two}, nil)
+	require.NoError(t, err)
+	_, err = s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: product.ID, LocationID: shelf.ID, Quantity: 4, Reason: store.ReasonAudit,
+	})
+	require.NoError(t, err)
+
+	turnover, err := s.AnalyticsTurnover(ctx, storageID, store.GranularityMonth)
+	require.NoError(t, err)
+	require.Len(t, turnover, 1)
+	assert.Equal(t, 5, turnover[0].Purchased, "only the original purchase counts")
+	assert.Zero(t, turnover[0].Consumed, "a correction is not something anybody ate")
 }

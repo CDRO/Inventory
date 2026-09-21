@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
@@ -53,11 +54,18 @@ func NewLocationHandler(s LocationStore, errs *ErrorWriter) *LocationHandler {
 // there is no per-node value a bug could get wrong, and the filtering happens
 // once, in the query. The test for this asserts on the wire format, because
 // that is the thing a client could actually read.
+//
+// last_audited_at is the one field here that is not structure: it is when a
+// stocktake last confirmed this node against the shelf
+// (docs/specs/13-stocktake-and-audit.md), and it is in the tree response
+// because that is where a person edits locations and therefore where
+// staleness has to be visible. null means never audited.
 type locationNode struct {
-	ID          uuid.UUID       `json:"id"`
-	Name        string          `json:"name"`
-	Description *string         `json:"description,omitempty"`
-	Children    []*locationNode `json:"children"`
+	ID            uuid.UUID       `json:"id"`
+	Name          string          `json:"name"`
+	Description   *string         `json:"description,omitempty"`
+	LastAuditedAt *time.Time      `json:"last_audited_at"`
+	Children      []*locationNode `json:"children"`
 }
 
 // List serves GET /api/storages/{storage_id}/locations.
@@ -335,9 +343,10 @@ func nestLocations(rows []store.Location) []*locationNode {
 
 func newLocationNode(row store.Location) *locationNode {
 	return &locationNode{
-		ID:          row.ID,
-		Name:        row.Name,
-		Description: row.Description,
+		ID:            row.ID,
+		Name:          row.Name,
+		Description:   row.Description,
+		LastAuditedAt: row.LastAuditedAt,
 		// Never nil: the tree component reads node.children directly, and a
 		// JSON null there would make every leaf a special case in the client.
 		Children: []*locationNode{},

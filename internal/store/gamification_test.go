@@ -89,7 +89,7 @@ func TestMoveAndAuditReasonsEarnNoXP(t *testing.T) {
 	kitchen, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Kitchen"})
 	require.NoError(t, err)
 
-	_, err = s.MoveBatch(ctx, storageID, batchID, kitchen.ID, &userID)
+	_, err = moveBatch(ctx, s, storageID, batchID, kitchen.ID, &userID)
 	require.NoError(t, err)
 	require.NoError(t, s.AdjustBatch(ctx, storageID, batchID, -1, store.ReasonAudit, &userID))
 

@@ -359,12 +359,12 @@ func TestMoveBatchRejectsForeignEnds(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("a target location in another storage", func(t *testing.T) {
-		_, err := s.MoveBatch(ctx, storageA, batchID, foreign.ID, nil)
+		_, err := moveBatch(ctx, s, storageA, batchID, foreign.ID, nil)
 		assert.ErrorIs(t, err, store.ErrNotFound)
 	})
 
 	t.Run("a batch in another storage", func(t *testing.T) {
-		_, err := s.MoveBatch(ctx, storageB, batchID, foreign.ID, nil)
+		_, err := moveBatch(ctx, s, storageB, batchID, foreign.ID, nil)
 		assert.ErrorIs(t, err, store.ErrNotFound)
 	})
 

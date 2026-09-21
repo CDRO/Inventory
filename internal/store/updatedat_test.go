@@ -237,3 +237,23 @@ func TestCreateBatchRejectsZeroQuantity(t *testing.T) {
 		`SELECT count(*) FROM inventory_logs WHERE product_id = $1`, product.ID),
 		"no phantom batch means no ledger row explaining it")
 }
+
+// TestConfirmStocktakeTouchesUpdatedAt — a walk writes last_audited_at, which
+// is rendered in the location tree (docs/specs/13-stocktake-and-audit.md). A
+// client's delta sync asks against updated_at, so an audit that moved only the
+// audit timestamp would keep serving "never audited" from cache forever.
+func TestConfirmStocktakeTouchesUpdatedAt(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+
+	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Layer 2"})
+	require.NoError(t, err)
+	before := age(t, ctx, "locations", location.ID)
+
+	_, err = s.ConfirmStocktake(ctx, storageID, location.ID, nil, nil, nil)
+	require.NoError(t, err)
+
+	assert.True(t, readUpdatedAt(t, ctx, "locations", location.ID).After(before),
+		"a stocktake is a change a syncing client has to see")
+}
