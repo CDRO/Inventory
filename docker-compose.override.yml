@@ -13,6 +13,9 @@
 # unaffected because it pins the base file explicitly:
 #
 #   docker compose -f docker-compose.yml up -d
+#
+# (The Synology NAS pins two files instead - docker-compose.yml and
+# docker-compose.nas.yml - through deploy/synology/compose.)
 
 services:
   app:

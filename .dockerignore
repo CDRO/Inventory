@@ -6,6 +6,18 @@ docs
 .env
 data
 
+# Runtime data of the Synology NAS variant (docker-compose.nas.yml) lives in
+# bind-mounted folders inside the clone. Without these lines the build context
+# would contain the live Postgres data directory: files owned by the postgres
+# user that the context reader cannot always read (the build fails), a copy of
+# the database in every `COPY . .` layer, and gigabytes sent to the daemon on
+# every build. Patterns match at the context root only, so internal/uploads is
+# not excluded.
+pgdata
+uploads
+imagecache
+ts_inventory_state
+
 # The E2E harness and its runtime artifacts never belong in the application
 # image: it is a separate, throwaway test container, not something the
 # Dockerfile builds or ships (docs/specs/05-frontend-pwa-foundations.md).

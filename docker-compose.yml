@@ -1,8 +1,14 @@
 # Base / production stack. See docs/specs/01-architecture-and-deployment.md.
 #
-# Production (Synology NAS) deliberately pins this file only, so the dev
-# overrides in docker-compose.override.yml are not picked up:
+# Production deliberately pins this file only, so the dev overrides in
+# docker-compose.override.yml are not picked up:
 #   docker compose -f docker-compose.yml up -d
+#
+# The operator's own Synology NAS is the exception: it layers
+# docker-compose.nas.yml on top and must NOT use the single-file form above
+# (that starts Traefik on DSM's port 80). It always goes through
+# deploy/synology/compose - see the "Synology NAS variant" section of
+# docs/specs/01-architecture-and-deployment.md.
 
 services:
   traefik:
