@@ -557,3 +557,65 @@ func TestConfirmStocktakeRecordsTheActingUser(t *testing.T) {
 		`SELECT count(*) FROM inventory_logs WHERE product_id = $1 AND reason = 'audit' AND created_by = $2`,
 		first.ProductID, userID))
 }
+
+// TestConfirmStocktakeFoundStockKeepsTheDerivedUserDistinction covers the
+// walk's own found-stock branch, which decides expiration_source separately
+// from the single-batch POST route and so could drift from it silently.
+//
+// The distinction is what the expiry cascade keys off
+// (docs/specs/08-expiration-and-classification.md): a 'derived' date may be
+// recomputed, a 'user' one — including a deliberate "this does not expire" —
+// never may. Getting it backwards here would let a recompute quietly overwrite
+// a date somebody typed while walking the shelf.
+func TestConfirmStocktakeFoundStockKeepsTheDerivedUserDistinction(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID, locationID, first, second := shelf(t, ctx, s)
+
+	// products.item_type defaults to 'long_shelf_life', whose fallback is 365
+	// days, so an unstated date resolves to a real one rather than to NULL —
+	// which is what makes "derived with a date" distinguishable from "user
+	// with no date" in the assertions below.
+	newProduct := func(name string) uuid.UUID {
+		t.Helper()
+		p, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: name})
+		require.NoError(t, err)
+		return p.ID
+	}
+	stated := time.Date(2027, 1, 10, 0, 0, 0, 0, time.UTC)
+
+	result, err := s.ConfirmStocktake(ctx, storageID, locationID, nil,
+		[]store.StocktakeCount{
+			{BatchID: first.ID, Quantity: first.Quantity},
+			{BatchID: second.ID, Quantity: second.Quantity},
+		},
+		[]store.FoundStock{
+			{ProductID: newProduct("Chickpeas"), Quantity: 1},
+			{ProductID: newProduct("Salt"), Quantity: 1, StatedExpiration: true},
+			{ProductID: newProduct("Passata jar"), Quantity: 1, StatedExpiration: true, ExpirationDate: &stated},
+		})
+	require.NoError(t, err)
+	require.Len(t, result.CreatedBatchIDs, 3, "the created ids come back in the order they were stated")
+
+	read := func(id uuid.UUID) (source string, date *time.Time) {
+		t.Helper()
+		require.NoError(t, testPool.QueryRow(ctx,
+			`SELECT expiration_source, expiration_date FROM inventory_batches WHERE id = $1`,
+			id).Scan(&source, &date))
+		return source, date
+	}
+
+	source, date := read(result.CreatedBatchIDs[0])
+	assert.Equal(t, string(store.ExpirationDerived), source, "saying nothing is an omission, not a statement")
+	require.NotNil(t, date, "an omitted date resolves rather than staying unset")
+	assert.Equal(t, time.Now().AddDate(0, 0, 365).Format(time.DateOnly), date.Format(time.DateOnly))
+
+	source, date = read(result.CreatedBatchIDs[1])
+	assert.Equal(t, string(store.ExpirationUser), source, "an explicit null is a person saying it does not expire")
+	assert.Nil(t, date)
+
+	source, date = read(result.CreatedBatchIDs[2])
+	assert.Equal(t, string(store.ExpirationUser), source)
+	require.NotNil(t, date)
+	assert.Equal(t, "2027-01-10", date.Format(time.DateOnly))
+}

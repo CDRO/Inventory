@@ -122,7 +122,10 @@ func (h *BatchHandler) Split(w http.ResponseWriter, r *http.Request) {
 // quantity correction have no shared state that could be left inconsistent.
 //
 // A quantity of 0 deletes the batch, which leaves nothing to return: that case
-// answers 204 rather than a 200 carrying a row that no longer exists.
+// answers 204 rather than a 200 carrying a row that no longer exists. Pairing
+// that 0 with a location_id is the one combination this route refuses (422):
+// the row is deleted either way, so "empty it" and "move it" contradict each
+// other and applying them in either order gives a different ledger.
 func (h *BatchHandler) Update(w http.ResponseWriter, r *http.Request) {
 	storageID, ok := StorageIDFrom(r.Context())
 	if !ok {
