@@ -42,6 +42,15 @@ func logCount(t *testing.T, ctx context.Context, productID uuid.UUID) int {
 	return countRows(t, ctx, `SELECT count(*) FROM inventory_logs WHERE product_id = $1`, productID)
 }
 
+// moveBatch is UpdateBatch with only the location named — the whole-batch move
+// of docs/specs/06-vision-shelf-ingestion.md. UpdateBatch is the one exported
+// way to move a batch or set its quantity (docs/specs/13-stocktake-and-audit.md
+// folded the two into a single patch, so that a PATCH carrying both lands in
+// one transaction); this helper keeps the move-only tests reading as moves.
+func moveBatch(ctx context.Context, s *store.Store, storageID, batchID, target uuid.UUID, userID *uuid.UUID) (*store.Batch, error) {
+	return s.UpdateBatch(ctx, storageID, batchID, store.BatchPatch{LocationID: &target}, userID)
+}
+
 func TestCreateBatchWritesPairedLog(t *testing.T) {
 	s := requireDB(t)
 	ctx := context.Background()
@@ -330,7 +339,7 @@ func TestMoveBatchWritesPairedMoveLogs(t *testing.T) {
 
 	before := logCount(t, ctx, productID)
 
-	moved, err := s.MoveBatch(ctx, storageID, batchID, kitchen.ID, nil)
+	moved, err := moveBatch(ctx, s, storageID, batchID, kitchen.ID, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, batchID, moved.ID, "a move keeps the batch's identity; only a split makes a new row")
@@ -372,7 +381,7 @@ func TestMoveBatchPreservesExpiry(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	moved, err := s.MoveBatch(ctx, storageID, batch.ID, kitchen.ID, nil)
+	moved, err := moveBatch(ctx, s, storageID, batch.ID, kitchen.ID, nil)
 	require.NoError(t, err)
 
 	require.NotNil(t, moved.ExpirationDate)
@@ -391,7 +400,7 @@ func TestMoveBatchToTheSameLocationWritesNothing(t *testing.T) {
 	storageID, productID, cellar, batchID := stocked(t, ctx, s, 5)
 	before := logCount(t, ctx, productID)
 
-	moved, err := s.MoveBatch(ctx, storageID, batchID, cellar, nil)
+	moved, err := moveBatch(ctx, s, storageID, batchID, cellar, nil)
 	require.NoError(t, err, "a no-op move is not an error; a client resending its own state must succeed")
 
 	assert.Equal(t, cellar, moved.LocationID)

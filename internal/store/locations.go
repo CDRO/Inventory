@@ -19,8 +19,12 @@ type Location struct {
 	ParentID    *uuid.UUID
 	Name        string
 	Description *string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// LastAuditedAt is when a stocktake last confirmed this node against the
+	// shelf itself (docs/specs/13-stocktake-and-audit.md). nil means never
+	// audited, which is what every node that predates the feature honestly is.
+	LastAuditedAt *time.Time
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 // NewLocation is the input to CreateLocation. StorageID is not a field: it
@@ -95,7 +99,7 @@ func insertLocation(ctx context.Context, tx pgx.Tx, storageID, id uuid.UUID, in 
 	return scanLocation(tx.QueryRow(ctx, `
 		INSERT INTO locations (id, storage_id, parent_id, name, description)
 		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, storage_id, parent_id, name, description, created_at, updated_at`,
+		RETURNING id, storage_id, parent_id, name, description, created_at, updated_at, last_audited_at`,
 		id, storageID, in.ParentID, in.Name, in.Description))
 }
 
@@ -186,7 +190,7 @@ func (s *Store) UpdateLocation(ctx context.Context, storageID, id uuid.UUID, pat
 			    parent_id   = CASE WHEN $4::bool THEN $5::uuid ELSE parent_id END,
 			    updated_at  = now()
 			 WHERE id = $6 AND storage_id = $7
-			RETURNING id, storage_id, parent_id, name, description, created_at, updated_at`,
+			RETURNING id, storage_id, parent_id, name, description, created_at, updated_at, last_audited_at`,
 			patch.Name, patch.SetDescription, patch.Description,
 			patch.SetParentID, patch.ParentID, id, storageID)
 
@@ -264,7 +268,7 @@ func (s *Store) DeleteLocation(ctx context.Context, storageID, id uuid.UUID) err
 // can appear at any depth.
 func (s *Store) LocationTree(ctx context.Context, storageID uuid.UUID) ([]Location, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, storage_id, parent_id, name, description, created_at, updated_at
+		SELECT id, storage_id, parent_id, name, description, created_at, updated_at, last_audited_at
 		  FROM locations
 		 WHERE storage_id = $1
 		 ORDER BY created_at, id`, storageID)
@@ -325,7 +329,8 @@ type rowScanner interface {
 
 func scanLocation(row rowScanner) (*Location, error) {
 	var loc Location
-	err := row.Scan(&loc.ID, &loc.StorageID, &loc.ParentID, &loc.Name, &loc.Description, &loc.CreatedAt, &loc.UpdatedAt)
+	err := row.Scan(&loc.ID, &loc.StorageID, &loc.ParentID, &loc.Name, &loc.Description,
+		&loc.CreatedAt, &loc.UpdatedAt, &loc.LastAuditedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

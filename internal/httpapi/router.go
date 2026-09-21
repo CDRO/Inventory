@@ -100,6 +100,7 @@ type APIStore interface {
 	ReorderStore
 	AnalyticsStore
 	GamificationStore
+	StocktakeStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -427,6 +428,16 @@ func NewRouter(d Deps) http.Handler {
 			sr.Put("/gamification/settings", gamification.UpdateStorageSettings)
 			sr.Get("/quests", gamification.Quests)
 			sr.Get("/achievements", gamification.Achievements)
+
+			// Stocktake and manual inventory correction
+			// (docs/specs/13-stocktake-and-audit.md): found stock the system
+			// never recorded, and the guided walk of one location. The
+			// single-batch quantity fix rides the existing
+			// PATCH /inventory-batches/{id} above rather than adding a route.
+			stocktake := NewStocktakeHandler(d.Store, errs)
+			sr.Post("/inventory-batches", stocktake.CreateBatch)
+			sr.Get("/locations/{id}/stocktake", stocktake.Sheet)
+			sr.Post("/locations/{id}/stocktake", stocktake.Confirm)
 		})
 	}
 
