@@ -213,7 +213,7 @@ containers left running — never collide on a host port or a container name.
 ├── docker-compose.override.yml # dev overrides; auto-loaded by Compose
 ├── docker-compose.nas.yml      # Synology NAS layer, on top of the base file
 ├── deploy/
-│   └── synology/               # optional compose shorthand + Tailscale serve config for the NAS
+│   └── synology/               # NAS scripts (shell setup, update, optional compose shorthand) + Tailscale serve config
 ├── .env.example
 └── PROJECT_PLAN.md             # original informal notes — superseded by docs/specs/
 ```
@@ -615,6 +615,11 @@ $ cd /volume1/docker/inventory        # the clone; adjust the path
 $ DC="docker-compose -p inventory -f docker-compose.yml -f docker-compose.nas.yml"
 ```
 
+To have it in every login shell instead, run `sh deploy/synology/install-shell`
+once: it writes a marked block into `~/.profile` that exports `DC` and defines the
+alias `dc`, with absolute paths, so both work from any directory (see
+[`deploy/synology/README.md`](../../deploy/synology/README.md)).
+
 The rest of this section writes `$DC …` for that command. The explicit `-f` pair
 is the pin that "Deployment model" calls a security control: it keeps
 `docker-compose.override.yml` (`APP_ENV=dev`, `debug_reason` in error responses,
@@ -748,18 +753,46 @@ $ TS_AUTHKEY=tskey-auth-… $DC up -d
 ```
 
 The wizard ends by printing `docker compose up -d`; ignore it and use `$DC up -d`.
+`sh deploy/synology/update` runs the build, migrate and start of this sequence for
+you when no app instance is running.
 
-**Updating.**
+**Updating: `sh deploy/synology/update`.** The script updates the stack so that a
+release that does not start never replaces one that does. It pulls the code and
+the sidecar image, builds, runs `migrate up`, waits until no job is pending, starts
+a **second** app instance from the new image next to the old one, waits until that
+one answers `GET /healthz`, then stops and removes the old one and recreates the
+sidecar. Its contract:
 
-```console
-$ cd /volume1/docker/inventory        # the clone; adjust the path
-$ DC="docker-compose -p inventory -f docker-compose.yml -f docker-compose.nas.yml"
-$ git pull
-$ $DC pull ts-inventory     # the sidecar image is unpinned
-$ $DC build
-$ $DC run --rm app migrate up
-$ $DC up -d
-```
+- **The old instance is not touched until the new one is healthy.** A failed
+  build, migration or start leaves the old app serving; a new instance that does
+  not become healthy is removed again.
+- **Both `-f` files on every compose call**, and it refuses to run if the merged
+  model lists `traefik` or lacks `app`, `db` or `ts-inventory` (the NAS layer is
+  not active), or if Compose is older than 2.24.
+- **`--classic`** stops the app and the sidecar first, then migrates, then starts:
+  for a release whose migration the previous release cannot run against.
+- **Nothing to do** is detected (same image layers as the running app) and changes
+  nothing.
+
+What it does not give you, and the reasons:
+
+- **Not zero downtime.** The sidecar shares the app's network namespace and must be
+  recreated with it: a few seconds without the tailnet URL.
+- **Two releases overlap:** the migration runs against the old app, and the old app
+  runs on the migrated schema until it is retired.
+- **The app assumes a single process.** `FailInterruptedJobs` marks every pending
+  job failed on start (`04-backend-api-conventions.md`), so a second instance can
+  fail a job the first is still working on. The script waits for pending jobs to
+  finish before it starts the second instance; a job submitted in the seconds
+  between that check and the new start is still failed, and the user re-runs the
+  analysis. Closing that window needs the recovery to be aware of which process
+  owns a job, which is application work, not deployment.
+
+Options, environment and troubleshooting are in
+[`deploy/synology/README.md`](../../deploy/synology/README.md). Without the script,
+the same update by hand is `git pull`, then `$DC pull ts-inventory`, `$DC build`,
+`$DC run --rm app migrate up`, `$DC up -d`, which stops the app before it starts
+the new one.
 
 ## Health/readiness
 

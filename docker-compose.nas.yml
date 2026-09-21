@@ -7,8 +7,10 @@
 #
 #   docker-compose -p inventory -f docker-compose.yml -f docker-compose.nas.yml <arguments>
 #
-# (deploy/synology/compose is the same prefix as an optional script; nothing here
-# depends on it.) It does not depend on any untracked file. That is deliberate. An
+# (deploy/synology/install-shell puts it into your login shell as $DC and `dc`,
+# deploy/synology/update runs a safe rolling update, and deploy/synology/compose
+# is the prefix as an optional script; nothing here depends on any of them, see
+# deploy/synology/README.md.) It does not depend on any untracked file. That is deliberate. An
 # explicit -f is the pin the spec calls a security control: it keeps
 # docker-compose.override.yml (the dev override: APP_ENV=dev, debug_reason in
 # error responses, port 8000 past the ingress) from being merged in. A guard

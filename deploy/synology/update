@@ -115,6 +115,27 @@ wait_healthy() {
   return 1
 }
 
+# The image a build produces is tagged <project>-app:latest. The image the app is
+# RUNNING is pinned under <project>-app:running after every start: a build moves
+# :latest, and the image store may then drop the image an old container still runs
+# from, which would leave nothing to compare against.
+BUILT_TAG="${PROJECT}-app:latest"
+RUNNING_TAG="${PROJECT}-app:running"
+
+pin_running() { docker tag "$BUILT_TAG" "$RUNNING_TAG"; }
+
+# True when container $1 runs the image this build produced. The layers are
+# compared, not the ids: with the containerd image store every build writes a new
+# manifest (a timestamped attestation), so the id changes although nothing did.
+same_as_running() {
+  run_id=$(docker inspect -f '{{.Image}}' "$1" 2>/dev/null) || return 1
+  pin_id=$(docker image inspect -f '{{.Id}}' "$RUNNING_TAG" 2>/dev/null) || return 1
+  [ "$run_id" = "$pin_id" ] || return 1     # the pin is not what actually runs
+  a=$(docker image inspect -f '{{.RootFS.Layers}}' "$RUNNING_TAG" 2>/dev/null) || return 1
+  b=$(docker image inspect -f '{{.RootFS.Layers}}' "$BUILT_TAG" 2>/dev/null) || return 1
+  [ -n "$a" ] && [ "$a" = "$b" ]
+}
+
 # --- Get the new code and image -----------------------------------------------
 
 if [ "$pull" -eq 1 ]; then
@@ -141,6 +162,7 @@ if [ -z "$old" ]; then
   say "No app instance is running: migrating and starting the stack"
   $DC run --rm app migrate up
   $DC up -d
+  pin_running
   $DC ps
   exit 0
 fi
@@ -150,14 +172,10 @@ set -- $old
 
 # --- Nothing to do? -----------------------------------------------------------
 
-if [ "$force" -eq 0 ]; then
-  running_image=$(docker inspect -f '{{.Image}}' "$old" 2>/dev/null || true)
-  built_image=$(docker image inspect -f '{{.Id}}' "${PROJECT}-app:latest" 2>/dev/null || true)
-  if [ -n "$running_image" ] && [ "$running_image" = "$built_image" ]; then
-    say "The running app already uses the image just built: nothing to swap (use --force to swap anyway)"
-    $DC ps
-    exit 0
-  fi
+if [ "$force" -eq 0 ] && same_as_running "$old"; then
+  say "The running app already uses the image just built: nothing to swap (use --force to swap anyway)"
+  $DC ps
+  exit 0
 fi
 
 # --- Classic update -----------------------------------------------------------
@@ -169,6 +187,7 @@ if [ "$classic" -eq 1 ]; then
   $DC run --rm app migrate up
   say "Starting the stack"
   $DC up -d
+  pin_running
   $DC ps
   [ "$prune" -eq 0 ] || docker image prune -f
   exit 0
@@ -220,9 +239,18 @@ say "Retiring the old instance"
 docker stop -t 30 "$old" >/dev/null
 docker rm "$old" >/dev/null
 $DC up -d --no-deps --no-recreate --scale app=1 app
+pin_running
 
 say "Recreating the sidecar (it shared the old instance's network namespace)"
-$DC up -d --no-deps --force-recreate ts-inventory
+# Joining the namespace of an app container that has only just started can fail
+# once; the new app is already serving, so retry a few times before giving up.
+tries=0
+until $DC up -d --no-deps --force-recreate ts-inventory; do
+  tries=$((tries + 1))
+  [ "$tries" -lt 3 ] || die "the app is updated and running, but the sidecar could not be recreated. Run: $DC up -d --no-deps --force-recreate ts-inventory"
+  echo "    retrying in 3s ($tries/2)"
+  sleep 3
+done
 
 $DC ps
 [ "$prune" -eq 0 ] || docker image prune -f
