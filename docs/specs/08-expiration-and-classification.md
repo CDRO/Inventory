@@ -131,7 +131,9 @@ The category-rule change and the admin catalog change above both report a
 count, since both are performed *in order to* change dates. Re-filing a
 product, or moving a category, is a change of category that happens to move
 dates as a consequence, so the recompute is silent. Changing
-`products.default_shelf_life_days` has no endpoint yet.
+`products.default_shelf_life_days` goes through the product edit endpoint
+(`16-product-maintenance.md`), which reports the recomputed count the same
+way the category and catalog routes do.
 
 ## The category tree
 

@@ -1,11 +1,18 @@
 # Runs the E2E deployment gate (docker-compose.e2e.yml,
 # docs/specs/05-frontend-pwa-foundations.md) on GitHub-hosted runners.
 #
-# This is a separate workflow from test.yml, not a second job appended to it,
-# specifically so the two run in parallel: this suite brings up a full
-# stack (traefik, app, db) and drives a real browser, which takes
-# meaningfully longer than `go test ./...`, and the fast unit-test signal
-# must not wait on the slow browser one.
+# Deliberately NOT triggered on `pull_request`. E2E is the deployment gate —
+# "must pass before promoting an image to production"
+# (docs/specs/01-architecture-and-deployment.md) — not a PR merge gate: it is
+# slow (a full stack plus a real browser), and review-tests
+# (.claude/agents/review-tests.md) already treats E2E journeys as "not
+# verified here" rather than requiring them per PR. The only required check
+# on a PR is test.yml (go vet + go test). This workflow instead runs after
+# every push to main (confirming what is about to be deployed) and on
+# `workflow_dispatch` for an explicit pre-deploy or debugging run. If a PR
+# ever needs its own E2E signal, that is a deliberate `workflow_dispatch`
+# call against the PR branch, per the dispatch/poll recipe below — never an
+# automatic, merge-blocking run.
 #
 # Same reasoning as test.yml for why this exists at all: this project is
 # docker-only (docs/specs/01-architecture-and-deployment.md), and some
@@ -35,7 +42,6 @@ name: e2e
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:

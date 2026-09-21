@@ -40,5 +40,13 @@ services:
       # "relation does not exist" from a test suite that migrates its own
       # throwaway database, not an obvious "your migration is missing".
       - ./migrations:/src/migrations
+    # Both sides read the same variable, not a fixed "8000:8000": the app
+    # itself listens on $HTTP_PORT (internal/config/config.go), not a
+    # hardcoded 8000, so the host and container sides must move together.
+    # Concurrent checkouts (e.g. the wave orchestrator's per-package
+    # worktrees, scripts/wellen-orchestrator.ps1) set a distinct HTTP_PORT
+    # per worktree's .env precisely so `docker compose up` in two of them at
+    # once does not fight over the same host port; the default here keeps a
+    # single ordinary checkout working unchanged.
     ports:
-      - "8000:8000"             # direct access, bypassing Traefik, for debugging
+      - "${HTTP_PORT:-8000}:${HTTP_PORT:-8000}"

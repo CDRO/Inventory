@@ -137,6 +137,7 @@ Every route below re-checks `is_admin` against the database.
 | List users | `GET /api/admin/users` |
 | Create user | `POST /api/admin/users` — body `{username, password, display_name, is_admin}` |
 | Delete/deactivate user | `DELETE /api/admin/users/{id}` |
+| Reset a user's password | `POST /api/admin/users/{id}/password` — body `{new_password}` (`14-account-self-service.md`) |
 | List storages | `GET /api/admin/storages` |
 | Create storage | `POST /api/admin/storages` — body `{name}` |
 | Delete storage | `DELETE /api/admin/storages/{id}` |
@@ -148,6 +149,7 @@ Every route below re-checks `is_admin` against the database.
 | Search the global product catalog | `GET /api/admin/catalog?q=` |
 | Set a catalog entry's default shelf life | `PATCH /api/admin/catalog/{id}` — body `{default_shelf_life_days}` only |
 | Delete a catalog entry (moderation) | `DELETE /api/admin/catalog/{id}` |
+| Delete a catalog barcode mapping (moderation) | `DELETE /api/admin/catalog-barcodes/{barcode}` (`20-barcode-recall.md`) |
 
 Catalog moderation exists because `catalog_products` is insert-only
 (`02-data-model.md`): a bad or abusive entry cannot be corrected by its
@@ -227,3 +229,8 @@ level; production logs it server-side only, never in the response.
   see.
 - The frontend never renders navigation to `/admin`; the admin area is
   reached by URL and gated server-side.
+- *Amended by [`29-first-run-admin-guidance.md`](29-first-run-admin-guidance.md)
+  (not yet built):* an admin with no storage is sent to `/admin` by the
+  **server** before this empty state is shown, through a neutral `GET
+  /no-storages` navigation route. Nothing above is weakened: the client still
+  never learns `is_admin` and still renders no navigation to `/admin`.

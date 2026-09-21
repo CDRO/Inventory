@@ -48,9 +48,14 @@ vanilla JavaScript with no build step — see
   per-tenant role hierarchies. It is a household tool: one admin, and
   otherwise flat per-storage membership (see
   [`03-auth-and-multi-tenancy.md`](03-auth-and-multi-tenancy.md)).
-- Not a barcode/UPC-scanning system. Item identification is exclusively via
-  vision-LLM photo analysis and text/semantic matching, not barcode
-  databases.
+- Not a barcode-**database** system. Identification of *unknown* items is
+  exclusively via vision-LLM photo analysis and text/semantic matching — no
+  external UPC/EAN database is ever consulted. A barcode may, however, be
+  attached locally to an already-identified product and used as a fast,
+  free **recall** key on later scans — see
+  [`20-barcode-recall.md`](20-barcode-recall.md). *(Amended 2026-09-20 by
+  owner decision; originally an outright non-goal — the history is in
+  `docs/spikes/21-native-android-app.md`.)*
 - Not a recipe planner, meal planner, or budgeting tool. Inventory tracking
   and reordering only.
 - No offline-first / conflict-resolution sync engine. The PWA capability
@@ -94,12 +99,30 @@ vanilla JavaScript with no build step — see
 | 6 | Reorder & minimum stock management | `10-reorder-and-shopping-export.md` |
 | 7 | Reporting & analytics | `11-reporting-and-analytics.md` |
 | — | API contract for third-party native clients | `12-client-api-contract.md` |
+| — | Stocktake & manual inventory correction | `13-stocktake-and-audit.md` |
+| — | Account self-service & credential lifecycle | `14-account-self-service.md` |
+| — | Backup, restore & data export | `15-backup-restore-and-export.md` |
+| — | Product maintenance: edit, merge, delete | `16-product-maintenance.md` |
+| — | Expiry notifications (opt-in, self-hosted) | `17-expiry-notifications.md` |
+| — | Operations: logging, audit trail, upgrades | `18-operations-and-observability.md` |
+| — | Localization (i18n) | `19-localization.md` |
+| — | Barcode recall | `20-barcode-recall.md` |
+| — | Barcode hot cache (instance-wide, client-side) | `24-barcode-hot-cache.md` |
+| — | Quick-create a location without leaving a capture screen | `26-location-quick-create.md` |
+| — | Quick-create a category without leaving a capture screen | `27-category-quick-create.md` |
+| — | Quick-create a location from the batch move/split picker | `28-batch-move-quick-create.md` |
+| — | First-run guidance for admins (no storage yet → the admin view) | `29-first-run-admin-guidance.md` |
+| — | Setup wizard: derived database URL, comment-free `.env` | `30-setup-wizard-derived-config.md` |
 | — | *Later phase:* gamification of inventory upkeep | `50`, `51`, `52` |
 
-**Numbering:** `00`–`11` are the core system, `12` onward is further core work
-as it is specified (`13`–`49` still free). `50`+ is a later, optional phase —
-nothing in `00`–`12` may depend on it, and the system must be complete
-and shippable with the `50` range unimplemented.
+**Numbering:** `00`–`11` are the core system in build order; `12`–`20`, `24`
+and `26`–`30` are further accepted core work. **Specs and spikes share one
+number space**: a number in `docs/specs/` is accepted work, a number in
+`docs/spikes/` is a candidate (`21`–`23` and `25` are currently claimed by
+spikes), and a promoted spike keeps its number as it moves folders. `31`–`49`
+are still free; numbers are never reused. `50`+ is a later, optional phase —
+nothing in `00`–`30` may depend on it, and the system must be complete and
+shippable with the `50` range unimplemented.
 
 **Candidate work** that has not been accepted lives in `docs/spikes/`, which is
 not a contract and must never be implemented from.

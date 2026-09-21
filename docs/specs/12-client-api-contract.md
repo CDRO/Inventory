@@ -33,7 +33,9 @@ Out of scope, deliberately:
   server-rendered (`03-auth-and-multi-tenancy.md`). A paired client is never
   an admin client; requests to those paths get the same `404` as any
   non-admin.
-- **Barcode lookup.** Not in this contract — see "Deferred" at the end.
+- **Barcode-database identification.** Recall of locally-associated
+  barcodes *is* in scope (see "Barcode recall" at the end); consulting
+  external UPC/EAN databases is not, per `00-overview.md`.
 - **Telemetry.** A client may collect its own; this server neither receives nor
   stores client analytics.
 - **A sync engine.** See "Idempotency" — the server makes a client's retries
@@ -206,18 +208,21 @@ deployed on the NAS reaches phones that cannot be updated in step.
   endpoint's shape must say so here, or the reviewers in the ship loop should
   block it.
 
-## Deferred
+## Barcode recall
 
-**Barcode lookup is not part of this contract.** It stays inside the
-`S-01` spike (`docs/spikes/README.md`) and, if built, arrives on that feature's
-branch — including its schema column and lookup endpoint.
+*(This section originally deferred barcode lookup to the Android spike for
+containment. That containment ended on 2026-09-20, when the owner accepted
+the narrower recall form as core work.)*
 
-The reasoning is containment: barcode identification exists to serve the
-on-device-inference experiment. If that experiment fails, the branch is
-reverted and the core schema is clean, with no orphaned column and no half-used
-concept left in `products`. It also means `00-overview.md`'s barcode non-goal
-stands until an experiment actually justifies changing it, rather than being
-amended in advance of evidence.
+Barcode **recall** — resolving a locally-associated code to a product, and
+the quick log flow built on it — is specified in
+[`20-barcode-recall.md`](20-barcode-recall.md) and is part of the additive
+v1 surface: a paired client may call its endpoints like any others, under
+the same scoping, idempotency, and `404` rules. What remains outside this
+contract is what remains outside the whole system: identification of
+unknown items via external UPC/EAN databases
+(`00-overview.md`). The containment history lives in
+`docs/spikes/21-native-android-app.md` (formerly `S-01`).
 
 ## Acceptance criteria
 

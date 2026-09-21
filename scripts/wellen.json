@@ -1,0 +1,191 @@
+{
+  "plan": {
+    "name": "Extended core (specs 12-30)",
+    "planIssue": 97,
+    "conventions": "Keep to the conventions in #97: internal/httpapi/router.go is append-only within a wave - add new routes, never reorder or regroup existing ones. Apply the silent invariants from CLAUDE.md throughout (404-not-403 for unknown and inaccessible storages, is_admin re-queried from the DB on every admin request, debug_reason gated at the single error serializer, same-storage validation on every id, every inventory_batches write paired in the same transaction with an inventory_logs row, EXIF orientation applied before stripping, derived-vs-user expiry cascades touching only derived dates). Every build, test, and migration runs through docker compose - no host toolchain, per docs/specs/01-architecture-and-deployment.md. Any package that adds or renames a file under web/static/ meant to be part of the cached app shell must add it to SHELL_ASSETS in web/static/sw.js and bump CACHE_VERSION (docs/specs/05-frontend-pwa-foundations.md) - on a conflict on that one line, keep the higher version and both packages' additions, because a stale cached shell fails silently. .env.example carries no inline comment after any value (docs/specs/30-setup-wizard-derived-config.md): Compose reads one after an empty value as the value - a package that adds a variable to .env.example puts its note on the line above."
+  },
+  "standards": {
+    "model": "claude-sonnet-5",
+    "effort": "high",
+    "consolidationModel": "claude-opus-5",
+    "consolidationEffort": "xhigh",
+    "advisor": true,
+    "roundLimitPackage": 2,
+    "roundLimitConsolidation": 4
+  },
+  "waves": [
+    {
+      "number": 1,
+      "waveIssue": 98,
+      "integrationBranch": "integration/specs-13-20-welle-1",
+      "sequential": false,
+      "packages": [
+        {
+          "specIssue": 88,
+          "slug": "w1-delta-sync",
+          "branch": "specs-13-20/w1-delta-sync",
+          "spec": "Spec 12",
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "This is the delta-sync remainder only - pairing, Bearer auth, and idempotency already shipped under #27/#28, so do not re-implement them. Add ?updated_since= to the cacheable-entity list endpoints, a deleted array sourced from tombstones, X-Client-Version as diagnostics-only (it must never gate behavior), and 409 resync_required when updated_since predates the 30-day tombstone retention. 404-not-403 applies to a delta request against another storage exactly like every other route."
+        },
+        {
+          "specIssue": 90,
+          "slug": "w1-account-selfservice",
+          "branch": "specs-13-20/w1-account-selfservice",
+          "spec": "Spec 14",
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "Password change and admin reset must invalidate every OTHER session of that user in the same transaction as the hash update - write a test that logs in from two sessions, changes the password in one, and asserts the other is rejected on its next request. The rate limiter covers /api/auth/login, /api/auth/pair, and /api/auth/password with one shared counter; do not build three separate limiters. is_admin stays re-queried per request for the new admin reset route - it rides the existing RequireSession -> RequireAdmin chain, no special case."
+        },
+        {
+          "specIssue": 89,
+          "slug": "w1-stocktake",
+          "branch": "specs-13-20/w1-stocktake",
+          "spec": "Spec 13",
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "Migration 00008_stocktake.sql adds locations.last_audited_at, no other number. Every quantity write here pairs, in the same transaction, with exactly one inventory_logs row carrying reason = 'audit' - except a genuinely unchanged quantity, which must write nothing; both cases need a test, since this is the first code path that ever writes 'audit'. The stocktake confirm reuses the exact-row-set pattern from spec 09 (missing/unknown batch_id is 422, never a silent skip) rather than inventing a looser variant."
+        },
+        {
+          "specIssue": 111,
+          "slug": "w1-setup-wizard",
+          "branch": "specs-13-20/w1-setup-wizard",
+          "spec": "Spec 30",
+          "focus": "Two fixes in internal/config/setup.go and .env.example, no migration. This package is in wave 1 on purpose: later packages add variables to .env.example and must follow the comment-free format it introduces. DATABASE_URL is derived with net/url (UserPassword plus a path), never by string concatenation, and is never prompted; derive it after all prompts from the FINAL POSTGRES_* answers, wherever the line sits in the template. Prove the inline-comment fix against Compose itself, not against the wizard's own parser: read the generated .env through a throwaway service's env_file and show that STATIC_DIR and GEMINI_IMAGE_MODEL come out empty - put that output in the PR. Decide the '$'-in-password case explicitly and test it: either reject it at the POSTGRES_PASSWORD prompt or prove it survives both the URL and Compose's interpolation. Do not add COMPOSE_FILE or any other deployment selector to .env.example, and do not try to preserve unknown lines of an existing .env - both are out of scope."
+        }
+      ]
+    },
+    {
+      "number": 2,
+      "waveIssue": 99,
+      "integrationBranch": "integration/specs-13-20-welle-2",
+      "sequential": false,
+      "packages": [
+        {
+          "specIssue": 91,
+          "slug": "w2-backup-restore",
+          "branch": "specs-13-20/w2-backup-restore",
+          "spec": "Spec 15",
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "The backup service excludes imagecache deliberately - it is re-fetchable by definition (spec 07), and backing it up would waste most of the archive's bytes on the most replaceable data. .env stays out of the archive too; the restore procedure regenerates it via docker compose run --rm setup. Prove the restore procedure actually works end to end on a clean checkout against the acceptance criteria - a documented procedure nobody has run is not done. The per-storage export must contain nothing from any other storage, no credential material, and images that are already EXIF-stripped at upload - a test should confirm the archive itself is clean, since it is the one artifact designed to leave the house."
+        },
+        {
+          "specIssue": 93,
+          "slug": "w2-notifications",
+          "branch": "specs-13-20/w2-notifications",
+          "spec": "Spec 17",
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "Migration 00009_notifications.sql adds notification_settings, no other number. Read the spec's own explanation of why this does not reopen the no-notifications rules in specs 06 and 50 before objecting to it on review - it is opt-in, per-storage, off by default, and about the food, never about app usage or a streak. No retry queue: the next day's scheduled run is the retry, and a stored delivery token must never be returned by any read."
+        },
+        {
+          "specIssue": 110,
+          "slug": "w2-first-run-admin",
+          "branch": "specs-13-20/w2-first-run-admin",
+          "spec": "Spec 29",
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "Read the spec's 'Why the obvious implementation is forbidden' before writing anything. The requested behavior (an admin with no storage reaches /admin) must NOT be built as a client-side link or a client-side check of is_admin: spec 03 forbids both, and is_admin must never appear in any JSON, cookie, or query string the server generates for the client. The whole decision lives in the new server route GET /no-storages, which reads is_admin from the database on every call - test that by revoking the flag between two calls on one session. It answers a 302 whose exact Location differs by state; assert the exact Location, not merely 'a redirect'. The route sits behind the session gate only and never inside the RequireAdmin group, or it would strand exactly the users it exists for. internal/httpapi/router.go stays append-only. storages.js changes only its zero-storage branch and uses location.replace so Back cannot loop; the embedded static tree must contain no '/admin' string, so extend web/embed_test.go from checking paths to checking content. Bump CACHE_VERSION in web/static/sw.js if storages.js is served from a cached copy. Add the three E2E journeys the spec lists."
+        }
+      ]
+    },
+    {
+      "number": 3,
+      "waveIssue": 100,
+      "integrationBranch": "integration/specs-13-20-welle-3",
+      "sequential": false,
+      "packages": [
+        {
+          "specIssue": 92,
+          "slug": "w3-product-maintenance",
+          "branch": "specs-13-20/w3-product-maintenance",
+          "spec": "Spec 16",
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "A merge re-points batches and logs to the survivor, recomputes only the MOVED batches' derived expiry dates under the survivor's rules (spec 08's cascade, reused not reimplemented), writes a tombstone for the source (spec 12's delta sync depends on this), and creates NO new inventory_logs rows - a merge changes nothing about how much stock exists, only which product row it belongs to. This is also the endpoint spec 08 was missing for products.default_shelf_life_days - wire it through the same cascade the category route already uses."
+        },
+        {
+          "specIssue": 94,
+          "slug": "w3-operations",
+          "branch": "specs-13-20/w3-operations",
+          "spec": "Spec 18",
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "Migration 00010_admin_audit_log.sql adds admin_audit_log, no other number. The never-logged list in the spec (session tokens, pairing codes, passwords, Idempotency-Key values, API keys, image bytes/paths) is exhaustive on purpose - grep a captured log for each of them in a real test, don't just review the code by eye. The startup migration check is a fatal, non-retryable exit like the existing missing-.env check, not a crash loop under restart: unless-stopped."
+        }
+      ]
+    },
+    {
+      "number": 4,
+      "waveIssue": 108,
+      "integrationBranch": "integration/specs-13-20-welle-4",
+      "sequential": true,
+      "packages": [
+        {
+          "specIssue": 105,
+          "slug": "w4-location-quick-create",
+          "branch": "specs-13-20/w4-location-quick-create",
+          "spec": "Spec 26",
+          "focus": "Frontend-only: no backend change and no migration - it composes the existing location GET/POST endpoints from spec 06. Location creation stays a single path (POST /api/storages/{storage_id}/locations): never reimplement its same-storage validation client-side, and scope the modal to the page's own storage_id only. Refresh every open location field from ONE GET after the modal closes, not one per field, and never touch another row's in-progress edits or re-fetch the job being reviewed. Location names are user text: textContent only. The new js/location-modal.js must be added to SHELL_ASSETS in web/static/sw.js with a CACHE_VERSION bump, or installed clients silently never see the trigger. No literal colors - css tokens only. This spec was written as 'spec 13' before the numbers were reassigned; the file and every reference to it now say 26."
+        },
+        {
+          "specIssue": 106,
+          "slug": "w4-category-quick-create",
+          "branch": "specs-13-20/w4-category-quick-create",
+          "spec": "Spec 27",
+          "focus": "Sequential after Spec 26 in this wave - it generalizes 26's modal, so that module must already exist. Frontend-only, no migration. Rename js/location-modal.js to js/tree-modal.js with openTreeManager(storageId, {kind}) and update EVERY call site plus SHELL_ASSETS in web/static/sw.js and CACHE_VERSION - a stale cached shell that still imports the old module name silently breaks 26's location trigger. Category creation goes only through the existing POST /api/storages/{storage_id}/categories, so the category_created scoring (spec 51) and the shelf-life default behave exactly as on categories.html; the flow must work unchanged with gamification switched off. The location field keeps behaving exactly as spec 26 specifies - this changes the module's shape, not its behavior. Written as 'spec 14' before the renumbering."
+        },
+        {
+          "specIssue": 107,
+          "slug": "w4-batch-move-quick-create",
+          "branch": "specs-13-20/w4-batch-move-quick-create",
+          "spec": "Spec 28",
+          "focus": "Sequential after Spec 27 in this wave - call openTreeManager with kind locations, since the modal module is already generalized by then. Frontend-only, no migration. Keep the edit confined to the batch move/split picker on products.html: spec 16 (earlier wave) and spec 20 (later wave) touch the same page. The split/move endpoints stay untouched and authoritative - same-storage target_location_id validation, and a split still writes its two 'move' log rows so net product stock is unchanged. Cancelling the modal must leave the in-progress quantity and selected batch exactly as they were. Written as 'spec 15' before the renumbering."
+        }
+      ]
+    },
+    {
+      "number": 5,
+      "waveIssue": 101,
+      "integrationBranch": "integration/specs-13-20-welle-5",
+      "sequential": true,
+      "packages": [
+        {
+          "specIssue": 96,
+          "slug": "w5-barcode",
+          "branch": "specs-13-20/w5-barcode",
+          "spec": "Spec 20",
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "Migration 00011_barcodes.sql adds product_barcodes and catalog_barcodes, plus users.barcode_prompt_enabled and users.barcode_prompt_seen_at for the capture-time offer - one migration, no other number. Read 00-overview.md's amended non-goal first: recall of an already-associated barcode is in scope, an external UPC/EAN database lookup is not - do not add one. catalog_barcodes follows the exact same insert-only, no-storage-reference, no-counts privacy invariants as catalog_products (spec 02) - do not give it a looser rule. The quick-log sheet is the confirm step: nothing may be written from the scan event itself, only from the explicit confirm tap, and every batch write still pairs with an inventory_logs row. The capture-time offer (new product via 06/07/10, no barcode yet) always shows exactly three choices - scan now, not this time, turn off - never fewer, and turning it off is a per-user PATCH /api/auth/barcode-prompt, not a new field on spec 14's PATCH /api/auth/me. The server-side decode-from-photo fallback must never write the uploaded image to disk under any circumstance, success or failure."
+        },
+        {
+          "specIssue": 103,
+          "slug": "w5-barcode-hot-cache",
+          "branch": "specs-13-20/w5-barcode-hot-cache",
+          "spec": "Spec 24",
+          "model": "claude-sonnet-5",
+          "effort": "high",
+          "focus": "Sequential after Spec 20 in this wave - needs its catalog_barcodes table and lookup endpoint to exist first. Migration 00012_barcode_hot_cache.sql adds catalog_barcodes.scan_count, no other number. The increment on a successful lookup is asynchronous and best-effort, same pattern as the suggestion-cache's last_accessed_at update in spec 07 - it must never add latency to the lookup response, and a failed count update must never fail the lookup. No response anywhere - including GET /api/barcodes/hot itself - ever serializes scan_count; rank is conveyed by array order only. The client-side hot-cache hit is an optimistic preview only: the real per-storage lookup (spec 20) is called for every scan regardless, and its answer always wins over the cached preview when they differ. This is explicitly not an offline-editing feature - the one network call is never skipped."
+        }
+      ]
+    },
+    {
+      "number": 6,
+      "waveIssue": 102,
+      "integrationBranch": "integration/specs-13-20-welle-6",
+      "sequential": false,
+      "packages": [
+        {
+          "specIssue": 95,
+          "slug": "w6-localization",
+          "branch": "specs-13-20/w6-localization",
+          "spec": "Spec 19",
+          "focus": "This package touches data-i18n markup across nearly every page in web/static/ - that is exactly why it runs alone, last, in its own wave, after every other package's UI has already landed - including the quick-create modal triggers and labels from specs 26-28 and the barcode offer from spec 20. The admin area stays English-only, deliberately; do not localize the Go templates. The key-parity test between en.json and de.json is what keeps the catalogs from rotting - make sure it actually fails when a key is added to one and not the other, and that every translated string is inserted with textContent, never innerHTML."
+        }
+      ]
+    }
+  ]
+}

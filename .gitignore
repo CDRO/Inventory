@@ -35,3 +35,7 @@ e2e/node_modules/
 e2e/package-lock.json
 e2e/test-results/
 e2e/playwright-report/
+
+# Wave orchestrator run artifacts (scripts/wellen-orchestrator.ps1)
+scripts/wellen-orchestrator.log
+scripts/konsol-welle-*.started
