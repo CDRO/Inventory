@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#2563eb">
+  <title>Stocktake · Inventory</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/css/tokens.css">
+  <link rel="stylesheet" href="/css/base.css">
+  <link rel="stylesheet" href="/css/components.css">
+  <link rel="stylesheet" href="/css/gamification.css">
+</head>
+<body>
+  <header class="shell row row--between">
+    <strong>Inventory</strong>
+    <div class="row">
+      <div id="storage-switcher" hidden></div>
+      <div id="gamification-ring" hidden></div>
+      <a id="back" href="/locations.html" class="btn btn--ghost">Locations</a>
+    </div>
+  </header>
+
+  <main id="main" class="shell stack" aria-live="polite">
+    <h2 id="heading">Stocktake</h2>
+    <p id="audited" class="muted"></p>
+
+    <!-- Errors stay on screen next to the sheet they refer to: the one that
+         matters here says the shelf changed under you, and the next step is
+         to re-read the reloaded sheet. -->
+    <div id="error" class="alert" role="alert" hidden></div>
+    <div id="notice" class="alert alert--success" role="status" hidden></div>
+    <p id="status" class="empty-state">Loading…</p>
+
+    <section id="sheet" class="stack" hidden>
+      <p class="muted">
+        Count what is actually on this shelf and correct anything that
+        disagrees. Nothing is written until you confirm, and a count of 0
+        removes that batch. Child locations are their own walk.
+      </p>
+
+      <div id="rows" class="review-list"></div>
+      <p id="empty" class="empty-state" hidden>
+        Nothing is recorded at this location. If something is on the shelf,
+        add it below.
+      </p>
+
+      <form id="add-found" class="card stack">
+        <strong>Found something that is not listed?</strong>
+        <div class="field">
+          <label for="found-product">Product</label>
+          <select id="found-product" required></select>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="found-quantity">How many</label>
+            <input id="found-quantity" type="number" min="1" step="1" value="1" required>
+          </div>
+          <div class="field">
+            <label for="found-expiry">Expires on (optional)</label>
+            <input id="found-expiry" type="date">
+          </div>
+        </div>
+        <p class="muted">
+          Left empty, the shelf-life rules work the date out. Fill it in and
+          your date is kept as typed.
+        </p>
+        <button type="submit" class="btn">Add to this walk</button>
+      </form>
+
+      <div id="found" class="stack"></div>
+
+      <div class="row">
+        <button id="confirm" type="button" class="btn btn--primary">Confirm stocktake</button>
+        <a id="cancel" href="/locations.html" class="btn btn--ghost">Cancel</a>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="/js/pages/stocktake.js"></script>
+</body>
+</html>

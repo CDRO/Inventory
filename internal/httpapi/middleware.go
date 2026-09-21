@@ -155,6 +155,17 @@ func (m *Middleware) RequireSession(next http.Handler) http.Handler {
 // A non-admin receives the same `404` as an unknown resource, byte for byte.
 // The admin area does not announce its own existence: a `403` would tell an
 // ordinary user that `/admin` is a real thing worth attacking.
+//
+// **A paired device session is refused here too, whatever its user's is_admin
+// says.** The admin area is browser-only and server-rendered, and
+// docs/specs/12-client-api-contract.md puts it outside the client contract
+// entirely: "a paired client is never an admin client". Without this check an
+// admin who pairs a phone hands that phone every admin route, because a device
+// session resolves to the same user as their browser — and `Kind` is the only
+// thing that tells the two apart. The rule is on the session row rather than on
+// the Authorization header for exactly that reason: a header is a transport a
+// client chooses, while the kind was fixed server-side when the session was
+// minted and no client can move it.
 func (m *Middleware) RequireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, ok := UserFrom(r.Context())
@@ -165,6 +176,11 @@ func (m *Middleware) RequireAdmin(next http.Handler) http.Handler {
 			return
 		}
 
+		// The lookup runs before the session-kind check, not after, so that
+		// is_admin really is re-queried on every admin request — including the
+		// ones that were always going to be refused. Ordering it the other way
+		// would make the invariant "on every admin request from a browser",
+		// which is a weaker sentence that reads the same.
 		isAdmin, err := m.store.IsAdmin(r.Context(), user.ID)
 		if err != nil {
 			m.errors.WriteError(w, r, Internal(err))
@@ -172,6 +188,12 @@ func (m *Middleware) RequireAdmin(next http.Handler) http.Handler {
 		}
 		if !isAdmin {
 			m.errors.WriteError(w, r, NotFound(ReasonNotAdmin))
+			return
+		}
+
+		session, ok := SessionFrom(r.Context())
+		if !ok || session.Kind != store.SessionBrowser {
+			m.errors.WriteError(w, r, NotFound(ReasonAdminAreaHidden))
 			return
 		}
 

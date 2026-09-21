@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/CDRO/Inventory/internal/store"
 )
@@ -17,7 +20,9 @@ const (
 	CodeNotFound         = "not_found"
 	CodeConflict         = "conflict"
 	CodeValidationFailed = "validation_failed"
+	CodeResyncRequired   = "resync_required"
 	CodePayloadTooLarge  = "payload_too_large"
+	CodeRateLimited      = "rate_limited"
 	CodeModelUnavailable = "model_unavailable"
 	CodeUpstreamFailed   = "upstream_failed"
 	CodeInternal         = "internal_error"
@@ -65,6 +70,14 @@ type Failure struct {
 	Reason string
 	// Err is the underlying cause. It is logged, never serialized.
 	Err error
+	// RetryAfter is how long the caller must wait, for the 429 the credential
+	// rate limiter produces (docs/specs/14-account-self-service.md). It is
+	// carried on the Failure rather than set on the ResponseWriter by the
+	// handler so that the header and the body it belongs to are emitted
+	// together, by the one serializer — a handler that set it itself would be
+	// writing part of an error response outside WriteError, which is the
+	// thing this package's structure exists to prevent.
+	RetryAfter time.Duration
 }
 
 func (f *Failure) Error() string {
@@ -133,6 +146,11 @@ func (w *ErrorWriter) WriteError(rw http.ResponseWriter, r *http.Request, failur
 			slog.String("reason", failure.Reason),
 			slog.String("method", r.Method),
 			slog.String("path", r.URL.Path),
+			// The client's self-reported version, and the only thing anything
+			// in this package does with that header — see clientversion.go for
+			// why it is read here and nowhere else. It is an attribute of a
+			// response already decided, so it cannot influence one.
+			slog.String("client_version", clientVersionFrom(r)),
 			slog.Any("err", failure.Err),
 		)
 	}
@@ -150,6 +168,13 @@ func (w *ErrorWriter) WriteError(rw http.ResponseWriter, r *http.Request, failur
 
 	rw.Header().Set("Content-Type", "application/json; charset=utf-8")
 	rw.Header().Set("Cache-Control", "no-store")
+	if failure.RetryAfter > 0 {
+		// Rounded up, and never below one second: RFC 9110 gives Retry-After
+		// whole seconds, and a "0" would invite an immediate retry that the
+		// limiter is still going to refuse.
+		seconds := math.Ceil(failure.RetryAfter.Seconds())
+		rw.Header().Set("Retry-After", strconv.Itoa(max(1, int(seconds))))
+	}
 	rw.WriteHeader(failure.Status)
 	// An encode failure here means the client hung up; there is nothing left
 	// to tell them.
@@ -199,6 +224,28 @@ func Conflict(message string, err error) *Failure {
 		message = "That action conflicts with the current state."
 	}
 	return &Failure{Status: http.StatusConflict, Code: CodeConflict, Message: message, Err: err}
+}
+
+// ResyncRequired tells a client its cached copy cannot be brought up to date
+// incrementally and must be thrown away.
+//
+// It is a 409 with its own code rather than a plain conflict because it is an
+// instruction, not a refusal: the request was correct, the server simply no
+// longer remembers far enough back to describe every deletion since. A client
+// that switched on `conflict` alone could not tell this from "that category
+// still has products in it" and would have no way to know it should re-fetch
+// (docs/specs/12-client-api-contract.md).
+//
+// The alternative — answering 200 with whatever the surviving tombstones
+// happen to cover — is the failure the spec exists to prevent: the client
+// keeps a deleted row for months with nothing anywhere reporting a problem.
+func ResyncRequired(reason string) *Failure {
+	return &Failure{
+		Status:  http.StatusConflict,
+		Code:    CodeResyncRequired,
+		Message: "Your cached copy is too old to update. Fetch the full list again.",
+		Reason:  reason,
+	}
 }
 
 // ValidationFailed carries the per-field messages a form needs.
@@ -271,6 +318,13 @@ func FromStoreError(err error, reason string) *Failure {
 		return Conflict(err.Error(), err)
 	case errors.Is(err, store.ErrValidation):
 		return ValidationFailed(nil, err)
+	case errors.Is(err, store.ErrResyncRequired):
+		// Mapped here rather than in each delta handler for the reason every
+		// other mapping is here: three list endpoints answer deltas, and a
+		// handler that forgot this case would turn "your cache is too old"
+		// into a 500 — an error the client retries forever instead of the
+		// instruction it needed.
+		return ResyncRequired(err.Error())
 	default:
 		return Internal(err)
 	}
@@ -286,8 +340,12 @@ func defaultMessage(code string) string {
 		return "That action conflicts with the current state."
 	case CodeValidationFailed:
 		return "The request could not be processed."
+	case CodeResyncRequired:
+		return "Your cached copy is too old to update. Fetch the full list again."
 	case CodePayloadTooLarge:
 		return "The uploaded file is too large."
+	case CodeRateLimited:
+		return "Too many attempts. Wait a moment and try again."
 	case CodeModelUnavailable:
 		return "The configured vision model is unavailable."
 	case CodeUpstreamFailed:

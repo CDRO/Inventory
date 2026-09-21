@@ -148,6 +148,60 @@ func (s *Store) DeleteUser(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// ChangePassword replaces a user's password hash and revokes their sessions,
+// in one transaction.
+//
+// keepSessionID names the one session that survives — the browser or device
+// that made the request, for the self-service change of
+// docs/specs/14-account-self-service.md. An empty string keeps none, which is
+// the admin reset: the resetter cannot know which of the target's sessions are
+// legitimate, so none of them are.
+//
+// **The revocation shares the transaction with the hash update by design.**
+// Someone changes their password precisely when its secrecy is in doubt, so
+// the old sessions are the thing being locked out; doing the delete as a
+// best-effort follow-up would mean a failure between the two leaves the
+// password changed and every previously-stolen session still working — the
+// lock changed and the windows left open, with nothing in the response to say
+// so.
+//
+// A user id that matches nothing is ErrNotFound, and the transaction rolls
+// back, so no sessions are deleted for an id that named no account.
+func (s *Store) ChangePassword(ctx context.Context, userID uuid.UUID, passwordHash, keepSessionID string) error {
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2`, passwordHash, userID)
+		if err != nil {
+			return fmt.Errorf("store: set password hash: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+
+		// $2 = '' is never a real session id (they are 43-character base64url
+		// tokens), so the empty string cleanly means "keep nothing" without a
+		// second statement or a nullable parameter.
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM sessions
+			 WHERE user_id = $1 AND ($2 = '' OR id <> $2)`, userID, keepSessionID); err != nil {
+			return fmt.Errorf("store: revoke sessions: %w", err)
+		}
+		return nil
+	})
+}
+
+// SetDisplayName renames a user, returning the updated row.
+//
+// Only the display name. Usernames are immutable — they are the login
+// identifier, and renaming one buys a migration headache for no user-facing
+// benefit (docs/specs/14-account-self-service.md).
+func (s *Store) SetDisplayName(ctx context.Context, userID uuid.UUID, displayName string) (*User, error) {
+	return scanUser(s.pool.QueryRow(ctx, `
+		UPDATE users SET display_name = $1
+		 WHERE id = $2
+		RETURNING id, username, password_hash, display_name, is_admin, created_at`,
+		displayName, userID))
+}
+
 // ListUsers returns every account, for the admin view.
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.pool.Query(ctx, `

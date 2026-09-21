@@ -26,8 +26,10 @@ docker compose up -d
 ```
 
 `setup` reads `.env.example` as the canonical variable list, prompts for each
-variable with its default, and generates `SESSION_SECRET` itself. Run it
-before starting the stack: Compose reads `.env` when it parses the file, so a
+variable with its default, and generates `SESSION_SECRET` itself.
+`DATABASE_URL` is not prompted for either — it is derived from the
+`POSTGRES_USER`, `POSTGRES_PASSWORD` and `POSTGRES_DB` answers once every
+prompt is answered. Run it before starting the stack: Compose reads `.env` when it parses the file, so a
 running container will not pick up a `.env` written afterwards. If you rerun
 setup on a live stack, apply the change with:
 

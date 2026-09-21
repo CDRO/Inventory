@@ -21,6 +21,10 @@ import { el, text, clearChildren } from "./dom.js";
  * @property {string} id
  * @property {string} name
  * @property {string} [description]
+ * @property {string|null} [last_audited_at] - locations only: when a
+ *   stocktake last confirmed this node against the shelf, null for never
+ *   (docs/specs/13-stocktake-and-audit.md). This module never reads it; the
+ *   locations page's renderDetail callback does, off the same object.
  * @property {TreeNode[]} children
  */
 

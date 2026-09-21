@@ -11,10 +11,16 @@ import (
 	"github.com/CDRO/Inventory/internal/store"
 )
 
+// maxBatchQuantity bounds a manually corrected count, the same order of
+// magnitude as maxIngestQuantity and maxConsumeQuantity: far above anything a
+// household shelf holds, far below a number that would make one PATCH an
+// expensive transaction.
+const maxBatchQuantity = 100_000
+
 // BatchStore is the slice of the store the batch handlers use.
 type BatchStore interface {
 	SplitBatch(ctx context.Context, storageID, batchID uuid.UUID, quantity int, targetLocationID uuid.UUID, userID *uuid.UUID) (*store.Batch, error)
-	MoveBatch(ctx context.Context, storageID, batchID, targetLocationID uuid.UUID, userID *uuid.UUID) (*store.Batch, error)
+	UpdateBatch(ctx context.Context, storageID, batchID uuid.UUID, patch store.BatchPatch, userID *uuid.UUID) (*store.Batch, error)
 }
 
 // BatchHandler serves the batch operations in
@@ -103,8 +109,23 @@ func (h *BatchHandler) Split(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, newBatchResponse(*created))
 }
 
-// Update serves PATCH /api/storages/{storage_id}/inventory-batches/{id}, which
-// currently carries one field: location_id, to move the whole batch.
+// Update serves PATCH /api/storages/{storage_id}/inventory-batches/{id}: a
+// whole-batch move (docs/specs/06-vision-shelf-ingestion.md), a manual
+// quantity correction (docs/specs/13-stocktake-and-audit.md), or both in one
+// request — in which case the store applies them in one transaction, so there
+// is no half-applied PATCH to detect afterwards.
+//
+// expiration_date and expiration_source stay on their own sub-route
+// (.../expiry), which owns the derived-versus-user cascade of
+// docs/specs/08-expiration-and-classification.md. Nothing is lost by them
+// landing separately: a date writes no ledger row, so an expiry edit and a
+// quantity correction have no shared state that could be left inconsistent.
+//
+// A quantity of 0 deletes the batch, which leaves nothing to return: that case
+// answers 204 rather than a 200 carrying a row that no longer exists. Pairing
+// that 0 with a location_id is the one combination this route refuses (422):
+// the row is deleted either way, so "empty it" and "move it" contradict each
+// other and applying them in either order gives a different ledger.
 func (h *BatchHandler) Update(w http.ResponseWriter, r *http.Request) {
 	storageID, ok := StorageIDFrom(r.Context())
 	if !ok {
@@ -120,35 +141,61 @@ func (h *BatchHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	var body struct {
 		LocationID *string `json:"location_id"`
+		Quantity   *int    `json:"quantity"`
 	}
 	if failure := decodeJSON(w, r, &body); failure != nil {
 		h.errors.WriteError(w, r, failure)
 		return
 	}
 
-	if body.LocationID == nil {
+	if body.LocationID == nil && body.Quantity == nil {
 		// A PATCH naming no field is a request the server cannot carry out, and
-		// answering 200 would tell the caller their move landed when nothing
-		// moved.
-		h.errors.WriteError(w, r, ValidationFailed(
-			map[string][]string{"location_id": {"A location_id is required."}}, nil))
+		// answering 200 would tell the caller their change landed when nothing
+		// changed.
+		h.errors.WriteError(w, r, ValidationFailed(map[string][]string{
+			"location_id": {"A location_id, a quantity, or both are required."},
+			"quantity":    {"A location_id, a quantity, or both are required."},
+		}, nil))
 		return
 	}
 
-	targetID, err := uuid.Parse(*body.LocationID)
-	if err != nil {
-		h.errors.WriteError(w, r, ValidationFailed(
-			map[string][]string{"location_id": {"Must be a UUID."}}, nil))
+	fields := map[string][]string{}
+	patch := store.BatchPatch{}
+
+	if body.Quantity != nil {
+		if *body.Quantity < 0 || *body.Quantity > maxBatchQuantity {
+			fields["quantity"] = append(fields["quantity"], "Must be a whole number of zero or more.")
+		} else {
+			patch.Quantity = body.Quantity
+		}
+	}
+
+	if body.LocationID != nil {
+		targetID, err := uuid.Parse(*body.LocationID)
+		if err != nil {
+			fields["location_id"] = append(fields["location_id"], "Must be a UUID.")
+		} else {
+			patch.LocationID = &targetID
+		}
+	}
+
+	if len(fields) > 0 {
+		h.errors.WriteError(w, r, ValidationFailed(fields, nil))
 		return
 	}
 
-	moved, err := h.store.MoveBatch(r.Context(), storageID, batchID, targetID, actingUser(r))
+	updated, err := h.store.UpdateBatch(r.Context(), storageID, batchID, patch, actingUser(r))
 	if err != nil {
 		h.errors.WriteError(w, r, FromStoreError(err, "batch or target location not in this storage or nonexistent"))
 		return
 	}
 
-	writeJSON(w, http.StatusOK, newBatchResponse(*moved))
+	if updated == nil {
+		writeJSON(w, http.StatusNoContent, nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, newBatchResponse(*updated))
 }
 
 // batchIDFromPath parses {id}, answering 404 for anything unparseable — the

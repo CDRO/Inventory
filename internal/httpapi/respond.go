@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 )
 
 // maxJSONBody caps a request body before it is decoded.
@@ -66,6 +67,39 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) *Failure {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
 			return PayloadTooLarge()
+		}
+		return ValidationFailed(
+			map[string][]string{"body": {"The request body is not valid JSON."}}, err)
+	}
+	return nil
+}
+
+// decodeJSONStrict is decodeJSON plus a refusal of any field the target type
+// does not declare.
+//
+// For a route whose contract is "this field and nothing else"
+// (docs/specs/14-account-self-service.md's PATCH /api/auth/me). Silently
+// ignoring an unknown key is how a client ships a body carrying the one
+// documented field plus an admin flag it invented, believing the second half
+// did something — and how a typo in a field name becomes a write that appears
+// to succeed and changes nothing.
+//
+// (The invented flag would not be honoured either way: admin status is
+// re-read from the database per request and is not settable through any
+// route a non-admin can reach. Refusing the body is about telling the client
+// the truth, not about closing a hole.)
+func decodeJSONStrict(w http.ResponseWriter, r *http.Request, dst any) *Failure {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return PayloadTooLarge()
+		}
+		if field, found := strings.CutPrefix(err.Error(), "json: unknown field "); found {
+			return ValidationFailed(
+				map[string][]string{"body": {"Unknown field " + field + "."}}, err)
 		}
 		return ValidationFailed(
 			map[string][]string{"body": {"The request body is not valid JSON."}}, err)

@@ -39,6 +39,13 @@ type AuthStoreFull interface {
 	UserByUsername(ctx context.Context, username string) (*store.User, error)
 	CreatePairingCode(ctx context.Context, userID uuid.UUID) (string, error)
 	RedeemPairingCode(ctx context.Context, code string) (uuid.UUID, error)
+
+	// The credential lifecycle of docs/specs/14-account-self-service.md.
+	// ChangePassword replaces the hash and revokes every session but
+	// keepSessionID, in one transaction; "" keeps none, which is the admin
+	// reset.
+	ChangePassword(ctx context.Context, userID uuid.UUID, passwordHash, keepSessionID string) error
+	SetDisplayName(ctx context.Context, userID uuid.UUID, displayName string) (*store.User, error)
 }
 
 // AuthHandler serves the session lifecycle
@@ -58,12 +65,18 @@ type AuthHandler struct {
 	// false only in dev, where Secure would stop the cookie working over plain
 	// http://localhost entirely.
 	secureCookies bool
+	// credentials is the process-wide credential limiter, shared with
+	// POST /api/auth/pair and POST /api/auth/password
+	// (docs/specs/14-account-self-service.md).
+	credentials *rateLimiter
 }
 
 // NewAuthHandler wires the auth routes. secureCookies must be false only for
-// a dev deployment served over plain HTTP.
-func NewAuthHandler(s AuthStoreFull, errs *ErrorWriter, secureCookies bool) *AuthHandler {
-	return &AuthHandler{store: s, errors: errs, secureCookies: secureCookies}
+// a dev deployment served over plain HTTP. credentials is the shared
+// credential limiter built in NewRouter; it must be the same instance the
+// device and account handlers hold.
+func NewAuthHandler(s AuthStoreFull, errs *ErrorWriter, secureCookies bool, credentials *rateLimiter) *AuthHandler {
+	return &AuthHandler{store: s, errors: errs, secureCookies: secureCookies, credentials: credentials}
 }
 
 // meResponse is what GET /api/auth/me returns.
@@ -95,6 +108,11 @@ type storageRef struct {
 // A wrong username and a wrong password produce the identical response.
 // Distinguishing them would turn this endpoint into a way to enumerate who
 // has an account on a household's server.
+//
+// Rate-limited per address and per submitted username, on the counter shared
+// with pairing and password change (docs/specs/14-account-self-service.md).
+// The limit is checked before the password is verified, so a caller already
+// over it costs this server a map lookup rather than an argon2id hash.
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Username string `json:"username"`
@@ -105,8 +123,19 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ip := clientIP(r)
 	username := strings.TrimSpace(body.Username)
+	keys := credentialKeys(ip, username)
+	if retryAfter, blocked := h.credentials.blocked(keys...); blocked {
+		h.errors.WriteError(w, r, rateLimited(retryAfter, "login rate limit for "+ip))
+		return
+	}
+
 	if username == "" || body.Password == "" {
+		// Charged to the address only: there is no username here to charge,
+		// and counting a blank one would let anybody prime a shared "user:"
+		// counter and lock out whoever submits an empty field next.
+		h.credentials.record(credentialKeys(ip, "")...)
 		// Still the generic refusal rather than a validation error naming the
 		// empty field: an empty username is a failed login like any other, and
 		// a different shape here is one more bit of signal.
@@ -117,6 +146,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	user, err := auth.Authenticate(r.Context(), h.store, username, body.Password)
 	if err != nil {
 		if errors.Is(err, auth.ErrBadCredentials) {
+			h.credentials.record(keys...)
 			h.errors.WriteError(w, r, invalidCredentials("bad username or password"))
 			return
 		}
@@ -129,9 +159,10 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		h.errors.WriteError(w, r, Internal(err))
 		return
 	}
+	h.credentials.reset(keys...)
 
 	http.SetCookie(w, h.sessionCookie(session.ID, session.ExpiresAt))
-	h.writeMe(w, r, user)
+	writeMe(w, r, h.store, h.errors, user)
 }
 
 // Logout serves POST /api/auth/logout.
@@ -165,14 +196,20 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 		h.errors.WriteError(w, r, Unauthorized(ReasonSessionMissing))
 		return
 	}
-	h.writeMe(w, r, user)
+	writeMe(w, r, h.store, h.errors, user)
 }
 
 // writeMe renders the caller and their storages.
-func (h *AuthHandler) writeMe(w http.ResponseWriter, r *http.Request, user *store.User) {
-	storages, err := h.store.StoragesForUser(r.Context(), user.ID)
+//
+// Package-level rather than a method because two handlers answer with this
+// shape: GET /api/auth/me and login here, and PATCH /api/auth/me in
+// account.go (docs/specs/14-account-self-service.md). One renderer means the
+// no-is_admin guarantee on meResponse cannot be true of one of them and not
+// the other.
+func writeMe(w http.ResponseWriter, r *http.Request, s AuthStoreFull, errs *ErrorWriter, user *store.User) {
+	storages, err := s.StoragesForUser(r.Context(), user.ID)
 	if err != nil {
-		h.errors.WriteError(w, r, Internal(err))
+		errs.WriteError(w, r, Internal(err))
 		return
 	}
 

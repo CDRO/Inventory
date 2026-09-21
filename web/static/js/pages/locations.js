@@ -21,6 +21,7 @@ import { renderStorageSwitcher } from "../storage-switcher.js";
 import { renderInboxLink } from "../inbox-badge.js";
 import { initGamification } from "../gamification.js";
 import { TreeView } from "../tree.js";
+import { formatAudited } from "../audited.js";
 import { get, post, patch, ApiError } from "../api.js";
 import { clearChildren, el, text } from "../dom.js";
 
@@ -69,6 +70,7 @@ async function init() {
     onAddChild: (parentId, name) => runMutation(() => createLocation(parentId, name)),
     onRename: (id, name) => runMutation(() => renameLocation(id, name)),
     onMove: (id, newParentId) => runMutation(() => moveLocation(id, newParentId)),
+    renderDetail: renderAuditState,
   });
 
   addRootButton.addEventListener("click", showAddRootForm);
@@ -118,6 +120,28 @@ function showAddRootForm() {
 
   treeContainer.before(form);
   input.focus();
+}
+
+// renderAuditState is the tree component's renderDetail hook
+// (docs/specs/05-frontend-pwa-foundations.md), drawing how long ago each node
+// was last walked and the link that walks it
+// (docs/specs/13-stocktake-and-audit.md).
+//
+// Staleness belongs here rather than in a notification: the tree is where a
+// person edits locations, so it is where "never audited" is worth seeing. No
+// nagging, no badge, no reminder — visibility is the whole feature.
+function renderAuditState(node) {
+  return el("span", { class: "tree-detail" }, [
+    el("span", { class: "muted" }, [text(formatAudited(node.last_audited_at))]),
+    el(
+      "a",
+      {
+        class: "btn btn--ghost",
+        href: `/stocktake.html?location=${encodeURIComponent(node.id)}&storage=${encodeURIComponent(storageId)}`,
+      },
+      [text("Stocktake")],
+    ),
+  ]);
 }
 
 function basePath() {

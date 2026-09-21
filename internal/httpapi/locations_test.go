@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -49,11 +50,29 @@ type fakeLocations struct {
 	// creates counts CreateLocation calls, which is how the idempotency tests
 	// tell a replay from a second execution.
 	creates atomic.Int32
+
+	delta      *store.Delta[store.Location]
+	deltaErr   error
+	lastSince  time.Time
+	deltaCalls int
 }
 
 func (f *fakeLocations) LocationTree(_ context.Context, storageID uuid.UUID) ([]store.Location, error) {
 	f.lastStorageID = storageID
 	return f.tree, f.treeErr
+}
+
+func (f *fakeLocations) LocationsChangedSince(_ context.Context, storageID uuid.UUID, since time.Time) (*store.Delta[store.Location], error) {
+	f.lastStorageID = storageID
+	f.lastSince = since
+	f.deltaCalls++
+	if f.deltaErr != nil {
+		return nil, f.deltaErr
+	}
+	if f.delta != nil {
+		return f.delta, nil
+	}
+	return &store.Delta[store.Location]{Changed: f.tree, Deleted: []uuid.UUID{}, SyncedAt: fixedSyncPoint}, nil
 }
 
 func (f *fakeLocations) CreateLocationAsUser(_ context.Context, storageID uuid.UUID, in store.NewLocation, _ uuid.UUID) (*store.Location, error) {
@@ -99,6 +118,7 @@ type fakeBatches struct {
 	lastBatchID    uuid.UUID
 	lastQuantity   int
 	lastTargetID   uuid.UUID
+	lastPatch      store.BatchPatch
 	lastActingUser *uuid.UUID
 }
 
@@ -113,15 +133,89 @@ func (f *fakeBatches) SplitBatch(_ context.Context, storageID, batchID uuid.UUID
 	return &store.Batch{ID: uuid.New(), LocationID: target, Quantity: quantity}, nil
 }
 
-func (f *fakeBatches) MoveBatch(_ context.Context, storageID, batchID, target uuid.UUID, userID *uuid.UUID) (*store.Batch, error) {
-	f.lastStorageID, f.lastBatchID, f.lastTargetID, f.lastActingUser = storageID, batchID, target, userID
+func (f *fakeBatches) UpdateBatch(_ context.Context, storageID, batchID uuid.UUID, patch store.BatchPatch, userID *uuid.UUID) (*store.Batch, error) {
+	f.lastStorageID, f.lastBatchID, f.lastActingUser = storageID, batchID, userID
+	f.lastPatch = patch
+	if patch.LocationID != nil {
+		f.lastTargetID = *patch.LocationID
+	}
 	if f.moveErr != nil {
 		return nil, f.moveErr
+	}
+	if patch.Quantity != nil && *patch.Quantity == 0 {
+		// The store deletes an emptied batch, so there is no row to return —
+		// the handler turns that into a 204.
+		return nil, nil
 	}
 	if f.moved != nil {
 		return f.moved, nil
 	}
-	return &store.Batch{ID: batchID, LocationID: target, Quantity: 3}, nil
+	moved := &store.Batch{ID: batchID, LocationID: f.lastTargetID, Quantity: 3}
+	if patch.Quantity != nil {
+		moved.Quantity = *patch.Quantity
+	}
+	return moved, nil
+}
+
+// fakeStocktake is an in-memory StocktakeStore
+// (docs/specs/13-stocktake-and-audit.md), recording the same way.
+type fakeStocktake struct {
+	created    *store.Batch
+	createErr  error
+	lastCreate store.NewBatch
+
+	sheet    *store.StocktakeSheet
+	sheetErr error
+
+	confirmed     *store.StocktakeResult
+	confirmErr    error
+	lastCounts    []store.StocktakeCount
+	lastFound     []store.FoundStock
+	lastLocation  uuid.UUID
+	lastStorageID uuid.UUID
+	lastUser      *uuid.UUID
+}
+
+func (f *fakeStocktake) CreateBatch(_ context.Context, storageID uuid.UUID, in store.NewBatch) (*store.Batch, error) {
+	f.lastStorageID = storageID
+	f.lastCreate = in
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
+	if f.created != nil {
+		return f.created, nil
+	}
+	return &store.Batch{
+		ID: uuid.New(), ProductID: in.ProductID, LocationID: in.LocationID,
+		Quantity: in.Quantity, ExpirationDate: in.ExpirationDate,
+		ExpirationSource: in.ExpirationSource,
+	}, nil
+}
+
+func (f *fakeStocktake) LocationStocktake(_ context.Context, storageID, locationID uuid.UUID) (*store.StocktakeSheet, error) {
+	f.lastStorageID, f.lastLocation = storageID, locationID
+	if f.sheetErr != nil {
+		return nil, f.sheetErr
+	}
+	if f.sheet != nil {
+		return f.sheet, nil
+	}
+	return &store.StocktakeSheet{
+		Location: store.Location{ID: locationID, StorageID: storageID, Name: "Layer 2"},
+		Batches:  []store.StocktakeBatch{},
+	}, nil
+}
+
+func (f *fakeStocktake) ConfirmStocktake(_ context.Context, storageID, locationID uuid.UUID, userID *uuid.UUID, counts []store.StocktakeCount, found []store.FoundStock) (*store.StocktakeResult, error) {
+	f.lastStorageID, f.lastLocation, f.lastUser = storageID, locationID, userID
+	f.lastCounts, f.lastFound = counts, found
+	if f.confirmErr != nil {
+		return nil, f.confirmErr
+	}
+	if f.confirmed != nil {
+		return f.confirmed, nil
+	}
+	return &store.StocktakeResult{CreatedBatchIDs: []uuid.UUID{}}, nil
 }
 
 // fakeAPI is the whole APIStore: the authorization lookups and the two
@@ -141,6 +235,7 @@ type fakeAPI struct {
 	*fakeReorderStore
 	*fakeAnalyticsStore
 	*fakeGamification
+	*fakeStocktake
 }
 
 // newFakeAPI builds the whole fake store around an auth fake, with every other
@@ -152,7 +247,7 @@ func newFakeAPI(auth *fakeAuth) fakeAPI {
 		fakeJobs: newFakeJobs(), fakeIdempotency: newFakeIdempotency(), fakeIngestStore: &fakeIngestStore{},
 		fakeConsumeStore: &fakeConsumeStore{}, fakeProductStore: &fakeProductStore{},
 		fakeReorderStore: &fakeReorderStore{}, fakeAnalyticsStore: &fakeAnalyticsStore{},
-		fakeGamification: newFakeGamification(),
+		fakeGamification: newFakeGamification(), fakeStocktake: &fakeStocktake{},
 	}
 }
 
@@ -181,6 +276,7 @@ type apiFixture struct {
 	reorder      *fakeReorderStore
 	analytics    *fakeAnalyticsStore
 	gamification *fakeGamification
+	stocktake    *fakeStocktake
 	adminVision  *fakeAdminVision
 	storageID    uuid.UUID
 	user         *store.User
@@ -203,6 +299,7 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 	images := &fakeSuggester{}
 	imageData := &fakeImageCache{}
 	gamification := newFakeGamification()
+	stocktake := &fakeStocktake{}
 	user, session := auth.addUser(t, false)
 	storageID := uuid.New()
 	auth.addMember(storageID, user.ID)
@@ -230,7 +327,7 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 			fakeJobs: jobs, fakeIdempotency: idem, fakeIngestStore: ingestStore,
 			fakeConsumeStore: consumeStore, fakeProductStore: products,
 			fakeReorderStore: reorder, fakeAnalyticsStore: analytics,
-			fakeGamification: gamification,
+			fakeGamification: gamification, fakeStocktake: stocktake,
 		},
 		Matcher:       matcher,
 		Images:        images,
@@ -256,6 +353,7 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 		reorder:      reorder,
 		analytics:    analytics,
 		gamification: gamification,
+		stocktake:    stocktake,
 		adminVision:  adminVision,
 		storageID:    storageID, user: user, session: session,
 	}
@@ -341,6 +439,11 @@ func storageRoutes(base string) []struct {
 		{http.MethodPost, base + "/dashboard/reorder/items/match", `{"name":"Butter"}`},
 		{http.MethodPost, base + "/dashboard/reorder/items", `{"name":"Butter"}`},
 		{http.MethodGet, base + "/dashboard/analytics", ""},
+		// Stocktake and manual inventory correction
+		// (docs/specs/13-stocktake-and-audit.md).
+		{http.MethodPost, base + "/inventory-batches", `{"product_id":"` + id + `","location_id":"` + id + `","quantity":1}`},
+		{http.MethodGet, base + "/locations/" + id + "/stocktake", ""},
+		{http.MethodPost, base + "/locations/" + id + "/stocktake", `{"batches":[]}`},
 	}
 }
 

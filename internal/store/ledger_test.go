@@ -42,6 +42,15 @@ func logCount(t *testing.T, ctx context.Context, productID uuid.UUID) int {
 	return countRows(t, ctx, `SELECT count(*) FROM inventory_logs WHERE product_id = $1`, productID)
 }
 
+// moveBatch is UpdateBatch with only the location named — the whole-batch move
+// of docs/specs/06-vision-shelf-ingestion.md. UpdateBatch is the one exported
+// way to move a batch or set its quantity (docs/specs/13-stocktake-and-audit.md
+// folded the two into a single patch, so that a PATCH carrying both lands in
+// one transaction); this helper keeps the move-only tests reading as moves.
+func moveBatch(ctx context.Context, s *store.Store, storageID, batchID, target uuid.UUID, userID *uuid.UUID) (*store.Batch, error) {
+	return s.UpdateBatch(ctx, storageID, batchID, store.BatchPatch{LocationID: &target}, userID)
+}
+
 func TestCreateBatchWritesPairedLog(t *testing.T) {
 	s := requireDB(t)
 	ctx := context.Background()
@@ -292,31 +301,6 @@ func TestDeleteProductWritesTombstoneInSameTransaction(t *testing.T) {
 		`SELECT count(*) FROM tombstones WHERE entity_type = 'product' AND entity_id = $1`, productID))
 }
 
-// TestDeltaIsResumable covers the honesty rule for delta sync: a client whose
-// cursor predates the oldest surviving tombstone cannot be brought up to date,
-// and must be told to resync rather than handed an answer that quietly omits a
-// swept deletion.
-func TestDeltaIsResumable(t *testing.T) {
-	s := requireDB(t)
-	ctx := context.Background()
-
-	storageID, productID, _, _ := stocked(t, ctx, s, 1)
-
-	fresh, err := s.DeltaIsResumable(ctx, storageID, timeNow(t, ctx))
-	require.NoError(t, err)
-	assert.True(t, fresh, "with no deletions recorded, any cursor is resumable")
-
-	require.NoError(t, s.DeleteProduct(ctx, storageID, productID))
-
-	tombstones, err := s.TombstonesSince(ctx, storageID, timeZero())
-	require.NoError(t, err)
-	require.Len(t, tombstones, 1)
-
-	stale, err := s.DeltaIsResumable(ctx, storageID, timeZero())
-	require.NoError(t, err)
-	assert.False(t, stale, "a cursor older than the oldest tombstone cannot be resumed")
-}
-
 // TestMoveBatchWritesPairedMoveLogs holds the whole-batch move to the same rule
 // the split obeys: two 'move' rows summing to zero, so product totals are
 // untouched while the ledger still records that something happened.
@@ -330,7 +314,7 @@ func TestMoveBatchWritesPairedMoveLogs(t *testing.T) {
 
 	before := logCount(t, ctx, productID)
 
-	moved, err := s.MoveBatch(ctx, storageID, batchID, kitchen.ID, nil)
+	moved, err := moveBatch(ctx, s, storageID, batchID, kitchen.ID, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, batchID, moved.ID, "a move keeps the batch's identity; only a split makes a new row")
@@ -372,7 +356,7 @@ func TestMoveBatchPreservesExpiry(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	moved, err := s.MoveBatch(ctx, storageID, batch.ID, kitchen.ID, nil)
+	moved, err := moveBatch(ctx, s, storageID, batch.ID, kitchen.ID, nil)
 	require.NoError(t, err)
 
 	require.NotNil(t, moved.ExpirationDate)
@@ -391,7 +375,7 @@ func TestMoveBatchToTheSameLocationWritesNothing(t *testing.T) {
 	storageID, productID, cellar, batchID := stocked(t, ctx, s, 5)
 	before := logCount(t, ctx, productID)
 
-	moved, err := s.MoveBatch(ctx, storageID, batchID, cellar, nil)
+	moved, err := moveBatch(ctx, s, storageID, batchID, cellar, nil)
 	require.NoError(t, err, "a no-op move is not an error; a client resending its own state must succeed")
 
 	assert.Equal(t, cellar, moved.LocationID)

@@ -43,6 +43,11 @@ route from `06-vision-shelf-ingestion.md` /
   `expiration_date`, `expiration_source`) in one request is allowed; each
   field keeps its own rules and log semantics (`move` rows for a
   relocation, no log for an expiry edit — dates are not quantities).
+  The one exception is `quantity = 0` together with `location_id`, which
+  is `422`: "the shelf is empty" and "carry it to the other room"
+  contradict each other, the row is deleted either way, and applying them
+  in either order gives a different ledger. A caller that means both means
+  two requests.
 
 ## Manual batch creation — "found stock"
 

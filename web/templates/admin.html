@@ -19,6 +19,8 @@
   ul.plain li { display: flex; gap: 0.5rem; align-items: center; }
   form { margin: 0; }
   form.create { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: end; margin-top: 1rem; }
+  form.inline-row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }
+  form.inline-row input { max-width: 12rem; }
   label { display: flex; flex-direction: column; font-size: 0.85rem; }
   label.inline { flex-direction: row; gap: 0.25rem; align-items: center; }
   input, select, button { font: inherit; }
@@ -52,6 +54,26 @@
           <form data-method="DELETE" data-action="/api/admin/users/{{.ID}}"
                 data-confirm="Delete {{.Username}}? They are signed out everywhere immediately.">
             <button class="link" type="submit">Delete</button>
+            <output class="error"></output>
+          </form>
+          {{- /*
+            The reset of docs/specs/14-account-self-service.md: the remedy for
+            a forgotten password in a system with no email and therefore no
+            reset link. Hand the new password over in person; the user changes
+            it themselves afterwards from Settings.
+
+            Absent from the admin's own row for the same reason Delete is: it
+            revokes ALL of the target's sessions, so resetting your own would
+            sign you out of the page you are standing on, mid-reload. Your own
+            password lives on /settings.html, where the change keeps the
+            current session alive.
+          */ -}}
+          <form class="inline-row" data-method="POST" data-action="/api/admin/users/{{.ID}}/password"
+                data-confirm="Reset {{.Username}}&#39;s password? Every device they are signed in on is signed out immediately.">
+            <input name="new_password" type="password" required minlength="10"
+                   autocomplete="new-password" placeholder="New password"
+                   aria-label="New password for {{.Username}}">
+            <button class="link" type="submit">Reset password</button>
             <output class="error"></output>
           </form>
           {{- end}}

@@ -123,6 +123,7 @@ One shape for every error, produced by **exactly one serializer** in
 | Storage unknown **or** caller not a member | 404 | `not_found` |
 | Admin route, caller not admin | 404 | `not_found` |
 | Resource exists in the caller's storage but action is illegal (e.g. deleting a location that still holds inventory) | 409 | `conflict` |
+| Delta request whose `updated_since` predates tombstone retention (`12-client-api-contract.md`) | 409 | `resync_required` |
 | Payload validation failure | 422 | `validation_failed` |
 | Upload exceeds size limit | 413 | `payload_too_large` |
 | Too many failed attempts at a rate-limited auth endpoint (`14-account-self-service.md`) | 429 | `rate_limited` |
@@ -145,6 +146,13 @@ non-enumeration rules in `03-auth-and-multi-tenancy.md`.
 Cursor-based, not offset-based (avoids drift under concurrent writes).
 List endpoints accept `?limit=50&cursor=...` and return `next_cursor: null`
 when exhausted. Default `limit` 50, max 200.
+
+List endpoints for client-cacheable entities additionally accept
+`?updated_since=<RFC3339>`, which narrows the response to what changed and adds
+a `deleted` array and a `synced_at` sync point to the envelope. It is opt-in:
+without the parameter the response is unchanged. The full rules, including the
+`409 resync_required` boundary, are in
+[`12-client-api-contract.md`](12-client-api-contract.md).
 
 ## Idempotent writes
 
