@@ -1,0 +1,229 @@
+#!/bin/sh
+# Updates the Synology NAS stack without replacing a working app by a broken one.
+#
+#   sh deploy/synology/update                 # rolling update (the default)
+#   sh deploy/synology/update --classic       # stop, migrate, start (see below)
+#   sh deploy/synology/update --no-pull       # do not run `git pull`
+#   sh deploy/synology/update --force         # swap even if the image is unchanged
+#   sh deploy/synology/update --prune         # afterwards, remove dangling images
+#
+# Rolling update:
+#   1. git pull --ff-only, pull the sidecar image, build the app image
+#   2. migrate up            (the OLD app keeps serving while this runs)
+#   3. wait until no job is pending, so the new instance's start-up recovery
+#      cannot fail a job the old instance is still working on
+#   4. start a SECOND app instance from the new image, next to the old one
+#   5. wait until the new instance answers GET /healthz
+#        - it does not: remove it again. The old instance was never touched.
+#   6. stop and remove the old instance; the count is back to one
+#   7. recreate the Tailscale sidecar, which shares the app's network namespace
+#      and would otherwise keep pointing at the dead one (a few seconds without
+#      the tailnet URL: that gap is not avoidable with this layout)
+#
+# --classic is for a release whose migration the previous release cannot run
+# against (the rolling update migrates while the old app still serves): it stops
+# the app and the sidecar first, then migrates, then starts everything.
+#
+# Environment: TS_AUTHKEY is passed through to the very first start; HEALTH_TIMEOUT
+# and DRAIN_TIMEOUT are seconds (defaults 120 and 60). DOCKER_COMPOSE and
+# INVENTORY_PROJECT exist for testing (defaults: docker-compose, inventory).
+#
+# Every compose call carries both -f files, so the dev override is never merged
+# in; the script refuses to run if the merged model lists traefik. See
+# docs/specs/01-architecture-and-deployment.md, "Synology NAS variant".
+
+set -eu
+
+COMPOSE=${DOCKER_COMPOSE:-docker-compose}
+PROJECT=${INVENTORY_PROJECT:-inventory}
+HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-120}
+DRAIN_TIMEOUT=${DRAIN_TIMEOUT:-60}
+
+die() { echo "update: $*" >&2; exit 1; }
+say() { echo "==> $*"; }
+
+usage() {
+  sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+pull=1 classic=0 force=0 prune=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-pull) pull=0 ;;
+    --classic) classic=1 ;;
+    --force) force=1 ;;
+    --prune) prune=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown option: $1 (try --help)" ;;
+  esac
+  shift
+done
+
+cd "$(dirname "$0")/../.." || die "cannot enter the clone"
+DC="$COMPOSE -p $PROJECT -f docker-compose.yml -f docker-compose.nas.yml"
+
+# --- Preconditions ------------------------------------------------------------
+
+v=$($COMPOSE version --short 2>/dev/null | sed 's/^v//') || true
+[ -n "$v" ] || die "cannot run '$COMPOSE version' (is the standalone docker-compose on PATH?)"
+major=${v%%.*}; rest=${v#*.}; minor=${rest%%.*}
+{ [ "$major" -gt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -ge 24 ]; }; } \
+  || die "Compose $v is too old: these files need >= 2.24 (the one bundled with Container Manager is 2.20)"
+
+services=$($DC config --services) || die "compose could not load the two files"
+for s in app db ts-inventory; do
+  echo "$services" | grep -qx "$s" || die "the merged model has no service '$s'"
+done
+if echo "$services" | grep -qx traefik; then
+  die "the merged model lists traefik: the NAS layer is not active. Nothing was changed."
+fi
+
+# --- Helpers ------------------------------------------------------------------
+
+app_ids() { $DC ps -q app; }
+
+container_ip() {
+  docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$1"
+}
+
+container_port() {
+  p=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$1" | sed -n 's/^HTTP_PORT=//p' | head -n 1)
+  echo "${p:-8000}"
+}
+
+is_running() { [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = true ]; }
+
+# The number of pending jobs, or nothing when it cannot be read.
+pending_jobs() {
+  $DC exec -T db sh -c "psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -tAc \"SELECT count(*) FROM jobs WHERE status = 'pending'\"" 2>/dev/null \
+    | tr -d '[:space:]'
+}
+
+# The health probe runs inside the db container (an Alpine image with wget), on the
+# compose network, so it works wherever container addresses are not routable from
+# the host and needs no extra image.
+wait_healthy() {
+  id=$1; port=$(container_port "$id"); t=0
+  while [ "$t" -lt "$HEALTH_TIMEOUT" ]; do
+    is_running "$id" || return 2
+    ip=$(container_ip "$id")
+    if [ -n "$ip" ] && $DC exec -T db wget -q -O /dev/null -T 3 "http://$ip:$port/healthz" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2; t=$((t + 2))
+  done
+  return 1
+}
+
+# --- Get the new code and image -----------------------------------------------
+
+if [ "$pull" -eq 1 ]; then
+  say "git pull --ff-only ($(git rev-parse --abbrev-ref HEAD))"
+  before=$(git rev-parse HEAD)
+  git pull --ff-only
+  after=$(git rev-parse HEAD)
+  if [ "$before" != "$after" ]; then
+    echo "    $(git rev-parse --short "$before") -> $(git rev-parse --short "$after")"
+  else
+    echo "    already up to date"
+  fi
+fi
+
+say "Pulling the sidecar image and building the app image"
+$DC pull ts-inventory
+$DC build
+
+old=$(app_ids)
+
+# --- No app yet: first start --------------------------------------------------
+
+if [ -z "$old" ]; then
+  say "No app instance is running: migrating and starting the stack"
+  $DC run --rm app migrate up
+  $DC up -d
+  $DC ps
+  exit 0
+fi
+
+set -- $old
+[ $# -eq 1 ] || die "$# app instances are running already (a previous update was interrupted?). Keep the one you want, remove the rest with 'docker rm -f <id>', and run this again."
+
+# --- Nothing to do? -----------------------------------------------------------
+
+if [ "$force" -eq 0 ]; then
+  running_image=$(docker inspect -f '{{.Image}}' "$old" 2>/dev/null || true)
+  built_image=$(docker image inspect -f '{{.Id}}' "${PROJECT}-app:latest" 2>/dev/null || true)
+  if [ -n "$running_image" ] && [ "$running_image" = "$built_image" ]; then
+    say "The running app already uses the image just built: nothing to swap (use --force to swap anyway)"
+    $DC ps
+    exit 0
+  fi
+fi
+
+# --- Classic update -----------------------------------------------------------
+
+if [ "$classic" -eq 1 ]; then
+  say "Classic update: stopping the app and the sidecar"
+  $DC stop ts-inventory app
+  say "Migrating"
+  $DC run --rm app migrate up
+  say "Starting the stack"
+  $DC up -d
+  $DC ps
+  [ "$prune" -eq 0 ] || docker image prune -f
+  exit 0
+fi
+
+# --- Rolling update -----------------------------------------------------------
+
+say "Migrating (the old app keeps serving; the release's migrations must run against it)"
+$DC run --rm app migrate up
+
+say "Waiting for pending jobs to finish (up to ${DRAIN_TIMEOUT}s)"
+t=0
+while :; do
+  n=$(pending_jobs)
+  [ -n "$n" ] || die "cannot read the pending-job count. Nothing was swapped; use --classic if you accept interrupting jobs."
+  [ "$n" -eq 0 ] && break
+  [ "$t" -lt "$DRAIN_TIMEOUT" ] || die "$n job(s) still pending after ${DRAIN_TIMEOUT}s. Nothing was swapped; try again later, or use --classic."
+  sleep 2; t=$((t + 2))
+done
+
+say "Starting a second app instance from the new image"
+$DC up -d --no-deps --no-recreate --scale app=2 app
+
+new=
+for id in $(app_ids); do
+  [ "$id" = "$old" ] || new="$new $id"
+done
+set -- $new
+if [ $# -ne 1 ]; then
+  for id in $new; do docker rm -f "$id" >/dev/null 2>&1 || true; done
+  die "expected exactly one new app instance, found $#. The old one was not touched."
+fi
+new=$1
+
+say "Waiting for the new instance to answer /healthz (up to ${HEALTH_TIMEOUT}s)"
+rc=0
+wait_healthy "$new" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "--- last log lines of the new instance:" >&2
+  docker logs --tail 30 "$new" >&2 || true
+  docker rm -f "$new" >/dev/null 2>&1 || true
+  if [ "$rc" -eq 2 ]; then
+    die "the new instance stopped. It was removed; the old instance was not touched."
+  fi
+  die "the new instance did not become healthy. It was removed; the old instance was not touched."
+fi
+
+say "Retiring the old instance"
+docker stop -t 30 "$old" >/dev/null
+docker rm "$old" >/dev/null
+$DC up -d --no-deps --no-recreate --scale app=1 app
+
+say "Recreating the sidecar (it shared the old instance's network namespace)"
+$DC up -d --no-deps --force-recreate ts-inventory
+
+$DC ps
+[ "$prune" -eq 0 ] || docker image prune -f
+say "Done."

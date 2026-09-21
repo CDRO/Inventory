@@ -1,0 +1,84 @@
+#!/bin/sh
+# Gives every login shell of this user the NAS compose command, as $DC and as the
+# alias `dc`, from any directory.
+#
+#   sh deploy/synology/install-shell              # install (idempotent)
+#   sh deploy/synology/install-shell --remove     # take it out again
+#   sh deploy/synology/install-shell --profile FILE
+#
+# It writes one marked block into ~/.profile (root's, when run from `sudo -i` or
+# an SSH login as root). The block holds absolute paths into this clone, so `dc`
+# and $DC work from any directory, and they always carry both -f files: the dev
+# override is never merged in. Run it again after moving the clone; it replaces
+# its own block and touches nothing else in the file.
+#
+# See docs/specs/01-architecture-and-deployment.md, "Synology NAS variant".
+
+set -eu
+
+START='# >>> inventory NAS shell (deploy/synology/install-shell) >>>'
+END='# <<< inventory NAS shell <<<'
+
+die() { echo "install-shell: $*" >&2; exit 1; }
+
+usage() {
+  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+mode=install
+profile="${HOME:-}/.profile"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --remove) mode=remove; shift ;;
+    --profile)
+      [ $# -ge 2 ] || die "--profile needs a file"
+      profile=$2; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown option: $1 (try --help)" ;;
+  esac
+done
+[ -n "$profile" ] && [ "$profile" != "/.profile" ] || die "HOME is not set; pass --profile FILE"
+
+repo=$(cd "$(dirname "$0")/../.." && pwd) || die "cannot resolve the clone's path"
+[ -f "$repo/docker-compose.nas.yml" ] || die "$repo does not look like the clone (no docker-compose.nas.yml)"
+case "$repo" in
+  *[[:space:]]*) die "the clone's path contains whitespace ($repo): \$DC cannot hold it" ;;
+esac
+
+# The profile without any earlier block of ours.
+strip_block() {
+  if [ -f "$profile" ]; then
+    # Whole-line string comparison: the marker lines hold characters that mean
+    # something in a regular expression.
+    awk -v s="$START" -v e="$END" '$0 == s { skip = 1; next } $0 == e { skip = 0; next } !skip' "$profile"
+  fi
+}
+
+tmp=$(mktemp "${TMPDIR:-/tmp}/inventory-profile.XXXXXX") || die "cannot create a temporary file"
+trap 'rm -f "$tmp"' EXIT
+strip_block > "$tmp"
+
+if [ "$mode" = install ]; then
+  # A profile that does not end in a newline would glue our first line onto its last.
+  if [ -s "$tmp" ] && [ "$(tail -c 1 "$tmp" | od -An -c | tr -d ' ')" != '\n' ]; then
+    echo >> "$tmp"
+  fi
+  {
+    echo "$START"
+    echo "export INVENTORY_DIR=\"$repo\""
+    echo 'export DC="docker-compose -p inventory -f $INVENTORY_DIR/docker-compose.yml -f $INVENTORY_DIR/docker-compose.nas.yml"'
+    echo 'alias dc="$DC"'
+    echo "$END"
+  } >> "$tmp"
+fi
+
+# Rewrite in place (cat, not mv) so the file keeps its owner and mode.
+cat "$tmp" > "$profile"
+
+if [ "$mode" = install ]; then
+  echo "Installed in $profile for the clone at $repo."
+  echo "Log in again, or run:  . $profile"
+  echo "Then:  dc ps      (or: \$DC ps)"
+else
+  echo "Removed from $profile."
+fi

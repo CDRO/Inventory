@@ -40,9 +40,9 @@ services:
     profiles: ["disabled"]
 
   app:
-    # A readable name in Container Manager, as in the operator's other stacks.
-    # Nothing depends on it: the sidecar below refers to the service name `app`.
-    container_name: inventory_app
+    # No container_name here, on purpose: Compose refuses to run two instances of
+    # a service that has one, and deploy/synology/update starts a second app
+    # instance next to the old one before it retires the old one.
     volumes:
       - ./uploads:/data/uploads
       - ./imagecache:/data/cache
