@@ -264,11 +264,44 @@ func (c *Cache) Open(ctx context.Context, hash string) ([]byte, string, error) {
 	data, err := os.ReadFile(c.Path(hash))
 	if err != nil {
 		if os.IsNotExist(err) {
+			c.forgetMissing(ctx, hash)
 			return nil, "", store.ErrNotFound
 		}
 		return nil, "", fmt.Errorf("imagesearch: read cached image: %w", err)
 	}
 	return data, row.ContentType, nil
+}
+
+// forgetMissing drops a row whose file is gone, so the cache is a cache miss
+// rather than a dangling reference.
+//
+// This is what makes a restore need no cache-specific step
+// (docs/specs/15-backup-restore-and-export.md). `cached_images` rows are in
+// the backup; the files they name are deliberately not, because they are
+// re-fetchable by definition. Without this, every row restored from a dump
+// would serve a permanent 404 for an image the database insists it has — a
+// broken picture with a row behind it, which no sweep ever cleans up because
+// the orphan sweep only looks the other way, for files with no row.
+//
+// Deleting the row is all that happens here. The re-fetch belongs on the
+// suggestion path, where Fetch already refetches a source URL whose file has
+// vanished: downloading from here would put a provider round trip on an <img>
+// GET, and right after a restore *every* row is fileless, so the first page
+// render would fire one download per picture at once.
+//
+// Only rows already established as store.CachedOK reach this point, which
+// matters: an 'unusable' row has no file by design — it is the negative cache
+// that stops a broken candidate being re-downloaded on every run of the same
+// query — and deleting those would turn that memory off.
+//
+// A failed delete is logged and otherwise ignored. The caller gets the same
+// cache miss either way; the only cost is that the stale row survives to be
+// noticed again on the next request.
+func (c *Cache) forgetMissing(ctx context.Context, hash string) {
+	if err := c.store.DeleteCachedImage(ctx, hash); err != nil {
+		c.log.WarnContext(ctx, "imagesearch: could not drop cached image row whose file is gone",
+			slog.String("hash", hash), slog.Any("err", err))
+	}
 }
 
 // Touch refreshes a hash's recency without blocking the caller.
