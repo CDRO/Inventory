@@ -18,6 +18,8 @@
 .claude/worklog.md
 .claude/*.log
 .claude/*.diff
+.claude/*.txt
+.claude/*.md
 
 # Go build output
 /inventory
