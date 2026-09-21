@@ -279,13 +279,44 @@ function Import-WavePlan {
 }
 
 # ---------------------------------------------------------------------------
+# Native commands whose failure this script wants to HANDLE
+# ---------------------------------------------------------------------------
+
+# Exit code of the last Invoke-Native call.
+$script:NativeExit = 0
+
+# Runs a native command (gh, git, docker, claude) with stderr discarded,
+# returns its stdout, and leaves the exit code in $script:NativeExit.
+#
+# Under $ErrorActionPreference = 'Stop', Windows PowerShell 5.1 turns ANY
+# stderr output of a native command into a terminating NativeCommandError -
+# even with 2>$null, *> $null or 2>&1 (verified on 5.1). So a plain
+# "gh ... 2>$null; if ($LASTEXITCODE -ne 0)" never reaches its own error
+# handling: the first transient network error, rate limit, or stopped Docker
+# daemon would end a multi-day run instead of being treated as "not yet" and
+# retried on the next poll. Lowering the preference for just this call is the
+# only form that works.
+function Invoke-Native {
+    param([scriptblock]$Command)
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $Command 2>$null
+        $script:NativeExit = $LASTEXITCODE
+        return $output
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
+# ---------------------------------------------------------------------------
 # GitHub state (read-only)
 # ---------------------------------------------------------------------------
 
 function Get-IssueState {
     param([int]$Number)
-    $json = gh issue view $Number --repo $GhRepo --json state -q '.state' 2>$null
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($json)) {
+    $json = Invoke-Native { gh issue view $Number --repo $GhRepo --json state -q '.state' }
+    if ($script:NativeExit -ne 0 -or [string]::IsNullOrWhiteSpace($json)) {
         return $null
     }
     return $json.Trim()
@@ -307,8 +338,8 @@ function Wait-ForIssueClosed {
 
 function Test-RemoteBranchExists {
     param([string]$Branch)
-    git -C $RepoRoot ls-remote --exit-code --heads origin $Branch *> $null
-    return ($LASTEXITCODE -eq 0)
+    Invoke-Native { git -C $RepoRoot ls-remote --exit-code --heads origin $Branch } | Out-Null
+    return ($script:NativeExit -eq 0)
 }
 
 function Wait-ForRemoteBranch {
@@ -336,14 +367,21 @@ function Wait-ForRemoteBranch {
 # main checkout's and may already define the same keys.
 function Set-EnvValue {
     param([string]$EnvPath, [string]$Key, [string]$Value)
-    $lines = @(Get-Content -LiteralPath $EnvPath -ErrorAction SilentlyContinue)
+    # .NET IO on purpose, not Get-Content/Set-Content: on Windows PowerShell
+    # 5.1 those read a BOM-less file as ANSI and write ANSI with CRLF, which
+    # would quietly re-encode a UTF-8/LF .env (the setup wizard writes one)
+    # and could corrupt a non-ASCII secret. UTF-8 without BOM, LF, matches
+    # what `docker compose run --rm setup` produced. $EnvPath must be absolute.
+    $lines = @()
+    if (Test-Path -LiteralPath $EnvPath) { $lines = @([System.IO.File]::ReadAllLines($EnvPath)) }
     $pattern = "^$([regex]::Escape($Key))="
     $found = $false
-    $lines = $lines | ForEach-Object {
+    $lines = @($lines | ForEach-Object {
         if ($_ -match $pattern) { $found = $true; "$Key=$Value" } else { $_ }
-    }
+    })
     if (-not $found) { $lines += "$Key=$Value" }
-    Set-Content -LiteralPath $EnvPath -Value $lines
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($EnvPath, (($lines -join "`n") + "`n"), $utf8NoBom)
 }
 
 # Gives a package worktree's .env its own COMPOSE_PROJECT_NAME, HTTP_PORT,
@@ -544,8 +582,8 @@ function Invoke-Wave {
     $marker = Join-Path $PSScriptRoot "konsol-welle-$($Wave.waveIssue).started"
     $openPr = $null
     if (-not $DryRun) {
-        $openPr = gh pr list --repo $GhRepo --head $branch --base main --state open --json number -q '.[0].number' 2>$null
-        if ($LASTEXITCODE -ne 0) { $openPr = $null }
+        $openPr = Invoke-Native { gh pr list --repo $GhRepo --head $branch --base main --state open --json number -q '.[0].number' }
+        if ($script:NativeExit -ne 0) { $openPr = $null }
     }
     if ((Test-Path $marker) -or -not [string]::IsNullOrWhiteSpace($openPr)) {
         $reason = if (Test-Path $marker) { "marker file '$marker'" } else { "open PR #$openPr ($branch -> main)" }
@@ -631,7 +669,7 @@ if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
           "This script must be started from the same kind of PowerShell window where 'claude' normally works " +
           "(not from a heavily restricted/automated environment). Open a new PowerShell window and try again."
 }
-if (-not (claude --help 2>$null | Out-String).Contains('--remote-control')) {
+if (-not (Invoke-Native { claude --help } | Out-String).Contains('--remote-control')) {
     throw "The installed claude version does not know the --remote-control flag. Please run 'claude update' - this script relies on passing Remote Control and the prompt as CLI arguments."
 }
 if (-not (Test-Path (Join-Path $RepoRoot '.env'))) { throw ".env is missing in the repo root - every worktree needs a copy of it." }
@@ -644,15 +682,15 @@ if (-not (Test-Path (Join-Path $RepoRoot '.env'))) { throw ".env is missing in t
 # plugin exist; `docker info` is what actually needs the daemon and
 # therefore actually proves the current user can reach it.
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw "docker not found on PATH." }
-docker compose version *> $null
-if ($LASTEXITCODE -ne 0) { throw "docker compose (the CLI plugin) is not available - install/update Docker Desktop or the compose plugin." }
-docker info *> $null
-if ($LASTEXITCODE -ne 0) {
-    throw "docker compose does not have the rights it needs: 'docker info' failed, which means the Docker daemon is either not running or not reachable by this user (on Linux, typically: this user is not in the 'docker' group, or the socket needs sudo). Fix that first - every package session will otherwise fail its own ship loop at the same first 'docker compose run' in every worktree."
+Invoke-Native { docker compose version } | Out-Null
+if ($script:NativeExit -ne 0) { throw "docker compose (the CLI plugin) is not available - install/update Docker Desktop or the compose plugin." }
+Invoke-Native { docker info } | Out-Null
+if ($script:NativeExit -ne 0) {
+    throw "docker compose does not have the rights it needs: 'docker info' failed, which means the Docker daemon is either not running or not reachable by this user (on Windows/macOS: start Docker Desktop and wait until it reports running; on Linux: typically this user is not in the 'docker' group, or the socket needs sudo). Fix that first - every package session will otherwise fail its own ship loop at the same first 'docker compose run' in every worktree."
 }
 
-$GhRepo = (gh repo view --json nameWithOwner -q '.nameWithOwner' 2>$null)
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($GhRepo)) {
+$GhRepo = (Invoke-Native { gh repo view --json nameWithOwner -q '.nameWithOwner' })
+if ($script:NativeExit -ne 0 -or [string]::IsNullOrWhiteSpace($GhRepo)) {
     throw "Could not derive the GitHub repository from origin (gh repo view). Is gh logged in, and is origin set?"
 }
 $GhRepo = $GhRepo.Trim()

@@ -1,8 +1,8 @@
 {
   "plan": {
-    "name": "Extended core (specs 12-20)",
+    "name": "Extended core (specs 12-28)",
     "planIssue": 97,
-    "conventions": "Keep to the conventions in #97: internal/httpapi/router.go is append-only within a wave - add new routes, never reorder or regroup existing ones. Apply the silent invariants from CLAUDE.md throughout (404-not-403 for unknown and inaccessible storages, is_admin re-queried from the DB on every admin request, debug_reason gated at the single error serializer, same-storage validation on every id, every inventory_batches write paired in the same transaction with an inventory_logs row, EXIF orientation applied before stripping, derived-vs-user expiry cascades touching only derived dates). Every build, test, and migration runs through docker compose - no host toolchain, per docs/specs/01-architecture-and-deployment.md."
+    "conventions": "Keep to the conventions in #97: internal/httpapi/router.go is append-only within a wave - add new routes, never reorder or regroup existing ones. Apply the silent invariants from CLAUDE.md throughout (404-not-403 for unknown and inaccessible storages, is_admin re-queried from the DB on every admin request, debug_reason gated at the single error serializer, same-storage validation on every id, every inventory_batches write paired in the same transaction with an inventory_logs row, EXIF orientation applied before stripping, derived-vs-user expiry cascades touching only derived dates). Every build, test, and migration runs through docker compose - no host toolchain, per docs/specs/01-architecture-and-deployment.md. Any package that adds or renames a file under web/static/ meant to be part of the cached app shell must add it to SHELL_ASSETS in web/static/sw.js and bump CACHE_VERSION (docs/specs/05-frontend-pwa-foundations.md) - on a conflict on that one line, keep the higher version and both packages' additions, because a stale cached shell fails silently."
   },
   "standards": {
     "model": "claude-sonnet-5",
@@ -103,14 +103,43 @@
     },
     {
       "number": 4,
-      "waveIssue": 101,
+      "waveIssue": 108,
       "integrationBranch": "integration/specs-13-20-welle-4",
       "sequential": true,
       "packages": [
         {
+          "specIssue": 105,
+          "slug": "w4-location-quick-create",
+          "branch": "specs-13-20/w4-location-quick-create",
+          "spec": "Spec 26",
+          "focus": "Frontend-only: no backend change and no migration - it composes the existing location GET/POST endpoints from spec 06. Location creation stays a single path (POST /api/storages/{storage_id}/locations): never reimplement its same-storage validation client-side, and scope the modal to the page's own storage_id only. Refresh every open location field from ONE GET after the modal closes, not one per field, and never touch another row's in-progress edits or re-fetch the job being reviewed. Location names are user text: textContent only. The new js/location-modal.js must be added to SHELL_ASSETS in web/static/sw.js with a CACHE_VERSION bump, or installed clients silently never see the trigger. No literal colors - css tokens only. This spec was written as 'spec 13' before the numbers were reassigned; the file and every reference to it now say 26."
+        },
+        {
+          "specIssue": 106,
+          "slug": "w4-category-quick-create",
+          "branch": "specs-13-20/w4-category-quick-create",
+          "spec": "Spec 27",
+          "focus": "Sequential after Spec 26 in this wave - it generalizes 26's modal, so that module must already exist. Frontend-only, no migration. Rename js/location-modal.js to js/tree-modal.js with openTreeManager(storageId, {kind}) and update EVERY call site plus SHELL_ASSETS in web/static/sw.js and CACHE_VERSION - a stale cached shell that still imports the old module name silently breaks 26's location trigger. Category creation goes only through the existing POST /api/storages/{storage_id}/categories, so the category_created scoring (spec 51) and the shelf-life default behave exactly as on categories.html; the flow must work unchanged with gamification switched off. The location field keeps behaving exactly as spec 26 specifies - this changes the module's shape, not its behavior. Written as 'spec 14' before the renumbering."
+        },
+        {
+          "specIssue": 107,
+          "slug": "w4-batch-move-quick-create",
+          "branch": "specs-13-20/w4-batch-move-quick-create",
+          "spec": "Spec 28",
+          "focus": "Sequential after Spec 27 in this wave - call openTreeManager with kind locations, since the modal module is already generalized by then. Frontend-only, no migration. Keep the edit confined to the batch move/split picker on products.html: spec 16 (earlier wave) and spec 20 (later wave) touch the same page. The split/move endpoints stay untouched and authoritative - same-storage target_location_id validation, and a split still writes its two 'move' log rows so net product stock is unchanged. Cancelling the modal must leave the in-progress quantity and selected batch exactly as they were. Written as 'spec 15' before the renumbering."
+        }
+      ]
+    },
+    {
+      "number": 5,
+      "waveIssue": 101,
+      "integrationBranch": "integration/specs-13-20-welle-5",
+      "sequential": true,
+      "packages": [
+        {
           "specIssue": 96,
-          "slug": "w4-barcode",
-          "branch": "specs-13-20/w4-barcode",
+          "slug": "w5-barcode",
+          "branch": "specs-13-20/w5-barcode",
           "spec": "Spec 20",
           "model": "claude-opus-5",
           "effort": "xhigh",
@@ -118,8 +147,8 @@
         },
         {
           "specIssue": 103,
-          "slug": "w4-barcode-hot-cache",
-          "branch": "specs-13-20/w4-barcode-hot-cache",
+          "slug": "w5-barcode-hot-cache",
+          "branch": "specs-13-20/w5-barcode-hot-cache",
           "spec": "Spec 24",
           "model": "claude-sonnet-5",
           "effort": "high",
@@ -128,17 +157,17 @@
       ]
     },
     {
-      "number": 5,
+      "number": 6,
       "waveIssue": 102,
-      "integrationBranch": "integration/specs-13-20-welle-5",
+      "integrationBranch": "integration/specs-13-20-welle-6",
       "sequential": false,
       "packages": [
         {
           "specIssue": 95,
-          "slug": "w5-localization",
-          "branch": "specs-13-20/w5-localization",
+          "slug": "w6-localization",
+          "branch": "specs-13-20/w6-localization",
           "spec": "Spec 19",
-          "focus": "This package touches data-i18n markup across nearly every page in web/static/ - that is exactly why it runs alone, last, in its own wave, after every other package's UI has already landed. The admin area stays English-only, deliberately; do not localize the Go templates. The key-parity test between en.json and de.json is what keeps the catalogs from rotting - make sure it actually fails when a key is added to one and not the other, and that every translated string is inserted with textContent, never innerHTML."
+          "focus": "This package touches data-i18n markup across nearly every page in web/static/ - that is exactly why it runs alone, last, in its own wave, after every other package's UI has already landed - including the quick-create modal triggers and labels from specs 26-28 and the barcode offer from spec 20. The admin area stays English-only, deliberately; do not localize the Go templates. The key-parity test between en.json and de.json is what keeps the catalogs from rotting - make sure it actually fails when a key is added to one and not the other, and that every translated string is inserted with textContent, never innerHTML."
         }
       ]
     }
