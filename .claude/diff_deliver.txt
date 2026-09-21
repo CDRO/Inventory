@@ -1,0 +1,260 @@
+diff --git a/internal/notify/deliver.go b/internal/notify/deliver.go
+new file mode 100644
+index 0000000..6a9f120
+--- /dev/null
++++ b/internal/notify/deliver.go
+@@ -0,0 +1,254 @@
++package notify
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"net/url"
++	"strings"
++	"time"
++
++	"github.com/CDRO/Inventory/internal/store"
++)
++
++// DeliveryTimeout bounds one outbound request, per
++// docs/specs/17-expiry-notifications.md. A relay on the same NAS answers in
++// milliseconds; ten seconds is already generous, and the point of the bound
++// is that a target which has stopped answering cannot hold an hourly tick
++// open indefinitely.
++const DeliveryTimeout = 10 * time.Second
++
++// gotifyPriority is the priority gotify is asked for. 4 is its "normal-high"
++// band: it notifies without the sound and vibration of a true alarm, which is
++// the right weight for "your yogurt goes off tomorrow".
++const gotifyPriority = 4
++
++// maxDrain is how much of a response body is read before it is discarded.
++//
++// Only the status code is recorded (docs/specs/17-expiry-notifications.md),
++// but draining a little of the body lets the connection be reused, and
++// bounding the drain means a target answering with an endless stream costs
++// nothing. Nothing read here is ever stored or shown.
++const maxDrain = 4 << 10
++
++// ErrUnsupportedScheme is a target URL that is not http or https.
++var ErrUnsupportedScheme = errors.New("notify: only http and https targets are supported")
++
++// ErrNoHost is a target URL with no host to send to.
++var ErrNoHost = errors.New("notify: the target URL has no host")
++
++// ParseTarget validates a member-supplied target URL.
++//
++// It is exported because the same check has to run in two places: the PUT
++// handler rejects a bad URL with a 422 the person can act on, and delivery
++// re-checks rather than trusting that a row in the database went through that
++// handler. Restricting the scheme is the one restriction that matters here —
++// file://, gopher:// and friends are how a server-side fetcher gets talked
++// into reading something local.
++//
++// What it deliberately does not do is resolve the host or judge the address
++// behind it. The spec's trust posture is explicit: the target is operator
++// -supplied inside one household, on a LAN where the interesting addresses
++// are private by definition, and a private-range blocklist would break the
++// normal case (a ntfy container next door) while stopping nobody.
++func ParseTarget(raw string) (*url.URL, error) {
++	trimmed := strings.TrimSpace(raw)
++	if trimmed == "" {
++		return nil, ErrNoHost
++	}
++	parsed, err := url.Parse(trimmed)
++	if err != nil {
++		return nil, fmt.Errorf("notify: %w", err)
++	}
++	switch parsed.Scheme {
++	case "http", "https":
++	default:
++		return nil, ErrUnsupportedScheme
++	}
++	if parsed.Host == "" {
++		return nil, ErrNoHost
++	}
++	return parsed, nil
++}
++
++// newClient builds the one client this package uses.
++//
++// Three properties are the whole trust posture of the outbound request
++// (docs/specs/17-expiry-notifications.md):
++//
++//   - **No redirects are followed.** ErrUseLastResponse hands the 3xx back as
++//     an ordinary response, which the status check below then treats as a
++//     failure. A followed redirect is how a target that looks like a ntfy
++//     topic reaches something else entirely on the next hop.
++//   - **No cookie jar**, so nothing the server holds can ride along. There is
++//     nothing to attach in the first place: the request carries the digest
++//     and the configured token, and no session, API key or .env value is ever
++//     in scope here.
++//   - **A timeout on every attempt**, covering connect, write and read
++//     together.
++func newClient() *http.Client {
++	return &http.Client{
++		Timeout: DeliveryTimeout,
++		CheckRedirect: func(*http.Request, []*http.Request) error {
++			return http.ErrUseLastResponse
++		},
++	}
++}
++
++// deliver posts one message to one target and returns nil, or a failure whose
++// Summary is safe to store.
++func deliver(ctx context.Context, client *http.Client, settings store.NotificationSettings, title, message string, items []payloadItem) error {
++	target, err := ParseTarget(settings.URL)
++	if err != nil {
++		return &DeliveryError{summary: "the configured URL is not usable"}
++	}
++
++	req, err := buildRequest(ctx, settings, target, title, message, items)
++	if err != nil {
++		return &DeliveryError{summary: "the message could not be built", err: err}
++	}
++
++	resp, err := client.Do(req)
++	if err != nil {
++		// err.Error() is never used for the summary: net/http embeds the
++		// request URL in it, and a gotify URL carries the token in its query
++		// string. last_result is returned by every read of the settings row,
++		// so that string would publish the token.
++		if errors.Is(err, context.DeadlineExceeded) || isTimeout(err) {
++			return &DeliveryError{summary: fmt.Sprintf("no answer within %s", DeliveryTimeout), err: err}
++		}
++		return &DeliveryError{summary: "the target could not be reached", err: err}
++	}
++	defer resp.Body.Close()
++	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrain))
++
++	switch {
++	case resp.StatusCode >= 200 && resp.StatusCode < 300:
++		return nil
++	case resp.StatusCode >= 300 && resp.StatusCode < 400:
++		// Not followed, and not silently tolerated either: a target that
++		// answers a POST with a redirect is not the target that was
++		// configured.
++		return &DeliveryError{summary: fmt.Sprintf("the target redirected (HTTP %d); redirects are not followed", resp.StatusCode)}
++	default:
++		return &DeliveryError{summary: fmt.Sprintf("the target answered HTTP %d", resp.StatusCode)}
++	}
++}
++
++// buildRequest shapes the request for one kind.
++//
++// The three kinds differ only in envelope: ntfy takes the text as the body,
++// gotify takes JSON at a sub-path with the token in the query string, and the
++// webhook takes the structured payload for the operator to script against.
++func buildRequest(ctx context.Context, settings store.NotificationSettings, target *url.URL, title, message string, items []payloadItem) (*http.Request, error) {
++	switch settings.Kind {
++	case store.NotificationNtfy:
++		req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), strings.NewReader(message))
++		if err != nil {
++			return nil, err
++		}
++		req.Header.Set("Content-Type", "text/plain; charset=utf-8")
++		req.Header.Set("Title", title)
++		setBearer(req, settings.Token)
++		return req, nil
++
++	case store.NotificationGotify:
++		endpoint := target.JoinPath("message")
++		if settings.Token != "" {
++			query := endpoint.Query()
++			query.Set("token", settings.Token)
++			endpoint.RawQuery = query.Encode()
++		}
++		body, err := json.Marshal(struct {
++			Title    string `json:"title"`
++			Message  string `json:"message"`
++			Priority int    `json:"priority"`
++		}{Title: title, Message: message, Priority: gotifyPriority})
++		if err != nil {
++			return nil, err
++		}
++		return jsonRequest(ctx, endpoint.String(), body, "")
++
++	case store.NotificationWebhook:
++		body, err := json.Marshal(struct {
++			Title   string        `json:"title"`
++			Message string        `json:"message"`
++			Items   []payloadItem `json:"items"`
++		}{Title: title, Message: message, Items: items})
++		if err != nil {
++			return nil, err
++		}
++		return jsonRequest(ctx, target.String(), body, settings.Token)
++
++	default:
++		return nil, fmt.Errorf("notify: unknown kind %q", settings.Kind)
++	}
++}
++
++func jsonRequest(ctx context.Context, endpoint string, body []byte, token string) (*http.Request, error) {
++	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
++	if err != nil {
++		return nil, err
++	}
++	req.Header.Set("Content-Type", "application/json")
++	setBearer(req, token)
++	return req, nil
++}
++
++// setBearer attaches the configured token, and only ever that. The gotify
++// kind does not use it — its token travels in the query string, which is
++// what gotify's own API expects.
++func setBearer(req *http.Request, token string) {
++	if token == "" {
++		return
++	}
++	req.Header.Set("Authorization", "Bearer "+token)
++}
++
++// DeliveryError is a failed send, carrying a summary written for the person
++// reading the settings page.
++//
++// The distinction between summary and err is the point of the type: summary
++// is stored in last_result and shown in the UI, err is logged. Anything
++// derived from net/http's own error text belongs only in the second, because
++// that text contains the request URL and a gotify URL contains the token.
++type DeliveryError struct {
++	summary string
++	err     error
++}
++
++// Summary is the short, storable description of what went wrong. It never
++// contains the target URL or the token.
++func (e *DeliveryError) Summary() string { return e.summary }
++
++func (e *DeliveryError) Error() string {
++	if e.err != nil {
++		return e.summary + ": " + e.err.Error()
++	}
++	return e.summary
++}
++
++func (e *DeliveryError) Unwrap() error { return e.err }
++
++// isTimeout reports whether err is net/http's own timeout, which does not
++// wrap context.DeadlineExceeded when it comes from Client.Timeout.
++func isTimeout(err error) bool {
++	var timeout interface{ Timeout() bool }
++	return errors.As(err, &timeout) && timeout.Timeout()
++}
++
++// NewDeliveryError builds a failure carrying only a curated summary.
++//
++// Exported for the callers that have to report a delivery outcome without
++// having performed the delivery themselves — the HTTP layer's tests above
++// all, which need a failure shaped exactly like the one the settings page
++// will render. The summary is the caller's to write, and the rule it must
++// follow is the same one this file follows: never derive it from an error
++// string that contains the target URL.
++func NewDeliveryError(summary string) *DeliveryError {
++	return &DeliveryError{summary: summary}
++}

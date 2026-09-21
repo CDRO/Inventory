@@ -1,0 +1,312 @@
+diff --git a/internal/store/notifications.go b/internal/store/notifications.go
+new file mode 100644
+index 0000000..c4616c7
+--- /dev/null
++++ b/internal/store/notifications.go
+@@ -0,0 +1,306 @@
++package store
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"time"
++
++	"github.com/google/uuid"
++	"github.com/jackc/pgx/v5"
++)
++
++// The database side of docs/specs/17-expiry-notifications.md: one opt-in
++// configuration row per storage, the once-a-day claim the scheduler makes
++// against it, and the query that gathers what a digest would be about.
++//
++// No bucketing happens here. The query below fetches every batch that could
++// possibly land in a bucket and internal/expiry.Classify decides which one it
++// lands in, because the spec requires the digest and the dashboard to share a
++// single classification — a WHERE clause spelling out "within three days"
++// would be exactly the second definition that requirement forbids.
++
++// Notification kinds, mirroring the CHECK constraint on
++// notification_settings.kind. Delivery differs per kind (internal/notify),
++// but the set of them is a fact about the schema.
++const (
++	NotificationNtfy    = "ntfy"
++	NotificationGotify  = "gotify"
++	NotificationWebhook = "webhook"
++)
++
++// Recorded outcomes of a run, written to notification_settings.last_result.
++// A failure records a short summary instead of one of these.
++const (
++	// NotificationSent means the digest reached the target.
++	NotificationSent = "sent"
++	// NotificationEmpty means every included bucket was empty, so nothing was
++	// sent. A daily "all fine" message is how a channel gets muted.
++	NotificationEmpty = "empty"
++)
++
++// NotificationSettings is one storage's digest configuration.
++//
++// Token is in this struct because delivery needs it. It is never in a
++// response: the HTTP layer reports whether one is set and nothing more
++// (docs/specs/17-expiry-notifications.md).
++type NotificationSettings struct {
++	StorageID   uuid.UUID
++	Enabled     bool
++	Kind        string
++	URL         string
++	Token       string
++	SendHour    int
++	IncludeSoon bool
++	LastRunAt   *time.Time
++	LastResult  *string
++	UpdatedAt   time.Time
++}
++
++// NotificationSettingsInput is a save.
++//
++// Token is a three-state field, which the HTTP layer maps from the request
++// body: nil keeps whatever is stored, a pointer to "" clears it, and a
++// pointer to a value replaces it. The middle state has to be expressible
++// because the value is never sent to a client — a form that simply does not
++// mention the token must not silently erase it, and a person who wants it
++// gone must still have a way to say so.
++type NotificationSettingsInput struct {
++	Enabled     bool
++	Kind        string
++	URL         string
++	Token       *string
++	SendHour    int
++	IncludeSoon bool
++}
++
++// DigestItem is one line of a digest: what it is, how much of it there is,
++// where it sits, and when it goes off.
++//
++// LocationPath is the full ancestor path ("Basement > Right Shelf"), resolved
++// here rather than client-side because the message has no client — it is
++// plain text posted to somebody's phone.
++type DigestItem struct {
++	ProductName    string
++	Quantity       int
++	LocationPath   string
++	ExpirationDate time.Time
++}
++
++// NotificationSettingsFor returns one storage's configuration, or ErrNotFound
++// when it has never been configured.
++//
++// "Never configured" is a real and common state — the table starts empty and
++// stays that way for every household that does not opt in — so the caller
++// distinguishes it rather than getting a zero-valued row that reads like a
++// disabled configuration somebody chose.
++func (s *Store) NotificationSettingsFor(ctx context.Context, storageID uuid.UUID) (*NotificationSettings, error) {
++	row := s.pool.QueryRow(ctx, `
++		SELECT storage_id, enabled, kind, url, coalesce(token, ''), send_hour,
++		       include_soon, last_run_at, last_result, updated_at
++		  FROM notification_settings
++		 WHERE storage_id = $1`, storageID)
++
++	settings, err := scanNotificationSettings(row)
++	if err != nil {
++		if errors.Is(err, ErrNotFound) {
++			return nil, err
++		}
++		return nil, fmt.Errorf("store: load notification settings: %w", err)
++	}
++	return settings, nil
++}
++
++// SaveNotificationSettings writes one storage's configuration and returns the
++// stored row.
++//
++// Any member may call this: rights inside a storage are flat
++// (docs/specs/03-auth-and-multi-tenancy.md), and the digest is about shared
++// food. storage_id is the primary key, so a second save updates the one row
++// rather than adding a competing configuration.
++//
++// last_run_at is deliberately left alone. Turning notifications on at 09:00
++// when the send hour is 08:00 must not produce a digest for a window that has
++// already passed today, and a storage already notified today must not be
++// notified again because somebody corrected a typo in the URL.
++func (s *Store) SaveNotificationSettings(ctx context.Context, storageID uuid.UUID, in NotificationSettingsInput) (*NotificationSettings, error) {
++	if in.SendHour < 0 || in.SendHour > 23 {
++		return nil, fmt.Errorf("%w: send_hour must be between 0 and 23", ErrValidation)
++	}
++	switch in.Kind {
++	case NotificationNtfy, NotificationGotify, NotificationWebhook:
++	default:
++		return nil, fmt.Errorf("%w: unknown notification kind %q", ErrValidation, in.Kind)
++	}
++	if in.URL == "" {
++		return nil, fmt.Errorf("%w: url is required", ErrValidation)
++	}
++
++	// nullif($5::text, '') rather than the pointer itself: "cleared" and "absent"
++	// are different requests, but an empty token and no token are the same
++	// stored state, and NULL is the honest one.
++	//
++	// The CASE on the conflict path is what makes a nil Token mean "keep":
++	// $5 is NULL only when the caller said nothing about the token, and then
++	// the column keeps the value it already has.
++	row := s.pool.QueryRow(ctx, `
++		INSERT INTO notification_settings
++		            (storage_id, enabled, kind, url, token, send_hour, include_soon, updated_at)
++		     VALUES ($1, $2, $3, $4, nullif($5::text, ''), $6, $7, now())
++		ON CONFLICT (storage_id) DO UPDATE
++		   SET enabled      = EXCLUDED.enabled,
++		       kind         = EXCLUDED.kind,
++		       url          = EXCLUDED.url,
++		       token        = CASE WHEN $5::text IS NULL THEN notification_settings.token
++		                           ELSE nullif($5::text, '') END,
++		       send_hour    = EXCLUDED.send_hour,
++		       include_soon = EXCLUDED.include_soon,
++		       updated_at   = now()
++		RETURNING storage_id, enabled, kind, url, coalesce(token, ''), send_hour,
++		          include_soon, last_run_at, last_result, updated_at`,
++		storageID, in.Enabled, in.Kind, in.URL, in.Token, in.SendHour, in.IncludeSoon)
++
++	settings, err := scanNotificationSettings(row)
++	if err != nil {
++		return nil, fmt.Errorf("store: save notification settings: %w", err)
++	}
++	return settings, nil
++}
++
++// ClaimDueNotifications marks every storage due at now as run and returns
++// their configurations, in one statement.
++//
++// Claiming before sending rather than recording afterwards is the whole
++// once-a-day guarantee. A process that crashed between posting a digest and
++// writing the row down would, on a select-then-send ordering, send the same
++// digest again on every restart within that hour. Here the claim is the
++// database's own decision, taken once: a second process ticking the same
++// hour, or the same process restarted, finds nothing left to claim.
++//
++// The cost is that a delivery failing after the claim is not retried today.
++// That is the spec's explicit choice — there is no retry queue, the next
++// day's run is the retry, and the test button is the debugging tool.
++//
++// dayStart is the start of the current day in the server's own zone, supplied
++// by the caller. It is deliberately not CURRENT_DATE: that is the database
++// session's idea of today, a second definition of the same word, and it
++// disagrees with send_hour's whenever the two containers differ.
++func (s *Store) ClaimDueNotifications(ctx context.Context, now, dayStart time.Time) ([]NotificationSettings, error) {
++	rows, err := s.pool.Query(ctx, `
++		UPDATE notification_settings
++		   SET last_run_at = $1
++		 WHERE enabled
++		   AND send_hour = $2
++		   AND (last_run_at IS NULL OR last_run_at < $3)
++		RETURNING storage_id, enabled, kind, url, coalesce(token, ''), send_hour,
++		          include_soon, last_run_at, last_result, updated_at`,
++		now, now.Hour(), dayStart)
++	if err != nil {
++		return nil, fmt.Errorf("store: claim due notifications: %w", err)
++	}
++	defer rows.Close()
++
++	out := []NotificationSettings{}
++	for rows.Next() {
++		settings, err := scanNotificationSettings(rows)
++		if err != nil {
++			return nil, fmt.Errorf("store: scan due notification: %w", err)
++		}
++		out = append(out, *settings)
++	}
++	return out, rows.Err()
++}
++
++// RecordNotificationResult writes the outcome of a run.
++//
++// result is NotificationSent, NotificationEmpty, or a short failure summary
++// written for the person reading the settings page. It must never be built
++// from a transport error's own text: that text contains the request URL, and
++// a gotify URL carries the token in its query string — last_result is
++// returned by every read of this row, so that would publish the one value the
++// rest of this file is careful never to return.
++func (s *Store) RecordNotificationResult(ctx context.Context, storageID uuid.UUID, result string) error {
++	if _, err := s.pool.Exec(ctx, `
++		UPDATE notification_settings SET last_result = $2 WHERE storage_id = $1`,
++		storageID, result); err != nil {
++		return fmt.Errorf("store: record notification result: %w", err)
++	}
++	return nil
++}
++
++// ExpiringBatchesBefore returns every batch of one storage that still holds
++// stock and expires strictly before until, nearest first.
++//
++// until is the far edge of the widest bucket, computed by the caller from
++// internal/expiry's window constants. Passing it in rather than writing the
++// number here is what keeps one definition of the urgency windows: this
++// query's job is "fetch the candidates", and deciding which bucket each one
++// falls into is expiry.Classify's.
++//
++// quantity > 0 excludes a batch consumed down to nothing. It is still a row —
++// the ledger needs it — but there is no yogurt left to warn anybody about.
++//
++// Only this storage's rows, joined through products.storage_id, like every
++// other read in the system (docs/specs/03-auth-and-multi-tenancy.md). The
++// location path is resolved by the same bounded ancestor walk as
++// AnalyticsLocationDistribution, so corrupt data cannot turn it into an
++// unbounded query.
++func (s *Store) ExpiringBatchesBefore(ctx context.Context, storageID uuid.UUID, until time.Time) ([]DigestItem, error) {
++	rows, err := s.pool.Query(ctx, `
++		WITH RECURSIVE due AS (
++			SELECT b.id, b.location_id, b.quantity, b.expiration_date, p.name AS product_name
++			  FROM inventory_batches b
++			  JOIN products p ON p.id = b.product_id
++			 WHERE p.storage_id = $1
++			   AND b.quantity > 0
++			   AND b.expiration_date IS NOT NULL
++			   AND b.expiration_date < $2
++		),
++		chain AS (
++			SELECT l.id AS origin_id, l.id, l.parent_id, l.name, 0 AS depth
++			  FROM locations l
++			 WHERE l.id IN (SELECT location_id FROM due)
++			UNION ALL
++			SELECT chain.origin_id, l.id, l.parent_id, l.name, chain.depth + 1
++			  FROM locations l
++			  JOIN chain ON l.id = chain.parent_id
++			 WHERE chain.depth < $3
++		),
++		paths AS (
++			SELECT origin_id, string_agg(name, ' > ' ORDER BY depth DESC) AS full_path
++			  FROM chain
++			 GROUP BY origin_id
++		)
++		SELECT due.product_name, due.quantity, coalesce(paths.full_path, ''), due.expiration_date
++		  FROM due
++		  LEFT JOIN paths ON paths.origin_id = due.location_id
++		 ORDER BY due.expiration_date, due.product_name`,
++		storageID, until, maxTreeDepth)
++	if err != nil {
++		return nil, fmt.Errorf("store: expiring batches: %w", err)
++	}
++	defer rows.Close()
++
++	out := []DigestItem{}
++	for rows.Next() {
++		var item DigestItem
++		if err := rows.Scan(&item.ProductName, &item.Quantity, &item.LocationPath, &item.ExpirationDate); err != nil {
++			return nil, fmt.Errorf("store: scan expiring batch: %w", err)
++		}
++		out = append(out, item)
++	}
++	return out, rows.Err()
++}
++
++func scanNotificationSettings(row rowScanner) (*NotificationSettings, error) {
++	var s NotificationSettings
++	err := row.Scan(&s.StorageID, &s.Enabled, &s.Kind, &s.URL, &s.Token, &s.SendHour,
++		&s.IncludeSoon, &s.LastRunAt, &s.LastResult, &s.UpdatedAt)
++	if errors.Is(err, pgx.ErrNoRows) {
++		return nil, ErrNotFound
++	}
++	if err != nil {
++		return nil, err
++	}
++	return &s, nil
++}

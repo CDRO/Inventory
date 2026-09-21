@@ -225,6 +225,15 @@ type DeliveryError struct {
 // contains the target URL or the token.
 func (e *DeliveryError) Summary() string { return e.summary }
 
+// Error is the full description, for a log line and nothing else.
+//
+// **It may contain the target URL and the token, and must never be stored or
+// returned.** net/http puts the request URL into its own error text, a gotify
+// URL carries the token in its query string, and last_result is returned by
+// every read of the settings row — so writing this string there would publish
+// the one value this package exists to keep out of responses. Summary is the
+// storable half; reach for that one whenever the destination is a database
+// column or an API response rather than a log.
 func (e *DeliveryError) Error() string {
 	if e.err != nil {
 		return e.summary + ": " + e.err.Error()
@@ -232,6 +241,9 @@ func (e *DeliveryError) Error() string {
 	return e.summary
 }
 
+// Unwrap exposes the transport error for errors.Is and errors.As. It carries
+// the same disclosure risk as Error: inspect it, match on it, log it — never
+// serialize it.
 func (e *DeliveryError) Unwrap() error { return e.err }
 
 // isTimeout reports whether err is net/http's own timeout, which does not
