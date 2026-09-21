@@ -54,12 +54,22 @@ decides from the database state of *this request*:
 |---|---|
 | No valid session | `302` to the login page — the same target the SPA's `401` handling uses |
 | Valid session, at least one `storage_members` row | `302` to `/storages.html` |
-| Valid session, zero memberships, `users.is_admin = TRUE` | `302` to `/admin` |
-| Valid session, zero memberships, not an admin | `302` to `/storages.html?empty=1` |
+| Valid session, zero memberships, `users.is_admin = TRUE`, **browser session** | `302` to `/admin` |
+| Valid session, zero memberships, anyone else | `302` to `/storages.html?empty=1` |
 
 - `is_admin` is read from the database on every call, exactly as the admin gate
   does. It is never cached on the session and never taken from anything the
   client sent.
+- **A paired device session is routed as a non-admin, whatever its user's
+  `is_admin` says.** `12-client-api-contract.md` puts the admin area outside
+  the client contract — "a paired client is never an admin client" — and
+  `RequireAdmin` already refuses a device session one gate further in. Without
+  the same rule here, the `Location` would be a readable `is_admin` oracle over
+  exactly the transport the admin area excludes, without the device ever
+  following the redirect; and following it would land on that exclusion's
+  `404`, which is a dead end rather than guidance. The row above is therefore
+  about a browser navigating, which is the only caller for which "send them to
+  the admin view" is a useful answer at all.
 - Every response carries `Cache-Control: no-store`.
 - `GET` only. Any other method gets the standard `404` envelope of every
   unrouted request (`04-backend-api-conventions.md`).
@@ -100,8 +110,9 @@ directly; only the storages page bounces them.
 
 - [ ] `GET /no-storages` with no valid session is a `302` to the login page.
 - [ ] With a valid session and at least one membership it is a `302` to `/storages.html`, whether or not the user is an admin.
-- [ ] With a valid session, zero memberships and `is_admin = TRUE` it is a `302` to `/admin`.
+- [ ] With a valid **browser** session, zero memberships and `is_admin = TRUE` it is a `302` to `/admin`.
 - [ ] With a valid session, zero memberships and `is_admin = FALSE` it is a `302` to `/storages.html?empty=1`.
+- [ ] With a valid **paired device** session, zero memberships and `is_admin = TRUE` it is a `302` to `/storages.html?empty=1` — identical to what a non-admin gets, in the `Location` and in the body (`12-client-api-contract.md`).
 - [ ] `is_admin` is read from the database on each request: a test uses one session, calls the route, revokes the user's admin flag directly in the database, calls it again and sees the redirect change from `/admin` to `/storages.html?empty=1` without a new login.
 - [ ] Every response from the route carries `Cache-Control: no-store`; any method other than `GET` returns the standard `404` envelope.
 - [ ] No JSON response and no cookie changes: `GET /api/auth/me` still returns exactly `{id, username, display_name, storages}` and no field that differs for an admin.
