@@ -54,7 +54,7 @@ services:
   ts-inventory:
     image: tailscale/tailscale:latest
     container_name: ts-inventory
-    network_mode: service:inventory_app
+    network_mode: service:app
     environment:
       # Becomes https://inventory.<tailnet>.ts.net (needs MagicDNS and HTTPS
       # certificates enabled for the tailnet).
