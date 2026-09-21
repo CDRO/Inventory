@@ -62,8 +62,8 @@ makes `go test` and `go vet` work at all, since the production image is
 
 The two commands that need the *production* image therefore pin the base file
 with `-f docker-compose.yml` (on the operator's own Synology NAS the pin is the
-two-file `deploy/synology/compose` wrapper instead — see "Synology NAS variant",
-and do not use the single-file form there):
+two-file `-f docker-compose.yml -f docker-compose.nas.yml` instead — see
+"Synology NAS variant", and do not use the single-file form there):
 
 - **Migrations**, because `migrate` is a subcommand of the compiled
   `/inventory` binary, which exists only in the production image. Note also
@@ -213,7 +213,7 @@ containers left running — never collide on a host port or a container name.
 ├── docker-compose.override.yml # dev overrides; auto-loaded by Compose
 ├── docker-compose.nas.yml      # Synology NAS layer, on top of the base file
 ├── deploy/
-│   └── synology/               # compose wrapper + Tailscale serve config for the NAS
+│   └── synology/               # optional compose shorthand + Tailscale serve config for the NAS
 ├── .env.example
 └── PROJECT_PLAN.md             # original informal notes — superseded by docs/specs/
 ```
@@ -538,8 +538,8 @@ services:
 - **Staging:** operator's PC, Docker Desktop, dev compose overrides,
   `APP_ENV=dev`, frontend served from disk.
 - **Production:** Synology NAS, Container Manager, base `docker-compose.yml`
-  only (on the operator's own NAS: the base plus one layer, always through
-  `deploy/synology/compose` — see "Synology NAS variant") — and that has to be
+  only (on the operator's own NAS: the base plus one layer, both files pinned on
+  every call — see "Synology NAS variant") — and that has to be
   stated on the command line, because Compose
   auto-loads `docker-compose.override.yml` when it is present. Because the
   Dockerfile performs the whole build, deploying is:
@@ -604,11 +604,19 @@ as a Synology package in front of Traefik. All three are one tracked file,
 unchanged base file — so the clone on the NAS never carries a local edit, and
 `git pull` has nothing to trip over.
 
-**Selecting it: the wrapper.** Every command on the NAS goes through
-[`deploy/synology/compose`](../../deploy/synology/compose), a short shell
-wrapper that runs `docker-compose -p inventory -f docker-compose.yml -f
-docker-compose.nas.yml "$@"` from the repository root. The explicit `-f` pair is
-the pin that "Deployment model" calls a security control: it keeps
+**Selecting it: two files, pinned on every call.** Every command on the NAS is
+`docker-compose` (with the hyphen, see "Compose version" below) followed by the
+same prefix, written out in full. In an SSH session on the NAS, in the clone's
+folder, set it once and use it as `$DC` (the variable is gone after a logout, so
+set it again after every login):
+
+```console
+$ cd /volume1/docker/inventory        # the clone; adjust the path
+$ DC="docker-compose -p inventory -f docker-compose.yml -f docker-compose.nas.yml"
+```
+
+The rest of this section writes `$DC …` for that command. The explicit `-f` pair
+is the pin that "Deployment model" calls a security control: it keeps
 `docker-compose.override.yml` (`APP_ENV=dev`, `debug_reason` in error responses,
 port 8000 published past the ingress) out of the NAS stack. The pin is spelled
 out on every call, and not kept in the environment, on purpose. An earlier design
@@ -617,9 +625,17 @@ open: the setup wizard rewrites `.env` from `.env.example`, dropping every line
 that is not in the template, and the command it then prints
 (`docker compose up -d --force-recreate`) has no `-f`, so it would load the dev
 override and start a dev-flavoured stack on fresh named volumes next to the real
-data in `./pgdata`. The project name is fixed in the wrapper for the same reason,
-and so that container, network and volume names stay the same wherever the clone
-lives.
+data in `./pgdata`. The project name (`-p inventory`) is fixed for the same
+reason, and so that container, network and volume names stay the same wherever
+the clone lives.
+
+[`deploy/synology/compose`](../../deploy/synology/compose) is the same prefix as
+a script — `deploy/synology/compose up -d` instead of `$DC up -d` — and is
+optional. It exists only in a clone that has pulled `main` since it was added, it
+must keep its executable bit (otherwise start it as `sh deploy/synology/compose
+…`), and it needs LF line endings (a CRLF checkout breaks its first line;
+`.gitattributes` pins that for the repository, not for a copy made by hand). If
+it does not run, use `$DC`: nothing in this section depends on the script.
 
 Consequently, on the NAS:
 
@@ -631,13 +647,13 @@ Consequently, on the NAS:
   commands elsewhere in this document and in the README are for a plain clone,
   not for this NAS.
 - **Do not copy the command the setup wizard prints when it finishes** (`docker
-  compose up -d`); use the wrapper.
+  compose up -d`); use `$DC up -d`.
 - **Never put a `compose.yml` (or `compose.yaml`) into the clone.** Compose
   prefers those names over `docker-compose.yml` and silently ignores the latter
   (it prints only a warning), so a private copy would replace the repository's
   file for any command that does not pin its files with `-f`.
-- Check before starting anything: `deploy/synology/compose config --services`
-  must list `app`, `db` and `ts-inventory` and must not list `traefik`.
+- Check before starting anything: `$DC config --services` must list `app`, `db`
+  and `ts-inventory` and must not list `traefik`.
 
 **Ingress: a Tailscale sidecar instead of Traefik.** `ts-inventory` publishes
 the app on the tailnet over HTTPS (`https://inventory.<tailnet>.ts.net`) by
@@ -668,13 +684,13 @@ the stack publishes no host port at all: nothing can clash with DSM's own
   against and cannot reach a restarted one until it is restarted too. That
   includes Docker's own automatic restart of `app` after a crash: nothing
   restarts the sidecar then, so recovery is manual —
-  `deploy/synology/compose restart ts-inventory`. `up -d` recreates both, so the
+  `$DC restart ts-inventory`. `up -d` recreates both, so the
   update flow below needs no extra step. (Giving the sidecar its own network and
   proxying to `http://app:8000`, which `serve.json` already does, would remove
   the coupling; the operator chose the shared namespace to match their other
   stacks.)
 - **The auth key is passed once, on the command line, and never written to a
-  tracked file:** `TS_AUTHKEY=tskey-auth-… deploy/synology/compose up -d`. It
+  tracked file:** `TS_AUTHKEY=tskey-auth-… $DC up -d`. It
   still lands in the shell history and, through interpolation, in the
   container's configuration (`docker inspect`, the Container Manager UI) until
   the container is recreated. Use a one-off key with a short expiry, and revoke
@@ -723,22 +739,26 @@ background sweep and serves nothing useful. The bind-mounted `./pgdata` starts
 empty, so this applies to every new clone.
 
 ```console
-$ deploy/synology/compose run --rm setup           # writes .env
-$ deploy/synology/compose build
-$ deploy/synology/compose run --rm app migrate up  # also creates the initial admin
-$ TS_AUTHKEY=tskey-auth-… deploy/synology/compose up -d
+$ cd /volume1/docker/inventory        # the clone; adjust the path
+$ DC="docker-compose -p inventory -f docker-compose.yml -f docker-compose.nas.yml"
+$ $DC run --rm setup           # writes .env
+$ $DC build
+$ $DC run --rm app migrate up  # also creates the initial admin
+$ TS_AUTHKEY=tskey-auth-… $DC up -d
 ```
 
-The wizard ends by printing `docker compose up -d`; ignore it and use the wrapper.
+The wizard ends by printing `docker compose up -d`; ignore it and use `$DC up -d`.
 
 **Updating.**
 
 ```console
+$ cd /volume1/docker/inventory        # the clone; adjust the path
+$ DC="docker-compose -p inventory -f docker-compose.yml -f docker-compose.nas.yml"
 $ git pull
-$ deploy/synology/compose pull ts-inventory     # the sidecar image is unpinned
-$ deploy/synology/compose build
-$ deploy/synology/compose run --rm app migrate up
-$ deploy/synology/compose up -d
+$ $DC pull ts-inventory     # the sidecar image is unpinned
+$ $DC build
+$ $DC run --rm app migrate up
+$ $DC up -d
 ```
 
 ## Health/readiness
