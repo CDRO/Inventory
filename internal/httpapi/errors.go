@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/CDRO/Inventory/internal/store"
 )
@@ -19,6 +22,7 @@ const (
 	CodeValidationFailed = "validation_failed"
 	CodeResyncRequired   = "resync_required"
 	CodePayloadTooLarge  = "payload_too_large"
+	CodeRateLimited      = "rate_limited"
 	CodeModelUnavailable = "model_unavailable"
 	CodeUpstreamFailed   = "upstream_failed"
 	CodeInternal         = "internal_error"
@@ -66,6 +70,14 @@ type Failure struct {
 	Reason string
 	// Err is the underlying cause. It is logged, never serialized.
 	Err error
+	// RetryAfter is how long the caller must wait, for the 429 the credential
+	// rate limiter produces (docs/specs/14-account-self-service.md). It is
+	// carried on the Failure rather than set on the ResponseWriter by the
+	// handler so that the header and the body it belongs to are emitted
+	// together, by the one serializer — a handler that set it itself would be
+	// writing part of an error response outside WriteError, which is the
+	// thing this package's structure exists to prevent.
+	RetryAfter time.Duration
 }
 
 func (f *Failure) Error() string {
@@ -156,6 +168,13 @@ func (w *ErrorWriter) WriteError(rw http.ResponseWriter, r *http.Request, failur
 
 	rw.Header().Set("Content-Type", "application/json; charset=utf-8")
 	rw.Header().Set("Cache-Control", "no-store")
+	if failure.RetryAfter > 0 {
+		// Rounded up, and never below one second: RFC 9110 gives Retry-After
+		// whole seconds, and a "0" would invite an immediate retry that the
+		// limiter is still going to refuse.
+		seconds := math.Ceil(failure.RetryAfter.Seconds())
+		rw.Header().Set("Retry-After", strconv.Itoa(max(1, int(seconds))))
+	}
 	rw.WriteHeader(failure.Status)
 	// An encode failure here means the client hung up; there is nothing left
 	// to tell them.
@@ -325,6 +344,8 @@ func defaultMessage(code string) string {
 		return "Your cached copy is too old to update. Fetch the full list again."
 	case CodePayloadTooLarge:
 		return "The uploaded file is too large."
+	case CodeRateLimited:
+		return "Too many attempts. Wait a moment and try again."
 	case CodeModelUnavailable:
 		return "The configured vision model is unavailable."
 	case CodeUpstreamFailed:

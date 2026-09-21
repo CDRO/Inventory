@@ -35,6 +35,12 @@ type AdminStore interface {
 	ListUsers(ctx context.Context) ([]store.User, error)
 	CreateUser(ctx context.Context, in store.NewUser) (*store.User, error)
 	DeleteUser(ctx context.Context, id uuid.UUID) error
+
+	// ChangePassword is the admin reset of
+	// docs/specs/14-account-self-service.md. The same store method the
+	// self-service route uses; an empty keepSessionID is what makes this one
+	// revoke *all* of the target's sessions rather than all but one.
+	ChangePassword(ctx context.Context, userID uuid.UUID, passwordHash, keepSessionID string) error
 	ListStorages(ctx context.Context) ([]store.Storage, error)
 	CreateStorage(ctx context.Context, name string) (*store.Storage, error)
 	DeleteStorage(ctx context.Context, id uuid.UUID) error
@@ -212,6 +218,66 @@ func (h *AdminHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		h.errors.WriteError(w, r, FromStoreError(err, "user not found"))
 		return
 	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+// ResetPassword serves POST /api/admin/users/{id}/password.
+//
+// The "I forgot my password" remedy in a system with no email and therefore
+// no reset-link flow: the admin is a person in the same household, and
+// handing over a new temporary password in the kitchen is the intended UX
+// (docs/specs/14-account-self-service.md).
+//
+// # Nothing special about this route's authorization
+//
+// It rides the RequireSession → RequireAdmin chain the whole admin group is
+// registered on, so is_admin is re-queried from the database for this request
+// like every other (middleware.go), and a non-admin gets the same 404 as a
+// path that does not exist. There is no per-route check here to get wrong,
+// and a user id that names nobody is the same 404 as one the caller may not
+// touch — ChangePassword's ErrNotFound, mapped by the one store-error mapper.
+//
+// **All** of the target's sessions go, not all but one: the resetter cannot
+// know which of them are legitimate. There is deliberately no
+// must_change_password flag — at household scale the social contract
+// ("change it after you log in") is enough, and the flag would add a second
+// login state machine to every client for something that happens twice a
+// year.
+func (h *AdminHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
+	id, failure := idFromPath(r, "id", "malformed user id")
+	if failure != nil {
+		h.errors.WriteError(w, r, failure)
+		return
+	}
+
+	var body struct {
+		NewPassword string `json:"new_password"`
+	}
+	if failure := decodeJSON(w, r, &body); failure != nil {
+		h.errors.WriteError(w, r, failure)
+		return
+	}
+
+	if fields := validateNewPassword(body.NewPassword); fields != nil {
+		h.errors.WriteError(w, r, ValidationFailed(fields, nil))
+		return
+	}
+
+	hash, err := auth.HashPassword(body.NewPassword)
+	if err != nil {
+		h.errors.WriteError(w, r, Internal(err))
+		return
+	}
+
+	if err := h.store.ChangePassword(r.Context(), id, hash, ""); err != nil {
+		h.errors.WriteError(w, r, FromStoreError(err, "user not found"))
+		return
+	}
+
+	// 204: the response echoes success and nothing else. The admin typed the
+	// new password, so there is nothing to tell them about it, and a body
+	// carrying it would put a live credential into a log, a proxy cache, or
+	// whatever the browser does with a JSON response next.
 	writeJSON(w, http.StatusNoContent, nil)
 }
 

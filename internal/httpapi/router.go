@@ -185,7 +185,11 @@ func NewRouter(d Deps) http.Handler {
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// TrustedRealIP, not chi's middleware.RealIP: the latter rewrites
+	// RemoteAddr from X-Forwarded-For whoever the peer is, and the credential
+	// rate limiter keys on the result (ratelimit.go,
+	// docs/specs/14-account-self-service.md).
+	r.Use(TrustedRealIP)
 	r.Use(middleware.Recoverer)
 
 	// chi's defaults answer with plain text ("404 page not found"), which is
@@ -227,8 +231,16 @@ func NewRouter(d Deps) http.Handler {
 		// how a caller gets a session in the first place. Everything else here
 		// sits behind RequireSession, including logout: revoking a session you
 		// cannot prove you hold is not a thing to offer.
-		authHandler := NewAuthHandler(d.Store, errs, !d.InsecureCookies)
-		devices := NewDeviceHandler(d.Store, errs)
+		// One credential limiter for login, pairing and password change
+		// (docs/specs/14-account-self-service.md). Built here and handed to
+		// all three handlers precisely so it is one counter: three limiters
+		// would mean ten guesses each rather than ten in total, against
+		// endpoints that are interchangeable to whoever is guessing.
+		credentials := newRateLimiter(credentialFailuresPerWindow, credentialWindow)
+
+		authHandler := NewAuthHandler(d.Store, errs, !d.InsecureCookies, credentials)
+		devices := NewDeviceHandler(d.Store, errs, credentials)
+		account := NewAccountHandler(d.Store, errs, credentials)
 
 		r.Post("/api/auth/login", authHandler.Login)
 		r.Post("/api/auth/pair", devices.Pair)
@@ -242,6 +254,13 @@ func NewRouter(d Deps) http.Handler {
 			ar.Post("/api/auth/pairing-codes", devices.CreatePairingCode)
 			ar.Get("/api/auth/devices", devices.ListDevices)
 			ar.Delete("/api/auth/devices/{session_id}", devices.RevokeDevice)
+
+			// Account self-service (docs/specs/14-account-self-service.md):
+			// the caller's own credentials and display name. Session-gated
+			// only — they act on the row the session names, so there is no id
+			// in either request to scope or tamper with.
+			ar.Post("/api/auth/password", account.ChangePassword)
+			ar.Patch("/api/auth/me", account.UpdateMe)
 
 			// The caller's own aggregate progress and preferences
 			// (docs/specs/51-gamification-scoring.md) — session-scoped, not
@@ -293,6 +312,7 @@ func NewRouter(d Deps) http.Handler {
 			ad.Get("/api/admin/users", adminAPI.ListUsers)
 			ad.Post("/api/admin/users", adminAPI.CreateUser)
 			ad.Delete("/api/admin/users/{id}", adminAPI.DeleteUser)
+			ad.Post("/api/admin/users/{id}/password", adminAPI.ResetPassword)
 			ad.Get("/api/admin/storages", adminAPI.ListStorages)
 			ad.Post("/api/admin/storages", adminAPI.CreateStorage)
 			ad.Delete("/api/admin/storages/{id}", adminAPI.DeleteStorage)

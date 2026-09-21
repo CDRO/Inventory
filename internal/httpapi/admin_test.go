@@ -303,6 +303,11 @@ func TestNonAdminCannotTellTheAdminAreaExists(t *testing.T) {
 		{http.MethodGet, "/api/admin/users", ""},
 		{http.MethodPost, "/api/admin/users", `{"username":"mallory","password":"password123","is_admin":true}`},
 		{http.MethodDelete, "/api/admin/users/" + victim.ID.String(), ""},
+		// The password reset of docs/specs/14-account-self-service.md. It
+		// rides the same gate chain as every route above it, and the point of
+		// listing it here is that nothing about it may be distinguishable
+		// from a path that does not exist.
+		{http.MethodPost, "/api/admin/users/" + victim.ID.String() + "/password", `{"new_password":"a much longer one"}`},
 		{http.MethodGet, "/api/admin/storages", ""},
 		{http.MethodDelete, "/api/admin/storages/" + storage.ID.String(), ""},
 		{http.MethodPost, "/api/admin/storages/" + storage.ID.String() + "/members", `{"user_id":"` + victim.ID.String() + `"}`},
@@ -338,6 +343,8 @@ func TestNonAdminCannotTellTheAdminAreaExists(t *testing.T) {
 
 	_, stillThere := auth.users[victim.ID]
 	assert.True(t, stillThere, "a refused delete must not have deleted anything")
+	assert.NotEqual(t, "$argon2id$", victim.PasswordHash[:min(10, len(victim.PasswordHash))],
+		"a refused reset must not have rewritten a hash")
 	for _, u := range auth.users {
 		assert.NotEqual(t, "mallory", u.Username, "a refused create must not have created anything")
 	}

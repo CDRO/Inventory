@@ -1,14 +1,22 @@
 import "../register-sw.js";
 
-// Page module for settings.html — the one user-facing settings surface for
-// gamification (docs/specs/52-gamification-quests-and-ui.md's fourth UI
-// integration point): the user's own gamification_enabled toggle and holiday
-// weeks, plus the currently selected storage's flat toggles. Never suggested,
-// prompted, or advertised elsewhere — it exists here for whoever needs it.
+// Page module for settings.html — the one user-facing settings surface.
+//
+// Two specs share it. Account self-service
+// (docs/specs/14-account-self-service.md): display name, password change,
+// and the list of signed-in devices. Gamification
+// (docs/specs/52-gamification-quests-and-ui.md's fourth UI integration
+// point): the user's own gamification_enabled toggle and holiday weeks, plus
+// the currently selected storage's flat toggles.
+//
+// **Nothing here branches on admin status**, because no response this page
+// reads carries any (docs/specs/03-auth-and-multi-tenancy.md). The admin
+// password reset is on the server-rendered /admin page, and this file has no
+// way to know whether the caller can open it.
 
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
-import { get, put, ApiError } from "../api.js";
+import { get, put, post, patch, del, ApiError } from "../api.js";
 import { el, text, clearChildren, qs } from "../dom.js";
 
 const switcherContainer = qs("#storage-switcher");
@@ -22,6 +30,16 @@ const weeklyGoalInput = qs("#weekly-goal");
 const storageSaveButton = qs("#storage-save");
 const resetLocalDataButton = qs("#reset-local-data");
 const resetStatus = qs("#reset-status");
+const displayNameInput = qs("#display-name");
+const displayNameSaveButton = qs("#display-name-save");
+const displayNameStatus = qs("#display-name-status");
+const passwordForm = qs("#password-form");
+const currentPasswordInput = qs("#current-password");
+const newPasswordInput = qs("#new-password");
+const repeatPasswordInput = qs("#repeat-password");
+const passwordError = qs("#password-error");
+const passwordStatus = qs("#password-status");
+const devicesList = qs("#devices");
 
 let storageId = null;
 /** @type {string[]} every holiday week the caller currently has on record, "YYYY-MM-DD". */
@@ -37,6 +55,13 @@ async function init() {
     showError(err);
     return;
   }
+
+  // The account section works whether or not the caller has a storage yet,
+  // so it is filled before the storage resolution below can navigate away.
+  displayNameInput.value = me.display_name;
+  displayNameSaveButton.addEventListener("click", saveDisplayName);
+  passwordForm.addEventListener("submit", changePassword);
+  loadDevices();
 
   const resolved = resolveStorage(me.storages);
   if (resolved == null) {
@@ -144,6 +169,127 @@ async function removeHolidayWeek(week) {
     });
     currentHolidayWeeks = prefs.holiday_weeks;
     renderHolidayWeeks();
+  } catch (err) {
+    showError(err);
+  }
+}
+
+// --- Account (docs/specs/14-account-self-service.md) ---
+
+async function saveDisplayName() {
+  clearError();
+  displayNameStatus.hidden = true;
+  displayNameSaveButton.disabled = true;
+  try {
+    const me = await patch("/api/auth/me", { display_name: displayNameInput.value });
+    displayNameInput.value = me.display_name;
+    displayNameStatus.textContent = "Saved.";
+    displayNameStatus.hidden = false;
+  } catch (err) {
+    showError(err);
+  } finally {
+    displayNameSaveButton.disabled = false;
+  }
+}
+
+// changePassword submits the form and, on success, tells the user what it
+// just did to their other sessions.
+//
+// The repeat field is checked here and nowhere else: it is courtesy, to catch
+// a typo before it becomes a password nobody knows. The server never sees it
+// and has no opinion about it, which is why a mismatch is reported locally
+// rather than sent off to be refused.
+async function changePassword(event) {
+  event.preventDefault();
+  clearError();
+  passwordError.hidden = true;
+  passwordStatus.hidden = true;
+
+  if (newPasswordInput.value !== repeatPasswordInput.value) {
+    passwordError.textContent = "The two new passwords do not match.";
+    passwordError.hidden = false;
+    return;
+  }
+
+  const submit = passwordForm.querySelector("button[type=submit]");
+  submit.disabled = true;
+  try {
+    await post("/api/auth/password", {
+      current_password: currentPasswordInput.value,
+      new_password: newPasswordInput.value,
+    });
+    passwordForm.reset();
+    passwordStatus.textContent =
+      "Password changed. Every other browser and paired device has been signed out.";
+    passwordStatus.hidden = false;
+    // The device list just lost every row but this one.
+    await loadDevices();
+  } catch (err) {
+    passwordError.textContent = passwordMessage(err);
+    passwordError.hidden = false;
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+// passwordMessage turns an error envelope into one line next to the form.
+//
+// A wrong current password comes back as a 422 with the message under
+// `fields.current_password` rather than as a 401, precisely so the browser
+// stays signed in and the message can be shown here
+// (docs/specs/14-account-self-service.md).
+function passwordMessage(err) {
+  if (!(err instanceof ApiError)) {
+    return err.message || "Something went wrong.";
+  }
+  const details = Object.values(err.fields || {}).flat();
+  return details.length ? details.join(" ") : err.message;
+}
+
+async function loadDevices() {
+  try {
+    const devices = await get("/api/auth/devices");
+    renderDevices(devices.items);
+  } catch (err) {
+    showError(err);
+  }
+}
+
+function renderDevices(devices) {
+  clearChildren(devicesList);
+  if (devices.length === 0) {
+    devicesList.append(el("p", { class: "empty-state" }, [text("No signed-in devices.")]));
+    return;
+  }
+
+  for (const device of devices) {
+    const row = el("div", { class: "row row--between" }, [
+      el("span", {}, [text(describeDevice(device))]),
+    ]);
+    if (device.current) {
+      row.append(el("span", { class: "muted" }, [text("This device")]));
+    } else {
+      row.append(
+        el("button", { type: "button", class: "btn btn--ghost", onclick: () => revokeDevice(device.id) }, [
+          text("Sign out"),
+        ]),
+      );
+    }
+    devicesList.append(row);
+  }
+}
+
+function describeDevice(device) {
+  const name = device.label || (device.kind === "device" ? "Paired device" : "Browser");
+  const seen = device.last_seen_at ? device.last_seen_at.slice(0, 10) : "not since signing in";
+  return `${name} — last active ${seen}`;
+}
+
+async function revokeDevice(id) {
+  clearError();
+  try {
+    await del(`/api/auth/devices/${encodeURIComponent(id)}`);
+    await loadDevices();
   } catch (err) {
     showError(err);
   }

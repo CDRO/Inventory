@@ -109,6 +109,44 @@ func (f *fakeAuth) RedeemPairingCode(_ context.Context, code string) (uuid.UUID,
 	return userID, nil
 }
 
+// ChangePassword mirrors store.ChangePassword: the hash is replaced and every
+// session but keepSessionID goes, with "" keeping none.
+//
+// Done under the one mutex, which is as close as an in-memory fake gets to
+// the real thing's transaction. That the two halves are genuinely atomic in
+// PostgreSQL — and that an unknown user changes nothing — is proved against a
+// real database in internal/store/users_test.go; what these tests prove is
+// that the handlers ask for the right thing.
+func (f *fakeAuth) ChangePassword(_ context.Context, userID uuid.UUID, passwordHash, keepSessionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	user, ok := f.users[userID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	user.PasswordHash = passwordHash
+
+	for id, session := range f.sessions {
+		if session.UserID == userID && id != keepSessionID {
+			delete(f.sessions, id)
+		}
+	}
+	return nil
+}
+
+func (f *fakeAuth) SetDisplayName(_ context.Context, userID uuid.UUID, displayName string) (*store.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	user, ok := f.users[userID]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	user.DisplayName = displayName
+	return user, nil
+}
+
 // withPassword gives a fake user a real argon2id hash, so login exercises the
 // actual verification rather than a stub that always agrees.
 func (f *fakeAuth) withPassword(t *testing.T, u *store.User, password string) {
