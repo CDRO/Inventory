@@ -98,8 +98,10 @@ docker compose -f docker-compose.yml up -d
 > a Tailscale sidecar instead of Traefik, as one extra compose file. On it, the
 > commands above are the wrong ones (they start Traefik on DSM's port 80); use
 > `docker-compose -p inventory -f docker-compose.yml -f docker-compose.nas.yml …`
-> instead (`docker-compose` with the hyphen; `deploy/synology/compose` is an
-> optional script for the same prefix). See "Synology NAS variant" in
+> instead (`docker-compose` with the hyphen). `deploy/synology/` has scripts for
+> this — `install-shell` (gives you `$DC` and `dc`) and `update` (a safe rolling
+> update), documented in [`deploy/synology/README.md`](deploy/synology/README.md).
+> See "Synology NAS variant" in
 > [`docs/specs/01-architecture-and-deployment.md`](docs/specs/01-architecture-and-deployment.md).
 
 Before deploying, run the E2E gate

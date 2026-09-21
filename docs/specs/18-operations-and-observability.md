@@ -117,6 +117,12 @@ The upgrade procedure, in order, on the NAS:
 3. `docker compose -f docker-compose.yml run --rm app migrate up`.
 4. `docker compose -f docker-compose.yml up -d`.
 
+On the operator's Synology NAS, steps 2 to 4 are `sh deploy/synology/update`, which
+brings the second app instance up beside the old one before it retires that one
+(`01-architecture-and-deployment.md`, "Synology NAS variant"). Step 1 is still
+yours: the script takes no backup, and going back after a migration still means
+restoring it.
+
 To make skipping step 3 loud instead of weird: **on startup, `serve`
 compares the database's goose version against the migrations the binary
 ships.** If migrations are pending, it exits fatally — same
