@@ -78,7 +78,7 @@ services:
       # container's configuration (`docker inspect`) until the container is
       # recreated. Use a one-off key with a short expiry, and revoke it if the
       # first start fails. The default keeps `up` quiet when it is unset.
-      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_AUTHKEY: ${TS_AUTHKEY_INVENTORY:-}
     volumes:
       - ./ts_inventory_state:/var/lib/tailscale    # holds the node key: keep it private
       # The directory, not the single file: Tailscale only notices changes to a
