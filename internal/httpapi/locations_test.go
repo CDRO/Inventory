@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -49,11 +50,29 @@ type fakeLocations struct {
 	// creates counts CreateLocation calls, which is how the idempotency tests
 	// tell a replay from a second execution.
 	creates atomic.Int32
+
+	delta      *store.Delta[store.Location]
+	deltaErr   error
+	lastSince  time.Time
+	deltaCalls int
 }
 
 func (f *fakeLocations) LocationTree(_ context.Context, storageID uuid.UUID) ([]store.Location, error) {
 	f.lastStorageID = storageID
 	return f.tree, f.treeErr
+}
+
+func (f *fakeLocations) LocationsChangedSince(_ context.Context, storageID uuid.UUID, since time.Time) (*store.Delta[store.Location], error) {
+	f.lastStorageID = storageID
+	f.lastSince = since
+	f.deltaCalls++
+	if f.deltaErr != nil {
+		return nil, f.deltaErr
+	}
+	if f.delta != nil {
+		return f.delta, nil
+	}
+	return &store.Delta[store.Location]{Changed: f.tree, Deleted: []uuid.UUID{}, SyncedAt: fixedSyncPoint}, nil
 }
 
 func (f *fakeLocations) CreateLocationAsUser(_ context.Context, storageID uuid.UUID, in store.NewLocation, _ uuid.UUID) (*store.Location, error) {

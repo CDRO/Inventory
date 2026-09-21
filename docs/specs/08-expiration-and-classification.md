@@ -150,7 +150,10 @@ nonexistent one (`404 not_found`, never `403`;
 - `GET /api/storages/{storage_id}/categories` — the tree of that storage
   only, nested: `{id, name, default_shelf_life_days, children: [...]}`.
   `default_shelf_life_days` is always present; `null` means the node sets no
-  rule and inherits.
+  rule and inherits. With `?updated_since=` this endpoint answers a delta
+  instead, whose nodes are flat and carry `parent_id` rather than `children`
+  (`12-client-api-contract.md`); `default_shelf_life_days` is always present
+  there too, for the same reason — `null` is the rule, not a missing value.
 - `POST /api/storages/{storage_id}/categories` — body `{name, parent_id,
   default_shelf_life_days}`, the last two optional. A given `parent_id` must
   be in this storage, or `404`. A shelf life set here needs no cascade: no

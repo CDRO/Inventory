@@ -562,8 +562,16 @@ CREATE INDEX idx_tombstones_storage_deleted ON tombstones(storage_id, deleted_at
 ```
 
 Written in the same transaction as the delete. Retained **30 days**; a client
-whose `updated_since` predates the oldest surviving tombstone cannot be brought
-up to date safely and is told to resync (`12-client-api-contract.md`).
+whose `updated_since` predates that retention window cannot be brought up to
+date safely and is told to resync (`12-client-api-contract.md`).
+
+**The boundary is the retention window, not the oldest row still in the
+table.** The two look equivalent and are not: once the sweep has removed the
+only tombstone a storage ever had, "oldest surviving tombstone" is undefined,
+and a rule built on it answers a year-old cursor as if nothing had ever been
+deleted — leaving that deletion in the client's cache indefinitely, which is
+the failure this table exists to prevent. The sweep and the boundary read the
+same 30-day constant so they cannot drift apart.
 
 ### `updated_at` on cacheable entities
 

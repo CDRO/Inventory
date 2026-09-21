@@ -30,7 +30,10 @@ distinguishing the two (`03-auth-and-multi-tenancy.md`).
   `{id, name, description, children: [...]}`. The query is filtered by
   `storage_id`; no other storage's nodes may appear at any depth, and the
   response must never contain a node whose `storage_id` differs from the
-  URL's.
+  URL's. With `?updated_since=` this endpoint answers a delta instead, whose
+  nodes are flat and carry `parent_id` rather than `children`
+  (`12-client-api-contract.md`); the storage scoping above is identical in
+  both forms.
 - `POST /api/storages/{storage_id}/locations` — body `{name, description,
   parent_id}` (`parent_id` nullable for a root location). If `parent_id`
   is given it must exist **and belong to this storage**; otherwise

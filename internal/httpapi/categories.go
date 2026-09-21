@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -13,6 +14,7 @@ import (
 // CategoryStore is the slice of the store the category handlers use.
 type CategoryStore interface {
 	CategoryTree(ctx context.Context, storageID uuid.UUID) ([]store.Category, error)
+	CategoriesChangedSince(ctx context.Context, storageID uuid.UUID, since time.Time) (*store.Delta[store.Category], error)
 	CreateCategoryAsUser(ctx context.Context, storageID uuid.UUID, in store.NewCategory, userID uuid.UUID) (*store.Category, error)
 	UpdateCategory(ctx context.Context, storageID, id uuid.UUID, patch store.CategoryPatch) (*store.Category, error)
 	DeleteCategory(ctx context.Context, storageID, id uuid.UUID) error
@@ -63,11 +65,47 @@ type categoryNode struct {
 	Children             []*categoryNode `json:"children"`
 }
 
+// categoryDelta is one changed category in a delta response — **flat, with a
+// parent_id, and no children**.
+//
+// A delta cannot be a tree. It contains only the nodes that changed, so a
+// changed child whose parent did not change has no parent in the payload and
+// would deserialize as a root: the client would file "Yoghurt" at the top of
+// its category list and never learn otherwise. Sending the edge as a field
+// instead lets a client hold these nodes in a flat map keyed by id, patch the
+// ones that arrive, drop the ids in `deleted`, and rebuild the tree itself —
+// which is the only ordering-independent way to merge a partial tree.
+//
+// default_shelf_life_days is always serialized, null included, for the same
+// reason it is in categoryNode: null means "inherit", which is a value, not an
+// absence, and a delta that omitted it would leave the old rule in place.
+type categoryDelta struct {
+	ID                   uuid.UUID  `json:"id"`
+	Name                 string     `json:"name"`
+	ParentID             *uuid.UUID `json:"parent_id"`
+	DefaultShelfLifeDays *int       `json:"default_shelf_life_days"`
+}
+
 // List serves GET /api/storages/{storage_id}/categories.
+//
+// With ?updated_since=<RFC3339> it answers a delta instead — flat nodes rather
+// than the tree, for the reason categoryDelta gives
+// (docs/specs/12-client-api-contract.md). Without the parameter the response
+// is the same nested tree it has always been.
 func (h *CategoryHandler) List(w http.ResponseWriter, r *http.Request) {
 	storageID, ok := StorageIDFrom(r.Context())
 	if !ok {
 		h.errors.WriteError(w, r, Internal(errNoStorageInContext))
+		return
+	}
+
+	since, failure := readDeltaSince(r)
+	if failure != nil {
+		h.errors.WriteError(w, r, failure)
+		return
+	}
+	if since != nil {
+		h.listDelta(w, r, storageID, *since)
 		return
 	}
 
@@ -78,6 +116,28 @@ func (h *CategoryHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, collection[*categoryNode]{Items: nestCategories(rows)})
+}
+
+// listDelta answers the delta form of List.
+func (h *CategoryHandler) listDelta(w http.ResponseWriter, r *http.Request, storageID uuid.UUID, since time.Time) {
+	delta, err := h.store.CategoriesChangedSince(r.Context(), storageID, since)
+	if err != nil {
+		h.errors.WriteError(w, r, FromStoreError(err, "list category delta"))
+		return
+	}
+
+	out := make([]categoryDelta, 0, len(delta.Changed))
+	for _, row := range delta.Changed {
+		out = append(out, categoryDelta{
+			ID:                   row.ID,
+			Name:                 row.Name,
+			ParentID:             row.ParentID,
+			DefaultShelfLifeDays: row.DefaultShelfLifeDays,
+		})
+	}
+	writeJSON(w, http.StatusOK, deltaCollection[categoryDelta]{
+		Items: out, Deleted: delta.Deleted, SyncedAt: delta.SyncedAt,
+	})
 }
 
 // Create serves POST /api/storages/{storage_id}/categories. Body:

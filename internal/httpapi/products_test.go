@@ -30,6 +30,11 @@ type fakeProductStore struct {
 	lastImageURL     *string
 	lastIconName     *string
 	lastActingUserID uuid.UUID
+
+	delta      *store.Delta[store.Product]
+	deltaErr   error
+	lastSince  time.Time
+	deltaCalls int
 }
 
 func (f *fakeProductStore) ListProducts(_ context.Context, storageID uuid.UUID) ([]store.Product, error) {
@@ -37,6 +42,21 @@ func (f *fakeProductStore) ListProducts(_ context.Context, storageID uuid.UUID) 
 	defer f.mu.Unlock()
 	f.lastStorageID = storageID
 	return f.products, f.productsErr
+}
+
+func (f *fakeProductStore) ProductsChangedSince(_ context.Context, storageID uuid.UUID, since time.Time) (*store.Delta[store.Product], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastStorageID = storageID
+	f.lastSince = since
+	f.deltaCalls++
+	if f.deltaErr != nil {
+		return nil, f.deltaErr
+	}
+	if f.delta != nil {
+		return f.delta, nil
+	}
+	return &store.Delta[store.Product]{Changed: f.products, Deleted: []uuid.UUID{}, SyncedAt: fixedSyncPoint}, nil
 }
 
 func (f *fakeProductStore) ListProductBatches(_ context.Context, storageID, productID uuid.UUID) ([]store.Batch, error) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -13,6 +14,7 @@ import (
 // ProductStore is the slice of the store the product routes read and write.
 type ProductStore interface {
 	ListProducts(ctx context.Context, storageID uuid.UUID) ([]store.Product, error)
+	ProductsChangedSince(ctx context.Context, storageID uuid.UUID, since time.Time) (*store.Delta[store.Product], error)
 	ListProductBatches(ctx context.Context, storageID, productID uuid.UUID) ([]store.Batch, error)
 	SetProductCategoryAsUser(ctx context.Context, storageID, id uuid.UUID, categoryID *uuid.UUID, userID uuid.UUID) error
 	SetProductImageAsUser(ctx context.Context, storageID, id uuid.UUID, imageURL, iconName *string, userID uuid.UUID) error
@@ -47,10 +49,25 @@ type productResponse struct {
 }
 
 // List serves GET /api/storages/{storage_id}/products.
+//
+// With ?updated_since=<RFC3339> it answers a delta instead: the products
+// changed since that instant, the ids of those deleted, and the cursor for
+// next time (docs/specs/12-client-api-contract.md). Without the parameter the
+// response is exactly what it has always been.
 func (h *ProductHandler) List(w http.ResponseWriter, r *http.Request) {
 	storageID, ok := StorageIDFrom(r.Context())
 	if !ok {
 		h.errors.WriteError(w, r, Internal(errNoStorageInContext))
+		return
+	}
+
+	since, failure := readDeltaSince(r)
+	if failure != nil {
+		h.errors.WriteError(w, r, failure)
+		return
+	}
+	if since != nil {
+		h.listDelta(w, r, storageID, *since)
 		return
 	}
 
@@ -65,6 +82,27 @@ func (h *ProductHandler) List(w http.ResponseWriter, r *http.Request) {
 		out = append(out, productResponse{ID: p.ID, Name: p.Name})
 	}
 	writeJSON(w, http.StatusOK, collection[productResponse]{Items: out})
+}
+
+// listDelta answers the delta form of List.
+//
+// The item shape is the full list's item shape, unchanged: a delta is the same
+// collection narrowed to what moved, so a client parses one response type for
+// both and a field added to the list is a field added to the delta for free.
+func (h *ProductHandler) listDelta(w http.ResponseWriter, r *http.Request, storageID uuid.UUID, since time.Time) {
+	delta, err := h.store.ProductsChangedSince(r.Context(), storageID, since)
+	if err != nil {
+		h.errors.WriteError(w, r, FromStoreError(err, "list product delta"))
+		return
+	}
+
+	out := make([]productResponse, 0, len(delta.Changed))
+	for _, p := range delta.Changed {
+		out = append(out, productResponse{ID: p.ID, Name: p.Name})
+	}
+	writeJSON(w, http.StatusOK, deltaCollection[productResponse]{
+		Items: out, Deleted: delta.Deleted, SyncedAt: delta.SyncedAt,
+	})
 }
 
 // Batches serves GET /api/storages/{storage_id}/products/{product_id}/batches

@@ -32,7 +32,12 @@ Out of scope, deliberately:
 - **The admin area.** `/admin/*` and `/api/admin/*` stay browser-only and
   server-rendered (`03-auth-and-multi-tenancy.md`). A paired client is never
   an admin client; requests to those paths get the same `404` as any
-  non-admin.
+  non-admin. The rule is enforced on the **session kind**, not on the
+  `Authorization` header: a device session and its owner's browser session
+  resolve to the same user, so `is_admin` alone cannot tell them apart, and a
+  header is a transport the client picks while the kind was fixed server-side
+  when the session was minted. An admin pairing a phone therefore keeps the
+  admin area in their browser and does not gain it on the phone.
 - **Barcode-database identification.** Recall of locally-associated
   barcodes *is* in scope (see "Barcode recall" at the end); consulting
   external UPC/EAN databases is not, per `00-overview.md`.
@@ -145,8 +150,11 @@ A client that works offline caches the product catalog and shopping list, and
 needs to refresh cheaply.
 
 - List endpoints for cacheable entities accept `?updated_since=<RFC3339>` and
-  return only rows changed after that instant, using the existing cursor
-  pagination from `04-backend-api-conventions.md`.
+  return only rows changed at or after that instant — inclusive, for the reason
+  given under "The delta envelope" below. They carry the collection envelope of
+  `04-backend-api-conventions.md`, `next_cursor` included; the three endpoints
+  that answer deltas today return their collections whole, so a delta rides on
+  cursor pagination as soon as one of them has it.
 - This requires `updated_at` on the cacheable entities — `products`,
   `categories`, `locations`, `shopping_lists`, `shopping_list_items` — set on
   every write (`02-data-model.md`).
@@ -156,11 +164,85 @@ needs to refresh cheaply.
   (`storage_id`, entity type, id, `deleted_at`), and the delta response carries
   a `deleted` array alongside the changed rows.
 - Tombstones are retained **30 days**. A client whose `updated_since` is older
-  than the oldest surviving tombstone cannot be brought up to date safely, so
-  the server responds `409 resync_required` and the client discards its cache
-  and does a full fetch. This case is easy to forget and produces a cache that
-  is quietly wrong for months; make the server detect it rather than trusting
-  clients to.
+  than the retention window cannot be brought up to date safely, so the server
+  responds `409 resync_required` and the client discards its cache and does a
+  full fetch. This case is easy to forget and produces a cache that is quietly
+  wrong for months; make the server detect it rather than trusting clients to.
+
+### The delta envelope
+
+`?updated_since=` is opt-in and purely additive: a request without it gets the
+same response it always got, which is what keeps the PWA — the only consumer
+that reads these endpoints today — unaffected. With it, the envelope is:
+
+```json
+{
+  "items": [ ... ],
+  "deleted": ["<id>", "..."],
+  "synced_at": "2026-09-21T14:30:00Z",
+  "next_cursor": null
+}
+```
+
+- **`items`** carries the same shape the full list carries, narrowed to what
+  changed. A delta is the list filtered, not a second response format.
+- **`deleted`** is ids, never rows — the row is gone, and an id is all a client
+  needs to drop it. Ids are never reused, so an id here means "this one,
+  permanently". Deleting a parent tombstones every node beneath it, so a client
+  holding only the parent still learns each descendant is gone.
+- **`synced_at`** is the instant the delta was taken, to send back as the next
+  `updated_since`. It is not optional decoration: none of these endpoints
+  serialize `updated_at` on their items, so without it a client has nothing to
+  compute its next cursor from, and using its own clock would shift every sync
+  by the skew between the phone and the NAS — in the direction that skips
+  changes.
+
+  **`synced_at` is not the wall clock**, and the difference is a data-loss bug
+  rather than a nicety. Postgres `now()` is transaction-*start* time, and every
+  row here is stamped with it. A write that begins at 10:00:00.000 and commits
+  at 10:00:00.500 therefore carries the timestamp 10:00:00.000, while being
+  invisible to a delta running at 10:00:00.200 — so handing that delta's client
+  `10:00:00.200` as its cursor would skip a row stamped `10:00:00.000` on every
+  future request, and that deletion would never reach the client at all. The
+  server instead takes the start of the oldest transaction still in flight: no
+  row it cannot yet see can carry a timestamp earlier than that. `updated_since`
+  is compared **inclusively** (`>=`) for the boundary this creates, since a row
+  belonging to the transaction that set the watermark carries exactly that
+  timestamp.
+
+  Together these make delta sync **at-least-once**: a row may arrive in two
+  consecutive deltas, which a client overwrites with the same value, and never
+  in none.
+- **`next_cursor`** is present for the same reason it is on every collection.
+  These three endpoints return their collections whole, so it is always null
+  today; when one gains pagination, the delta rides on the same cursor.
+
+**Tree endpoints answer a delta flat, not nested.** `categories` and
+`locations` return a nested tree for an ordinary list. A delta contains only
+the nodes that changed, so a changed child whose parent did not change has no
+parent in the payload and would deserialize as a root — the client would file
+it at the top of its tree and never learn otherwise. In a delta each node
+therefore carries `parent_id` and no `children`, and the client rebuilds the
+tree itself from a flat cache keyed by id. For the same reason every nullable
+field is serialized even when null: in a delta an absent key reads as
+"unchanged", so a cleared description or a shelf-life rule reset to *inherit*
+has to be present-and-null to reach the cache at all.
+
+**The resync boundary is computed from the retention window**, not from the
+oldest tombstone still in the table. The two are not equivalent: once the sweep
+has removed the only tombstone a storage ever had, "oldest surviving tombstone"
+is undefined and a year-old cursor would be answered as if nothing had ever been
+deleted. Retention is also the less conservative rule — a storage whose oldest
+surviving tombstone is 25 days old can still answer a 28-day-old cursor
+correctly. The sweep and the boundary read the same constant so they cannot
+drift apart.
+
+**Not yet delta-capable: shopping lists.** `shopping_lists` and
+`shopping_list_items` are listed above as cacheable and have tombstone entity
+types reserved, but there is no shopping-list *list* endpoint to hang
+`?updated_since=` on — a list is created and then fetched by id — and no
+deletion path writes those tombstones. When a list endpoint for them exists it
+takes the same parameter and the same envelope.
 
 ## What the server must never trust from a client
 
@@ -203,7 +285,13 @@ deployed on the NAS reaches phones that cannot be updated in step.
   altering the meaning of an existing value.
 - Clients send `X-Client-Version: <name>/<version>` on every request. It is for
   diagnostics only and must never gate behavior — version-sniffing to alter
-  responses is how one API quietly becomes several.
+  responses is how one API quietly becomes several. The server reads it in
+  exactly one place, the error serializer, where it is attached to the log line
+  for a failed request and nothing else; that is structural rather than a
+  convention, because the one function that sees the header is producing a
+  response that has already been decided and has no way to change it. Two
+  requests differing only in this header get byte-identical answers. (Request
+  logging in general belongs to `18-operations-logging-audit-upgrades.md`.)
 - Changes to this contract are changes to this spec file. A PR that alters an
   endpoint's shape must say so here, or the reviewers in the ship loop should
   block it.

@@ -82,6 +82,26 @@ func (f *fakeAuth) addUser(t *testing.T, isAdmin bool) (*store.User, *store.Sess
 	return user, session
 }
 
+// addDeviceSession mints a second session for an existing user with
+// Kind=device — what POST /api/auth/pair creates for a paired phone
+// (docs/specs/12-client-api-contract.md). The browser session returned by
+// addUser is untouched, which is the point: revoking one must not touch the
+// other, and only one of them may reach the admin area.
+func (f *fakeAuth) addDeviceSession(userID uuid.UUID, label string) *store.Session {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	session := &store.Session{
+		ID:        "device-" + uuid.NewString(),
+		UserID:    userID,
+		Kind:      store.SessionDevice,
+		Label:     &label,
+		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+	}
+	f.sessions[session.ID] = session
+	return session
+}
+
 func (f *fakeAuth) setAdmin(id uuid.UUID, isAdmin bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

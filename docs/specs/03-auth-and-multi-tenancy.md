@@ -117,6 +117,17 @@ Consequently:
 - A non-admin requesting any `/admin` page or `/api/admin/*` route gets
   the same `404` treatment described below — the admin area does not
   announce its own existence either.
+- **A session with `kind = 'device'` gets that same `404` whatever its
+  user's `is_admin` says.** The admin area is browser-only and
+  server-rendered, and `12-client-api-contract.md` puts it outside the
+  client contract entirely. The check is on the session kind rather than
+  on the `Authorization` header because a device session and its owner's
+  browser session resolve to the same user, so `is_admin` cannot separate
+  them, and a header is a transport the client chooses while the kind was
+  fixed server-side when the session was minted. `is_admin` is still
+  re-queried from the database on these requests too, so the invariant
+  stays "on every admin-gated request" rather than quietly narrowing to
+  "on every admin-gated request from a browser".
 
 ## Initial admin bootstrap
 

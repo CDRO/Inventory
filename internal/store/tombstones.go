@@ -20,20 +20,15 @@ const (
 	TombstoneShoppingListItem EntityType = "shopping_list_item"
 )
 
-// TombstoneRetention is how long a deletion stays visible to a delta sync. A
-// client whose updated_since predates the oldest surviving tombstone cannot be
-// brought up to date safely and must resync
-// (docs/specs/12-client-api-contract.md).
+// TombstoneRetention is how long a deletion stays visible to a delta sync.
+//
+// It is the one number the resync boundary is computed from
+// (DeltaIsResumable in delta.go): a client whose updated_since predates this
+// window cannot be told about every deletion since, because the sweep has
+// already removed some, so it must discard its cache and fetch everything
+// (docs/specs/12-client-api-contract.md). Both the sweep and the boundary read
+// this constant, so they cannot drift apart.
 const TombstoneRetention = 30 * 24 * time.Hour
-
-// Tombstone records that a row was deleted.
-type Tombstone struct {
-	ID         uuid.UUID
-	StorageID  uuid.UUID
-	EntityType EntityType
-	EntityID   uuid.UUID
-	DeletedAt  time.Time
-}
 
 // recordTombstones writes one row per deleted entity.
 //
@@ -57,54 +52,11 @@ func recordTombstones(ctx context.Context, q querier, storageID uuid.UUID, kind 
 	return nil
 }
 
-// TombstonesSince returns deletions in this storage after the given instant,
-// for a client catching up.
-func (s *Store) TombstonesSince(ctx context.Context, storageID uuid.UUID, since time.Time) ([]Tombstone, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT id, storage_id, entity_type, entity_id, deleted_at
-		  FROM tombstones
-		 WHERE storage_id = $1 AND deleted_at > $2
-		 ORDER BY deleted_at, id`, storageID, since)
-	if err != nil {
-		return nil, fmt.Errorf("store: list tombstones: %w", err)
-	}
-	defer rows.Close()
-
-	var out []Tombstone
-	for rows.Next() {
-		var t Tombstone
-		var kind string
-		if err := rows.Scan(&t.ID, &t.StorageID, &kind, &t.EntityID, &t.DeletedAt); err != nil {
-			return nil, fmt.Errorf("store: scan tombstone: %w", err)
-		}
-		t.EntityType = EntityType(kind)
-		out = append(out, t)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: list tombstones: %w", err)
-	}
-	return out, nil
-}
-
-// DeltaIsResumable reports whether a client asking for changes since the given
-// instant can be brought up to date from the surviving tombstones.
-//
-// If the client's cursor predates the oldest tombstone still retained, some
-// deletion has already been swept and answering the delta would silently leave
-// a deleted row in that client's cache. The honest answer is "resync".
-func (s *Store) DeltaIsResumable(ctx context.Context, storageID uuid.UUID, since time.Time) (bool, error) {
-	var oldest *time.Time
-	err := s.pool.QueryRow(ctx, `
-		SELECT min(deleted_at) FROM tombstones WHERE storage_id = $1`, storageID).Scan(&oldest)
-	if err != nil {
-		return false, fmt.Errorf("store: oldest tombstone: %w", err)
-	}
-	if oldest == nil {
-		// No deletions recorded, so nothing can have been swept.
-		return true, nil
-	}
-	return !since.Before(*oldest), nil
-}
+// Deletions are read back through the delta loaders in delta.go
+// (Store.deletedSince), which scope the query to one entity kind because a
+// delta request only ever concerns one list endpoint. There is deliberately no
+// exported "all tombstones since" reader: nothing needs the mixed set, and one
+// would invite a caller to filter in Go what the index can filter in SQL.
 
 // SweepTombstones deletes rows past the retention window. Returns how many
 // went.

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -34,11 +35,29 @@ type fakeCategories struct {
 
 	deleteErr error
 	deleted   []uuid.UUID
+
+	delta      *store.Delta[store.Category]
+	deltaErr   error
+	lastSince  time.Time
+	deltaCalls int
 }
 
 func (f *fakeCategories) CategoryTree(_ context.Context, storageID uuid.UUID) ([]store.Category, error) {
 	f.lastStorageID = storageID
 	return f.tree, f.treeErr
+}
+
+func (f *fakeCategories) CategoriesChangedSince(_ context.Context, storageID uuid.UUID, since time.Time) (*store.Delta[store.Category], error) {
+	f.lastStorageID = storageID
+	f.lastSince = since
+	f.deltaCalls++
+	if f.deltaErr != nil {
+		return nil, f.deltaErr
+	}
+	if f.delta != nil {
+		return f.delta, nil
+	}
+	return &store.Delta[store.Category]{Changed: f.tree, Deleted: []uuid.UUID{}, SyncedAt: fixedSyncPoint}, nil
 }
 
 func (f *fakeCategories) CreateCategoryAsUser(_ context.Context, storageID uuid.UUID, in store.NewCategory, userID uuid.UUID) (*store.Category, error) {
