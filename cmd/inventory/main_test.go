@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/CDRO/Inventory/internal/config"
+	"github.com/CDRO/Inventory/internal/migrate"
 )
 
 // TestExitCodeForConfigFailure is the guard on the "fatal, non-retryable exit
@@ -66,6 +67,39 @@ func TestErrorMessageKeepsRemediationUnprefixed(t *testing.T) {
 
 	assert.Equal(t, missing.Error(), errorMessage(missing))
 	assert.Equal(t, "inventory: boom", errorMessage(errors.New("boom")))
+}
+
+// TestASchemaMismatchIsFatalAndNonRetryable is the acceptance criterion of
+// docs/specs/18-operations-and-observability.md: `serve` refuses to start with
+// a non-zero exit when migrations are pending, and `restart: unless-stopped`
+// does not turn that into log spam.
+//
+// The distinct exit code is what carries the second half. Docker's restart
+// policies do not discriminate on exit codes, so EX_CONFIG is not a signal to
+// Docker — it is a signal to the person reading `docker compose logs app`,
+// telling them the container is refusing to run rather than crashing, and it
+// is the same one the missing-.env check has used since spec 01. The message
+// is what names the fix, so it is asserted to arrive unprefixed.
+func TestASchemaMismatchIsFatalAndNonRetryable(t *testing.T) {
+	t.Parallel()
+
+	behind := &migrate.SchemaMismatchError{DBVersion: 5, BinaryVersion: 10, Pending: 5}
+	ahead := &migrate.SchemaMismatchError{DBVersion: 12, BinaryVersion: 10}
+
+	for _, err := range []error{behind, ahead, fmt.Errorf("starting server: %w", behind)} {
+		assert.Equal(t, config.ExitConfig, exitCodeFor(err),
+			"a schema mismatch exits like a configuration failure: the operator must act")
+	}
+
+	assert.Equal(t, behind.Error(), errorMessage(behind),
+		"the remediation block reaches the operator unprefixed")
+	assert.Contains(t, behind.Error(), "migrate up",
+		"and names the command that fixes it")
+
+	// The distinction that makes the code meaningful at all: a database that is
+	// merely unreachable is worth retrying, and must not be reported as a
+	// deployment the operator has to repair.
+	assert.Equal(t, 1, exitCodeFor(errors.New("dial tcp: connection refused")))
 }
 
 // TestRunRejectsUnknownCommand keeps a typo from being mistaken for `serve`,

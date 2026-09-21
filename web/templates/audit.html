@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Inventory — Admin audit trail</title>
+<style nonce="{{.Nonce}}">
+  *, *::before, *::after { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; line-height: 1.5; color: #1f2328; background: #fafafa; }
+  main { max-width: 72rem; margin: 0 auto; padding: 2rem 1rem; }
+  h1 { margin-top: 0; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; background: #fff; }
+  th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #d0d7de; vertical-align: top; }
+  th { font-size: 0.85rem; color: #57606a; }
+  td.when, td.details { font-size: 0.85rem; }
+  td.details { color: #57606a; word-break: break-word; }
+  .muted { color: #57606a; }
+  code { background: #f6f8fa; padding: 0.1rem 0.3rem; border-radius: 4px; }
+  nav.pager { margin-top: 1rem; }
+  footer { border-top: 1px solid #d0d7de; margin-top: 2.5rem; padding-top: 1rem; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<main>
+<h1>Audit trail</h1>
+
+<p class="muted">
+  Every mutating admin action, newest first. Written in the same transaction as
+  the change it records, and never edited or deleted — the application has no
+  verb for either.
+</p>
+
+<div class="scroll">
+<table>
+  <thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Target</th><th>Details</th></tr></thead>
+  <tbody>
+  {{- range .Rows}}
+    <tr>
+      <td class="when">{{.When}}</td>
+      <td>{{.Actor}}</td>
+      <td><code>{{.Action}}</code></td>
+      <td class="details">{{if .Target}}{{.Target}}{{else}}<span class="muted">—</span>{{end}}</td>
+      <td class="details">{{.Details}}</td>
+    </tr>
+  {{- else}}
+    <tr><td colspan="5" class="muted">Nothing recorded yet.</td></tr>
+  {{- end}}
+  </tbody>
+</table>
+</div>
+
+{{- if .NextCursor}}
+<nav class="pager"><a href="/admin/audit?cursor={{.NextCursor}}">Older &rarr;</a></nav>
+{{- end}}
+
+<footer class="muted">
+  <a href="/admin">&larr; Admin</a> &middot; version <code>{{.Version}}</code>
+</footer>
+
+</main>
+</body>
+</html>

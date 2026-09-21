@@ -37,6 +37,8 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -51,6 +53,12 @@ type Store interface {
 	ListStorages(ctx context.Context) ([]store.Storage, error)
 	ListMembers(ctx context.Context, storageID uuid.UUID) ([]store.Member, error)
 	SearchCatalog(ctx context.Context, q string) ([]store.CatalogProduct, error)
+	// ListAdminAudit backs /admin/audit
+	// (docs/specs/18-operations-and-observability.md). Read-only, like
+	// everything else this interface names: the trail is written by the admin
+	// mutations themselves, inside their own transactions, and this package
+	// only renders it.
+	ListAdminAudit(ctx context.Context, cursor string, limit int) (*store.AuditPage, error)
 }
 
 // VisionChecker backs the AI-model banner
@@ -76,6 +84,16 @@ type Handler struct {
 	vision     VisionChecker
 	imageModel ImageModelChecker
 	page       *template.Template
+	// audit is the trail page (docs/specs/18-operations-and-observability.md).
+	//
+	// Its own *template.Template rather than a second file parsed into the
+	// same set: ParseFS into one set leaves Execute picking whichever template
+	// was parsed last, so two pages in one set is a way to serve the wrong
+	// page and never hear about it.
+	audit *template.Template
+	// version is the build string in the footer of both pages, so an operator
+	// can see what is running without leaving the UI they are already in.
+	version string
 	// currentUser names the caller, so the page can withhold the delete action
 	// from their own row. It is a callback rather than an import because the
 	// session lives in the httpapi package, which mounts this one.
@@ -86,12 +104,13 @@ type Handler struct {
 	fail func(http.ResponseWriter, *http.Request, error)
 }
 
-// New parses the admin template. It fails at startup, not on the first
-// request, if the template is missing or malformed.
+// New parses the admin templates. It fails at startup, not on the first
+// request, if one is missing or malformed.
 func New(
 	s Store,
 	visionChecker VisionChecker,
 	imageModel ImageModelChecker,
+	version string,
 	currentUser func(*http.Request) (uuid.UUID, bool),
 	fail func(http.ResponseWriter, *http.Request, error),
 ) (*Handler, error) {
@@ -103,8 +122,24 @@ func New(
 	if err != nil {
 		return nil, fmt.Errorf("admin: parse template: %w", err)
 	}
-	return &Handler{store: s, vision: visionChecker, imageModel: imageModel, page: page, currentUser: currentUser, fail: fail}, nil
+	audit, err := template.ParseFS(tree, "audit.html")
+	if err != nil {
+		return nil, fmt.Errorf("admin: parse template: %w", err)
+	}
+	if version == "" {
+		version = devVersion
+	}
+	return &Handler{
+		store: s, vision: visionChecker, imageModel: imageModel,
+		page: page, audit: audit, version: version,
+		currentUser: currentUser, fail: fail,
+	}, nil
 }
+
+// devVersion mirrors httpapi.DevVersion. It is duplicated rather than imported
+// because httpapi mounts this package and importing it back would be a cycle;
+// the constant is one word and both call sites name the spec.
+const devVersion = "dev"
 
 type userRow struct {
 	ID          uuid.UUID
@@ -138,6 +173,7 @@ type catalogRow struct {
 
 type pageData struct {
 	Nonce    string
+	Version  string
 	Users    []userRow
 	Storages []storageRow
 
@@ -165,18 +201,122 @@ func (h *Handler) Page(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, err)
 		return
 	}
+	h.render(w, r, h.page, func(nonce string) any {
+		data.Nonce, data.Version = nonce, h.version
+		return data
+	})
+}
 
+// auditRow is one audit entry as the template renders it.
+//
+// Details arrives as pre-formatted key=value text rather than a map, because
+// html/template cannot range a map[string]any in a stable order and an audit
+// page whose columns rearrange between reloads is one nobody trusts.
+type auditRow struct {
+	When    string
+	Actor   string
+	Action  string
+	Target  string
+	Details string
+}
+
+type auditData struct {
+	Nonce   string
+	Version string
+	Rows    []auditRow
+	// NextCursor is empty on the last page; the template shows the "older"
+	// link only when it is set.
+	NextCursor string
+}
+
+// Audit serves GET /admin/audit: the admin audit trail, newest first
+// (docs/specs/18-operations-and-observability.md).
+//
+// It is mounted on the same RequireSession → RequireAdmin group as every other
+// admin route, so a non-admin gets the same 404 as for a path that does not
+// exist, and there is no check here of its own to fall out of step with that.
+//
+// There is deliberately no JSON counterpart. The trail records who did what to
+// whom across tenancy boundaries — exactly the data the non-enumeration rules
+// of docs/specs/03-auth-and-multi-tenancy.md keep out of the client API — and
+// a read-only server-rendered table is all an operator needs.
+func (h *Handler) Audit(w http.ResponseWriter, r *http.Request) {
+	page, err := h.store.ListAdminAudit(r.Context(), r.URL.Query().Get("cursor"), store.AuditPageSize)
+	if err != nil {
+		// Includes a mangled cursor, which the store reports as
+		// store.ErrValidation. It reaches the same serializer as everything
+		// else; this package renders no error of its own.
+		h.fail(w, r, err)
+		return
+	}
+
+	data := &auditData{NextCursor: page.Next}
+	for _, entry := range page.Entries {
+		data.Rows = append(data.Rows, auditRow{
+			When: entry.CreatedAt.Format(time.RFC3339),
+			// Empty means the actor was store.SystemActor or has since been
+			// deleted; the two are indistinguishable in the data and are not
+			// guessed apart here.
+			Actor:   orSystem(entry.ActorUsername),
+			Action:  string(entry.Action),
+			Target:  entry.Target,
+			Details: formatDetails(entry.Details),
+		})
+	}
+
+	h.render(w, r, h.audit, func(nonce string) any {
+		data.Nonce, data.Version = nonce, h.version
+		return data
+	})
+}
+
+func orSystem(username string) string {
+	if username == "" {
+		return "system"
+	}
+	return username
+}
+
+// formatDetails renders the JSONB payload as stable "key=value" text, keys in
+// alphabetical order so two reloads of the same row look identical.
+func formatDetails(details map[string]any) string {
+	if len(details) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(details))
+	for k := range details {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%v", k, details[k]))
+	}
+	// Escaped by html/template on the way out like any other string; nothing
+	// here builds markup.
+	return strings.Join(parts, " ")
+}
+
+// render is the one response path both admin pages take: a fresh nonce, the
+// template into a buffer, and the identical security headers.
+//
+// Shared rather than copied because the headers are the page's whole defence.
+// A second page that rendered without the CSP, or with a stale nonce, would
+// look correct in a browser and be a hole — the kind of divergence that only
+// shows up when somebody goes looking. data is a callback so the nonce reaches
+// the template's own struct without this helper knowing either page's shape.
+func (h *Handler) render(w http.ResponseWriter, r *http.Request, tmpl *template.Template, data func(nonce string) any) {
 	nonce, err := newNonce()
 	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	data.Nonce = nonce
 
 	// Rendered into a buffer first, so a template error is still a clean 500
 	// rather than half a page followed by nothing.
 	var buf bytes.Buffer
-	if err := h.page.Execute(&buf, data); err != nil {
+	if err := tmpl.Execute(&buf, data(nonce)); err != nil {
 		h.fail(w, r, fmt.Errorf("admin: render: %w", err))
 		return
 	}
@@ -279,7 +419,7 @@ func (h *Handler) load(r *http.Request) (*pageData, error) {
 		if models, err := h.vision.Models(ctx); err == nil {
 			data.AvailableModels = models
 		} else {
-			slog.Warn("admin page: could not list vision models", slog.Any("err", err))
+			slog.WarnContext(ctx, "admin page: could not list vision models", slog.Any("err", err))
 		}
 	}
 	if h.imageModel != nil {

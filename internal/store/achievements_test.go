@@ -131,8 +131,8 @@ func TestStorageAchievementsAwardDeepFreezeToEveryMember(t *testing.T) {
 	storageID := newStorage(t, ctx)
 	alice := newUser(t, ctx)
 	bob := newUser(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, alice))
-	require.NoError(t, s.AddMember(ctx, storageID, bob))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, alice))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, bob))
 
 	for i := 0; i < 100; i++ {
 		_, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Item"})
@@ -150,7 +150,7 @@ func TestStorageAchievementsDoNotAwardDeepFreezeBelowThreshold(t *testing.T) {
 	ctx := context.Background()
 	storageID := newStorage(t, ctx)
 	alice := newUser(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, alice))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, alice))
 
 	for i := 0; i < 99; i++ {
 		_, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Item"})
@@ -173,7 +173,7 @@ func TestStorageAchievementsAwardLibrarianAt80PercentHealth(t *testing.T) {
 	ctx := context.Background()
 	storageID := newStorage(t, ctx)
 	alice := newUser(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, alice))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, alice))
 
 	category, err := s.CreateCategory(ctx, storageID, store.NewCategory{Name: "Staples"})
 	require.NoError(t, err)
@@ -200,7 +200,7 @@ func TestStorageAchievementsAwardArchivistAt100PercentHealth(t *testing.T) {
 	ctx := context.Background()
 	storageID := newStorage(t, ctx)
 	alice := newUser(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, alice))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, alice))
 
 	category, err := s.CreateCategory(ctx, storageID, store.NewCategory{Name: "Staples"})
 	require.NoError(t, err)
@@ -232,7 +232,7 @@ func TestStorageAchievementsSpringCleanBoundary(t *testing.T) {
 	ctx := context.Background()
 	storageID := newStorage(t, ctx)
 	alice := newUser(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, alice))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, alice))
 	category, err := s.CreateCategory(ctx, storageID, store.NewCategory{Name: "Staples"})
 	require.NoError(t, err)
 
@@ -254,7 +254,7 @@ func TestStorageAchievementsSpringCleanRequiresZeroUncategorized(t *testing.T) {
 	ctx := context.Background()
 	storageID := newStorage(t, ctx)
 	alice := newUser(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, alice))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, alice))
 	category, err := s.CreateCategory(ctx, storageID, store.NewCategory{Name: "Staples"})
 	require.NoError(t, err)
 
@@ -275,7 +275,7 @@ func TestEvaluateZeroWasteWeekAwardsWhenNothingExpiredUnconsumed(t *testing.T) {
 	ctx := context.Background()
 	storageID := newStorage(t, ctx)
 	alice := newUser(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, alice))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, alice))
 
 	weekStart := mostRecentMonday(t, time.Now())
 	require.NoError(t, s.EvaluateZeroWasteWeek(ctx, storageID, weekStart))
@@ -288,7 +288,7 @@ func TestEvaluateZeroWasteWeekWithheldWhenSomethingExpiredWithStockRemaining(t *
 	ctx := context.Background()
 	storageID := newStorage(t, ctx)
 	alice := newUser(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, alice))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, alice))
 	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Pantry"})
 	require.NoError(t, err)
 	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Yogurt", ItemType: store.ItemPerishable})
@@ -318,7 +318,7 @@ func TestStorageAchievementsAwardWellStockedAfterSevenDays(t *testing.T) {
 	ctx := context.Background()
 	storageID := newStorage(t, ctx)
 	alice := newUser(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, alice))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, alice))
 	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Pantry"})
 	require.NoError(t, err)
 	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Item", MinStock: 1})
@@ -347,7 +347,7 @@ func TestStorageAchievementsWellStockedResetsWhenAProductFallsBelowMinStock(t *t
 	ctx := context.Background()
 	storageID := newStorage(t, ctx)
 	alice := newUser(t, ctx)
-	require.NoError(t, s.AddMember(ctx, storageID, alice))
+	require.NoError(t, s.AddMember(ctx, store.SystemActor, storageID, alice))
 	_, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Item", MinStock: 5})
 	require.NoError(t, err)
 

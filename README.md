@@ -21,7 +21,8 @@ check with `docker compose version` before deploying.
 ## First run
 
 ```bash
-docker compose run --rm setup    # interactive wizard, writes ./.env
+docker compose run --rm setup       # interactive wizard, writes ./.env
+docker compose run --rm app migrate up
 docker compose up -d
 ```
 
@@ -40,6 +41,13 @@ docker compose up -d --force-recreate
 Starting without a `.env` is not fatal to Compose, but the `app` container
 exits immediately with the variables it needs and the two commands that fix
 it.
+
+**`migrate up` comes before `up -d`, always.** The server compares the
+database's schema version against the migrations its own binary ships and
+refuses to start when they disagree, naming the command that fixes it. Both
+that and the missing-`.env` check exit with code `78`, which is how
+`docker compose logs app` tells "this deployment needs a person" apart from
+"crashed, worth restarting".
 
 ### The first account
 
@@ -239,10 +247,86 @@ backup/restore above, and this exists so the data outlives the software.
 `GET /healthz` answers `200` once the database is reachable:
 
 ```json
-{ "status": "ok", "vision": "ok" }
+{ "status": "ok", "vision": "ok", "version": "2026-09-21" }
 ```
 
 `vision` is reported separately and never changes the status code. A
 `model_unavailable` value means the configured `GEMINI_MODEL` is not one the
 provider currently offers — vision features return `503`, everything else
 keeps working, and an admin can pick a working model without a redeploy.
+
+`version` is the string stamped into the binary at build time, so "what is the
+NAS actually running" is answerable with a `curl` and no SSH. Stamp it by
+passing `VERSION` to the build; a build that does not is `dev`:
+
+```bash
+VERSION=2026-09-21 docker compose -f docker-compose.yml build
+```
+
+The same string is in the footer of the admin page.
+
+## Logs
+
+Everything the application logs is JSON on stdout, at `info` and above. There
+are no log files and nothing to rotate: Docker's log driver owns retention.
+
+```bash
+docker compose -f docker-compose.yml logs -f app
+```
+
+Every request produces exactly one line when it completes, carrying a
+`request_id`, the route pattern (never the raw URL), the status and the
+duration. The same `request_id` is on the response's `X-Request-Id` header and
+on every other line logged while that request was being handled — so a report
+of "it failed just after lunch" becomes one `grep`.
+
+Session tokens and cookies, pairing codes, passwords, `Idempotency-Key`
+values, API keys, request and response bodies, and uploaded image bytes or
+their paths are never logged, in any environment. Calls to Gemini, SerpAPI,
+Iconify and notification targets log the provider, the duration and the
+status, never the prompt, the image or the response.
+
+## The admin audit trail
+
+Every mutating admin action — creating or deleting a user, resetting somebody's
+password, creating or deleting a storage, granting or revoking access,
+changing a setting, moderating a catalog entry — is recorded in the same
+database transaction as the change itself, so an action cannot happen without
+being recorded.
+
+Read it at **`/admin/audit`**, linked from the footer of `/admin`. It is
+newest first, pages backwards, and is append-only: the application has no way
+to edit or delete an entry. Like the rest of the admin area it does not
+announce itself — to anyone who is not an admin it is an ordinary `404`, and
+there is no JSON API for it at all.
+
+Entries record who did it, what action, which id, and the facts worth keeping
+(a created username, a granted storage). They never contain a password or a
+hash, not even transiently. Deleting an admin leaves their entries in place
+with the actor blanked, because "the admin who did this is gone" is exactly
+the situation the trail is read in.
+
+Actions a household member takes inside their own storage are deliberately
+*not* here — `inventory_logs` already records who changed what quantity. This
+table is the operator surface.
+
+## Upgrades
+
+In order, on the machine running the stack:
+
+```bash
+docker compose -f docker-compose.yml run --rm backup    # 1. the rollback plan
+docker compose -f docker-compose.yml build              # 2. (or pull)
+docker compose -f docker-compose.yml run --rm app migrate up   # 3.
+docker compose -f docker-compose.yml up -d              # 4.
+```
+
+**Step 1 is the rollback.** Migrations are forward-only — there is no
+`migrate down` in production, because down-migrations against real data are
+tested never and trusted always. Going back after a bad upgrade means
+restoring the backup taken in step 1.
+
+Skipping step 3 is loud rather than weird: the server refuses to start and
+prints the command. On the operator's Synology NAS, steps 2 to 4 are
+`sh deploy/synology/update`; step 1 is still yours, since the script takes no
+backup.

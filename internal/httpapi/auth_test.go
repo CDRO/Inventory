@@ -120,7 +120,28 @@ func (f *fakeAuth) RedeemPairingCode(_ context.Context, code string) (uuid.UUID,
 func (f *fakeAuth) ChangePassword(_ context.Context, userID uuid.UUID, passwordHash, keepSessionID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.changePassword(userID, passwordHash, keepSessionID)
+}
 
+// AdminResetPassword is the audited admin reset
+// (docs/specs/18-operations-and-observability.md): the same change, keeping no
+// session, plus the trail entry. The details name the target and nothing else
+// — store.AuditDetails has no field a password or a hash would fit in, which
+// is what makes "never contains password material" a property of the type
+// rather than of this fake being careful.
+func (f *fakeAuth) AdminResetPassword(_ context.Context, actor, userID uuid.UUID, passwordHash string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if err := f.changePassword(userID, passwordHash, ""); err != nil {
+		return err
+	}
+	f.recordAudit(actor, store.ActionUserPasswordReset, userID.String(),
+		store.AuditDetails{Username: f.users[userID].Username})
+	return nil
+}
+
+func (f *fakeAuth) changePassword(userID uuid.UUID, passwordHash, keepSessionID string) error {
 	user, ok := f.users[userID]
 	if !ok {
 		return store.ErrNotFound

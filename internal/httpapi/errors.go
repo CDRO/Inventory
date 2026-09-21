@@ -139,8 +139,19 @@ func (w *ErrorWriter) WriteError(rw http.ResponseWriter, r *http.Request, failur
 
 	// The reason always reaches the log, in both environments. Production
 	// hides it from the response, not from the operator.
-	if failure.Reason != "" || failure.Err != nil {
-		w.log.LogAttrs(r.Context(), slog.LevelInfo, "request failed",
+	//
+	// The level follows docs/specs/18-operations-and-observability.md: error
+	// for a 5xx, info for everything below it. A refused session or a 404 for
+	// a storage somebody may not see is the system working exactly as
+	// designed, and logging those at warn would make an ordinary day look like
+	// an incident.
+	//
+	// A 5xx is logged whatever it carries. Internal() sets Err rather than
+	// Reason, so the condition below would already cover it — but a 500 that
+	// somehow reached here with neither is precisely the one an operator must
+	// not have to find out about from a user.
+	if failure.Reason != "" || failure.Err != nil || failure.Status >= http.StatusInternalServerError {
+		w.log.LogAttrs(r.Context(), levelForStatus(failure.Status), "request failed",
 			slog.Int("status", failure.Status),
 			slog.String("code", failure.Code),
 			slog.String("reason", failure.Reason),

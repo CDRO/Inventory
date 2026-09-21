@@ -218,7 +218,7 @@ func TestCountUsersTracksInsertsAndDeletes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, before+1, during)
 
-	require.NoError(t, s.DeleteUser(ctx, created.ID))
+	require.NoError(t, s.DeleteUser(ctx, store.SystemActor, created.ID))
 
 	after, err := s.CountUsers(ctx)
 	require.NoError(t, err)
@@ -230,7 +230,7 @@ func TestCreateAndListStorages(t *testing.T) {
 	ctx := context.Background()
 
 	name := "Storage " + randomSuffix()
-	created, err := s.CreateStorage(ctx, name)
+	created, err := s.CreateStorage(ctx, store.SystemActor, name)
 	require.NoError(t, err)
 
 	assert.Equal(t, name, created.Name)
@@ -255,7 +255,7 @@ func TestDeleteStorageReportsAnUnknownID(t *testing.T) {
 	s := requireDB(t)
 	ctx := context.Background()
 
-	err := s.DeleteStorage(ctx, newUUID(t))
+	err := s.DeleteStorage(ctx, store.SystemActor, newUUID(t))
 
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }

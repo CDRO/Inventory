@@ -32,8 +32,10 @@ type Member struct {
 	AddedAt     time.Time
 }
 
-// CreateStorage adds a storage. Only an admin reaches this.
-func (s *Store) CreateStorage(ctx context.Context, name string) (*Storage, error) {
+// CreateStorage adds a storage. Only an admin reaches this, so it is audited:
+// the insert, the starter category tree and the admin_audit_log row are one
+// transaction (docs/specs/18-operations-and-observability.md).
+func (s *Store) CreateStorage(ctx context.Context, actor uuid.UUID, name string) (*Storage, error) {
 	id, err := newID()
 	if err != nil {
 		return nil, err
@@ -50,6 +52,11 @@ func (s *Store) CreateStorage(ctx context.Context, name string) (*Storage, error
 			return err
 		}
 		if err := seedStarterCategories(ctx, tx, storage.ID); err != nil {
+			return err
+		}
+		if err := writeAdminAudit(ctx, tx, actor, ActionStorageCreated, storage.ID.String(), AuditDetails{
+			StorageName: storage.Name,
+		}); err != nil {
 			return err
 		}
 		out = storage
@@ -136,15 +143,28 @@ func seedStarterCategories(ctx context.Context, tx pgx.Tx, storageID uuid.UUID) 
 // one of those tables carries storage_id ... ON DELETE CASCADE
 // (migrations/00002_core_schema.sql), so a membership row can never outlive
 // the thing it grants access to.
-func (s *Store) DeleteStorage(ctx context.Context, id uuid.UUID) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM storages WHERE id = $1`, id)
-	if err != nil {
-		return fmt.Errorf("store: delete storage: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+//
+// The name is read before the delete and kept in the audit details: nothing
+// afterwards can resolve the id, and a trail recording only "storage_deleted,
+// <uuid>" would not tell an operator which household went.
+func (s *Store) DeleteStorage(ctx context.Context, actor, id uuid.UUID) error {
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		var name string
+		err := tx.QueryRow(ctx, `SELECT name FROM storages WHERE id = $1`, id).Scan(&name)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("store: delete storage: %w", err)
+		}
+
+		if _, err := tx.Exec(ctx, `DELETE FROM storages WHERE id = $1`, id); err != nil {
+			return fmt.Errorf("store: delete storage: %w", err)
+		}
+		return writeAdminAudit(ctx, tx, actor, ActionStorageDeleted, id.String(), AuditDetails{
+			StorageName: name,
+		})
+	})
 }
 
 // IsStorageMember reports whether a user may access a storage.
@@ -178,17 +198,53 @@ func (s *Store) IsStorageMember(ctx context.Context, storageID, userID uuid.UUID
 // A storage or user that does not exist is ErrNotFound, not a driver error: the
 // foreign keys are what notice, and an admin mistyping an id deserves a 404
 // rather than a 500.
-func (s *Store) AddMember(ctx context.Context, storageID, userID uuid.UUID) error {
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO storage_members (storage_id, user_id) VALUES ($1, $2)
-		ON CONFLICT (storage_id, user_id) DO NOTHING`, storageID, userID)
-	if isForeignKeyViolation(err) {
-		return ErrNotFound
+//
+// The grant and its admin_audit_log row are one transaction
+// (docs/specs/18-operations-and-observability.md). **A re-grant records a row
+// too**, even though it changes nothing: the request was an admin action that
+// happened, and the alternative — a row only when the INSERT actually landed —
+// makes the trail depend on prior state in a way nobody reading it could
+// reconstruct. The names are resolved into the details so the entry still
+// reads after either row is deleted.
+func (s *Store) AddMember(ctx context.Context, actor, storageID, userID uuid.UUID) error {
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		storageName, username, err := membershipNames(ctx, tx, storageID, userID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO storage_members (storage_id, user_id) VALUES ($1, $2)
+			ON CONFLICT (storage_id, user_id) DO NOTHING`, storageID, userID); err != nil {
+			if isForeignKeyViolation(err) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("store: add storage member: %w", err)
+		}
+		return writeAdminAudit(ctx, tx, actor, ActionStorageMemberAdded, storageID.String(), AuditDetails{
+			StorageID: storageID.String(), StorageName: storageName,
+			UserID: userID.String(), Username: username,
+		})
+	})
+}
+
+// membershipNames resolves the storage and user a membership change names, and
+// is the reason a mistyped id is ErrNotFound before anything is written rather
+// than a foreign-key violation afterwards.
+func membershipNames(ctx context.Context, tx pgx.Tx, storageID, userID uuid.UUID) (storageName, username string, err error) {
+	if err := tx.QueryRow(ctx, `SELECT name FROM storages WHERE id = $1`, storageID).Scan(&storageName); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", "", ErrNotFound
+		}
+		return "", "", fmt.Errorf("store: read storage for membership: %w", err)
 	}
-	if err != nil {
-		return fmt.Errorf("store: add storage member: %w", err)
+	if err := tx.QueryRow(ctx, `SELECT username FROM users WHERE id = $1`, userID).Scan(&username); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", "", ErrNotFound
+		}
+		return "", "", fmt.Errorf("store: read user for membership: %w", err)
 	}
-	return nil
+	return storageName, username, nil
 }
 
 // RemoveMember revokes a user's access to a storage.
@@ -196,16 +252,29 @@ func (s *Store) AddMember(ctx context.Context, storageID, userID uuid.UUID) erro
 // Their sessions are untouched: membership is not a credential, and the user
 // may well belong to other storages. The next request that names this storage
 // simply stops finding a membership row.
-func (s *Store) RemoveMember(ctx context.Context, storageID, userID uuid.UUID) error {
-	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM storage_members WHERE storage_id = $1 AND user_id = $2`, storageID, userID)
-	if err != nil {
-		return fmt.Errorf("store: remove storage member: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+//
+// Revocation and its admin_audit_log row are one transaction
+// (docs/specs/18-operations-and-observability.md).
+func (s *Store) RemoveMember(ctx context.Context, actor, storageID, userID uuid.UUID) error {
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		storageName, username, err := membershipNames(ctx, tx, storageID, userID)
+		if err != nil {
+			return err
+		}
+
+		tag, err := tx.Exec(ctx,
+			`DELETE FROM storage_members WHERE storage_id = $1 AND user_id = $2`, storageID, userID)
+		if err != nil {
+			return fmt.Errorf("store: remove storage member: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return writeAdminAudit(ctx, tx, actor, ActionStorageMemberRemoved, storageID.String(), AuditDetails{
+			StorageID: storageID.String(), StorageName: storageName,
+			UserID: userID.String(), Username: username,
+		})
+	})
 }
 
 // ListMembers returns a storage's members, for the admin view.

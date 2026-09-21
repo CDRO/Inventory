@@ -23,6 +23,15 @@ import (
 	"github.com/CDRO/Inventory/internal/store"
 )
 
+// withoutRequestID copies a header map without X-Request-Id, so two responses
+// can be compared for byte-identical non-disclosure without the one header
+// that is unique per request by design.
+func withoutRequestID(h http.Header) http.Header {
+	out := h.Clone()
+	out.Del(httpapi.RequestIDHeader)
+	return out
+}
+
 // fakeAdminVision is the fuller vision checker the admin settings routes and
 // the /admin AI-model banner need, beyond stubVision's bare Status.
 type fakeAdminVision struct {
@@ -67,9 +76,33 @@ func (f *fakeAuth) ListUsers(_ context.Context) ([]store.User, error) {
 	return out, nil
 }
 
+// CreateUser is the unaudited bootstrap path; AdminCreateUser below is what
+// the admin route reaches. Both exist here for the same reason they exist on
+// the store: the interface the admin handler holds names only the audited one.
 func (f *fakeAuth) CreateUser(_ context.Context, in store.NewUser) (*store.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.createUser(in)
+}
+
+func (f *fakeAuth) AdminCreateUser(_ context.Context, actor uuid.UUID, in store.NewUser) (*store.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, err := f.createUser(in)
+	if err != nil {
+		// No audit entry on a failed create — the real store rolls the whole
+		// transaction back, and a fake that recorded anyway would let a
+		// regression in that rollback pass this test suite.
+		return nil, err
+	}
+	isAdmin := in.IsAdmin
+	f.recordAudit(actor, store.ActionUserCreated, u.ID.String(), store.AuditDetails{
+		Username: u.Username, DisplayName: u.DisplayName, AdminRights: &isAdmin,
+	})
+	return u, nil
+}
+
+func (f *fakeAuth) createUser(in store.NewUser) (*store.User, error) {
 	for _, u := range f.users {
 		if u.Username == in.Username {
 			return nil, fmt.Errorf("%w: username %q is taken", store.ErrDuplicate, in.Username)
@@ -88,12 +121,14 @@ func (f *fakeAuth) CreateUser(_ context.Context, in store.NewUser) (*store.User,
 // do. The real cascade is pinned against PostgreSQL by the store package's
 // TestDeletingAUserRevokesTheirSessionsImmediately; the HTTP test of the same
 // name below pins that the route reaches it.
-func (f *fakeAuth) DeleteUser(_ context.Context, id uuid.UUID) error {
+func (f *fakeAuth) DeleteUser(_ context.Context, actor, id uuid.UUID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, ok := f.users[id]; !ok {
+	target, ok := f.users[id]
+	if !ok {
 		return store.ErrNotFound
 	}
+	f.recordAudit(actor, store.ActionUserDeleted, id.String(), store.AuditDetails{Username: target.Username})
 	delete(f.users, id)
 	delete(f.admins, id)
 	for sid, s := range f.sessions {
@@ -120,7 +155,7 @@ func (f *fakeAuth) ListStorages(_ context.Context) ([]store.Storage, error) {
 	return out, nil
 }
 
-func (f *fakeAuth) CreateStorage(_ context.Context, name string) (*store.Storage, error) {
+func (f *fakeAuth) CreateStorage(_ context.Context, actor uuid.UUID, name string) (*store.Storage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.storages == nil {
@@ -128,15 +163,18 @@ func (f *fakeAuth) CreateStorage(_ context.Context, name string) (*store.Storage
 	}
 	s := &store.Storage{ID: uuid.New(), Name: name, CreatedAt: time.Now()}
 	f.storages[s.ID] = s
+	f.recordAudit(actor, store.ActionStorageCreated, s.ID.String(), store.AuditDetails{StorageName: s.Name})
 	return s, nil
 }
 
-func (f *fakeAuth) DeleteStorage(_ context.Context, id uuid.UUID) error {
+func (f *fakeAuth) DeleteStorage(_ context.Context, actor, id uuid.UUID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, ok := f.storages[id]; !ok {
+	target, ok := f.storages[id]
+	if !ok {
 		return store.ErrNotFound
 	}
+	f.recordAudit(actor, store.ActionStorageDeleted, id.String(), store.AuditDetails{StorageName: target.Name})
 	delete(f.storages, id)
 	for key := range f.members {
 		if strings.HasPrefix(key, id.String()) {
@@ -168,19 +206,23 @@ func (f *fakeAuth) ListMembers(_ context.Context, storageID uuid.UUID) ([]store.
 
 // AddMember mirrors the store: idempotent, and a missing user or storage is
 // ErrNotFound (the foreign keys' answer).
-func (f *fakeAuth) AddMember(_ context.Context, storageID, userID uuid.UUID) error {
+func (f *fakeAuth) AddMember(_ context.Context, actor, storageID, userID uuid.UUID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	_, storageOK := f.storages[storageID]
-	_, userOK := f.users[userID]
+	storage, storageOK := f.storages[storageID]
+	user, userOK := f.users[userID]
 	if !storageOK || !userOK {
 		return store.ErrNotFound
 	}
 	f.members[storageID.String()+userID.String()] = true
+	f.recordAudit(actor, store.ActionStorageMemberAdded, storageID.String(), store.AuditDetails{
+		StorageID: storageID.String(), StorageName: storage.Name,
+		UserID: userID.String(), Username: user.Username,
+	})
 	return nil
 }
 
-func (f *fakeAuth) RemoveMember(_ context.Context, storageID, userID uuid.UUID) error {
+func (f *fakeAuth) RemoveMember(_ context.Context, actor, storageID, userID uuid.UUID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := storageID.String() + userID.String()
@@ -188,6 +230,14 @@ func (f *fakeAuth) RemoveMember(_ context.Context, storageID, userID uuid.UUID) 
 		return store.ErrNotFound
 	}
 	delete(f.members, key)
+	details := store.AuditDetails{StorageID: storageID.String(), UserID: userID.String()}
+	if storage, ok := f.storages[storageID]; ok {
+		details.StorageName = storage.Name
+	}
+	if user, ok := f.users[userID]; ok {
+		details.Username = user.Username
+	}
+	f.recordAudit(actor, store.ActionStorageMemberRemoved, storageID.String(), details)
 	return nil
 }
 
@@ -198,10 +248,11 @@ func (f *fakeAuth) Setting(_ context.Context, key string) (string, bool, error) 
 	return v, ok, nil
 }
 
-func (f *fakeAuth) SetSetting(_ context.Context, key, value string, _ uuid.UUID) error {
+func (f *fakeAuth) SetSetting(_ context.Context, key, value string, updatedBy uuid.UUID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.settings[key] = value
+	f.recordAudit(updatedBy, store.ActionSettingsUpdated, key, store.AuditDetails{Key: key, Value: value})
 	return nil
 }
 
@@ -217,25 +268,31 @@ func (f *fakeAuth) SearchCatalog(_ context.Context, q string) ([]store.CatalogPr
 	return out, nil
 }
 
-func (f *fakeAuth) CorrectCatalogShelfLife(_ context.Context, id uuid.UUID, days *int) (int, error) {
+func (f *fakeAuth) CorrectCatalogShelfLife(_ context.Context, actor, id uuid.UUID, days *int) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for i, c := range f.catalog {
 		if c.ID == id {
 			f.catalog[i].DefaultShelfLifeDays = days
 			f.catalogRecomputeCalls = append(f.catalogRecomputeCalls, id)
-			return f.catalogRecompute[id], nil
+			recomputed := f.catalogRecompute[id]
+			f.recordAudit(actor, store.ActionCatalogEntryUpdated, id.String(), store.AuditDetails{
+				ShelfLifeDays: days, RecomputedBatches: &recomputed,
+			})
+			return recomputed, nil
 		}
 	}
 	return 0, store.ErrNotFound
 }
 
-func (f *fakeAuth) DeleteCatalogProduct(_ context.Context, id uuid.UUID) error {
+func (f *fakeAuth) DeleteCatalogProduct(_ context.Context, actor, id uuid.UUID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for i, c := range f.catalog {
 		if c.ID == id {
 			f.catalog = append(f.catalog[:i], f.catalog[i+1:]...)
+			f.recordAudit(actor, store.ActionCatalogEntryDeleted, id.String(),
+				store.AuditDetails{DisplayName: c.DisplayName})
 			return nil
 		}
 	}
@@ -276,7 +333,7 @@ func TestNonAdminCannotTellTheAdminAreaExists(t *testing.T) {
 	auth := newFakeAuth()
 	_, session := auth.addUser(t, false)
 	victim, _ := auth.addUser(t, false)
-	storage, err := auth.CreateStorage(context.Background(), "Pantry")
+	storage, err := auth.CreateStorage(context.Background(), store.SystemActor, "Pantry")
 	require.NoError(t, err)
 
 	router := httpapi.NewRouter(httpapi.Deps{
@@ -300,6 +357,11 @@ func TestNonAdminCannotTellTheAdminAreaExists(t *testing.T) {
 	requests := []struct{ method, path, body string }{
 		// The admin area.
 		{http.MethodGet, "/admin", ""},
+		// The audit trail (docs/specs/18-operations-and-observability.md). It
+		// is hidden like the rest of the admin area, and it is the one page
+		// whose existence would be worth the most to somebody probing: it
+		// names every account and storage on the deployment.
+		{http.MethodGet, "/admin/audit", ""},
 		{http.MethodGet, "/api/admin/users", ""},
 		{http.MethodPost, "/api/admin/users", `{"username":"mallory","password":"password123","is_admin":true}`},
 		{http.MethodDelete, "/api/admin/users/" + victim.ID.String(), ""},
@@ -337,7 +399,22 @@ func TestNonAdminCannotTellTheAdminAreaExists(t *testing.T) {
 
 			assert.Equal(t, reference.Code, rec.Code)
 			assert.Equal(t, reference.Body.String(), rec.Body.String())
-			assert.Equal(t, reference.Header(), rec.Header())
+			assert.Equal(t, withoutRequestID(reference.Header()), withoutRequestID(rec.Header()))
+
+			// X-Request-Id is compared for shape rather than value
+			// (docs/specs/18-operations-and-observability.md): it is a fresh
+			// UUIDv7 per request, so two responses cannot carry the same one
+			// and an equality check on the whole header map would fail for a
+			// reason that has nothing to do with disclosure. What matters here
+			// is that it is present and looks identical either way — an id
+			// that appeared on real admin routes and not on made-up paths, or
+			// that was derived from the resource, would itself be the tell.
+			id := rec.Header().Get(httpapi.RequestIDHeader)
+			require.NotEmpty(t, id, "every response carries a request id")
+			assert.NotEqual(t, reference.Header().Get(httpapi.RequestIDHeader), id,
+				"each request gets its own id")
+			_, err := uuid.Parse(id)
+			assert.NoError(t, err, "the request id is a UUID whatever the route")
 		})
 	}
 
