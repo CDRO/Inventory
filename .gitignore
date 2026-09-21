@@ -18,6 +18,8 @@
 .claude/worklog.md
 .claude/*.log
 .claude/*.diff
+.claude/*.txt
+.claude/*.md
 
 # Backup archives (docs/specs/15-backup-restore-and-export.md). The `backup`
 # service writes them into ./backups inside the clone; they hold the whole

@@ -30,10 +30,11 @@ Two details in that command are load-bearing:
 | `00006_gamification.sql` | `contribution_events`, `user_progress`, `achievements_unlocked`, `user_preferences`, `holiday_weeks`, `storage_gamification_settings` — the scoring ledger and caches of [`docs/specs/51-gamification-scoring.md`](../docs/specs/51-gamification-scoring.md) |
 | `00007_gamification_quests.sql` | `quests`, `quest_contributors`, plus `clean_since`/`well_stocked_since` on `storage_gamification_settings` — weekly quests and the clean-storage/well-stocked milestones of [`docs/specs/52-gamification-quests-and-ui.md`](../docs/specs/52-gamification-quests-and-ui.md) |
 | `00008_stocktake.sql` | `locations.last_audited_at` — the "when was this shelf last walked" timestamp of [`docs/specs/13-stocktake-and-audit.md`](../docs/specs/13-stocktake-and-audit.md) |
+| `00009_notifications.sql` | `notification_settings` — the per-storage, opt-in expiry digest configuration of [`docs/specs/17-expiry-notifications.md`](../docs/specs/17-expiry-notifications.md) |
 
 Every file carries both `-- +goose Up` and `-- +goose Down`, and the down path
-is exercised in CI-equivalent form: `down` eight times empties the schema and
-`up` restores all twenty-six tables.
+is exercised in CI-equivalent form: `down` nine times empties the schema and
+`up` restores all twenty-seven tables.
 
 `00001`'s down step deliberately does **not** drop the extension. Other schemas
 in the same database may depend on `pg_trgm`, and dropping it would take their

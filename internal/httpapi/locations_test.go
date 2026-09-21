@@ -257,6 +257,7 @@ type fakeAPI struct {
 	*fakeAnalyticsStore
 	*fakeGamification
 	*fakeStocktake
+	*fakeNotifications
 	*fakeExportStore
 }
 
@@ -270,41 +271,44 @@ func newFakeAPI(auth *fakeAuth) fakeAPI {
 		fakeConsumeStore: &fakeConsumeStore{}, fakeProductStore: &fakeProductStore{},
 		fakeReorderStore: &fakeReorderStore{}, fakeAnalyticsStore: &fakeAnalyticsStore{},
 		fakeGamification: newFakeGamification(), fakeStocktake: &fakeStocktake{},
-		fakeExportStore: &fakeExportStore{},
+		fakeNotifications: &fakeNotifications{},
+		fakeExportStore:   &fakeExportStore{},
 	}
 }
 
 // apiFixture builds a router with a member session already established, and
 // returns everything a test needs to make a request as that member.
 type apiFixture struct {
-	router       http.Handler
-	auth         *fakeAuth
-	locations    *fakeLocations
-	categories   *fakeCategories
-	batches      *fakeBatches
-	lists        *fakeShoppingLists
-	expiry       *fakeExpiry
-	jobs         *fakeJobs
-	idem         *fakeIdempotency
-	ingest       *fakeIngestStore
-	ingester     *fakeIngester
-	photos       *fakePhotoStore
-	pictures     *fakePhotoStore
-	matcher      *fakeMatcher
-	images       *fakeSuggester
-	imageData    *fakeImageCache
-	consume      *fakeConsumeStore
-	consumer     *fakeConsumer
-	products     *fakeProductStore
-	reorder      *fakeReorderStore
-	analytics    *fakeAnalyticsStore
-	gamification *fakeGamification
-	stocktake    *fakeStocktake
-	exports      *fakeExportStore
-	adminVision  *fakeAdminVision
-	storageID    uuid.UUID
-	user         *store.User
-	session      *store.Session
+	router        http.Handler
+	auth          *fakeAuth
+	locations     *fakeLocations
+	categories    *fakeCategories
+	batches       *fakeBatches
+	lists         *fakeShoppingLists
+	expiry        *fakeExpiry
+	jobs          *fakeJobs
+	idem          *fakeIdempotency
+	ingest        *fakeIngestStore
+	ingester      *fakeIngester
+	photos        *fakePhotoStore
+	pictures      *fakePhotoStore
+	matcher       *fakeMatcher
+	images        *fakeSuggester
+	imageData     *fakeImageCache
+	consume       *fakeConsumeStore
+	consumer      *fakeConsumer
+	products      *fakeProductStore
+	reorder       *fakeReorderStore
+	analytics     *fakeAnalyticsStore
+	gamification  *fakeGamification
+	stocktake     *fakeStocktake
+	notifications *fakeNotifications
+	notifier      *fakeNotifier
+	exports       *fakeExportStore
+	adminVision   *fakeAdminVision
+	storageID     uuid.UUID
+	user          *store.User
+	session       *store.Session
 }
 
 // newAPIFixture builds the fixture. Each opt may adjust the router's
@@ -324,6 +328,8 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 	imageData := &fakeImageCache{}
 	gamification := newFakeGamification()
 	stocktake := &fakeStocktake{}
+	notifications := &fakeNotifications{}
+	notifier := &fakeNotifier{}
 	exports := &fakeExportStore{}
 	user, session := auth.addUser(t, false)
 	storageID := uuid.New()
@@ -353,7 +359,8 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 			fakeConsumeStore: consumeStore, fakeProductStore: products,
 			fakeReorderStore: reorder, fakeAnalyticsStore: analytics,
 			fakeGamification: gamification, fakeStocktake: stocktake,
-			fakeExportStore: exports,
+			fakeNotifications: notifications,
+			fakeExportStore:   exports,
 		},
 		Matcher:       matcher,
 		Images:        images,
@@ -363,6 +370,7 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 		ProductImages: pictures,
 		Consumer:      consumer,
 		AdminVision:   adminVision,
+		Notifier:      notifier,
 		Config:        &config.Config{GeminiModel: "gemini-2.0-flash", AppEnv: "dev", HTTPPort: "8000"},
 	}
 	for _, opt := range opts {
@@ -376,13 +384,15 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 		ingest: ingestStore, ingester: ingester, photos: photos, pictures: pictures,
 		matcher: matcher, images: images, imageData: imageData,
 		consume: consumeStore, consumer: consumer, products: products,
-		reorder:      reorder,
-		analytics:    analytics,
-		gamification: gamification,
-		stocktake:    stocktake,
-		exports:      exports,
-		adminVision:  adminVision,
-		storageID:    storageID, user: user, session: session,
+		reorder:       reorder,
+		analytics:     analytics,
+		gamification:  gamification,
+		stocktake:     stocktake,
+		notifications: notifications,
+		notifier:      notifier,
+		exports:       exports,
+		adminVision:   adminVision,
+		storageID:     storageID, user: user, session: session,
 	}
 }
 

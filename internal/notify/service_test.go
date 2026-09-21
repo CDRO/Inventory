@@ -1,0 +1,219 @@
+package notify_test
+
+import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+
+	"github.com/CDRO/Inventory/internal/notify"
+	"github.com/CDRO/Inventory/internal/store"
+)
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// fakeStore stands in for the database half of the service.
+type fakeStore struct {
+	due      []store.NotificationSettings
+	claimErr error
+
+	items    map[uuid.UUID][]store.DigestItem
+	itemsErr error
+
+	results   map[uuid.UUID]string
+	lastUntil time.Time
+	claims    int
+}
+
+func (f *fakeStore) ClaimDueNotifications(_ context.Context, _, _ time.Time) ([]store.NotificationSettings, error) {
+	f.claims++
+	if f.claimErr != nil {
+		return nil, f.claimErr
+	}
+	return f.due, nil
+}
+
+func (f *fakeStore) ExpiringBatchesBefore(_ context.Context, storageID uuid.UUID, until time.Time) ([]store.DigestItem, error) {
+	f.lastUntil = until
+	if f.itemsErr != nil {
+		return nil, f.itemsErr
+	}
+	return f.items[storageID], nil
+}
+
+func (f *fakeStore) RecordNotificationResult(_ context.Context, storageID uuid.UUID, result string) error {
+	if f.results == nil {
+		f.results = map[uuid.UUID]string{}
+	}
+	f.results[storageID] = result
+	return nil
+}
+
+func TestRunDueSendsAndRecordsSent(t *testing.T) {
+	target := &capture{}
+	server := httptest.NewServer(target.handler())
+	defer server.Close()
+
+	settings := settingsFor(store.NotificationNtfy, server.URL+"/inventory", "")
+	now := time.Date(2026, time.September, 21, 8, 5, 0, 0, time.UTC)
+	backing := &fakeStore{
+		due: []store.NotificationSettings{settings},
+		items: map[uuid.UUID][]store.DigestItem{
+			settings.StorageID: {item("Milk", 2, "Fridge", day(2026, time.September, 19))},
+		},
+	}
+
+	sent, err := notify.New(backing, discardLogger()).RunDue(context.Background(), now)
+	require.NoError(t, err)
+	require.Equal(t, 1, sent)
+	require.Len(t, target.requests, 1)
+	require.Equal(t, store.NotificationSent, backing.results[settings.StorageID])
+}
+
+// The query window is always the widest bucket; include_soon decides what is
+// reported, not what is fetched, so the 3-versus-14 decision lives in exactly
+// one place.
+func TestRunDueAsksForTheFullTwoWeekWindow(t *testing.T) {
+	target := &capture{}
+	server := httptest.NewServer(target.handler())
+	defer server.Close()
+
+	settings := settingsFor(store.NotificationNtfy, server.URL+"/inventory", "")
+	now := time.Date(2026, time.September, 21, 8, 30, 0, 0, time.UTC)
+	backing := &fakeStore{due: []store.NotificationSettings{settings}}
+
+	_, err := notify.New(backing, discardLogger()).RunDue(context.Background(), now)
+	require.NoError(t, err)
+	require.Equal(t, day(2026, time.October, 5), backing.lastUntil,
+		"midnight today plus fourteen days, not the time of the tick")
+}
+
+// "If every bucket is empty, nothing is sent" — an 'all fine' message daily
+// is how a channel gets muted.
+func TestRunDueSendsNothingWhenEveryBucketIsEmpty(t *testing.T) {
+	target := &capture{}
+	server := httptest.NewServer(target.handler())
+	defer server.Close()
+
+	settings := settingsFor(store.NotificationNtfy, server.URL+"/inventory", "")
+	backing := &fakeStore{due: []store.NotificationSettings{settings}}
+
+	sent, err := notify.New(backing, discardLogger()).RunDue(context.Background(),
+		time.Date(2026, time.September, 21, 8, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	require.Zero(t, sent)
+	require.Empty(t, target.requests, "nothing left the process")
+	require.Equal(t, store.NotificationEmpty, backing.results[settings.StorageID])
+}
+
+// A storage whose only items are soon-expiring, with include_soon off, is the
+// same case: an empty digest, recorded as 'empty', sent to nobody.
+func TestRunDueRespectsIncludeSoon(t *testing.T) {
+	target := &capture{}
+	server := httptest.NewServer(target.handler())
+	defer server.Close()
+
+	settings := settingsFor(store.NotificationNtfy, server.URL+"/inventory", "")
+	settings.IncludeSoon = false
+	backing := &fakeStore{
+		due: []store.NotificationSettings{settings},
+		items: map[uuid.UUID][]store.DigestItem{
+			settings.StorageID: {item("Flour", 1, "Pantry", day(2026, time.September, 30))},
+		},
+	}
+
+	sent, err := notify.New(backing, discardLogger()).RunDue(context.Background(),
+		time.Date(2026, time.September, 21, 8, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	require.Zero(t, sent)
+	require.Empty(t, target.requests)
+	require.Equal(t, store.NotificationEmpty, backing.results[settings.StorageID])
+}
+
+// Nothing claimed is the normal state: no row, or enabled = FALSE, and the
+// claim returns nothing. No delivery can then happen, because the only thing
+// this loop delivers to is what the claim handed it.
+func TestRunDueSendsNothingWhenNothingIsDue(t *testing.T) {
+	target := &capture{}
+	server := httptest.NewServer(target.handler())
+	defer server.Close()
+
+	backing := &fakeStore{}
+	sent, err := notify.New(backing, discardLogger()).RunDue(context.Background(), time.Now())
+	require.NoError(t, err)
+	require.Zero(t, sent)
+	require.Empty(t, target.requests)
+	require.Empty(t, backing.results)
+}
+
+// One household's unreachable relay must not cost its neighbours in the same
+// database their digest, and the failure is recorded rather than retried —
+// the next day's run is the retry.
+func TestRunDueIsolatesOneStoragesFailure(t *testing.T) {
+	target := &capture{}
+	server := httptest.NewServer(target.handler())
+	defer server.Close()
+
+	broken := settingsFor(store.NotificationNtfy, "http://127.0.0.1:1/inventory", "tk_secret")
+	working := settingsFor(store.NotificationNtfy, server.URL+"/inventory", "")
+	expiring := []store.DigestItem{item("Milk", 2, "Fridge", day(2026, time.September, 19))}
+	backing := &fakeStore{
+		due: []store.NotificationSettings{broken, working},
+		items: map[uuid.UUID][]store.DigestItem{
+			broken.StorageID: expiring, working.StorageID: expiring,
+		},
+	}
+
+	sent, err := notify.New(backing, discardLogger()).RunDue(context.Background(),
+		time.Date(2026, time.September, 21, 8, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	require.Equal(t, 1, sent)
+	require.Equal(t, store.NotificationSent, backing.results[working.StorageID])
+	require.NotEqual(t, store.NotificationSent, backing.results[broken.StorageID])
+	require.NotContains(t, backing.results[broken.StorageID], "tk_secret",
+		"the stored summary never carries the token")
+}
+
+func TestRunDueReportsAClaimFailure(t *testing.T) {
+	backing := &fakeStore{claimErr: errors.New("database is down")}
+	sent, err := notify.New(backing, discardLogger()).RunDue(context.Background(), time.Now())
+	require.Error(t, err)
+	require.Zero(t, sent)
+}
+
+func TestSendTestDeliversAndRecordsTheOutcome(t *testing.T) {
+	target := &capture{}
+	server := httptest.NewServer(target.handler())
+	defer server.Close()
+
+	settings := settingsFor(store.NotificationNtfy, server.URL+"/inventory", "")
+	backing := &fakeStore{}
+	require.NoError(t, notify.New(backing, discardLogger()).SendTest(context.Background(), settings))
+
+	require.Len(t, target.requests, 1)
+	require.NotContains(t, target.requests[0].body, "Milk", "the test message carries no inventory")
+	require.Equal(t, store.NotificationSent, backing.results[settings.StorageID])
+}
+
+func TestSendTestRecordsAFailureSummary(t *testing.T) {
+	target := &capture{status: http.StatusNotFound}
+	server := httptest.NewServer(target.handler())
+	defer server.Close()
+
+	settings := settingsFor(store.NotificationGotify, server.URL, "tk_super_secret")
+	backing := &fakeStore{}
+	err := notify.New(backing, discardLogger()).SendTest(context.Background(), settings)
+
+	require.Error(t, err)
+	require.Contains(t, backing.results[settings.StorageID], "404")
+	require.NotContains(t, backing.results[settings.StorageID], "tk_super_secret")
+}

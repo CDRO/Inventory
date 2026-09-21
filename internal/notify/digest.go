@@ -1,0 +1,175 @@
+// Package notify builds and delivers the opt-in expiry digest of
+// docs/specs/17-expiry-notifications.md.
+//
+// # Why this exists at all, given two rules that sound like they forbid it
+//
+// docs/specs/06-vision-shelf-ingestion.md says the inbox badge is "the only
+// nudge — no notifications, no emails", and
+// docs/specs/50-gamification-overview.md says "no push notifications". Both
+// stand, untouched. They govern nagging somebody about *the app*: unreviewed
+// jobs, streaks, "we miss you". This package sends a subscribed report about
+// *the food*, off by default, per storage, to an endpoint the household
+// itself runs and typed in. The boundary the spec draws for all future work
+// is that notifications about the inventory's state may be opt-in features
+// and notifications about a person's behaviour remain forbidden.
+//
+// # Shape
+//
+// Nothing here is durable-delivery machinery, deliberately. There is no
+// queue, no retry, no backoff: a failed send records why and the next day's
+// run is the retry. A notification is a nicety, and the moment it grows an
+// outbox it starts costing more than it is worth.
+//
+// Two halves, split so the first can be tested without a network at all:
+// this file turns rows into a message, and deliver.go posts it.
+package notify
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/CDRO/Inventory/internal/expiry"
+	"github.com/CDRO/Inventory/internal/store"
+)
+
+// Digest is one storage's message, already bucketed.
+//
+// The three buckets are the urgency bands of
+// docs/specs/08-expiration-and-classification.md, assigned by
+// expiry.Classify — this package does no date arithmetic of its own, which
+// is what makes the digest and the dashboard agree about the same batch at
+// the same instant.
+type Digest struct {
+	Expired  []store.DigestItem
+	Critical []store.DigestItem
+	Soon     []store.DigestItem
+}
+
+// Build buckets items for the day today, honouring include_soon.
+//
+// An excluded Soon bucket is dropped here rather than filtered later, so
+// everything downstream — the emptiness test above all — sees only what will
+// actually be reported. A storage with nothing but soon-expiring items and
+// include_soon off has an empty digest and is not notified, which is the
+// point of the setting.
+//
+// Anything classified ok or none is not in the caller's query range and is
+// ignored if it arrives anyway.
+func Build(items []store.DigestItem, today time.Time, includeSoon bool) Digest {
+	var d Digest
+	for _, item := range items {
+		date := item.ExpirationDate
+		switch expiry.Classify(&date, today) {
+		case expiry.UrgencyExpired:
+			d.Expired = append(d.Expired, item)
+		case expiry.UrgencyCritical:
+			d.Critical = append(d.Critical, item)
+		case expiry.UrgencySoon:
+			if includeSoon {
+				d.Soon = append(d.Soon, item)
+			}
+		}
+	}
+	return d
+}
+
+// Empty reports whether there is nothing to say.
+//
+// An empty digest is not sent and records 'empty' instead: a daily "all fine"
+// message is how a channel gets muted, and a muted channel is how the next
+// real warning goes unread.
+func (d Digest) Empty() bool {
+	return len(d.Expired) == 0 && len(d.Critical) == 0 && len(d.Soon) == 0
+}
+
+// Title is the one-line summary — what somebody reads on a lock screen
+// without opening anything.
+func (d Digest) Title() string {
+	parts := make([]string, 0, 3)
+	if n := len(d.Expired); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d expired", n))
+	}
+	if n := len(d.Critical); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d expiring within %d days", n, expiry.CriticalWithinDays))
+	}
+	if n := len(d.Soon); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d expiring within %d days", n, expiry.SoonWithinDays))
+	}
+	if len(parts) == 0 {
+		return "Inventory: nothing expiring"
+	}
+	return "Inventory: " + strings.Join(parts, ", ")
+}
+
+// Message is the body: plain text, one line per batch, grouped by bucket.
+//
+// Plain text and nothing else. **No images, ever** — a photo taken inside
+// somebody's home must not be pushed to a relay, even a self-hosted one, so
+// there is no code path here that can reference one. The fields are the ones
+// the spec lists and no others: product name, quantity, location path, date.
+func (d Digest) Message() string {
+	var b strings.Builder
+	section := func(heading string, items []store.DigestItem) {
+		if len(items) == 0 {
+			return
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(heading)
+		b.WriteString("\n")
+		for _, item := range items {
+			b.WriteString(line(item))
+			b.WriteString("\n")
+		}
+	}
+
+	section("Expired:", d.Expired)
+	section(fmt.Sprintf("Within %d days:", expiry.CriticalWithinDays), d.Critical)
+	section(fmt.Sprintf("Within %d days:", expiry.SoonWithinDays), d.Soon)
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// line renders one batch. The location is omitted rather than rendered as an
+// empty gap when the path could not be resolved — a broken tree should cost
+// the line its "where", not its legibility.
+func line(item store.DigestItem) string {
+	parts := []string{fmt.Sprintf("- %s x%d", item.ProductName, item.Quantity)}
+	if item.LocationPath != "" {
+		parts = append(parts, item.LocationPath)
+	}
+	parts = append(parts, item.ExpirationDate.Format(time.DateOnly))
+	return strings.Join(parts, " — ")
+}
+
+// payloadItem is one entry of the webhook payload's items array
+// (docs/specs/17-expiry-notifications.md).
+type payloadItem struct {
+	Name           string `json:"name"`
+	Quantity       int    `json:"quantity"`
+	Location       string `json:"location"`
+	ExpirationDate string `json:"expiration_date"`
+	Urgency        string `json:"urgency"`
+}
+
+// items flattens the digest for the webhook kind, tagging each entry with the
+// bucket it was already placed in rather than re-deriving it.
+func (d Digest) items() []payloadItem {
+	out := make([]payloadItem, 0, len(d.Expired)+len(d.Critical)+len(d.Soon))
+	add := func(urgency expiry.Urgency, items []store.DigestItem) {
+		for _, item := range items {
+			out = append(out, payloadItem{
+				Name:           item.ProductName,
+				Quantity:       item.Quantity,
+				Location:       item.LocationPath,
+				ExpirationDate: item.ExpirationDate.Format(time.DateOnly),
+				Urgency:        string(urgency),
+			})
+		}
+	}
+	add(expiry.UrgencyExpired, d.Expired)
+	add(expiry.UrgencyCritical, d.Critical)
+	add(expiry.UrgencySoon, d.Soon)
+	return out
+}
