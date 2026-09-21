@@ -24,6 +24,13 @@ var generatedVars = map[string]bool{
 	"SESSION_SECRET": true,
 }
 
+// derivedVars are never prompted for either. Their value is computed after
+// every prompt has its final answer, from other entries, rather than typed —
+// see deriveDatabaseURL.
+var derivedVars = map[string]bool{
+	"DATABASE_URL": true,
+}
+
 // optionalVars may end up empty. Everything else in .env.example must be
 // given a value: an empty API key or DSN starts a process that fails later,
 // far from the cause.
@@ -35,6 +42,21 @@ var optionalVars = map[string]bool{
 	// needs it. Forcing a value here would make an operator who does not want
 	// image search invent one, or loop on the prompt forever.
 	"SERPAPI_API_KEY": true,
+}
+
+// composeInterpolatedVars reach Postgres by two routes that must agree:
+// docker-compose.yml interpolates each of them from .env into the db
+// service's environment (`${POSTGRES_USER}` and so on), while
+// deriveDatabaseURL embeds the same answer, percent-encoded, into
+// DATABASE_URL, which reaches the app via env_file. A value Compose's own
+// .env parser treats specially — a '$' it tries to interpolate, or
+// whitespace followed by '#' it reads as a trailing comment — is mangled or
+// truncated on the first route but not the second, so validate rejects both
+// outright rather than let the two silently disagree.
+var composeInterpolatedVars = map[string]bool{
+	"POSTGRES_USER":     true,
+	"POSTGRES_PASSWORD": true,
+	"POSTGRES_DB":       true,
 }
 
 // sessionSecretBytes is 256 bits of entropy, base64url-encoded when written.
@@ -116,12 +138,27 @@ func (w *Wizard) Run() error {
 			fmt.Fprintf(out, "%-24s generated\n", e.key)
 			continue
 		}
+		if derivedVars[e.key] {
+			// Announced here, at the line's own position in the template —
+			// the way a generated secret is — but not computed yet: a
+			// POSTGRES_* prompt this entry depends on may still be ahead of
+			// it in the template.
+			fmt.Fprintf(out, "%-24s derived from POSTGRES_*\n", e.key)
+			continue
+		}
 
 		value, err := promptValue(reader, out, e)
 		if err != nil {
 			return err
 		}
 		e.value = value
+	}
+
+	// Computed only now that every prompt has its final answer, regardless of
+	// where DATABASE_URL's own line sits in the template, so a POSTGRES_*
+	// prompt can never race the derivation that reads it.
+	if err := deriveDatabaseURL(entries); err != nil {
+		return err
 	}
 
 	if err := writeEnv(targetPath, entries); err != nil {
@@ -177,27 +214,81 @@ func validate(key, value string) string {
 		}
 		return key + " cannot be empty."
 	}
-	if key == "DATABASE_URL" {
-		return validateDSN(value)
+	if composeInterpolatedVars[key] {
+		if strings.ContainsRune(value, '$') {
+			// docker-compose.yml interpolates POSTGRES_USER, POSTGRES_PASSWORD
+			// and POSTGRES_DB into the db service's environment from .env; the
+			// same .env parse feeds DATABASE_URL to the app via env_file. A raw
+			// '$' is mangled by Compose's own variable interpolation when it
+			// loads the value — identically on both routes, not divergently —
+			// so it is rejected outright rather than risk shipping a value
+			// nothing agrees on.
+			return key + ` cannot contain "$": Compose's own .env parsing treats it as the start of a variable reference and mangles the value when loading it.`
+		}
+		if _, trailing := splitTrailingComment(value); trailing != "" {
+			// The same whitespace-then-'#' rule that makes Compose read a
+			// comment as part of an empty value also makes it silently
+			// truncate this one when it reads .env to build the db
+			// container's environment. DATABASE_URL keeps the full value
+			// intact because net/url percent-encodes '#', so the db
+			// container and the app would end up disagreeing.
+			return key + ` cannot contain whitespace followed by "#": Compose reads that as a comment when it builds the db container's environment, but the derived DATABASE_URL keeps the full value, so the two would end up disagreeing.`
+		}
 	}
 	return ""
 }
 
-func validateDSN(value string) string {
-	u, err := url.Parse(value)
-	if err != nil {
-		return "Not a valid URL: " + err.Error()
+// deriveDatabaseURL computes DATABASE_URL from the final POSTGRES_USER,
+// POSTGRES_PASSWORD and POSTGRES_DB answers and writes it into the matching
+// entry. A template without a DATABASE_URL entry is left alone.
+//
+// Built with a URL builder rather than string concatenation, per
+// docs/specs/30-setup-wizard-derived-config.md: user, password and database
+// name are percent-encoded only where they need to be.
+func deriveDatabaseURL(entries []entry) error {
+	idx := -1
+	for i := range entries {
+		if entries[i].key == "DATABASE_URL" {
+			idx = i
+			break
+		}
 	}
-	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
-		return `Must start with "postgres://".`
+	if idx == -1 {
+		return nil
 	}
-	if u.Host == "" {
-		return "Missing host, e.g. postgres://user:pass@db:5432/inventory."
+
+	user, ok := entryValue(entries, "POSTGRES_USER")
+	if !ok {
+		return fmt.Errorf("setup: derive DATABASE_URL: %s has no POSTGRES_USER", ExampleFile)
 	}
-	if strings.Trim(u.Path, "/") == "" {
-		return "Missing database name, e.g. postgres://user:pass@db:5432/inventory."
+	password, ok := entryValue(entries, "POSTGRES_PASSWORD")
+	if !ok {
+		return fmt.Errorf("setup: derive DATABASE_URL: %s has no POSTGRES_PASSWORD", ExampleFile)
 	}
-	return ""
+	db, ok := entryValue(entries, "POSTGRES_DB")
+	if !ok {
+		return fmt.Errorf("setup: derive DATABASE_URL: %s has no POSTGRES_DB", ExampleFile)
+	}
+
+	u := url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(user, password),
+		Host:     "db:5432",
+		Path:     "/" + db,
+		RawQuery: "sslmode=disable",
+	}
+	entries[idx].value = u.String()
+	return nil
+}
+
+// entryValue looks up a prompted or generated entry's final value by key.
+func entryValue(entries []entry, key string) (string, bool) {
+	for _, e := range entries {
+		if e.key == key {
+			return e.value, true
+		}
+	}
+	return "", false
 }
 
 // confirm asks a yes/no question, defaulting to no.
@@ -252,10 +343,10 @@ func parseExample(text string) []entry {
 // unquoted '#' preceded by whitespace starts a comment, so a '#' inside a
 // password is preserved.
 //
-// The whitespace before the '#' stays with the comment. It is what separates
-// the value from the note when the line is written back out, and a .env line
-// rendered as `APP_ENV=prod# note` would hand Compose the comment as part of
-// the value.
+// writeEnv renders trailing on its own line above the value, never after it:
+// Compose reads a '#' after an *empty* value as part of the value, which is
+// exactly the bug this parses around
+// (docs/specs/30-setup-wizard-derived-config.md).
 func splitTrailingComment(rest string) (value, trailing string) {
 	for i := 1; i < len(rest); i++ {
 		if rest[i] != '#' || (rest[i-1] != ' ' && rest[i-1] != '\t') {
@@ -271,7 +362,10 @@ func splitTrailingComment(rest string) (value, trailing string) {
 }
 
 // writeEnv renders the entries and writes them with owner-only permissions —
-// the file holds every secret the deployment has.
+// the file holds every secret the deployment has. A variable's note is
+// written on its own line above the variable, never after the value on the
+// same line: Compose reads a '#' after an empty value as part of the value
+// (docs/specs/30-setup-wizard-derived-config.md).
 func writeEnv(path string, entries []entry) error {
 	var b strings.Builder
 	for _, e := range entries {
@@ -280,10 +374,13 @@ func writeEnv(path string, entries []entry) error {
 			b.WriteByte('\n')
 			continue
 		}
+		if note := strings.TrimSpace(e.trailing); note != "" {
+			b.WriteString(note)
+			b.WriteByte('\n')
+		}
 		b.WriteString(e.key)
 		b.WriteByte('=')
 		b.WriteString(e.value)
-		b.WriteString(e.trailing)
 		b.WriteByte('\n')
 	}
 
