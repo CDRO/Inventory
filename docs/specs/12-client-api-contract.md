@@ -150,8 +150,11 @@ A client that works offline caches the product catalog and shopping list, and
 needs to refresh cheaply.
 
 - List endpoints for cacheable entities accept `?updated_since=<RFC3339>` and
-  return only rows changed after that instant, using the existing cursor
-  pagination from `04-backend-api-conventions.md`.
+  return only rows changed at or after that instant — inclusive, for the reason
+  given under "The delta envelope" below. They carry the collection envelope of
+  `04-backend-api-conventions.md`, `next_cursor` included; the three endpoints
+  that answer deltas today return their collections whole, so a delta rides on
+  cursor pagination as soon as one of them has it.
 - This requires `updated_at` on the cacheable entities — `products`,
   `categories`, `locations`, `shopping_lists`, `shopping_list_items` — set on
   every write (`02-data-model.md`).
