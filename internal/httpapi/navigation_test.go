@@ -77,6 +77,18 @@ func TestNoStoragesRedirectsByExactLocation(t *testing.T) {
 			location: "/index.html",
 		},
 		{
+			// The other way to have no session, and the one a real person
+			// actually meets: a cookie that is still in the browser naming a
+			// row that is gone — logged out elsewhere, revoked from the
+			// devices list, or simply expired. It reaches the gate through a
+			// different branch than the case above (LookupSession's
+			// ErrNotFound rather than an empty id), and it must come out at
+			// the same place.
+			name:     "an expired or revoked session goes to the login page too",
+			session:  "sess-no-such-row",
+			location: "/index.html",
+		},
+		{
 			name:     "a member goes to the storages page",
 			session:  f.session.ID,
 			location: "/storages.html",
