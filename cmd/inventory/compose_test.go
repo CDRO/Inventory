@@ -161,6 +161,59 @@ func TestBackupArchivesAreNotCommittable(t *testing.T) {
 		"and must never be sent to the daemon as build context")
 }
 
+// The two assertions below are static reads of scripts/backup rather than runs
+// of it.
+//
+// Executing the script from `go test` is genuinely out of reach: the test
+// container has no pg_dump, no psql and no second database to drop. The
+// behaviours are nonetheless the two that fail catastrophically and quietly —
+// an archive that looks complete but is truncated, and a restore that proceeds
+// into a live stack — so reading the script for the shape of each is worth more
+// than leaving both to a manual run that happened once. A static check cannot
+// prove the script works; it can prove nobody removed the part that makes it
+// safe, which is the regression actually worth catching.
+
+// TestBackupWritesUnderATemporaryNameAndRenames — a cron-driven backup that
+// dies half way through must leave nothing that looks like a backup, because
+// the next disaster is when anyone would find out. rename(2) within one
+// directory is atomic, so the final name never names a partial file.
+func TestBackupWritesUnderATemporaryNameAndRenames(t *testing.T) {
+	t.Parallel()
+
+	script := repoFile(t, "scripts/backup")
+
+	assert.Contains(t, script, `partial="$BACKUP_DIR/.inventory-backup-$stamp.tar.gz.part"`,
+		"the archive is built under a temporary name")
+	assert.Contains(t, script, `tar -czf "$partial"`,
+		"tar writes to the temporary name, never straight to the final one")
+	assert.Contains(t, script, `mv "$partial" "$final"`,
+		"the final name appears only once the archive is complete")
+	assert.Contains(t, script, `--no-owner --no-privileges`,
+		"the dump must name no database role, or a restore onto new hardware needs the old one")
+}
+
+// TestRestoreRefusesAgainstALiveDatabase — a restore into a running stack
+// corrupts both ends, and this is the check that actually protects the DROP.
+// It is asked of pg_stat_activity rather than of Docker because a container
+// with no socket has no other way to ask that a network hiccup could not answer
+// wrongly in the permissive direction.
+func TestRestoreRefusesAgainstALiveDatabase(t *testing.T) {
+	t.Parallel()
+
+	script := repoFile(t, "scripts/backup")
+
+	assert.Contains(t, script, "pg_stat_activity",
+		"the live-stack guard asks the database who else is connected")
+	assert.Contains(t, script, "pg_backend_pid()",
+		"the guard must not count its own connection")
+	assert.Contains(t, script, "refusing to restore:",
+		"and must refuse rather than proceed")
+	assert.Contains(t, script, "DELETE FROM sessions;",
+		"a restore invalidates every session of the backed-up instance: a session id is "+
+			"an opaque row, signed with nothing, so reloading the dump would otherwise "+
+			"hand back working cookies from before the disaster")
+}
+
 // TestBackupScriptIsPinnedToLFEndings — the script is bind-mounted into the
 // container straight from the checkout, so the checkout's line endings are the
 // ones the BusyBox shell reads. This repository is developed on Windows with

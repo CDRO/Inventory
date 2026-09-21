@@ -384,6 +384,38 @@ func TestExportSkipsAPictureWhoseFileIsGone(t *testing.T) {
 		"the archive stays self-consistent: no reference to a file it does not hold")
 }
 
+// TestExportFailsWhenTheUploadVolumeIsUnreadable draws the line the test above
+// does not: a *missing* picture is skipped, but a volume that cannot be read at
+// all is an error.
+//
+// Without this the two collapse into one behaviour, and a regression that
+// swallowed every read error would hand the member a cheerful 200 carrying an
+// archive with none of their photos in it — the failure this endpoint can least
+// afford, since nothing about the download would say anything went wrong.
+func TestExportFailsWhenTheUploadVolumeIsUnreadable(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	f.pictures.readErr = errors.New("input/output error")
+
+	imageURL := productImageURLFor(f.storageID, uuid.New().String()+".jpg")
+	f.exports.data = &store.StorageExport{
+		Storage: store.Storage{ID: f.storageID, Name: "Kitchen"},
+		Products: []store.ExportProduct{
+			{ID: uuid.New(), Name: "Gruyère", ImageURL: &imageURL, CurrentStock: 1},
+		},
+	}
+
+	rec := f.do(http.MethodGet, f.base()+"/export", "")
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code,
+		"a broken upload volume must not be served as a complete archive with no images in it")
+	assert.Equal(t, "internal_error", errorCode(t, rec))
+	assert.NotContains(t, rec.Header().Get("Content-Type"), "zip")
+	assert.NotContains(t, rec.Body.String(), "input/output error",
+		"the reason stays in the log; debug_reason is gated at the serializer")
+}
+
 // TestExportFailsBeforeWritingAnyBytes — once archive/zip has emitted a header
 // the status line is gone, so a store error discovered mid-stream would become
 // a 200 carrying a truncated ZIP: a corrupt file that looks like a successful
