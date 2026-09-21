@@ -1,25 +1,22 @@
 # Synology NAS variant (docs/specs/01-architecture-and-deployment.md, "Synology
 # NAS variant: Tailscale sidecar, bind-mounted data").
 #
-# Layered ON TOP of docker-compose.yml and selected by two lines in the NAS
-# clone's untracked .env, so the clone itself never carries a local edit that a
-# `git pull` could trip over:
+# Layered ON TOP of docker-compose.yml, so the clone on the NAS never carries a
+# local edit that a `git pull` could trip over. It is loaded by a wrapper:
 #
-#   COMPOSE_FILE=docker-compose.yml:docker-compose.nas.yml
-#   COMPOSE_PROJECT_NAME=inventory
+#   deploy/synology/compose <docker-compose arguments>
 #
-# COMPOSE_FILE replaces Compose's default file discovery. That is also what
-# keeps docker-compose.override.yml (the dev override: APP_ENV=dev, debug_reason
-# in error responses, port 8000 past the ingress) from being merged in on the
-# NAS - the same guarantee as the `-f docker-compose.yml` pin the spec calls a
-# security control, without having to type it on every command. Do not add
-# COMPOSE_FILE to .env.example: the setup wizard prompts for every line there,
-# and a development checkout needs the override auto-loaded.
+# which passes `-p inventory -f docker-compose.yml -f docker-compose.nas.yml` on
+# every call and does not depend on any untracked file. That is deliberate. An
+# explicit -f is the pin the spec calls a security control: it keeps
+# docker-compose.override.yml (the dev override: APP_ENV=dev, debug_reason in
+# error responses, port 8000 past the ingress) from being merged in. A guard
+# that lived in .env would fail open the moment the setup wizard rewrites it.
 #
-# On the NAS run every command WITHOUT -f: an explicit -f overrides COMPOSE_FILE
-# and loads the base file alone, whose Traefik then fails on DSM's port 80. The
-# setup wizard rewrites .env and drops these two lines, so add them after it ran.
-# `docker-compose config --services` must not list traefik.
+# So on the NAS never run a bare `docker-compose up`, and do not copy the
+# command the setup wizard prints at the end: neither has a -f, and both load the
+# dev override. `deploy/synology/compose config --services` must list app, db and
+# ts-inventory and must not list traefik.
 #
 # Deviations from the base stack, all deliberate:
 #
@@ -42,6 +39,8 @@ services:
     profiles: ["disabled"]
 
   app:
+    # A readable name in Container Manager, as in the operator's other stacks.
+    # Nothing depends on it: the sidecar below refers to the service name `app`.
     container_name: inventory_app
     volumes:
       - ./uploads:/data/uploads
@@ -52,8 +51,14 @@ services:
       - ./pgdata:/var/lib/postgresql/data
 
   ts-inventory:
+    # Unpinned on purpose, like the operator's other Tailscale sidecars;
+    # `deploy/synology/compose pull` refreshes it.
     image: tailscale/tailscale:latest
     container_name: ts-inventory
+    # Shares app's network namespace. If app restarts on its own - including
+    # Docker's automatic restart after a crash - this container keeps the dead
+    # namespace and the tailnet URL stops answering until it is restarted too:
+    #   deploy/synology/compose restart ts-inventory
     network_mode: service:app
     environment:
       # Becomes https://inventory.<tailnet>.ts.net (needs MagicDNS and HTTPS
@@ -61,19 +66,29 @@ services:
       TS_HOSTNAME: inventory
       TS_STATE_DIR: /var/lib/tailscale
       # The proxy rule lives in serve.json. `tailscale up` has no --serve flag,
-      # so TS_EXTRA_ARGS=--serve=... does not configure anything.
+      # so TS_EXTRA_ARGS=--serve=... does not configure anything. The
+      # ${TS_CERT_DOMAIN} inside serve.json is expanded by the Tailscale
+      # container at start-up to this node's MagicDNS name. It is not a Compose
+      # variable, and must not be replaced with a tailnet name.
       TS_SERVE_CONFIG: /config/serve.json
       # Needed only on the very first start; the node identity then persists in
-      # ./ts_inventory_state. Pass it on the command line, never in a file:
-      #   TS_AUTHKEY=tskey-auth-... docker-compose up -d
-      # Use a one-off (non-reusable) key. The default keeps `up` quiet when the
-      # variable is unset.
+      # ./ts_inventory_state. Pass it on the command line, not in a tracked file:
+      #   TS_AUTHKEY=tskey-auth-... deploy/synology/compose up -d
+      # It still lands in the shell history and, through interpolation, in this
+      # container's configuration (`docker inspect`) until the container is
+      # recreated. Use a one-off key with a short expiry, and revoke it if the
+      # first start fails. The default keeps `up` quiet when it is unset.
       TS_AUTHKEY: ${TS_AUTHKEY:-}
     volumes:
       - ./ts_inventory_state:/var/lib/tailscale    # holds the node key: keep it private
       # The directory, not the single file: Tailscale only notices changes to a
       # bind-mounted serve config when the directory is mounted.
       - ./deploy/synology/tailscale:/config:ro
+      # NET_ADMIN and the tun device are inherited from the operator's other
+      # Tailscale sidecars, not required here: `tailscale serve` runs in the
+      # image's default userspace networking, and TS_USERSPACE=false is not set.
+      # The operator's NAS has the device. On a NAS without it, Docker would
+      # create a directory at this path instead of failing.
       - /dev/net/tun:/dev/net/tun
     depends_on:
       - app

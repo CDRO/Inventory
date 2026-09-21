@@ -61,7 +61,9 @@ makes `go test` and `go vet` work at all, since the production image is
 `FROM scratch` and contains no toolchain.
 
 The two commands that need the *production* image therefore pin the base file
-with `-f docker-compose.yml`:
+with `-f docker-compose.yml` (on the operator's own Synology NAS the pin is the
+two-file `deploy/synology/compose` wrapper instead — see "Synology NAS variant",
+and do not use the single-file form there):
 
 - **Migrations**, because `migrate` is a subcommand of the compiled
   `/inventory` binary, which exists only in the production image. Note also
@@ -155,6 +157,9 @@ it is not.
 ├── Dockerfile                  # multi-stage: builds and tests everything, outputs scratch image
 ├── docker-compose.yml          # base/production
 ├── docker-compose.override.yml # dev overrides; auto-loaded by Compose
+├── docker-compose.nas.yml      # Synology NAS layer, on top of the base file
+├── deploy/
+│   └── synology/               # compose wrapper + Tailscale serve config for the NAS
 ├── .env.example
 └── PROJECT_PLAN.md             # original informal notes — superseded by docs/specs/
 ```
@@ -427,7 +432,8 @@ volumes:
 The single `app` service serves everything: the static frontend at `/`,
 the JSON API at `/api`, and the server-rendered admin UI at `/admin`.
 Traefik is the only ingress, which is what makes the remote-access layer
-swappable (below).
+swappable (below) — except on the operator's own NAS, where Traefik is switched
+off and a Tailscale sidecar is the ingress (see "Synology NAS variant").
 
 ## `docker-compose.override.yml` (local staging overrides)
 
@@ -473,7 +479,9 @@ services:
 - **Staging:** operator's PC, Docker Desktop, dev compose overrides,
   `APP_ENV=dev`, frontend served from disk.
 - **Production:** Synology NAS, Container Manager, base `docker-compose.yml`
-  only — and that has to be stated on the command line, because Compose
+  only (on the operator's own NAS: the base plus one layer, always through
+  `deploy/synology/compose` — see "Synology NAS variant") — and that has to be
+  stated on the command line, because Compose
   auto-loads `docker-compose.override.yml` when it is present. Because the
   Dockerfile performs the whole build, deploying is:
 
@@ -490,6 +498,9 @@ services:
   instead of the `scratch` binary, and publishes port 8000 past Traefik — on a
   Tailscale-only host, that is reachable to the whole tailnet without the
   ingress. A deployment checklist that omits the pin is a broken deployment.
+  The Synology variant keeps this guarantee by pinning **two** files on every
+  call instead of one; on that NAS `-f docker-compose.yml` alone is the wrong
+  command (it starts Traefik on DSM's port 80).
 - **Deployment gate:** the end-to-end browser suite
   (`05-frontend-pwa-foundations.md`) must pass before an image is
   promoted to production. Unit tests already run inside the image build;
@@ -498,7 +509,9 @@ services:
 
 ## Remote access (interchangeable by configuration)
 
-Traefik is the sole ingress and terminates all internal routing. The
+Traefik is the sole ingress and terminates all internal routing (except on the
+operator's own NAS, which replaces it with a Tailscale sidecar — see "Synology
+NAS variant"). The
 remote-access layer attaches to Traefik's `web` entrypoint and is therefore
 a **drop-in, swappable component: changing it is a compose/config edit with
 zero application changes.** Whichever is active, application-level session
@@ -524,53 +537,58 @@ runtime — see the vendoring rule in `11-reporting-and-analytics.md`.
 ## Synology NAS variant: Tailscale sidecar, bind-mounted data
 
 The operator's NAS (a DS923+ running Container Manager) deviates from the
-general design above in three deliberate ways. All three are one tracked file,
+general design above in three deliberate ways: (1) runtime data lives in bind
+mounts inside the clone instead of named volumes, (2) Traefik is switched off,
+and (3) Tailscale runs as a sidecar container that publishes the app, instead of
+as a Synology package in front of Traefik. All three are one tracked file,
 [`docker-compose.nas.yml`](../../docker-compose.nas.yml), layered on top of the
 unchanged base file — so the clone on the NAS never carries a local edit, and
 `git pull` has nothing to trip over.
 
-**Selecting it.** Two lines in the NAS clone's untracked `.env`:
+**Selecting it: the wrapper.** Every command on the NAS goes through
+[`deploy/synology/compose`](../../deploy/synology/compose), a short shell
+wrapper that runs `docker-compose -p inventory -f docker-compose.yml -f
+docker-compose.nas.yml "$@"` from the repository root. The explicit `-f` pair is
+the pin that "Deployment model" calls a security control: it keeps
+`docker-compose.override.yml` (`APP_ENV=dev`, `debug_reason` in error responses,
+port 8000 published past the ingress) out of the NAS stack. The pin is spelled
+out on every call, and not kept in the environment, on purpose. An earlier design
+selected the layer with `COMPOSE_FILE` in the clone's untracked `.env` and failed
+open: the setup wizard rewrites `.env` from `.env.example`, dropping every line
+that is not in the template, and the command it then prints
+(`docker compose up -d --force-recreate`) has no `-f`, so it would load the dev
+override and start a dev-flavoured stack on fresh named volumes next to the real
+data in `./pgdata`. The project name is fixed in the wrapper for the same reason,
+and so that container, network and volume names stay the same wherever the clone
+lives.
 
-```dotenv
-COMPOSE_FILE=docker-compose.yml:docker-compose.nas.yml
-COMPOSE_PROJECT_NAME=inventory
-```
+Consequently, on the NAS:
 
-`COMPOSE_FILE` replaces Compose's default file discovery, which is also what
-keeps `docker-compose.override.yml` out: it gives the same guarantee as the
-`-f docker-compose.yml` pin in "Deployment model", without typing it on every
-command. It does **not** belong in `.env.example` — the setup wizard prompts
-for every line there, and a development checkout needs the override
-auto-loaded. The separator is `:` on Linux; Compose on Windows defaults to `;`.
-
-There are two ways to lose the layer without any warning. Either one leaves
-the stack starting the base file's Traefik, which asks for host port 80 that
-DSM's own web server already holds (`Bind for 0.0.0.0:80 failed: port is
-already allocated` or `bind: address already in use`):
-
-- **An explicit `-f`.** A `-f` on the command line overrides `COMPOSE_FILE`.
-  The `-f docker-compose.yml` production commands elsewhere in this document
-  and in the README are for a plain clone; on the NAS, run every command
-  without `-f`.
-- **The setup wizard.** `docker-compose run --rm setup` rewrites `.env` from
-  `.env.example` and drops every line that is not in the template, including
-  these two. Run the wizard first and add the two lines afterwards.
-
-Check the result before starting anything: `docker-compose config --services`
-must list `app`, `db` and `ts-inventory` and must not list `traefik`.
-
-**Never put a `compose.yml` (or `compose.yaml`) into the clone.** Compose
-prefers `compose.yaml`/`compose.yml` over `docker-compose.yml` and silently
-ignores the latter (it prints only a warning), so a private copy would quietly
-replace the repository's file and every later change to it would have no effect
-— while `docker-compose.override.yml` would still be merged into it.
+- **Never run a bare `docker-compose up`** — or `docker compose`, or `-f
+  docker-compose.yml` alone — in the clone. Without the layer the base file
+  starts Traefik, which asks for host port 80 that DSM's own web server already
+  holds (`Bind for 0.0.0.0:80 failed: port is already allocated`), and without
+  any `-f` the dev override is merged as well. The `-f docker-compose.yml`
+  commands elsewhere in this document and in the README are for a plain clone,
+  not for this NAS.
+- **Do not copy the command the setup wizard prints when it finishes** (`docker
+  compose up -d`); use the wrapper.
+- **Never put a `compose.yml` (or `compose.yaml`) into the clone.** Compose
+  prefers those names over `docker-compose.yml` and silently ignores the latter
+  (it prints only a warning), so a private copy would replace the repository's
+  file for any command that does not pin its files with `-f`.
+- Check before starting anything: `deploy/synology/compose config --services`
+  must list `app`, `db` and `ts-inventory` and must not list `traefik`.
 
 **Ingress: a Tailscale sidecar instead of Traefik.** `ts-inventory` publishes
 the app on the tailnet over HTTPS (`https://inventory.<tailnet>.ts.net`) by
 proxying to `http://app:8000` through `tailscale serve`, configured by
 [`deploy/synology/tailscale/serve.json`](../../deploy/synology/tailscale/serve.json)
 via `TS_SERVE_CONFIG`. (`tailscale up` has no `--serve` flag, so that cannot be
-passed through `TS_EXTRA_ARGS`.) Traefik is disabled by an inactive profile, so
+passed through `TS_EXTRA_ARGS`.) The `${TS_CERT_DOMAIN}` in that file is expanded
+by the Tailscale container at start-up to the node's MagicDNS name; it is not a
+Compose variable, and must not be replaced with a tailnet name. Traefik is
+disabled by an inactive profile, so
 the stack publishes no host port at all: nothing can clash with DSM's own
 80/443/5000/5001, and the Docker socket is no longer mounted into a container.
 
@@ -579,18 +597,29 @@ the stack publishes no host port at all: nothing can clash with DSM's own
   plain HTTP would log no one in.
 - The sidecar joins the app's network namespace (`network_mode: service:app`,
   the same pattern as the operator's other Tailscale sidecars) and, like
-  those, gets `NET_ADMIN` and the `/dev/net/tun` device. The image still
-  defaults to userspace networking, which is all `tailscale serve` needs;
-  `TS_USERSPACE` is not changed. The device must exist on the NAS: for a
-  missing path Docker creates a directory in its place instead of failing.
+  those, gets `NET_ADMIN` and the `/dev/net/tun` device. Both are inherited,
+  not required: the image defaults to userspace networking, which is all
+  `tailscale serve` needs, and `TS_USERSPACE` is not changed, so they could be
+  dropped without effect (`NET_ADMIN` inside the app's network namespace is also
+  more privilege than the sidecar uses). The device must exist on the NAS: for a
+  missing path a `volumes:` bind mount makes Docker create a directory in its
+  place instead of failing.
 - **Restart `ts-inventory` whenever `app` is restarted on its own.** The
   sidecar keeps the network namespace of the app container it started
-  against and cannot reach a restarted one until it is restarted too.
-  `docker-compose up -d` recreates both, so the update flow below needs no
-  extra step.
+  against and cannot reach a restarted one until it is restarted too. That
+  includes Docker's own automatic restart of `app` after a crash: nothing
+  restarts the sidecar then, so recovery is manual —
+  `deploy/synology/compose restart ts-inventory`. `up -d` recreates both, so the
+  update flow below needs no extra step. (Giving the sidecar its own network and
+  proxying to `http://app:8000`, which `serve.json` already does, would remove
+  the coupling; the operator chose the shared namespace to match their other
+  stacks.)
 - **The auth key is passed once, on the command line, and never written to a
-  file** — least of all a tracked one: `TS_AUTHKEY=tskey-auth-… docker-compose
-  up -d`. Use a one-off, non-reusable key. The node identity then persists in
+  tracked file:** `TS_AUTHKEY=tskey-auth-… deploy/synology/compose up -d`. It
+  still lands in the shell history and, through interpolation, in the
+  container's configuration (`docker inspect`, the Container Manager UI) until
+  the container is recreated. Use a one-off key with a short expiry, and revoke
+  it if the first start fails. The node identity then persists in
   `./ts_inventory_state`, which holds the node key and is treated like a secret.
 
 **Data in the clone.** `./pgdata`, `./uploads` and `./imagecache` are bind
@@ -609,8 +638,11 @@ mind:
 `required: false`, which needs **Compose ≥ 2.24** (see "Minimum Docker Compose
 version" above). Container Manager bundles v2.20.1, which rejects the whole
 file. Install a newer standalone binary in a shared folder — one a DSM update
-does not overwrite — and put it first on `PATH` for the SSH session (v2.31.0 is
-what the development machines run):
+does not overwrite — and put it first on `PATH` (v2.31.0 is what the development
+machines run). The commands here assume a **root shell** (`sudo -i`): a plain
+`sudo <command>` may reset `PATH`, find the bundled v2.20.1 again and fail with a
+parse error, and may not pass on a `TS_AUTHKEY=…` prefix. For root, make the
+`PATH` line permanent in `/root/.profile`.
 
 ```console
 $ mkdir -p /volume1/docker/bin && cd /volume1/docker/bin
@@ -632,19 +664,22 @@ background sweep and serves nothing useful. The bind-mounted `./pgdata` starts
 empty, so this applies to every new clone.
 
 ```console
-$ docker-compose run --rm setup            # writes .env; then add the two COMPOSE_ lines
-$ docker-compose build
-$ docker-compose run --rm app migrate up   # also creates the initial admin
-$ TS_AUTHKEY=tskey-auth-… docker-compose up -d
+$ deploy/synology/compose run --rm setup           # writes .env
+$ deploy/synology/compose build
+$ deploy/synology/compose run --rm app migrate up  # also creates the initial admin
+$ TS_AUTHKEY=tskey-auth-… deploy/synology/compose up -d
 ```
 
-**Updating.** With `COMPOSE_FILE` set, no `-f` is needed:
+The wizard ends by printing `docker compose up -d`; ignore it and use the wrapper.
+
+**Updating.**
 
 ```console
 $ git pull
-$ docker-compose build
-$ docker-compose run --rm app migrate up
-$ docker-compose up -d
+$ deploy/synology/compose pull ts-inventory     # the sidecar image is unpinned
+$ deploy/synology/compose build
+$ deploy/synology/compose run --rm app migrate up
+$ deploy/synology/compose up -d
 ```
 
 ## Health/readiness
