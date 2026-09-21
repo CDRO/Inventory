@@ -543,6 +543,22 @@ command. It does **not** belong in `.env.example` — the setup wizard prompts
 for every line there, and a development checkout needs the override
 auto-loaded. The separator is `:` on Linux; Compose on Windows defaults to `;`.
 
+There are two ways to lose the layer without any warning. Either one leaves
+the stack starting the base file's Traefik, which asks for host port 80 that
+DSM's own web server already holds (`Bind for 0.0.0.0:80 failed: port is
+already allocated` or `bind: address already in use`):
+
+- **An explicit `-f`.** A `-f` on the command line overrides `COMPOSE_FILE`.
+  The `-f docker-compose.yml` production commands elsewhere in this document
+  and in the README are for a plain clone; on the NAS, run every command
+  without `-f`.
+- **The setup wizard.** `docker-compose run --rm setup` rewrites `.env` from
+  `.env.example` and drops every line that is not in the template, including
+  these two. Run the wizard first and add the two lines afterwards.
+
+Check the result before starting anything: `docker-compose config --services`
+must list `app`, `db` and `ts-inventory` and must not list `traefik`.
+
 **Never put a `compose.yml` (or `compose.yaml`) into the clone.** Compose
 prefers `compose.yaml`/`compose.yml` over `docker-compose.yml` and silently
 ignores the latter (it prints only a warning), so a private copy would quietly

@@ -16,6 +16,11 @@
 # COMPOSE_FILE to .env.example: the setup wizard prompts for every line there,
 # and a development checkout needs the override auto-loaded.
 #
+# On the NAS run every command WITHOUT -f: an explicit -f overrides COMPOSE_FILE
+# and loads the base file alone, whose Traefik then fails on DSM's port 80. The
+# setup wizard rewrites .env and drops these two lines, so add them after it ran.
+# `docker-compose config --services` must not list traefik.
+#
 # Deviations from the base stack, all deliberate:
 #
 #  1. Runtime data lives in bind mounts inside the clone (./pgdata, ./uploads,
@@ -49,6 +54,7 @@ services:
   ts-inventory:
     image: tailscale/tailscale:latest
     container_name: ts-inventory
+    network_mode: service:inventory_app
     environment:
       # Becomes https://inventory.<tailnet>.ts.net (needs MagicDNS and HTTPS
       # certificates enabled for the tailnet).
@@ -72,6 +78,9 @@ services:
       # The directory, not the single file: Tailscale only notices changes to a
       # bind-mounted serve config when the directory is mounted.
       - ./deploy/synology/tailscale:/config:ro
+      - /dev/net/tun:/dev/net/tun
     depends_on:
       - app
+    cap_add:
+      - NET_ADMIN
     restart: unless-stopped
