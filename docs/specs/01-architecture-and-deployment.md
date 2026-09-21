@@ -190,12 +190,16 @@ them when the work is merged. `scripts/wellen-docker-cleanup.ps1` does, for the
 worktrees of a finished wave (the orchestrator runs it after the wave's
 consolidation for every wave with `"dockerCleanup": true`; by hand:
 `.\scripts\wellen-docker-cleanup.ps1 -Wave <n> -DryRun`, then without `-DryRun`).
-It decides ownership from Docker's own labels, not from names: a Compose project
-belongs to the wave if one of its containers has a
-`com.docker.compose.project.working_dir` inside one of the wave's worktrees (which
-also catches a project a session started under a name of its own), or if its name
-is the orchestrator's `<repo>-<slug>` (which catches the network, volumes and
-images of a project whose containers are already gone). It removes those
+A real run refuses unless the wave issue is closed, and stops before removing
+anything if Docker cannot be listed. It decides ownership from Docker's own
+labels, not from names: a Compose project belongs to the wave if one of its
+containers has a `com.docker.compose.project.working_dir` inside one of the
+wave's worktrees (which also catches a project a session started under a name of
+its own), or if its name is the orchestrator's `<repo>-<slug>` or that followed by
+a hyphen and more (which catches the network, volumes and images of a project
+whose containers are already gone). A slug never claims a longer sibling
+(`w5-barcode` does not claim `<repo>-w5-barcode-hot-cache`), and a project with a
+container outside the wave's worktrees is not claimed by name. It removes those
 projects' containers, networks, volumes and image tags, and it **never** touches:
 
 - the main checkout's own stack (any project with a container in the repository

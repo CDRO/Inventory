@@ -1,11 +1,11 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Removes the Docker resources that a wave's package worktrees created:
-    containers (with their anonymous volumes), networks, named volumes and the
-    images built for them. Called by the wave orchestrator after a wave's
-    consolidation has finished (for waves with "dockerCleanup": true in the
-    wave file), and usable by hand at any time.
+    Removes the Docker resources that a finished wave's package worktrees
+    created: containers (with their anonymous volumes), networks, named
+    volumes and the images built for them. Called by the wave orchestrator
+    after a wave's consolidation (for waves with "dockerCleanup": true in the
+    wave file), and usable by hand for a wave that is finished.
 
 .DESCRIPTION
     Package sessions run `docker compose` in their own worktree
@@ -16,17 +16,30 @@
     example "inv-w1-setup-wizard") to run a check. Nothing removes them when
     the wave is done.
 
-    Ownership is decided by Docker's own labels, not by guessing at names:
+    THIS SCRIPT DELETES VOLUMES. Two guards keep it away from live work:
+
+      * A real run refuses unless the wave is finished: with -Wave, its wave
+        issue must be CLOSED (checked with gh; if gh cannot tell, it refuses).
+        With -Slug alone the script cannot tell, so it refuses without -Force.
+        -DryRun never removes anything and only reports.
+      * Ownership is decided by Docker's own labels, and a slug is never
+        allowed to claim a longer sibling (see below).
+
+    Ownership:
 
       * A compose PROJECT belongs to the wave if any of its containers has
         the label com.docker.compose.project.working_dir pointing into one of
         the wave's package worktrees. That catches a project whatever it is
         called.
       * A project also belongs to the wave if its name is the one the
-        orchestrator assigned (<repo>-<slug>) or starts with it followed by a
-        hyphen (case-insensitive, "_" and "-" treated alike). That catches
+        orchestrator assigned, <repo>-<slug>, or that followed by a hyphen
+        and more (case-insensitive, "_" and "-" treated alike). That catches
         the networks, volumes and images of a project whose containers are
-        already gone.
+        gone. It applies only if (a) the LONGEST <repo>-<slug> that the
+        project's name matches, over every slug in the wave file, is one of
+        the requested slugs - so w5-barcode never claims
+        <repo>-w5-barcode-hot-cache - and (b) none of the project's
+        containers lives in a directory outside the requested worktrees.
       * Everything carrying com.docker.compose.project=<such a project> is
         removed: containers, networks, volumes and images.
 
@@ -46,22 +59,35 @@
     content share an image id, and removing by id would take the other
     project's tag with it.
 
+    If Docker cannot be listed or inspected the script stops BEFORE removing
+    anything; an empty listing is never read as "nothing to do".
+
 .PARAMETER Wave
-    Wave number in the wave file; its packages' slugs are used.
+    Wave number in the wave file; its packages' slugs are used, and its wave
+    issue must be closed for a real run.
 
 .PARAMETER Slug
-    Package slugs to clean up, instead of (or in addition to) -Wave. The
-    orchestrator passes them this way.
+    Package slugs (comma-separated) to clean up, instead of or in addition to
+    -Wave. A real run with -Slug and no -Wave needs -Force.
 
 .PARAMETER WaveFile
-    Wave plan for -Wave. Default: wellen.json next to this script.
+    The wave plan. Default: wellen.json next to this script. It is always
+    read when it exists, to know every slug of the plan.
 
 .PARAMETER RepoRoot
     The main checkout. Default: the parent of this script's folder. Worktrees
     are <parent of RepoRoot>\<RepoName>-<slug>.
 
+.PARAMETER GhRepo
+    owner/name for the wave-issue check. Default: gh derives it from the
+    repository at RepoRoot.
+
+.PARAMETER Force
+    Skip the "wave is finished" check. Only for a wave you know is over.
+
 .PARAMETER DryRun
-    Only list what would be removed.
+    Only list what would be removed, and say whether a real run would be
+    allowed.
 
 .EXAMPLE
     .\wellen-docker-cleanup.ps1 -Wave 3 -DryRun
@@ -74,6 +100,8 @@ param(
     [string[]]$Slug = @(),
     [string]$WaveFile = '',
     [string]$RepoRoot = '',
+    [string]$GhRepo = '',
+    [switch]$Force,
     [switch]$DryRun
 )
 
@@ -99,6 +127,17 @@ function Invoke-Native {
     } finally {
         $ErrorActionPreference = $previous
     }
+}
+
+# A listing that must succeed: an empty result from a failed call would read as
+# "nothing to remove", so a failure stops the script before anything is removed.
+function Get-DockerLines {
+    param([scriptblock]$List, [string]$What)
+    $lines = Invoke-Native $List
+    if ($script:NativeExit -ne 0) {
+        throw "Could not list $What (docker exit code $script:NativeExit): nothing was removed."
+    }
+    return @($lines | Where-Object { $_ })
 }
 
 # Lower case, "_" as "-": compose project names appear in both spellings
@@ -128,7 +167,12 @@ function Get-Label {
 
 # `docker <InspectArgs> <ids...>` in chunks (Windows caps a command line),
 # parsed. The parameter must not be called `$Command`: Invoke-Native has one, and
-# a scriptblock sees the innermost variable of that name. Returns @() for no ids or on failure.
+# a scriptblock sees the innermost variable of that name.
+#
+# A chunk in which some id vanished between the listing and the inspect (a
+# container of another stack that just exited) exits non-zero but still prints
+# the others: that output is used. A chunk that prints nothing while failing
+# means Docker is not answering, and stops the script.
 function Get-Inspected {
     param([string[]]$InspectArgs, [string[]]$Ids)
     $ids = @($Ids | Where-Object { $_ })
@@ -136,11 +180,28 @@ function Get-Inspected {
     for ($i = 0; $i -lt $ids.Count; $i += 40) {
         $chunk = @($ids[$i..([Math]::Min($i + 39, $ids.Count - 1))])
         $lines = Invoke-Native { & docker @InspectArgs @chunk }
-        if ($script:NativeExit -ne 0 -or -not $lines) { continue }
+        if (-not $lines) {
+            if ($script:NativeExit -ne 0) {
+                throw "docker $($InspectArgs -join ' ') failed (exit code $script:NativeExit): nothing was removed."
+            }
+            continue
+        }
         $parsed = (@($lines) -join "`n") | ConvertFrom-Json
         $result += @($parsed)
     }
     return $result
+}
+
+# 'CLOSED', 'OPEN', or $null when gh cannot tell.
+function Get-IssueState {
+    param([int]$Number)
+    $ghArgs = @('issue', 'view', "$Number", '--json', 'state', '-q', '.state')
+    if ($GhRepo) { $ghArgs += @('--repo', $GhRepo) }
+    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { return $null }
+    Push-Location -LiteralPath $RepoRoot
+    try { $state = Invoke-Native { & gh @ghArgs } } finally { Pop-Location }
+    if ($script:NativeExit -ne 0 -or -not $state) { return $null }
+    return ([string]@($state)[0]).Trim().ToUpperInvariant()
 }
 
 # ---------------------------------------------------------------------------
@@ -154,13 +215,22 @@ $ParentDir = Split-Path -Path $RepoRoot -Parent
 
 # `powershell -File ... -Slug a,b` delivers "a,b" as ONE string: split it.
 $slugs = @($Slug | ForEach-Object { $_ -split '[,\s]+' } | Where-Object { $_ })
+
+# The wave file names every slug of the plan; it is needed to keep a slug from
+# claiming a longer sibling, so it is read whenever it exists.
+if ([string]::IsNullOrWhiteSpace($WaveFile)) { $WaveFile = Join-Path $PSScriptRoot 'wellen.json' }
+$plan = $null
+if (Test-Path -LiteralPath $WaveFile) {
+    $plan = Get-Content -Raw -LiteralPath $WaveFile | ConvertFrom-Json
+} elseif ($Wave -gt 0) {
+    throw "Wave file not found: $WaveFile"
+}
+$waveIssue = 0
 if ($Wave -gt 0) {
-    if ([string]::IsNullOrWhiteSpace($WaveFile)) { $WaveFile = Join-Path $PSScriptRoot 'wellen.json' }
-    if (-not (Test-Path -LiteralPath $WaveFile)) { throw "Wave file not found: $WaveFile" }
-    $data = Get-Content -Raw -LiteralPath $WaveFile | ConvertFrom-Json
-    $match = @($data.waves | Where-Object { $_.number -eq $Wave })
+    $match = @($plan.waves | Where-Object { $_.number -eq $Wave })
     if ($match.Count -eq 0) { throw "Wave $Wave is not in $WaveFile." }
     $slugs += @($match[0].packages | ForEach-Object { $_.slug })
+    $waveIssue = [int]$match[0].waveIssue
 }
 $slugs = @($slugs | Where-Object { $_ } | Select-Object -Unique)
 if ($slugs.Count -eq 0) { throw "Nothing to clean up: give -Wave <n> or -Slug <slug,...>." }
@@ -168,18 +238,60 @@ foreach ($s in $slugs) {
     if ($s -cnotmatch '^[a-z0-9][a-z0-9-]*$') { throw "Invalid slug '$s' (lowercase letters, digits and hyphens only)." }
 }
 
+$allSlugs = @($slugs)
+if ($null -ne $plan) {
+    foreach ($w in @($plan.waves)) {
+        foreach ($p in @($w.packages)) { if ($p.slug) { $allSlugs += [string]$p.slug } }
+    }
+}
+$allSlugs = @($allSlugs | Select-Object -Unique)
+
 $mode = if ($DryRun) { '[DryRun] ' } else { '' }
 # Write-Output, not Write-Host: the orchestrator captures these lines into its log.
 function Write-Step { param([string]$Text) Write-Output "$mode$Text" }
 
-$repoKey  = ConvertTo-NameKey $RepoName
-$rootKey  = ConvertTo-PathKey $RepoRoot
-$worktrees = @{}    # path key -> slug
-$bases     = @{}    # name key of the orchestrator-assigned project -> slug
+$repoKey   = ConvertTo-NameKey $RepoName
+$rootKey   = ConvertTo-PathKey $RepoRoot
+$worktrees = @{}    # path key -> slug (requested)
+$bases     = @{}    # name key <repo>-<slug> -> slug, for EVERY slug of the plan
+$requested = @{}    # name key <repo>-<slug> -> slug, requested only
+foreach ($s in $allSlugs) { $bases[(ConvertTo-NameKey "$RepoName-$s")] = $s }
 foreach ($s in $slugs) {
     $worktrees[(ConvertTo-PathKey (Join-Path $ParentDir "$RepoName-$s"))] = $s
-    $bases[(ConvertTo-NameKey "$RepoName-$s")] = $s
+    $requested[(ConvertTo-NameKey "$RepoName-$s")] = $s
 }
+
+Write-Step "Wave cleanup for '$RepoName': $($slugs -join ', ')"
+
+# ---------------------------------------------------------------------------
+# 0. Is the wave over? (a real run needs a yes)
+# ---------------------------------------------------------------------------
+
+$allowed = $false
+if ($Force) {
+    $allowed = $true
+    Write-Step "-Force: not checking that the wave is finished."
+} elseif ($Wave -gt 0) {
+    $state = Get-IssueState -Number $waveIssue
+    if ($state -eq 'CLOSED') {
+        $allowed = $true
+        Write-Step "Wave $Wave is finished (wave issue #$waveIssue is closed)."
+    } elseif ($state) {
+        Write-Step "Wave $Wave is NOT finished: wave issue #$waveIssue is $state. Its package sessions may still be using this Docker state."
+    } else {
+        Write-Step "Cannot tell whether wave $Wave is finished: gh could not read wave issue #$waveIssue."
+    }
+} else {
+    Write-Step "Without -Wave the script cannot tell whether these packages are finished."
+}
+if (-not $allowed -and -not $DryRun) {
+    throw "Refusing to remove anything: the wave is not known to be finished. Look with -DryRun first; use -Force only for a wave you know is over."
+}
+if (-not $allowed) { Write-Step "A real run would refuse (see above)." }
+
+# ---------------------------------------------------------------------------
+# 1. Which compose projects belong to these worktrees?
+# ---------------------------------------------------------------------------
 
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw "docker not found on PATH." }
 Invoke-Native { docker info } | Out-Null
@@ -188,45 +300,45 @@ if ($script:NativeExit -ne 0) { throw "The Docker daemon is not reachable ('dock
 $projectKey = 'com.docker.compose.project'
 $workdirKey = 'com.docker.compose.project.working_dir'
 
-Write-Step "Wave cleanup for '$RepoName': $($slugs -join ', ')"
-
-# ---------------------------------------------------------------------------
-# 1. Which compose projects belong to these worktrees?
-# ---------------------------------------------------------------------------
-
-$containerIds = @(Invoke-Native { docker ps -a -q --no-trunc } | Where-Object { $_ })
+$containerIds = Get-DockerLines { docker ps -a -q --no-trunc } 'containers'
 $containers = Get-Inspected -InspectArgs @('container', 'inspect') -Ids $containerIds
 
-# project name (as labelled) -> reason
-$owned = @{}
-# project name -> true: never removed (the main checkout's stack)
-$protected = @{}
-
-foreach ($c in $containers) {
-    $project = Get-Label $c.Config.Labels $projectKey
-    if (-not $project) { continue }
-    $workdir = ConvertTo-PathKey (Get-Label $c.Config.Labels $workdirKey)
-    if ($workdir -eq $rootKey) { $protected[$project] = $true; continue }
-    foreach ($wt in $worktrees.Keys) {
-        if ($workdir -eq $wt -or $workdir.StartsWith("$wt/")) {
-            $owned[$project] = "container in worktree $($worktrees[$wt])"
-        }
-    }
-}
-
-# Networks, volumes and images labelled with a project: their project names
-# are candidates too - a project whose containers are gone still has them.
 function Get-LabelledProject {
     param($Labels)
     return (Get-Label $Labels $projectKey)
 }
 
-$networkIds = @(Invoke-Native { docker network ls -q --no-trunc --filter "label=$projectKey" } | Where-Object { $_ })
-$networks   = Get-Inspected -InspectArgs @('network', 'inspect') -Ids $networkIds
-$volumeNames = @(Invoke-Native { docker volume ls -q --filter "label=$projectKey" } | Where-Object { $_ })
-$volumes    = Get-Inspected -InspectArgs @('volume', 'inspect') -Ids $volumeNames
-$imageIds   = @(Invoke-Native { docker image ls -q --no-trunc --filter "label=$projectKey" } | Where-Object { $_ } | Select-Object -Unique)
-$images     = Get-Inspected -InspectArgs @('image', 'inspect') -Ids $imageIds
+# project name (as labelled) -> reason
+$owned = @{}
+# project name -> true: never removed (the main checkout's stack)
+$protected = @{}
+# project name -> true: has a container OUTSIDE the requested worktrees, so a
+# similar name is not enough to claim it
+$foreignDir = @{}
+
+foreach ($c in $containers) {
+    $project = Get-LabelledProject $c.Config.Labels
+    if (-not $project) { continue }
+    $workdir = ConvertTo-PathKey (Get-Label $c.Config.Labels $workdirKey)
+    if ($workdir -eq $rootKey) { $protected[$project] = $true; continue }
+    $inside = $false
+    foreach ($wt in $worktrees.Keys) {
+        if ($workdir -eq $wt -or $workdir.StartsWith("$wt/")) {
+            $owned[$project] = "container in worktree $($worktrees[$wt])"
+            $inside = $true
+        }
+    }
+    if (-not $inside) { $foreignDir[$project] = $true }
+}
+
+# Networks, volumes and images labelled with a project: their project names
+# are candidates too - a project whose containers are gone still has them.
+$networkIds  = Get-DockerLines { docker network ls -q --no-trunc --filter "label=$projectKey" } 'networks'
+$networks    = Get-Inspected -InspectArgs @('network', 'inspect') -Ids $networkIds
+$volumeNames = Get-DockerLines { docker volume ls -q --filter "label=$projectKey" } 'volumes'
+$volumes     = Get-Inspected -InspectArgs @('volume', 'inspect') -Ids $volumeNames
+$imageIds    = @(Get-DockerLines { docker image ls -q --no-trunc --filter "label=$projectKey" } 'images' | Select-Object -Unique)
+$images      = Get-Inspected -InspectArgs @('image', 'inspect') -Ids $imageIds
 
 $candidateProjects = @{}
 foreach ($c in $containers) { $p = Get-LabelledProject $c.Config.Labels; if ($p) { $candidateProjects[$p] = $true } }
@@ -235,12 +347,19 @@ foreach ($v in $volumes)    { $p = Get-LabelledProject $v.Labels;        if ($p)
 foreach ($i in $images)     { $p = Get-LabelledProject $i.Config.Labels; if ($p) { $candidateProjects[$p] = $true } }
 
 foreach ($project in @($candidateProjects.Keys)) {
-    if ($owned.ContainsKey($project)) { continue }
+    if ($owned.ContainsKey($project) -or $foreignDir.ContainsKey($project)) { continue }
     $key = ConvertTo-NameKey $project
+    # The most specific <repo>-<slug> this name matches, over every slug of the
+    # plan: "inventory-w5-barcode-hot-cache" matches both w5-barcode and
+    # w5-barcode-hot-cache, and belongs to the longer one.
+    $best = $null
     foreach ($base in $bases.Keys) {
         if ($key -eq $base -or $key.StartsWith("$base-")) {
-            $owned[$project] = "named after worktree $($bases[$base])"
+            if ($null -eq $best -or $base.Length -gt $best.Length) { $best = $base }
         }
+    }
+    if ($null -ne $best -and $requested.ContainsKey($best)) {
+        $owned[$project] = "named after worktree $($requested[$best])"
     }
 }
 
@@ -308,9 +427,9 @@ foreach ($t in $imageTags)    { $removedNames[$t] = $true }
 $kept = New-Object System.Collections.Generic.List[string]
 $allNames = @()
 $allNames += @($containers | ForEach-Object { $_.Name.TrimStart('/') })
-$allNames += @(@(Invoke-Native { docker network ls --format '{{.Name}}' }) | Where-Object { $_ })
-$allNames += @(@(Invoke-Native { docker volume ls -q }) | Where-Object { $_ })
-$allNames += @(@(Invoke-Native { docker image ls --format '{{.Repository}}:{{.Tag}}' }) | Where-Object { $_ -and $_ -notlike '<none>*' })
+$allNames += Get-DockerLines { docker network ls --format '{{.Name}}' } 'networks'
+$allNames += Get-DockerLines { docker volume ls -q } 'volumes'
+$allNames += @(Get-DockerLines { docker image ls --format '{{.Repository}}:{{.Tag}}' } 'images' | Where-Object { $_ -notlike '<none>*' })
 foreach ($name in ($allNames | Select-Object -Unique)) {
     if ($removedNames.ContainsKey($name)) { continue }
     $key = ConvertTo-NameKey $name
@@ -343,7 +462,8 @@ function Remove-Each {
     foreach ($name in $Names) {
         Invoke-Native { & $Remove $name } | Out-Null
         if ($script:NativeExit -ne 0) {
-            Write-Warning "Could not remove $Kind '$name' (still in use?) - left in place."
+            # Output, not Write-Warning: the orchestrator logs only this stream.
+            Write-Output "WARNING: could not remove $Kind '$name' (still in use?) - left in place."
             $script:failed++
         }
     }

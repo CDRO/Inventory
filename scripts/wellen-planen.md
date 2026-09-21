@@ -53,7 +53,7 @@ several volumes and images per package, per wave.
 A wave with `"dockerCleanup": true` gets it removed **after its consolidation
 has finished** (the wave issue is closed, so no session is using any of it),
 by `scripts/wellen-docker-cleanup.ps1`. In this plan the field is set on waves
-3 to 6.
+3 to 6. It must be `true` or `false`; anything else fails `-Validate`.
 
 - **What is removed:** the containers (with their anonymous volumes), networks,
   named volumes and image tags of every Compose project that belongs to the
@@ -62,7 +62,10 @@ by `scripts/wellen-docker-cleanup.ps1`. In this plan the field is set on waves
   `com.docker.compose.project.working_dir` inside one of the wave's worktrees
   (whatever the project is called), or if its name is `<repo>-<slug>` or starts
   with that plus a hyphen (which finds a project whose containers are already
-  gone).
+  gone). The name rule never lets a slug claim a longer sibling: with the
+  slugs `w5-barcode` and `w5-barcode-hot-cache` in the wave file, cleaning the
+  first never touches the second's project, and a project with a container
+  outside the requested worktrees is not claimed by name at all.
 - **What is never removed:** the main checkout's own stack; the shared
   `inventory-app-dev` image (the dev override gives it one fixed name, so the
   main checkout uses it too) and every other image without a worktree project's
@@ -72,28 +75,49 @@ by `scripts/wellen-docker-cleanup.ps1`. In this plan the field is set on waves
 - **The worktrees themselves and their branches stay.** Only Docker state goes,
   and a package worktree recreates what it needs the next time someone runs
   `docker compose` in it.
-- **A failure only logs.** Cleanup is housekeeping: a warning names what could
-  not be removed (an image still used by something else, say), and the next
-  wave starts anyway. It is idempotent, so running it again is harmless. A wave
-  that is already complete when the orchestrator starts is cleaned too.
+- **It refuses rather than guesses.** A real run with `-Wave` checks with `gh`
+  that the wave issue is closed and refuses otherwise, including when `gh`
+  cannot say; a run that cannot list or inspect Docker stops before removing
+  anything. `-Slug` without `-Wave` cannot know whether the sessions are done and
+  needs `-Force`. `-DryRun` never removes anything and says whether a real run
+  would be allowed.
+- **A failure only logs.** Cleanup is housekeeping: the orchestrator runs it as a
+  background job with a 15-minute limit and writes its output into its own log
+  (lines starting `WARNING:` as warnings). If it fails, is refused or times out,
+  the log names the command to run by hand and the next wave starts anyway. It
+  is idempotent, so running it again is harmless. A wave that is already
+  complete when the orchestrator starts is cleaned too.
 - **The consolidation session is told not to clean Docker up itself** and never
   to run a prune.
 
-By hand, for any wave (look first, then remove):
+By hand (look first, then remove):
 
 ```powershell
 .\scripts\wellen-docker-cleanup.ps1 -Wave 3 -DryRun
 .\scripts\wellen-docker-cleanup.ps1 -Wave 3
-.\scripts\wellen-docker-cleanup.ps1 -Slug w3-operations,w3-product-maintenance
+.\scripts\wellen-docker-cleanup.ps1 -Slug w3-operations,w3-product-maintenance -Force
 ```
 
-**When a change to this takes effect.** The orchestrator reads the script and
-the wave file once, when it starts. A run that was already going keeps the
-behavior it started with: a wave that finished under it is not cleaned, and the
-consolidation prompt it builds for the current wave does not carry the note.
-Restart it (it is restart-safe) to pick the change up for the waves after that,
-and clean a wave that already finished by hand as above. `-StartWave n` skips
-the waves before `n` without cleaning them.
+`-Wave` only works once that wave's issue is closed. `-Slug ... -Force` is for
+a set of worktrees you know are finished; `-RepoRoot` and `-GhRepo` point it at
+another checkout or repository.
+
+**When a change to this takes effect.** The orchestrator reads its own script
+and the wave file once, when it starts (the cleanup script is read afresh at
+every call). A run that was already going keeps the behavior it started with: a
+wave that finished under it is not cleaned, and the consolidation prompt it
+builds for the current wave does not carry the note. The new files reach the
+main checkout only when a consolidation merges `main` into the integration
+branch, so for a run that is already inside wave 3, the first opportunity is
+after wave 3's consolidation. Then restart the orchestrator (it is restart-safe):
+it finds wave 3 complete, cleans it, and applies the cleanup to waves 4 to 6.
+Starting with `-StartWave n` skips the waves before `n` without cleaning them, so
+after `-StartWave 4` clean wave 3 by hand with `-Wave 3`.
+
+The script has a test that runs it against real Docker in a scratch environment
+with an invented repository name and touches nothing of this repository:
+`powershell -NoProfile -File scripts\tests\wellen-docker-cleanup.test.ps1`
+(about a minute; needs Docker and the busybox image).
 
 ## GitHub prerequisites a wave needs
 

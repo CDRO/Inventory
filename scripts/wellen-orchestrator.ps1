@@ -5,7 +5,9 @@
     scripts\wellen.json), waits for the previous wave, creates one worktree
     per package, starts a visible, interactive Claude Code session with the
     matching prompt/model/effort, waits for completion (issue closed),
-    kicks off consolidation, and moves on to the next wave.
+    kicks off consolidation, removes the Docker leftovers of the wave's
+    worktrees (waves with "dockerCleanup": true), and moves on to the next
+    wave.
 
     New waves are planned exclusively in the JSON file - this script never
     needs to change for that. How a wave is planned is described in
@@ -37,8 +39,9 @@
     main checkout's stack or the images that are shared with it. A failure is
     logged and does not stop the next wave. A wave that is already complete
     at start-up is cleaned as well; waves skipped with -StartWave are not.
-    The script and the wave file are read once at start-up, so a running
-    orchestrator does not pick up a change to either. Details and manual use:
+    The orchestrator and the wave file are read once at start-up, so a
+    running orchestrator does not pick up a change to either (the cleanup
+    script is read afresh at every call). Details and manual use:
     scripts\wellen-planen.md, "Docker cleanup after a wave".
 
 .ARCHITECTURE
@@ -247,9 +250,11 @@ function Import-WavePlan {
         if ((Get-Field $wave 'waveIssue' 0) -le 0) { Add-ErrorMsg "${wPath}.waveIssue: missing or not a positive number" }
         if (-not (Get-Field $wave 'integrationBranch')) { Add-ErrorMsg "${wPath}.integrationBranch: missing" }
 
-        $dockerCleanup = Get-Field $wave 'dockerCleanup'
-        if ($null -ne $dockerCleanup -and $dockerCleanup -isnot [bool]) {
-            Add-ErrorMsg "${wPath}.dockerCleanup: must be true or false, not '$dockerCleanup'"
+        # Read the property itself: Get-Field turns "" and null into "not set", and
+        # a value that is present but not a boolean must not silently mean false.
+        $dockerCleanupProperty = $wave.PSObject.Properties['dockerCleanup']
+        if ($null -ne $dockerCleanupProperty -and $dockerCleanupProperty.Value -isnot [bool]) {
+            Add-ErrorMsg "${wPath}.dockerCleanup: must be true or false, not '$($dockerCleanupProperty.Value)'"
         }
 
         $external = [bool](Get-Field $wave 'external' $false)
@@ -553,23 +558,44 @@ Start the consolidation of wave $($Wave.number) of $($Plan.name) (wave issue #$(
 # left in Docker (containers, networks, volumes, the images built for them),
 # by running wellen-docker-cleanup.ps1 - see its header for how ownership is
 # decided and what is never touched. Run once the wave's consolidation has
-# finished, so no session is using any of it any more. Idempotent, and a
-# failure only logs: the next wave must not wait on housekeeping.
+# finished. The script is called with -Wave and checks for itself, through the
+# wave issue, that the wave is over, and refuses otherwise. It runs as a job with
+# a time limit, and a failure or a timeout only logs: the next wave must not wait
+# on housekeeping. Idempotent.
+$DockerCleanupScript = Join-Path $PSScriptRoot 'wellen-docker-cleanup.ps1'
+$DockerCleanupTimeoutSeconds = 900
+
 function Invoke-WaveDockerCleanup {
     param($Wave)
     if (-not [bool](Get-Field $Wave 'dockerCleanup' $false)) { return }
     $slugs = @(@(Get-Field $Wave 'packages' @()) | ForEach-Object { $_.slug })
     if ($slugs.Count -eq 0) { return }
-    $cleanup = Join-Path $PSScriptRoot 'wellen-docker-cleanup.ps1'
     if ($DryRun) {
-        Write-Log "[DryRun] would remove the Docker resources of wave $($Wave.number)'s package worktrees ($($slugs -join ', ')): $cleanup"
+        Write-Log "[DryRun] would remove the Docker resources of wave $($Wave.number)'s package worktrees ($($slugs -join ', ')): $DockerCleanupScript -Wave $($Wave.number)"
         return
     }
     Write-Log "Removing the Docker resources of wave $($Wave.number)'s package worktrees ($($slugs -join ', '))."
+    $params = @{ Wave = [int]$Wave.number; WaveFile = $WaveFile; RepoRoot = $RepoRoot; GhRepo = [string]$GhRepo }
+    $job = $null
     try {
-        & $cleanup -Slug $slugs -RepoRoot $RepoRoot | ForEach-Object { Write-Log "  $_" }
+        $job = Start-Job -ScriptBlock { param($script, $p) & $script @p } -ArgumentList $DockerCleanupScript, $params
+        if (-not (Wait-Job -Job $job -Timeout $DockerCleanupTimeoutSeconds)) {
+            Stop-Job -Job $job
+            Write-Log "Docker cleanup of wave $($Wave.number) did not finish within $DockerCleanupTimeoutSeconds s and was stopped - continuing. Run scripts\wellen-docker-cleanup.ps1 -Wave $($Wave.number) -DryRun by hand." 'WARN'
+            return
+        }
+        foreach ($line in @(Receive-Job -Job $job -ErrorAction SilentlyContinue)) {
+            $level = if ("$line" -match '^\s*WARNING') { 'WARN' } else { 'INFO' }
+            Write-Log "  $line" $level
+        }
+        if ($job.State -eq 'Failed') {
+            $reason = $job.ChildJobs[0].JobStateInfo.Reason.Message
+            Write-Log "Docker cleanup of wave $($Wave.number) did not run: $reason - continuing. Run scripts\wellen-docker-cleanup.ps1 -Wave $($Wave.number) by hand once it is safe." 'WARN'
+        }
     } catch {
         Write-Log "Docker cleanup of wave $($Wave.number) failed: $($_.Exception.Message) - continuing. Run scripts\wellen-docker-cleanup.ps1 -Wave $($Wave.number) by hand." 'WARN'
+    } finally {
+        if ($null -ne $job) { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue }
     }
 }
 
