@@ -35,6 +35,26 @@ type fakeProductStore struct {
 	deltaErr   error
 	lastSince  time.Time
 	deltaCalls int
+
+	// docs/specs/16-product-maintenance.md: the detail read, the full patch,
+	// the merge and the delete.
+	getErr            error
+	currentStock      int
+	currentStockErr   error
+	logs              []store.ProductLog
+	logsErr           error
+	lastLogLimit      int
+	lastPatch         *store.ProductPatch
+	updateErr         error
+	updateCalls       int
+	recomputed        int
+	movedBatches      int
+	orphanedImage     string
+	mergeErr          error
+	mergeCalls        int
+	lastMergeSourceID *uuid.UUID
+	deleteErr         error
+	deleteCalls       int
 }
 
 func (f *fakeProductStore) ListProducts(_ context.Context, storageID uuid.UUID) ([]store.Product, error) {
@@ -78,6 +98,83 @@ func (f *fakeProductStore) SetProductImageAsUser(_ context.Context, storageID, i
 	defer f.mu.Unlock()
 	f.lastStorageID, f.lastProductID, f.lastImageURL, f.lastIconName, f.lastActingUserID = storageID, id, imageURL, iconName, userID
 	return f.setImageErr
+}
+
+// The maintenance half of the fake (docs/specs/16-product-maintenance.md).
+//
+// getErr and friends default to store.ErrNotFound-free behaviour: a test that
+// says nothing about them gets a product back, which keeps the older tests in
+// this file untouched.
+
+func (f *fakeProductStore) GetProduct(_ context.Context, storageID, id uuid.UUID) (*store.Product, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastStorageID, f.lastProductID = storageID, id
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	for i := range f.products {
+		if f.products[i].ID == id {
+			p := f.products[i]
+			return &p, nil
+		}
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *fakeProductStore) CurrentStock(_ context.Context, storageID, productID uuid.UUID) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastStorageID, f.lastProductID = storageID, productID
+	return f.currentStock, f.currentStockErr
+}
+
+func (f *fakeProductStore) ListProductLogs(_ context.Context, storageID, productID uuid.UUID, limit int) ([]store.ProductLog, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastStorageID, f.lastProductID, f.lastLogLimit = storageID, productID, limit
+	return f.logs, f.logsErr
+}
+
+func (f *fakeProductStore) UpdateProduct(_ context.Context, storageID, id uuid.UUID, patch store.ProductPatch) (*store.Product, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastStorageID, f.lastProductID, f.lastPatch = storageID, id, &patch
+	f.updateCalls++
+	if f.updateErr != nil {
+		return nil, 0, f.updateErr
+	}
+	for i := range f.products {
+		if f.products[i].ID == id {
+			return &f.products[i], f.recomputed, nil
+		}
+	}
+	return nil, 0, store.ErrNotFound
+}
+
+func (f *fakeProductStore) MergeProducts(_ context.Context, storageID, survivorID, sourceID uuid.UUID) (*store.MergeResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastStorageID, f.lastProductID, f.lastMergeSourceID = storageID, survivorID, &sourceID
+	f.mergeCalls++
+	if f.mergeErr != nil {
+		return nil, f.mergeErr
+	}
+	result := &store.MergeResult{MovedBatches: f.movedBatches, RecomputedBatches: f.recomputed, OrphanedImage: f.orphanedImage}
+	for i := range f.products {
+		if f.products[i].ID == survivorID {
+			result.Survivor = &f.products[i]
+		}
+	}
+	return result, nil
+}
+
+func (f *fakeProductStore) DeleteProduct(_ context.Context, storageID, id uuid.UUID) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastStorageID, f.lastProductID = storageID, id
+	f.deleteCalls++
+	return f.orphanedImage, f.deleteErr
 }
 
 // TestListProductsExposesOnlyIDAndName — category_id and catalog_id are

@@ -1,0 +1,488 @@
+import "../register-sw.js";
+
+// Page module for products.html — the product list plus the detail/edit view
+// docs/specs/16-product-maintenance.md defines, and the screen
+// docs/specs/08-expiration-and-classification.md refers to as "a product edit
+// screen" without ever specifying.
+//
+// What it owns: the edit surface (name, category, item type, min_stock, the
+// storage-local shelf-life override, the icon), the duplicate merge, and the
+// delete. What it deliberately does not own: batch editing. The batch list
+// here links to the screens that already do that
+// (docs/specs/06-vision-shelf-ingestion.md, 08, 13) rather than growing a
+// second implementation of them — which is also what
+// docs/specs/28-batch-move-quick-create.md will attach to later.
+//
+// The "merge instead?" affordance on a rename is a **courtesy, not a server
+// rule** (spec 16 says so in as many words): the server never blocks a rename
+// over similarity, because two genuinely different products can share close
+// names. It is computed here, over the product list this page already holds,
+// rather than through a server route nothing else needs.
+
+import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
+import { renderStorageSwitcher } from "../storage-switcher.js";
+import { renderInboxLink } from "../inbox-badge.js";
+import { initGamification } from "../gamification.js";
+import { get, patch, post, del, ApiError } from "../api.js";
+import { fetchCategories, appendCategoryOptions } from "../category-options.js";
+import { clearChildren, el, text } from "../dom.js";
+
+// The server's bound (maxShelfLifeDays in internal/httpapi/expiry.go). The
+// input carries it so a browser flags an out-of-range number before a round
+// trip; the server still decides.
+const MAX_SHELF_LIFE_DAYS = 36500;
+
+// The three values of docs/specs/02-data-model.md, in the order spec 08 walks
+// them when no rule applies.
+const ITEM_TYPES = [
+  ["perishable", "Perishable"],
+  ["long_shelf_life", "Long shelf life"],
+  ["non_perishable", "Non-perishable"],
+];
+
+const listContainer = document.querySelector("#list");
+const detailContainer = document.querySelector("#detail");
+const errorBox = document.querySelector("#error");
+const statusLine = document.querySelector("#status");
+const filterInput = document.querySelector("#filter");
+const switcherContainer = document.querySelector("#storage-switcher");
+
+let storageId = null;
+/** @type {{id: string, name: string}[]} */
+let products = [];
+/** @type {{id: string, name: string, depth: number}[]} */
+let categories = [];
+let selectedId = null;
+
+init();
+
+async function init() {
+  let me;
+  try {
+    me = await fetchMe();
+  } catch (err) {
+    // A 401 never reaches here — api.js redirects those to the login page.
+    showError(err);
+    return;
+  }
+
+  const resolved = resolveStorage(me.storages);
+  if (resolved == null) {
+    // storages.html owns the picker and the empty state, as every other page
+    // module does.
+    location.assign("/storages.html");
+    return;
+  }
+
+  storageId = resolved;
+  rememberStorageId(storageId);
+  if (new URLSearchParams(location.search).get("storage") !== storageId) {
+    history.replaceState(null, "", withStorageParam(storageId));
+  }
+
+  renderStorageSwitcher(switcherContainer, { storages: me.storages, currentId: storageId });
+  renderInboxLink(document.querySelector("#inbox-link"), storageId);
+  initGamification(storageId);
+
+  filterInput.addEventListener("input", renderList);
+
+  await reload();
+}
+
+function basePath() {
+  return `/api/storages/${storageId}/products`;
+}
+
+async function reload() {
+  try {
+    const [productBody, flatCategories] = await Promise.all([
+      get(basePath()),
+      fetchCategories(storageId),
+    ]);
+    products = productBody.items;
+    categories = flatCategories;
+  } catch (err) {
+    showError(err);
+    return;
+  }
+  clearError();
+  renderList();
+
+  if (selectedId && !products.some((p) => p.id === selectedId)) {
+    // The selected product is gone — merged away or deleted.
+    selectedId = null;
+    clearChildren(detailContainer);
+  }
+  if (selectedId) await showDetail(selectedId);
+}
+
+function renderList() {
+  const needle = normalize(filterInput.value);
+  const shown = needle ? products.filter((p) => normalize(p.name).includes(needle)) : products;
+
+  clearChildren(listContainer);
+  if (products.length === 0) {
+    listContainer.append(
+      el("p", { class: "empty-state" }, [
+        text("No products yet. Scan a shelf or a receipt to add some."),
+      ]),
+    );
+    return;
+  }
+  if (shown.length === 0) {
+    listContainer.append(el("p", { class: "empty-state" }, [text("No product matches that.")]));
+    return;
+  }
+
+  for (const product of shown) {
+    listContainer.append(
+      el(
+        "button",
+        {
+          type: "button",
+          class: product.id === selectedId ? "btn btn--block btn--primary" : "btn btn--block btn--ghost",
+          onclick: () => showDetail(product.id),
+        },
+        // Names go in through text(), never innerHTML: a product name is user
+        // text and may contain anything.
+        [text(product.name)],
+      ),
+    );
+  }
+}
+
+async function showDetail(productId) {
+  selectedId = productId;
+  renderList();
+  clearStatus();
+
+  let product;
+  try {
+    product = await get(`${basePath()}/${productId}`);
+  } catch (err) {
+    showError(err);
+    return;
+  }
+  clearError();
+  renderDetail(product);
+}
+
+function renderDetail(product) {
+  clearChildren(detailContainer);
+  detailContainer.append(
+    el("div", { class: "card stack" }, [
+      el("h3", {}, [text(product.name)]),
+      renderPicture(product),
+      renderEditForm(product),
+    ]),
+    renderStockCard(product),
+    renderHistoryCard(product),
+    renderDangerCard(product),
+  );
+}
+
+function renderPicture(product) {
+  if (product.image_url) {
+    return el("img", {
+      src: product.image_url,
+      alt: `Picture of ${product.name}`,
+      style: "max-width: 8rem; border-radius: var(--radius, 6px);",
+    });
+  }
+  if (product.icon_name) {
+    return el("p", { class: "muted" }, [text(`Icon: ${product.icon_name}`)]);
+  }
+  return el("p", { class: "empty-state" }, [text("No picture yet.")]);
+}
+
+function renderEditForm(product) {
+  const name = el("input", { type: "text", id: "p-name", value: product.name, required: true, maxlength: "255" });
+
+  // The same picker the review screens build (js/category-options.js), so the
+  // indentation and the "no category" option are one implementation.
+  const category = el("select", { id: "p-category" });
+  appendCategoryOptions(category, categories);
+  category.value = product.category_id ?? "";
+
+  const itemType = el("select", { id: "p-item-type" });
+  for (const [value, label] of ITEM_TYPES) {
+    const option = el("option", { value }, [text(label)]);
+    if (value === product.item_type) option.selected = true;
+    itemType.append(option);
+  }
+
+  const minStock = el("input", {
+    type: "number", id: "p-min-stock", min: "0", step: "1", value: String(product.min_stock),
+  });
+
+  const shelfLife = el("input", {
+    type: "number",
+    id: "p-shelf-life",
+    min: "0",
+    max: String(MAX_SHELF_LIFE_DAYS),
+    step: "1",
+    placeholder: "Inherit",
+    value: product.default_shelf_life_days == null ? "" : String(product.default_shelf_life_days),
+  });
+
+  const icon = el("input", {
+    type: "text", id: "p-icon", maxlength: "100", placeholder: "noto:cheese-wedge",
+    value: product.icon_name ?? "",
+  });
+
+  const form = el(
+    "form",
+    {
+      class: "stack",
+      onsubmit: (event) => {
+        event.preventDefault();
+        save(product, { name, category, itemType, minStock, shelfLife, icon });
+      },
+    },
+    [
+      field("Name", name),
+      field("Category", category),
+      field("Item type", itemType),
+      field("Minimum stock", minStock),
+      field("Shelf life (days)", shelfLife, "Leave empty to inherit from the category, the catalog, or the item type."),
+      field("Icon name", icon, "Leave empty for no icon."),
+      el("div", { class: "row" }, [
+        el("button", { type: "submit", class: "btn btn--primary" }, [text("Save")]),
+      ]),
+    ],
+  );
+  return form;
+}
+
+function field(label, input, hint) {
+  const children = [el("label", { for: input.id }, [text(label)]), input];
+  if (hint) children.push(el("small", { class: "muted" }, [text(hint)]));
+  return el("div", { class: "field" }, children);
+}
+
+async function save(product, inputs) {
+  const body = {};
+  const trimmedName = inputs.name.value.trim();
+  if (trimmedName !== product.name) body.name = trimmedName;
+
+  const categoryId = inputs.category.value || null;
+  if (categoryId !== (product.category_id ?? null)) body.category_id = categoryId;
+
+  if (inputs.itemType.value !== product.item_type) body.item_type = inputs.itemType.value;
+
+  const minStock = Number.parseInt(inputs.minStock.value, 10);
+  if (Number.isFinite(minStock) && minStock !== product.min_stock) body.min_stock = minStock;
+
+  // An empty field is an explicit null — "resolve it down the chain" — not an
+  // absent one, which is the difference the server's PATCH is built around.
+  const shelfLifeRaw = inputs.shelfLife.value.trim();
+  const shelfLife = shelfLifeRaw === "" ? null : Number.parseInt(shelfLifeRaw, 10);
+  if (shelfLife !== (product.default_shelf_life_days ?? null)) body.default_shelf_life_days = shelfLife;
+
+  const iconRaw = inputs.icon.value.trim();
+  const icon = iconRaw === "" ? null : iconRaw;
+  if (icon !== (product.icon_name ?? null)) body.icon_name = icon;
+
+  if (Object.keys(body).length === 0) {
+    showStatus("Nothing changed.");
+    return;
+  }
+
+  // The rename courtesy: a close existing name is offered as a merge, and the
+  // save goes ahead either way if the user says no. The server never refuses a
+  // rename over similarity (docs/specs/16-product-maintenance.md).
+  if (body.name) {
+    const twin = closestOtherProduct(body.name, product.id);
+    if (twin && !confirm(`“${twin.name}” already exists. Save this rename anyway?\n\nCancel to merge them instead.`)) {
+      await offerMerge(product, twin);
+      return;
+    }
+  }
+
+  try {
+    const updated = await patch(`${basePath()}/${product.id}`, body);
+    clearError();
+    if (typeof updated.recomputed_batches === "number") {
+      showStatus(
+        updated.recomputed_batches === 1
+          ? "Shelf life saved; 1 expiry date was recalculated."
+          : `Shelf life saved; ${updated.recomputed_batches} expiry dates were recalculated.`,
+      );
+    } else {
+      showStatus("Saved.");
+    }
+    await reload();
+  } catch (err) {
+    showError(err);
+  }
+}
+
+/**
+ * closestOtherProduct is the courtesy check behind a rename: the one other
+ * product whose normalized name matches the new one. It is deliberately a
+ * plain equality over normalized text rather than a fuzzy score — this is an
+ * offer, and a wrong offer costs the user a dialog.
+ */
+function closestOtherProduct(name, ownId) {
+  const needle = normalize(name);
+  return products.find((p) => p.id !== ownId && normalize(p.name) === needle) ?? null;
+}
+
+async function offerMerge(survivor, source) {
+  if (!confirm(`Merge “${source.name}” into “${survivor.name}”?\n\nAll of its stock and history moves across, and “${source.name}” disappears.`)) {
+    return;
+  }
+  try {
+    const result = await post(`${basePath()}/${survivor.id}/merge`, { source_product_id: source.id });
+    clearError();
+    showStatus(
+      `Merged. ${countLabel(result.moved_batches, "batch", "batches")} moved, ` +
+        `${countLabel(result.recomputed_batches, "expiry date", "expiry dates")} recalculated.`,
+    );
+    selectedId = survivor.id;
+    await reload();
+  } catch (err) {
+    showError(err);
+  }
+}
+
+function renderStockCard(product) {
+  const rows = product.batches.map((batch) =>
+    el("li", {}, [
+      text(`${batch.quantity} × `),
+      el("a", { href: withStorageParam(storageId, "/locations.html") }, [text("in stock")]),
+      text(batch.expiration_date ? ` — expires ${batch.expiration_date}` : " — no expiry"),
+      text(batch.expiration_source === "user" ? " (you set this)" : ""),
+    ]),
+  );
+
+  return el("div", { class: "card stack" }, [
+    el("h3", {}, [text(`In stock: ${product.current_stock}`)]),
+    rows.length
+      ? el("ul", {}, rows)
+      : el("p", { class: "empty-state" }, [text("Nothing on the shelf.")]),
+    el("p", { class: "muted" }, [
+      text("Quantities, locations and expiry dates are edited on the "),
+      el("a", { href: withStorageParam(storageId, "/stocktake.html") }, [text("stocktake screen")]),
+      text("."),
+    ]),
+  ]);
+}
+
+function renderHistoryCard(product) {
+  const rows = product.logs.map((entry) =>
+    el("li", {}, [
+      text(
+        `${entry.timestamp.slice(0, 10)} · ${entry.change_qty > 0 ? "+" : ""}${entry.change_qty} · ${entry.reason}` +
+          (entry.created_by ? ` · ${entry.created_by}` : ""),
+      ),
+    ]),
+  );
+
+  return el("div", { class: "card stack" }, [
+    el("h3", {}, [text("Recent history")]),
+    rows.length
+      ? el("ul", {}, rows)
+      : el("p", { class: "empty-state" }, [text("Nothing recorded yet.")]),
+  ]);
+}
+
+function renderDangerCard(product) {
+  const others = products.filter((p) => p.id !== product.id);
+  const picker = el("select", { id: "p-merge-source" }, [
+    el("option", { value: "" }, [text("— Pick the duplicate —")]),
+  ]);
+  for (const other of others) {
+    picker.append(el("option", { value: other.id }, [text(other.name)]));
+  }
+
+  return el("div", { class: "card stack" }, [
+    el("h3", {}, [text("Clean-up")]),
+    el("p", { class: "muted" }, [
+      text(`Merging keeps “${product.name}” exactly as it is and folds the other product's stock and history into it.`),
+    ]),
+    el("div", { class: "row" }, [
+      picker,
+      el(
+        "button",
+        {
+          type: "button",
+          class: "btn",
+          onclick: () => {
+            const source = others.find((p) => p.id === picker.value);
+            if (!source) {
+              showStatus("Pick the duplicate to merge in first.");
+              return;
+            }
+            offerMerge(product, source);
+          },
+        },
+        [text("Merge in")],
+      ),
+    ]),
+    el(
+      "button",
+      {
+        type: "button",
+        class: "btn btn--danger",
+        onclick: () => removeProduct(product),
+      },
+      [text("Delete this product")],
+    ),
+  ]);
+}
+
+async function removeProduct(product) {
+  // The confirm states the stock and that the history goes with it, which
+  // docs/specs/16-product-maintenance.md requires of the frontend: deleting is
+  // allowed even with stock on hand, so the person has to be told what they
+  // are erasing.
+  const warning =
+    `Delete “${product.name}”?\n\n` +
+    `${countLabel(product.current_stock, "item", "items")} currently on the shelf and ` +
+    `its entire history will be erased. This cannot be undone.`;
+  if (!confirm(warning)) return;
+
+  try {
+    await del(`${basePath()}/${product.id}`);
+    clearError();
+    showStatus(`“${product.name}” deleted.`);
+    selectedId = null;
+    clearChildren(detailContainer);
+    await reload();
+  } catch (err) {
+    showError(err);
+  }
+}
+
+function countLabel(n, singular, plural) {
+  return `${n} ${n === 1 ? singular : plural}`;
+}
+
+/** normalize lowercases and collapses whitespace, for the filter and the
+ * rename courtesy. It is not the server's matching service — this is a local
+ * convenience over a list the page already has. */
+function normalize(value) {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function showStatus(message) {
+  statusLine.textContent = message;
+  statusLine.hidden = false;
+}
+
+function clearStatus() {
+  statusLine.textContent = "";
+  statusLine.hidden = true;
+}
+
+function showError(err) {
+  errorBox.textContent =
+    err instanceof ApiError ? err.message : "Something went wrong. Check your connection and try again.";
+  errorBox.hidden = false;
+}
+
+function clearError() {
+  errorBox.textContent = "";
+  errorBox.hidden = true;
+}

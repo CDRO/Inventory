@@ -294,7 +294,8 @@ func TestDeleteProductWritesTombstoneInSameTransaction(t *testing.T) {
 
 	storageID, productID, _, _ := stocked(t, ctx, s, 2)
 
-	require.NoError(t, s.DeleteProduct(ctx, storageID, productID))
+	_, deleteErr := s.DeleteProduct(ctx, storageID, productID)
+	require.NoError(t, deleteErr)
 
 	assert.Equal(t, 0, countRows(t, ctx, `SELECT count(*) FROM products WHERE id = $1`, productID))
 	assert.Equal(t, 1, countRows(t, ctx,

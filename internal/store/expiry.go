@@ -139,64 +139,91 @@ func (s *Store) RecomputeDerivedExpiry(ctx context.Context, storageID, productID
 // window where the product's category and its batches' dates disagree, and a
 // failure in between would make that permanent.
 func recomputeDerivedExpiry(ctx context.Context, tx pgx.Tx, storageID, productID uuid.UUID) (int, error) {
-	affected := 0
-
-	err := func() error {
-		rules, err := expiryRulesFor(ctx, tx, storageID, productID)
-		if err != nil {
-			return err
-		}
-		resolution := expiry.Resolve(rules)
-
-		// Recomputed per batch, because the date is relative to when that
-		// batch was created: two batches of the same product added a week
-		// apart do not expire on the same day.
-		rows, err := tx.Query(ctx, `
-			SELECT b.id, b.created_at
-			  FROM inventory_batches b
-			 WHERE b.product_id = $1 AND b.expiration_source = 'derived'
-			 FOR UPDATE`, productID)
-		if err != nil {
-			return fmt.Errorf("store: load derived batches: %w", err)
-		}
-
-		type batchRow struct {
-			id        uuid.UUID
-			createdAt time.Time
-		}
-		var batches []batchRow
-		for rows.Next() {
-			var b batchRow
-			if err := rows.Scan(&b.id, &b.createdAt); err != nil {
-				rows.Close()
-				return fmt.Errorf("store: scan derived batch: %w", err)
-			}
-			batches = append(batches, b)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("store: load derived batches: %w", err)
-		}
-
-		for _, b := range batches {
-			date := expiry.DateFor(b.createdAt, resolution)
-
-			// The source is reasserted rather than left alone: these rows are
-			// derived by definition, and writing it keeps the column honest if
-			// one ever got there another way.
-			tag, err := tx.Exec(ctx, `
-				UPDATE inventory_batches
-				   SET expiration_date = $1, expiration_source = 'derived'
-				 WHERE id = $2 AND expiration_source = 'derived'`, date, b.id)
-			if err != nil {
-				return fmt.Errorf("store: recompute batch expiry: %w", err)
-			}
-			affected += int(tag.RowsAffected())
-		}
-		return nil
-	}()
+	rules, err := expiryRulesFor(ctx, tx, storageID, productID)
 	if err != nil {
 		return 0, err
+	}
+	batches, err := loadDerivedBatches(ctx, tx, productID)
+	if err != nil {
+		return 0, err
+	}
+	return applyDerivedExpiry(ctx, tx, batches, expiry.Resolve(rules))
+}
+
+// derivedBatch is one batch a cascade is allowed to move: its id, and the
+// creation date every derived expiry is measured from.
+type derivedBatch struct {
+	id        uuid.UUID
+	createdAt time.Time
+}
+
+// loadDerivedBatches locks and returns the batches of one product whose date
+// still follows the rules, and only those.
+//
+// The expiration_source = 'derived' filter lives here, not in a caller, for
+// the same reason applyDerivedExpiry repeats it in its UPDATE: it is the whole
+// guarantee of docs/specs/08-expiration-and-classification.md, and a condition
+// no call site supplies is a condition no call site can forget.
+//
+// The rows are locked because every caller is about to write them, and ordered
+// by id so two cascades racing over the same product take the row locks in the
+// same sequence rather than deadlocking half-way.
+func loadDerivedBatches(ctx context.Context, tx pgx.Tx, productID uuid.UUID) ([]derivedBatch, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT id, created_at
+		  FROM inventory_batches
+		 WHERE product_id = $1 AND expiration_source = 'derived'
+		 ORDER BY id
+		 FOR UPDATE`, productID)
+	if err != nil {
+		return nil, fmt.Errorf("store: load derived batches: %w", err)
+	}
+	defer rows.Close()
+
+	var batches []derivedBatch
+	for rows.Next() {
+		var b derivedBatch
+		if err := rows.Scan(&b.id, &b.createdAt); err != nil {
+			return nil, fmt.Errorf("store: scan derived batch: %w", err)
+		}
+		batches = append(batches, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: load derived batches: %w", err)
+	}
+	return batches, nil
+}
+
+// applyDerivedExpiry writes the date one resolution implies to each of the
+// given batches, and returns how many rows changed.
+//
+// Recomputed per batch, because the date is relative to when that batch was
+// created: two batches of the same product added a week apart do not expire on
+// the same day.
+//
+// Taking the batch rows as an argument rather than re-selecting them is what
+// lets a merge recompute exactly the batches it moved under the survivor's
+// rules (MergeProducts, docs/specs/16-product-maintenance.md) through this
+// same code, instead of a second implementation of the cascade that could
+// drift from this one.
+func applyDerivedExpiry(ctx context.Context, tx pgx.Tx, batches []derivedBatch, resolution expiry.Resolution) (int, error) {
+	affected := 0
+	for _, b := range batches {
+		date := expiry.DateFor(b.createdAt, resolution)
+
+		// The source is reasserted rather than left alone: these rows are
+		// derived by definition, and writing it keeps the column honest if
+		// one ever got there another way. The WHERE clause repeats it so that
+		// a batch a concurrent request turned into a user date between the
+		// SELECT above and this UPDATE is left alone rather than overwritten.
+		tag, err := tx.Exec(ctx, `
+			UPDATE inventory_batches
+			   SET expiration_date = $1, expiration_source = 'derived'
+			 WHERE id = $2 AND expiration_source = 'derived'`, date, b.id)
+		if err != nil {
+			return 0, fmt.Errorf("store: recompute batch expiry: %w", err)
+		}
+		affected += int(tag.RowsAffected())
 	}
 	return affected, nil
 }

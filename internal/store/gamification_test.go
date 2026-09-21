@@ -482,7 +482,8 @@ func TestRecomputeAllProgressResetsAPairWithNoRemainingEvents(t *testing.T) {
 	// (docs/specs/02-data-model.md) — user_progress is deliberately left
 	// exactly as the live path last wrote it, stale XP and all, since nothing
 	// about deleting a product runs a recompute on its own.
-	require.NoError(t, s.DeleteProduct(ctx, storageID, product.ID))
+	_, deleteErr := s.DeleteProduct(ctx, storageID, product.ID)
+	require.NoError(t, deleteErr)
 
 	n, err := s.RecomputeAllProgress(ctx)
 	require.NoError(t, err)
