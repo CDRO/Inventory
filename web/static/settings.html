@@ -34,8 +34,13 @@
 
       No admin affordance appears on this page, ever
       (docs/specs/03-auth-and-multi-tenancy.md). The admin password reset
-      lives on the server-rendered /admin page; there is nothing here for a
+      lives in the server-rendered admin area; there is nothing here for a
       client-side check to reveal, because there is no client-side check.
+
+      This comment names no path on purpose. An HTML comment ships to every
+      visitor verbatim, so writing the admin area's URL here would announce
+      it to exactly the people the 404 is meant to keep it from — see the
+      content check in web/embed_test.go, which is what now keeps that true.
     -->
     <section id="account-section" class="card stack">
       <h3>Account</h3>
@@ -127,6 +132,81 @@
         <input type="number" id="weekly-goal" min="0" step="1">
       </div>
       <button id="storage-save" type="button" class="btn btn--primary">Save storage settings</button>
+    </section>
+
+    <!--
+      Expiry notifications (docs/specs/17-expiry-notifications.md). Hidden
+      until the active storage is resolved, because the configuration is per
+      storage and there is nothing honest to show before that.
+
+      This is not a re-opening of the "no notifications" rules in specs 06 and
+      50: those govern nagging somebody about the app. This is a subscribed
+      report about the food, off by default, to an endpoint the household runs
+      itself.
+    -->
+    <section id="notifications-section" class="card stack" hidden>
+      <h3>Expiry notifications</h3>
+      <p class="empty-state">
+        Off unless you turn it on. One short daily digest — what has expired
+        and what is about to — posted to whatever URL you put below. Nothing
+        is sent on a day with nothing to report, and no photos are ever sent.
+      </p>
+      <p class="empty-state">
+        This is meant for a notification service you run yourself, on your own
+        network. Nothing here checks that: a public URL would put your product
+        names, quantities and locations wherever it points.
+      </p>
+
+      <label class="row">
+        <input type="checkbox" id="notify-enabled">
+        <span>Send a daily expiry digest for this storage</span>
+      </label>
+
+      <div class="field">
+        <label for="notify-kind">Service</label>
+        <select id="notify-kind">
+          <option value="ntfy">ntfy</option>
+          <option value="gotify">Gotify</option>
+          <option value="webhook">Webhook</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="notify-url">URL</label>
+        <input type="url" id="notify-url" placeholder="https://ntfy.example/inventory" autocomplete="off">
+        <span id="notify-url-hint" class="empty-state"></span>
+      </div>
+
+      <div class="field">
+        <label for="notify-token">Access token (optional)</label>
+        <input type="password" id="notify-token" autocomplete="off">
+        <span class="empty-state">
+          Stored on the server and never shown again. Leave this blank to keep
+          the one already saved.
+        </span>
+        <label class="row" id="notify-token-remove-row" hidden>
+          <input type="checkbox" id="notify-token-remove">
+          <span>Remove the saved token when I save</span>
+        </label>
+      </div>
+
+      <div class="field">
+        <label for="notify-hour">Send at (hour of the day, server time)</label>
+        <input type="number" id="notify-hour" min="0" max="23" step="1">
+      </div>
+
+      <label class="row">
+        <input type="checkbox" id="notify-include-soon">
+        <span>Also list items expiring within 14 days, not just 3</span>
+      </label>
+
+      <p id="notify-last-result" class="empty-state" hidden></p>
+
+      <div class="row">
+        <button id="notify-save" type="button" class="btn btn--primary">Save notification settings</button>
+        <button id="notify-test" type="button" class="btn">Send a test</button>
+      </div>
+      <p id="notify-test-status" class="empty-state" hidden></p>
     </section>
 
     <section id="reset-section" class="card stack">

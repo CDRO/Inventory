@@ -18,6 +18,11 @@ uploads
 imagecache
 ts_inventory_state
 
+# Backup archives (docs/specs/15-backup-restore-and-export.md) land in ./backups
+# in the clone. Without this line every `docker compose build` would ship the
+# whole backup history into the build context - gigabytes, growing.
+backups
+
 # The E2E harness and its runtime artifacts never belong in the application
 # image: it is a separate, throwaway test container, not something the
 # Dockerfile builds or ships (docs/specs/05-frontend-pwa-foundations.md).

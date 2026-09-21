@@ -49,6 +49,19 @@ services:
       - ./uploads:/data/uploads
       - ./imagecache:/data/cache
 
+  # Without these two entries the backup would silently archive nothing.
+  #
+  # Compose merges `volumes` by container path, and the base file points
+  # `backup` at the *named* volume `uploads`. On the NAS the real tree is the
+  # bind mount ./uploads, so the named volume does not exist — Docker would
+  # create it, empty, and tar would happily archive an empty directory: exit 0,
+  # an archive that looks right, and every image gone at restore time. The
+  # pairing (read-only for backup, writable for restore) matches the base file.
+  backup:
+    volumes:
+      - ./uploads:/data/uploads:ro
+      - ./uploads:/restore/uploads
+
   db:
     volumes:
       - ./pgdata:/var/lib/postgresql/data

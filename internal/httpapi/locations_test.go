@@ -218,6 +218,27 @@ func (f *fakeStocktake) ConfirmStocktake(_ context.Context, storageID, locationI
 	return &store.StocktakeResult{CreatedBatchIDs: []uuid.UUID{}}, nil
 }
 
+// fakeExportStore is an in-memory ExportStore
+// (docs/specs/15-backup-restore-and-export.md).
+type fakeExportStore struct {
+	data      *store.StorageExport
+	err       error
+	lastID    uuid.UUID
+	callCount int
+}
+
+func (f *fakeExportStore) ExportStorage(_ context.Context, storageID uuid.UUID) (*store.StorageExport, error) {
+	f.callCount++
+	f.lastID = storageID
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.data != nil {
+		return f.data, nil
+	}
+	return &store.StorageExport{Storage: store.Storage{ID: storageID, Name: "Kitchen"}}, nil
+}
+
 // fakeAPI is the whole APIStore: the authorization lookups and the two
 // resources behind them.
 type fakeAPI struct {
@@ -236,6 +257,8 @@ type fakeAPI struct {
 	*fakeAnalyticsStore
 	*fakeGamification
 	*fakeStocktake
+	*fakeNotifications
+	*fakeExportStore
 }
 
 // newFakeAPI builds the whole fake store around an auth fake, with every other
@@ -248,39 +271,44 @@ func newFakeAPI(auth *fakeAuth) fakeAPI {
 		fakeConsumeStore: &fakeConsumeStore{}, fakeProductStore: &fakeProductStore{},
 		fakeReorderStore: &fakeReorderStore{}, fakeAnalyticsStore: &fakeAnalyticsStore{},
 		fakeGamification: newFakeGamification(), fakeStocktake: &fakeStocktake{},
+		fakeNotifications: &fakeNotifications{},
+		fakeExportStore:   &fakeExportStore{},
 	}
 }
 
 // apiFixture builds a router with a member session already established, and
 // returns everything a test needs to make a request as that member.
 type apiFixture struct {
-	router       http.Handler
-	auth         *fakeAuth
-	locations    *fakeLocations
-	categories   *fakeCategories
-	batches      *fakeBatches
-	lists        *fakeShoppingLists
-	expiry       *fakeExpiry
-	jobs         *fakeJobs
-	idem         *fakeIdempotency
-	ingest       *fakeIngestStore
-	ingester     *fakeIngester
-	photos       *fakePhotoStore
-	pictures     *fakePhotoStore
-	matcher      *fakeMatcher
-	images       *fakeSuggester
-	imageData    *fakeImageCache
-	consume      *fakeConsumeStore
-	consumer     *fakeConsumer
-	products     *fakeProductStore
-	reorder      *fakeReorderStore
-	analytics    *fakeAnalyticsStore
-	gamification *fakeGamification
-	stocktake    *fakeStocktake
-	adminVision  *fakeAdminVision
-	storageID    uuid.UUID
-	user         *store.User
-	session      *store.Session
+	router        http.Handler
+	auth          *fakeAuth
+	locations     *fakeLocations
+	categories    *fakeCategories
+	batches       *fakeBatches
+	lists         *fakeShoppingLists
+	expiry        *fakeExpiry
+	jobs          *fakeJobs
+	idem          *fakeIdempotency
+	ingest        *fakeIngestStore
+	ingester      *fakeIngester
+	photos        *fakePhotoStore
+	pictures      *fakePhotoStore
+	matcher       *fakeMatcher
+	images        *fakeSuggester
+	imageData     *fakeImageCache
+	consume       *fakeConsumeStore
+	consumer      *fakeConsumer
+	products      *fakeProductStore
+	reorder       *fakeReorderStore
+	analytics     *fakeAnalyticsStore
+	gamification  *fakeGamification
+	stocktake     *fakeStocktake
+	notifications *fakeNotifications
+	notifier      *fakeNotifier
+	exports       *fakeExportStore
+	adminVision   *fakeAdminVision
+	storageID     uuid.UUID
+	user          *store.User
+	session       *store.Session
 }
 
 // newAPIFixture builds the fixture. Each opt may adjust the router's
@@ -300,6 +328,9 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 	imageData := &fakeImageCache{}
 	gamification := newFakeGamification()
 	stocktake := &fakeStocktake{}
+	notifications := &fakeNotifications{}
+	notifier := &fakeNotifier{}
+	exports := &fakeExportStore{}
 	user, session := auth.addUser(t, false)
 	storageID := uuid.New()
 	auth.addMember(storageID, user.ID)
@@ -328,6 +359,8 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 			fakeConsumeStore: consumeStore, fakeProductStore: products,
 			fakeReorderStore: reorder, fakeAnalyticsStore: analytics,
 			fakeGamification: gamification, fakeStocktake: stocktake,
+			fakeNotifications: notifications,
+			fakeExportStore:   exports,
 		},
 		Matcher:       matcher,
 		Images:        images,
@@ -337,6 +370,7 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 		ProductImages: pictures,
 		Consumer:      consumer,
 		AdminVision:   adminVision,
+		Notifier:      notifier,
 		Config:        &config.Config{GeminiModel: "gemini-2.0-flash", AppEnv: "dev", HTTPPort: "8000"},
 	}
 	for _, opt := range opts {
@@ -350,12 +384,15 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 		ingest: ingestStore, ingester: ingester, photos: photos, pictures: pictures,
 		matcher: matcher, images: images, imageData: imageData,
 		consume: consumeStore, consumer: consumer, products: products,
-		reorder:      reorder,
-		analytics:    analytics,
-		gamification: gamification,
-		stocktake:    stocktake,
-		adminVision:  adminVision,
-		storageID:    storageID, user: user, session: session,
+		reorder:       reorder,
+		analytics:     analytics,
+		gamification:  gamification,
+		stocktake:     stocktake,
+		notifications: notifications,
+		notifier:      notifier,
+		exports:       exports,
+		adminVision:   adminVision,
+		storageID:     storageID, user: user, session: session,
 	}
 }
 
@@ -444,6 +481,8 @@ func storageRoutes(base string) []struct {
 		{http.MethodPost, base + "/inventory-batches", `{"product_id":"` + id + `","location_id":"` + id + `","quantity":1}`},
 		{http.MethodGet, base + "/locations/" + id + "/stocktake", ""},
 		{http.MethodPost, base + "/locations/" + id + "/stocktake", `{"batches":[]}`},
+		// Member export (docs/specs/15-backup-restore-and-export.md).
+		{http.MethodGet, base + "/export", ""},
 	}
 }
 

@@ -44,6 +44,15 @@ testable without HTTP.
   posts to.
 - `/api/storages/{storage_id}/*` — everything storage-scoped. Mounted
   behind `RequireSession` → `RequireStorageMember`.
+- **Browser navigation routes** — currently `/no-storages`
+  (`29-first-run-admin-guidance.md`). Not API and not admin area: they have
+  no body, answer only a `302`, and exist so a decision the client may not
+  make is made by the server. Mounted behind `RequireSession` **only**, in
+  the variant that renders a refusal as a redirect to the login page rather
+  than as a `401` envelope — a person who navigated somewhere is owed a page,
+  not JSON. They are registered for `GET` alone, so any other method falls
+  through to the static catch-all and gets the ordinary `404` of an unrouted
+  path, and every response carries `Cache-Control: no-store`.
 - `/` and all other paths — the static frontend (embedded `web/static`, or
   read from `STATIC_DIR` when set). No session required.
 

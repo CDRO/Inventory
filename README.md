@@ -67,6 +67,8 @@ anyone who is not an admin it is an ordinary 404
 | Migrations | `docker compose -f docker-compose.yml run --rm app migrate up` | prod |
 | Migration state | `docker compose -f docker-compose.yml run --rm app migrate status` | prod |
 | First-time setup | `docker compose run --rm setup` | prod |
+| Backup | `docker compose -f docker-compose.yml run --rm backup` | postgres |
+| Restore | `docker compose -f docker-compose.yml run --rm backup restore /backups/<archive>` | postgres |
 | Health | `curl localhost:8000/healthz` | — |
 
 **The `-f docker-compose.yml` pin is not decoration.** Compose auto-loads
@@ -132,6 +134,105 @@ required `env_file` makes the documented first step fail on a fresh clone. The
 optional declaration is also what lets the container reach its own startup
 check and print the remediation above, instead of Compose aborting with a parse
 error that names no remedy.
+
+## Backup and restore
+
+Everything here runs through `docker compose`, like everything else — there is
+no `pg_dump` and no `tar` on the host
+([`docs/specs/15-backup-restore-and-export.md`](docs/specs/15-backup-restore-and-export.md)).
+The `backup` service is the `postgres:16-alpine` image the database already
+uses, driving [`scripts/backup`](scripts/backup).
+
+### Taking a backup
+
+```bash
+docker compose -f docker-compose.yml run --rm backup
+# backup: wrote /backups/inventory-backup-2026-09-21-1530.tar.gz (4.1M)
+```
+
+The archive lands in `./backups` in the clone and holds two things:
+
+- `db.sql` — a logical `pg_dump` of the whole database: inventory, users,
+  logs, settings, catalog.
+- `uploads/` — every permanent image.
+
+It deliberately holds **nothing from `imagecache`**, which is re-fetchable by
+definition and would otherwise be most of the bytes, and **no `.env`**, which
+holds `SESSION_SECRET` and the API keys. An archive travels; secrets should not
+travel with it. **Keep a copy of `.env` somewhere else** — not because the
+restore needs the same values (it does not), but because losing the API keys is
+its own bad afternoon.
+
+The command exits non-zero, with the reason on stderr, if the database is
+unreachable or the archive cannot be written, and it writes the file under a
+temporary name and renames it only on success — so a failed run never leaves
+something that looks like a backup. That matters because scheduling is yours:
+point DSM's Task Scheduler at exactly the command above. The application does
+not schedule its own backups, for the same reason it does not restart its own
+containers.
+
+> On the Synology NAS use the two-file prefix instead of `-f docker-compose.yml`
+> — `$DC run --rm backup` — as for every other command there. See
+> [`deploy/synology/README.md`](deploy/synology/README.md).
+
+### Restoring
+
+Onto a clean checkout with nothing but Docker installed:
+
+```bash
+git clone <this repository> inventory && cd inventory
+cp /path/to/inventory-backup-YYYY-MM-DD-HHMM.tar.gz ./backups/   # mkdir -p ./backups first
+
+docker compose run --rm setup                                     # writes a new .env
+docker compose -f docker-compose.yml up -d db                     # the database, alone
+docker compose -f docker-compose.yml run --rm backup restore /backups/inventory-backup-YYYY-MM-DD-HHMM.tar.gz
+docker compose -f docker-compose.yml run --rm app migrate up
+docker compose -f docker-compose.yml up -d
+```
+
+Notes on the steps, in the order you will wonder about them:
+
+- **`setup` answers do not have to match the backed-up instance.** The dump
+  carries no database roles or grants, and the restore creates the database
+  from whatever `.env` now says. A fresh `SESSION_SECRET` is fine.
+- **Everyone logs in again.** The restore clears the session table, so cookies
+  and paired devices from before the backup are dead. That is intended: a
+  session id is looked up in the database rather than signed, so leaving the
+  dump's rows in place would hand back working credentials from before the
+  disaster.
+- **The restore refuses to run while anything else is connected to the
+  database** — that is why only `db` is started in step two. A restore into a
+  running stack corrupts both.
+- **On Git Bash for Windows, prefix the restore with `MSYS_NO_PATHCONV=1`.**
+  It rewrites the `/backups/...` argument into a Windows path before Docker
+  sees it, and the restore then reports an archive it cannot find. Every other
+  shell, and the NAS, are unaffected.
+- **`migrate up` applies only what is newer than the backup.** The dump carries
+  goose's version table, so restoring a current archive is a no-op here, and
+  restoring an old one upgrades it.
+- **Images work immediately; suggestion thumbnails re-fetch themselves.** The
+  `cached_images` rows come back in the dump with no files behind them, and the
+  serving path treats a missing file as a cache miss, drops the stale row and
+  moves on. There is no cache-specific restore step, and there is never a
+  broken image with a dangling row.
+- Existing files in the uploads volume are left alone rather than replaced, so
+  a restore cannot destroy images belonging to an instance you are still
+  salvaging.
+
+### Exporting one storage
+
+Separately from all of the above, any member of a storage can download that
+storage as portable files:
+
+```
+GET /api/storages/{storage_id}/export
+```
+
+It streams a ZIP holding `export.json` (format `inventory-export/1`) and an
+`images/` folder — readable without this software, and carrying nothing from
+any other storage, no credential material, and no EXIF or GPS metadata. There
+is no import endpoint, deliberately: whole-instance moves go through
+backup/restore above, and this exists so the data outlives the software.
 
 ## Health
 

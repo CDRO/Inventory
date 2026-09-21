@@ -35,6 +35,7 @@ import (
 	"github.com/CDRO/Inventory/internal/jobs"
 	"github.com/CDRO/Inventory/internal/matching"
 	"github.com/CDRO/Inventory/internal/migrate"
+	"github.com/CDRO/Inventory/internal/notify"
 	"github.com/CDRO/Inventory/internal/store"
 	"github.com/CDRO/Inventory/internal/uploads"
 	"github.com/CDRO/Inventory/internal/vision"
@@ -326,6 +327,14 @@ func serve() error {
 	go runGamificationRecompute(ctx, db)
 	go runWeeklyGamificationJobs(ctx, db)
 
+	// Expiry notifications (docs/specs/17-expiry-notifications.md). The
+	// service is constructed unconditionally: it has no provider, no key and
+	// no volume to be missing, and with the table empty — which is the state
+	// of every deployment that has not opted in — its hourly tick claims
+	// nothing and posts nothing.
+	notifier := notify.New(db, slog.Default())
+	go runExpiryNotifications(ctx, notifier)
+
 	srv := &http.Server{
 		Addr: net.JoinHostPort("", cfg.HTTPPort),
 		Handler: httpapi.NewRouter(httpapi.Deps{
@@ -353,6 +362,7 @@ func serve() error {
 			Consumer:        consumer,
 			Backgrounds:     backgrounds,
 			Cutouts:         cutoutStore,
+			Notifier:        notifier,
 		}),
 		ReadHeaderTimeout: readHeaderTimeout,
 		WriteTimeout:      writeTimeout,
@@ -542,4 +552,51 @@ func staticFS(cfg *config.Config) (fs.FS, error) {
 		return nil, fmt.Errorf("load embedded assets: %w", err)
 	}
 	return assets, nil
+}
+
+// runExpiryNotifications ticks once an hour and delivers whatever digests are
+// due (docs/specs/17-expiry-notifications.md).
+//
+// The tick is hourly because send_hour is hourly; which storages are actually
+// due is the store's decision, taken in one claiming statement, so this loop
+// holds no state of its own and a restart cannot make it repeat a digest.
+//
+// The next tick is computed fresh from the wall clock each time rather than
+// from a fixed-period ticker, for the same reason runGamificationRecompute
+// does it: a ticker started at 07:59:30 fires at 08:59:30, 09:59:30 and so on,
+// and a DST transition would drift it off the hour permanently.
+//
+// A tick's failure is logged and the loop carries on. There is no retry here
+// by design — the spec is explicit that the next day's run is the retry, and
+// growing an outbox for a convenience feature is the thing it forbids.
+func runExpiryNotifications(ctx context.Context, notifier *notify.Service) {
+	for {
+		wait := time.Until(nextTopOfHour(time.Now()))
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+
+		sent, err := notifier.RunDue(ctx, time.Now())
+		if err != nil {
+			if ctx.Err() == nil {
+				slog.Warn("expiry notification run failed", slog.Any("err", err))
+			}
+			continue
+		}
+		if sent > 0 {
+			slog.Info("sent expiry digests", slog.Int("storages", sent))
+		}
+	}
+}
+
+// nextTopOfHour returns the next :00 strictly after now, in now's own
+// location.
+func nextTopOfHour(now time.Time) time.Time {
+	next := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, now.Location())
+	for !next.After(now) {
+		next = next.Add(time.Hour)
+	}
+	return next
 }

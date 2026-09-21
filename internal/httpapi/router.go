@@ -17,7 +17,11 @@
 //     handler performs its own check. RequireAdmin re-reads is_admin from the
 //     database on every request, and every refusal — unknown storage,
 //     inaccessible storage, malformed id, the whole admin area — is the same
-//     404, byte for byte.
+//     404, byte for byte. The session gate has two refusal renderers over one
+//     lookup — the error envelope for anything a script calls, a redirect to
+//     the login page for the routes a browser navigates to
+//     (docs/specs/29-first-run-admin-guidance.md) — which is a difference in
+//     how a refusal is rendered, not a fourth gate deciding anything.
 //   - **One upload path.** ReadImageUpload in upload.go strips metadata from
 //     every image entering the system and generates the filename itself.
 //
@@ -101,6 +105,8 @@ type APIStore interface {
 	AnalyticsStore
 	GamificationStore
 	StocktakeStore
+	NotificationStore
+	ExportStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -167,6 +173,11 @@ type Deps struct {
 	// downloadable .env for GET /api/admin/settings/env-file. Nil disables
 	// that one route; every other admin route is unaffected.
 	Config *config.Config
+	// Notifier delivers the expiry digest's test message
+	// (docs/specs/17-expiry-notifications.md). Nil leaves reading and saving
+	// notification settings working and makes the test route absent — the
+	// scheduler that sends the real digests lives in cmd/inventory, not here.
+	Notifier Notifier
 }
 
 // NewRouter builds the application's HTTP handler.
@@ -458,6 +469,52 @@ func NewRouter(d Deps) http.Handler {
 			sr.Post("/inventory-batches", stocktake.CreateBatch)
 			sr.Get("/locations/{id}/stocktake", stocktake.Sheet)
 			sr.Post("/locations/{id}/stocktake", stocktake.Confirm)
+
+			// Expiry notifications (docs/specs/17-expiry-notifications.md):
+			// one opt-in, per-storage digest configuration. Any member may
+			// change it — rights inside a storage are flat — and the test
+			// route is absent when no delivery service is wired, like every
+			// other route whose collaborator is optional.
+			notifications := NewNotificationHandler(d.Store, d.Notifier, errs)
+			sr.Get("/notification-settings", notifications.Get)
+			sr.Put("/notification-settings", notifications.Put)
+			if d.Notifier != nil {
+				sr.Post("/notification-settings/test", notifications.Test)
+			}
+
+			// Member export (docs/specs/15-backup-restore-and-export.md): one
+			// storage as portable files. It is on this sub-router like
+			// everything else, which is the whole of its access control — a
+			// non-member gets the same 404 here as for a storage that does not
+			// exist, and any member may export, since rights inside a storage
+			// are flat.
+			exports := NewExportHandler(d.Store, d.ProductImages, errs)
+			sr.Get("/export", exports.Export)
+		})
+
+		// First-run guidance (docs/specs/29-first-run-admin-guidance.md): the
+		// browser navigation routes, which are neither API nor admin area.
+		//
+		// The gate chain is the whole point of this group. /no-storages is
+		// reached by every user who has no storage, which on a fresh
+		// deployment is the bootstrap admin and on any deployment is every
+		// person waiting to be added to one — so RequireAdmin would answer
+		// 404 to precisely the callers it exists for, and the group sits
+		// outside the admin group above for that reason rather than by
+		// accident. It carries Idempotency like every other session-gated
+		// group, which is a no-op here: the middleware only acts on writes,
+		// and nothing but GET is routed into this group at all.
+		navigation := NewNavigationHandler(d.Store, errs)
+		r.Group(func(nr chi.Router) {
+			nr.Use(noStore)
+			nr.Use(mw.RequireSessionRedirect(LoginPage))
+			nr.Use(idem.Middleware)
+
+			// GET and nothing else. Every other verb falls through to the
+			// static catch-all below and gets the 404 of a path that does not
+			// exist — the same answer, from the same code, rather than a
+			// second one written here to look like it.
+			nr.Get("/no-storages", navigation.NoStorages)
 		})
 	}
 
