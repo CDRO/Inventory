@@ -90,58 +90,114 @@ func sessionIDFrom(r *http.Request) string {
 	return ""
 }
 
-// RequireSession resolves the caller and puts them in the request context.
+// resolveSession is the session lookup itself, without the refusal.
+//
+// It returns either a request carrying the caller in its context, or the
+// Failure that refuses it — never both. It exists as its own function because
+// the session gate has two refusal renderers (see RequireSession and
+// RequireSessionRedirect below) and only one set of rules: the cookie winning
+// over the header, an expired row arriving as an unknown one, the account
+// deleted mid-session, and the throttled activity touch are all decided here,
+// once. A second copy of them living in the redirecting variant is precisely
+// the kind of drift that ends with one navigation route honouring a revoked
+// session that the API already refuses.
 //
 // Nothing about the caller is taken from the request beyond the opaque session
 // id: the user, their name and their admin status are all looked up
 // server-side, so there is nothing a client could edit to change who they are
 // (docs/specs/03-auth-and-multi-tenancy.md).
+func (m *Middleware) resolveSession(r *http.Request) (*http.Request, *Failure) {
+	id := sessionIDFrom(r)
+	if id == "" {
+		return nil, Unauthorized(ReasonSessionMissing)
+	}
+
+	session, err := m.store.LookupSession(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			// LookupSession deletes an expired row as it finds it, so an
+			// unknown id and a lapsed one arrive here identically.
+			return nil, Unauthorized(ReasonSessionExpired)
+		}
+		return nil, Internal(err)
+	}
+
+	user, err := m.store.UserByID(r.Context(), session.UserID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			// The account was deleted while the session lived. Sessions
+			// cascade with the user, so this is a narrow race rather than
+			// a normal state — refuse it as an expired session.
+			return nil, Unauthorized(ReasonSessionExpired)
+		}
+		return nil, Internal(err)
+	}
+
+	// Best-effort activity tracking; throttled to at most hourly in the
+	// store. A failure here must not fail the request — but it must not be
+	// invisible either: a persistently failing touch (a bad migration on
+	// sessions, say) would otherwise be the one store error in this file
+	// nobody ever hears about.
+	if err := m.store.TouchSession(r.Context(), session.ID); err != nil {
+		m.errors.Log(r.Context(), "touch session failed", err)
+	}
+
+	ctx := context.WithValue(r.Context(), ctxUser, user)
+	ctx = context.WithValue(ctx, ctxSession, session)
+	return r.WithContext(ctx), nil
+}
+
+// RequireSession resolves the caller and puts them in the request context,
+// refusing anyone it cannot with the API's error envelope.
+//
+// This is the gate for everything a script calls. Its companion below is the
+// same gate for the handful of routes a browser *navigates* to.
 func (m *Middleware) RequireSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := sessionIDFrom(r)
-		if id == "" {
-			m.errors.WriteError(w, r, Unauthorized(ReasonSessionMissing))
+		authed, failure := m.resolveSession(r)
+		if failure != nil {
+			m.errors.WriteError(w, r, failure)
 			return
 		}
-
-		session, err := m.store.LookupSession(r.Context(), id)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				// LookupSession deletes an expired row as it finds it, so an
-				// unknown id and a lapsed one arrive here identically.
-				m.errors.WriteError(w, r, Unauthorized(ReasonSessionExpired))
-				return
-			}
-			m.errors.WriteError(w, r, Internal(err))
-			return
-		}
-
-		user, err := m.store.UserByID(r.Context(), session.UserID)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				// The account was deleted while the session lived. Sessions
-				// cascade with the user, so this is a narrow race rather than
-				// a normal state — refuse it as an expired session.
-				m.errors.WriteError(w, r, Unauthorized(ReasonSessionExpired))
-				return
-			}
-			m.errors.WriteError(w, r, Internal(err))
-			return
-		}
-
-		// Best-effort activity tracking; throttled to at most hourly in the
-		// store. A failure here must not fail the request — but it must not be
-		// invisible either: a persistently failing touch (a bad migration on
-		// sessions, say) would otherwise be the one store error in this file
-		// nobody ever hears about.
-		if err := m.store.TouchSession(r.Context(), session.ID); err != nil {
-			m.errors.Log(r.Context(), "touch session failed", err)
-		}
-
-		ctx := context.WithValue(r.Context(), ctxUser, user)
-		ctx = context.WithValue(ctx, ctxSession, session)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		next.ServeHTTP(w, authed)
 	})
+}
+
+// RequireSessionRedirect is the same session gate for a route the browser
+// navigates to rather than fetches — currently GET /no-storages
+// (docs/specs/29-first-run-admin-guidance.md).
+//
+// It is not a fourth authorization gate. It resolves the caller through the
+// identical resolveSession above and admits exactly the same people; the only
+// difference is what a refusal looks like. An address bar pointed at a route
+// that answers `{"error":{"code":"unauthorized"}}` shows the visitor a page of
+// JSON, so a dead session is sent to loginPage instead — the same target the
+// SPA's own 401 handling uses (web/static/js/api.js), so it makes no
+// difference to where a user ends up whether the client or the server noticed.
+//
+// **Only an unauthorized refusal becomes the redirect.** A store that is down
+// produces a 500 envelope here exactly as it does everywhere else: bouncing
+// the visitor to the login page would tell them their session had expired,
+// they would log in again, and the second attempt would fail the same way with
+// the real cause never shown to anyone.
+func (m *Middleware) RequireSessionRedirect(loginPage string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authed, failure := m.resolveSession(r)
+			if failure == nil {
+				next.ServeHTTP(w, authed)
+				return
+			}
+			if failure.Status != http.StatusUnauthorized {
+				m.errors.WriteError(w, r, failure)
+				return
+			}
+			// Deliberately not logged: a logged-out visitor opening a
+			// navigation route is the ordinary case, not an event an operator
+			// needs to hear about once per anonymous hit.
+			http.Redirect(w, r, loginPage, http.StatusFound)
+		})
+	}
 }
 
 // RequireAdmin gates the admin area. Always mounted after RequireSession.

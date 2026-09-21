@@ -1,6 +1,7 @@
 package web_test
 
 import (
+	"bytes"
 	"io/fs"
 	"testing"
 
@@ -79,4 +80,58 @@ func TestStaticEmbedsTheWholeTree(t *testing.T) {
 
 	assert.Contains(t, files, "index.html")
 	assert.Contains(t, files, "css/base.css", "nested assets must survive the embed")
+}
+
+// TestNoStaticAssetNamesTheAdminArea is the path check above carried through
+// to content, which is where it actually bites.
+//
+// The rule is docs/specs/03-auth-and-multi-tenancy.md's: the shipped
+// JavaScript contains no admin code and no navigation to the admin area, and
+// the area does not announce its own existence. Keeping admin.html out of
+// static/ satisfies the first half; it does nothing about a comment, a string
+// or a href inside a file that *is* served. An HTML comment is the sharp case,
+// because it reaches the browser byte-for-byte: settings.html carried "the
+// admin password reset lives on the server-rendered /admin page" until this
+// test was written, which handed every visitor the path that answers 404 to
+// them precisely so they cannot find it.
+//
+// This is also what makes docs/specs/29-first-run-admin-guidance.md's design
+// checkable rather than merely intended. That spec routes an admin with no
+// storage to the admin area through a server-side redirect, specifically so
+// that no client-side link has to exist; a test that only looked at filenames
+// would not notice the day someone adds the link anyway.
+//
+// The failure message quotes the path rather than the content on purpose: the
+// tree contains PNGs, and a diff of one of those is not a readable test
+// failure.
+func TestNoStaticAssetNamesTheAdminArea(t *testing.T) {
+	t.Parallel()
+
+	assets, err := web.Static()
+	require.NoError(t, err)
+
+	needle := []byte("/admin")
+	var scanned int
+	require.NoError(t, fs.WalkDir(assets, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		body, err := fs.ReadFile(assets, path)
+		if err != nil {
+			return err
+		}
+		scanned++
+		assert.Falsef(t, bytes.Contains(body, needle),
+			"%s contains %q: nothing served from web/static/ may name the admin area, "+
+				"in code, copy or a comment (docs/specs/03-auth-and-multi-tenancy.md)", path, needle)
+		return nil
+	}))
+
+	// A walk that silently visited nothing would pass this test while checking
+	// nothing at all — the same failure mode TestStaticIsRootedAtStaticDir
+	// guards against from the other side.
+	assert.Greater(t, scanned, 1, "the walk must actually have read the embedded tree")
 }

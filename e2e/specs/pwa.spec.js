@@ -304,3 +304,66 @@ test("the 'Reset local app data' action unregisters the service worker and clear
   expect(after.registrations, "the button must actually unregister the service worker").toBe(0);
   expect(after.caches, "the button must actually clear every Cache Storage entry").toBe(0);
 });
+
+// The navigation route of docs/specs/29-first-run-admin-guidance.md decides
+// where a user with no storage belongs by reading the database on that
+// request. A cached answer would therefore be worse than stale — it would keep
+// sending someone to the admin area after their admin rights were revoked, or
+// to the empty state after they were finally added to a storage, with no
+// request reaching the server to notice either.
+//
+// sw.js does not name /no-storages anywhere, which under the allowlist model
+// is what makes it safe; the test above proves that model holds for a made-up
+// path, and this one proves it for the real route whose correctness depends
+// on it.
+test("the service worker never serves a cached response for /no-storages", async ({ page }) => {
+  const loginRes = await page.request.post("/api/auth/login", {
+    data: { username: "e2e-admin", password: "e2e-fixture-password" },
+  });
+  expect(loginRes.status(), "login as e2e-admin").toBe(200);
+
+  await page.goto("/index.html");
+  await page.evaluate(() => navigator.serviceWorker.ready);
+
+  const seeded = await page.evaluate(async () => {
+    const names = await caches.keys();
+    const shellCaches = names.filter((name) => name.startsWith("inventory-shell-"));
+    if (shellCaches.length !== 1) {
+      return { cacheName: null, count: shellCaches.length };
+    }
+
+    const cache = await caches.open(shellCaches[0]);
+    await cache.put(
+      "/no-storages",
+      new Response("<html><body>planted-no-storages</body></html>", {
+        headers: { "Content-Type": "text/html" },
+      }),
+    );
+
+    const planted = await cache.match("/no-storages");
+    // Followed, not manual: what has to be proven is that the real redirect
+    // ran, and `redirected` plus the final pathname says so in one go. A
+    // planted entry would have resolved to a 200 that went nowhere.
+    const response = await fetch("/no-storages");
+    return {
+      cacheName: shellCaches[0],
+      count: shellCaches.length,
+      plantedOK: planted != null,
+      redirected: response.redirected,
+      finalPath: new URL(response.url).pathname,
+      body: await response.text(),
+    };
+  });
+
+  expect(
+    seeded.cacheName,
+    `expected exactly one inventory-shell-* cache, found ${seeded.count}`,
+  ).not.toBeNull();
+  expect(seeded.plantedOK, "the probe response must actually be in the cache").toBe(true);
+
+  expect(seeded.body).not.toContain("planted-no-storages");
+  expect(seeded.redirected, "the request must have reached the server and been redirected").toBe(true);
+  // e2e-admin is an admin with no storage, so the live answer is the admin
+  // area — which also shows the redirect was computed rather than replayed.
+  expect(seeded.finalPath).toBe("/admin");
+});
