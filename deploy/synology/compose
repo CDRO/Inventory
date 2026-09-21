@@ -1,0 +1,23 @@
+#!/bin/sh
+# docker-compose for the Synology NAS variant, with both files pinned.
+#
+#   deploy/synology/compose up -d --build
+#   deploy/synology/compose run --rm app migrate up
+#
+# Every call carries `-f docker-compose.yml -f docker-compose.nas.yml`, so the
+# dev override (docker-compose.override.yml: APP_ENV=dev, debug_reason in error
+# responses, port 8000 published) is never merged in, and the project name is
+# fixed so the setup wizard rewriting .env cannot change which stack this is.
+# Nothing here depends on an untracked file.
+#
+# See docs/specs/01-architecture-and-deployment.md, "Synology NAS variant".
+# `docker-compose` (with the hyphen) must be the standalone Compose >= 2.24, not
+# the older one bundled with Container Manager.
+
+cd "$(dirname "$0")/../.." || exit 1
+
+exec docker-compose \
+  -p inventory \
+  -f docker-compose.yml \
+  -f docker-compose.nas.yml \
+  "$@"

@@ -1,6 +1,17 @@
 # Local secrets — never committed (see docs/specs/01-architecture-and-deployment.md)
 .env
 
+# Runtime data of the Synology NAS variant (docker-compose.nas.yml). It lives in
+# bind mounts inside the clone on purpose, so it must stay untracked: pgdata is
+# the live database and ts_inventory_state holds the Tailscale node key. Anchored
+# to the repository root, so internal/uploads (a Go package) is unaffected.
+# Never run `git clean -x` or `-X` in a clone that holds this data - it would
+# delete all of it.
+/pgdata/
+/uploads/
+/imagecache/
+/ts_inventory_state/
+
 # Agent scratch state. Deliberately untracked: it is mid-task scratch only, it
 # would conflict on every branch, and anything durable belongs in a GitHub
 # issue or PR comment instead.
