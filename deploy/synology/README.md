@@ -79,8 +79,8 @@ $ sh deploy/synology/update
 The default is a **rolling update**. The old app keeps serving until the new one
 has proved itself:
 
-1. `git pull --ff-only`, check the pulled compose files, pull the sidecar image,
-   build the app image.
+1. Refuse if the clone has local changes to tracked files, then `git pull --ff-only`,
+   check the pulled compose files, pull the sidecar image, build the app image.
 2. `migrate up` — the *old* app is still serving while this runs.
 3. Wait until **no job is pending** (up to `DRAIN_TIMEOUT`, 60 s).
 4. Start a **second** app instance from the new image, next to the old one.
@@ -103,7 +103,7 @@ instance was running keeps running. From step 6 on the new app is already servin
 
 | Option | Effect |
 |---|---|
-| `--no-pull` | Skip `git pull` (you pulled already, or you are on a branch without upstream). |
+| `--no-pull` | Skip `git pull` and the clean-clone check: deploy the tree as it is (you pulled already, or you are on a branch without upstream). |
 | `--classic` | Stop app and sidecar, migrate, start everything. See below. |
 | `--force` | Swap even if Compose sees nothing to change. |
 | `--prune` | Afterwards, remove dangling images. |
@@ -210,6 +210,7 @@ real project `inventory` and its containers are not touched), run and check:
 | A pending job (`INSERT INTO jobs …`), `DRAIN_TIMEOUT=4` | Aborts, nothing swapped; after the job is `done`, the update goes through. |
 | A broken migration file in the clone | The build succeeds, `migrate up` fails, the old app and the sidecar are untouched. |
 | A `RUN false` in the `Dockerfile` | The build fails; nothing changed. |
+| A local change to a tracked file, then `update` | Refuses and lists the file; with `--no-pull` it deploys the tree as it is. |
 | A second app container started by hand | The script refuses before it pulls. |
 | The lock directory created by hand | The script refuses and names it. |
 | `--classic` with a failing migration | Stack stays stopped and the message says so. |
