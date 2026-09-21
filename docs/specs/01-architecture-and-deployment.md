@@ -715,15 +715,23 @@ the stack publishes no host port at all: nothing can clash with DSM's own
 
 **Data in the clone.** `./pgdata`, `./uploads` and `./imagecache` are bind
 mounts inside the clone instead of named volumes, so they are visible in File
-Station. They are gitignored and dockerignored, and both matter: without the
+Station, and `./backups` joins them as the directory the `backup` service
+writes archives into (`15-backup-restore-and-export.md`). All four are
+gitignored and dockerignored, and both matter: without the
 `.dockerignore` entries the build context would contain the live Postgres data
 directory (files the context reader cannot always read, a copy of the database
 in every `COPY . .` layer, gigabytes per build). Two consequences to keep in
 mind:
 
-- `git clean -x` / `-X` in that clone deletes all of it. Do not run it there.
+- `git clean -x` / `-X` in that clone deletes all of it — **including
+  `./backups`**, where the `backup` service writes its archives
+  (`15-backup-restore-and-export.md`). Do not run it there. Deleting the live
+  data and the backups of it in one command is the one mistake this section
+  exists to prevent.
 - A file-level copy of a *running* Postgres data directory — Hyper Backup
-  included — is not a consistent backup. Back the database up with `pg_dump`.
+  included — is not a consistent backup. Back the instance up with
+  `run --rm backup` (`15-backup-restore-and-export.md`), which takes a logical
+  `pg_dump` and the `uploads` tree in one archive.
 
 **Compose version.** The files use the long-form `env_file` with
 `required: false`, which needs **Compose ≥ 2.24** (see "Minimum Docker Compose

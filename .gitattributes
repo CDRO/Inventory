@@ -4,3 +4,9 @@
 deploy/synology/compose text eol=lf
 deploy/synology/install-shell text eol=lf
 deploy/synology/update text eol=lf
+
+# The backup/restore script runs in the postgres:16-alpine image's BusyBox
+# shell (docs/specs/15-backup-restore-and-export.md), which has the same
+# problem with a CRLF shebang. It is bind-mounted into the container straight
+# from the checkout, so the checkout's line endings are the ones that run.
+scripts/backup text eol=lf

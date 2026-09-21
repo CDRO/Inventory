@@ -105,6 +105,7 @@ type APIStore interface {
 	AnalyticsStore
 	GamificationStore
 	StocktakeStore
+	ExportStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -462,6 +463,15 @@ func NewRouter(d Deps) http.Handler {
 			sr.Post("/inventory-batches", stocktake.CreateBatch)
 			sr.Get("/locations/{id}/stocktake", stocktake.Sheet)
 			sr.Post("/locations/{id}/stocktake", stocktake.Confirm)
+
+			// Member export (docs/specs/15-backup-restore-and-export.md): one
+			// storage as portable files. It is on this sub-router like
+			// everything else, which is the whole of its access control — a
+			// non-member gets the same 404 here as for a storage that does not
+			// exist, and any member may export, since rights inside a storage
+			// are flat.
+			exports := NewExportHandler(d.Store, d.ProductImages, errs)
+			sr.Get("/export", exports.Export)
 		})
 
 		// First-run guidance (docs/specs/29-first-run-admin-guidance.md): the

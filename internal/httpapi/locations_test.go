@@ -218,6 +218,27 @@ func (f *fakeStocktake) ConfirmStocktake(_ context.Context, storageID, locationI
 	return &store.StocktakeResult{CreatedBatchIDs: []uuid.UUID{}}, nil
 }
 
+// fakeExportStore is an in-memory ExportStore
+// (docs/specs/15-backup-restore-and-export.md).
+type fakeExportStore struct {
+	data      *store.StorageExport
+	err       error
+	lastID    uuid.UUID
+	callCount int
+}
+
+func (f *fakeExportStore) ExportStorage(_ context.Context, storageID uuid.UUID) (*store.StorageExport, error) {
+	f.callCount++
+	f.lastID = storageID
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.data != nil {
+		return f.data, nil
+	}
+	return &store.StorageExport{Storage: store.Storage{ID: storageID, Name: "Kitchen"}}, nil
+}
+
 // fakeAPI is the whole APIStore: the authorization lookups and the two
 // resources behind them.
 type fakeAPI struct {
@@ -236,6 +257,7 @@ type fakeAPI struct {
 	*fakeAnalyticsStore
 	*fakeGamification
 	*fakeStocktake
+	*fakeExportStore
 }
 
 // newFakeAPI builds the whole fake store around an auth fake, with every other
@@ -248,6 +270,7 @@ func newFakeAPI(auth *fakeAuth) fakeAPI {
 		fakeConsumeStore: &fakeConsumeStore{}, fakeProductStore: &fakeProductStore{},
 		fakeReorderStore: &fakeReorderStore{}, fakeAnalyticsStore: &fakeAnalyticsStore{},
 		fakeGamification: newFakeGamification(), fakeStocktake: &fakeStocktake{},
+		fakeExportStore: &fakeExportStore{},
 	}
 }
 
@@ -277,6 +300,7 @@ type apiFixture struct {
 	analytics    *fakeAnalyticsStore
 	gamification *fakeGamification
 	stocktake    *fakeStocktake
+	exports      *fakeExportStore
 	adminVision  *fakeAdminVision
 	storageID    uuid.UUID
 	user         *store.User
@@ -300,6 +324,7 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 	imageData := &fakeImageCache{}
 	gamification := newFakeGamification()
 	stocktake := &fakeStocktake{}
+	exports := &fakeExportStore{}
 	user, session := auth.addUser(t, false)
 	storageID := uuid.New()
 	auth.addMember(storageID, user.ID)
@@ -328,6 +353,7 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 			fakeConsumeStore: consumeStore, fakeProductStore: products,
 			fakeReorderStore: reorder, fakeAnalyticsStore: analytics,
 			fakeGamification: gamification, fakeStocktake: stocktake,
+			fakeExportStore: exports,
 		},
 		Matcher:       matcher,
 		Images:        images,
@@ -354,6 +380,7 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 		analytics:    analytics,
 		gamification: gamification,
 		stocktake:    stocktake,
+		exports:      exports,
 		adminVision:  adminVision,
 		storageID:    storageID, user: user, session: session,
 	}
@@ -444,6 +471,8 @@ func storageRoutes(base string) []struct {
 		{http.MethodPost, base + "/inventory-batches", `{"product_id":"` + id + `","location_id":"` + id + `","quantity":1}`},
 		{http.MethodGet, base + "/locations/" + id + "/stocktake", ""},
 		{http.MethodPost, base + "/locations/" + id + "/stocktake", `{"batches":[]}`},
+		// Member export (docs/specs/15-backup-restore-and-export.md).
+		{http.MethodGet, base + "/export", ""},
 	}
 }
 

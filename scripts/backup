@@ -1,0 +1,221 @@
+#!/bin/sh
+#
+# Operator backup and restore for the whole instance
+# (docs/specs/15-backup-restore-and-export.md).
+#
+# Runs inside the `backup` service of docker-compose.yml: the same
+# postgres:16-alpine image the database already uses, so pg_dump, psql and
+# BusyBox tar are all present and nothing is installed anywhere. That is the
+# no-host-toolchain rule (docs/specs/01-architecture-and-deployment.md) applied
+# to disaster recovery.
+#
+#   docker compose -f docker-compose.yml run --rm backup
+#   docker compose -f docker-compose.yml run --rm backup restore /backups/<archive>
+#
+# The `-f docker-compose.yml` pin matters here exactly as it does for `migrate`
+# and for deployment. On the Synology NAS the pin is the two-file prefix
+# instead (the "Synology NAS variant" section of spec 01), which is why
+# docker-compose.nas.yml carries its own `backup` volume entries: without them
+# Compose would create an empty named volume beside the NAS bind mount and the
+# archive would carry no images at all.
+#
+# The script is invoked as an argument to /bin/sh rather than executed
+# directly, so it needs no executable bit — which a Windows checkout would not
+# preserve anyway. It does need LF line endings; .gitattributes pins that.
+#
+# What travels, and what deliberately does not:
+#
+#   db.sql     A logical pg_dump, not a copy of the pgdata files: a file-level
+#              copy of a running database is corrupt by default, and a logical
+#              dump restores across PostgreSQL versions — the case that matters
+#              when the restore target is a new NAS years later.
+#   uploads/   The image tree. Irreplaceable: photos of the household's own
+#              shelves and products.
+#
+#   imagecache Absent on purpose. It is re-fetchable by definition
+#              (docs/specs/07-shopping-list-reconciliation.md) and it is the
+#              largest share of the bytes on disk, so archiving it would spend
+#              most of every backup on the most replaceable data. It is not
+#              mounted into this container at all, so no later edit to this
+#              script can sweep it in by accident.
+#   .env       Absent on purpose. It holds SESSION_SECRET and the API keys, and
+#              an archive travels; secrets should not travel with it. The
+#              operator keeps it separately, and the restore procedure
+#              regenerates it with `docker compose run --rm setup`. This
+#              container mounts two data paths and this one script, never the
+#              project directory, so .env is not reachable from in here either.
+
+set -eu
+
+# Container paths, fixed by docker-compose.yml rather than configurable: a
+# settable path here would only ever become a path Compose does not mount, at
+# which point a backup silently archives an empty directory.
+BACKUP_DIR=/backups
+READ_UPLOADS=/data/uploads   # read-only; the tree a backup archives
+RESTORE_ROOT=/restore        # the same volume, mounted writable at
+                             # $RESTORE_ROOT/uploads, for restore only
+DB_HOST=db
+
+fail() {
+    echo "backup: $*" >&2
+    exit 1
+}
+
+# Credentials arrive from .env through the service's env_file, the same
+# mechanism every other service uses. Checked up front so a missing .env is a
+# sentence rather than a pg_dump usage error.
+for required in POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB; do
+    eval "value=\${$required:-}"
+    [ -n "$value" ] || fail "$required is not set. This service reads .env like every other one; if there is no .env yet, run: docker compose run --rm setup"
+done
+PGPASSWORD=$POSTGRES_PASSWORD
+export PGPASSWORD
+
+do_backup() {
+    [ -d "$BACKUP_DIR" ] || fail "$BACKUP_DIR is not mounted"
+    [ -d "$READ_UPLOADS" ] || fail "$READ_UPLOADS is not mounted"
+
+    stamp=$(date -u +%Y-%m-%d-%H%M)
+    final="$BACKUP_DIR/inventory-backup-$stamp.tar.gz"
+    # Written under a temporary name and renamed only once tar has succeeded.
+    # A cron-driven backup that dies half way through — no disk left, the
+    # database going away mid-dump — must leave nothing that looks like a
+    # backup, because the next disaster is when anyone would find out.
+    # rename(2) within one directory is atomic, so the final name never names a
+    # partial file even for an instant.
+    partial="$BACKUP_DIR/.inventory-backup-$stamp.tar.gz.part"
+
+    # /data is the container's own writable layer; /data/uploads inside it is
+    # the read-only mount. Writing the dump there is what lets tar archive both
+    # members under a single -C: BusyBox tar keeps only the last -C it is
+    # given, so the two-directory form GNU tar allows is not available here.
+    dump=/data/db.sql
+
+    trap 'rm -f "$partial" "$dump"' EXIT HUP INT TERM
+
+    # --no-owner --no-privileges so the dump names no database role. Without
+    # them a restore only works when POSTGRES_USER happens to match the
+    # backed-up instance's, which is exactly the assumption a restore onto new
+    # hardware years later cannot make.
+    pg_dump --no-owner --no-privileges \
+        -h "$DB_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f "$dump" \
+        || fail "pg_dump failed — the database is unreachable, or it refused the credentials in .env. Nothing was written to $BACKUP_DIR."
+
+    tar -czf "$partial" -C /data db.sql uploads \
+        || fail "could not write the archive. Nothing was written under the final name in $BACKUP_DIR."
+
+    mv "$partial" "$final" \
+        || fail "could not move the finished archive into place in $BACKUP_DIR."
+
+    echo "backup: wrote $final ($(du -h "$final" | cut -f1))"
+}
+
+do_restore() {
+    archive=$1
+    [ -n "$archive" ] || fail "usage: restore /backups/<archive>"
+    [ -f "$archive" ] || fail "no such archive: $archive"
+    [ -d "$RESTORE_ROOT/uploads" ] || fail "$RESTORE_ROOT/uploads is not mounted; the uploads volume cannot be written"
+
+    # Refuse to run against a live stack.
+    #
+    # The question is put to the database rather than to Docker, because this
+    # is the check that actually protects the DROP below and it cannot be
+    # fooled: a running app holds pool connections, and dropping the database
+    # out from under it corrupts both ends of the restore. A container with no
+    # Docker socket cannot ask "is the app service up" any other way that a
+    # network hiccup could not answer wrongly — and answering wrongly in the
+    # permissive direction is the one outcome that must not happen here.
+    #
+    # The query goes in on stdin rather than through -c, because psql
+    # substitutes :'db' only when it reads a script — with -c the command is
+    # passed through untouched and the server sees a literal colon. Quoting the
+    # database name through a psql variable rather than pasting it into the SQL
+    # is worth keeping: POSTGRES_DB is whatever the operator answered the setup
+    # wizard, and :'db' quotes it correctly whatever that was.
+    busy=$(printf "%s\n" \
+        "SELECT count(*) FROM pg_stat_activity WHERE datname = :'db' AND pid <> pg_backend_pid();" \
+        | psql -h "$DB_HOST" -U "$POSTGRES_USER" -d postgres -tAX -v ON_ERROR_STOP=1 \
+            -v db="$POSTGRES_DB") \
+        || fail "cannot reach the database. Start it on its own first: docker compose -f docker-compose.yml up -d db"
+    [ "$busy" -eq 0 ] 2>/dev/null \
+        || fail "refusing to restore: $busy other connection(s) to \"$POSTGRES_DB\". A restore into a running stack corrupts both. Stop the app first: docker compose -f docker-compose.yml stop app"
+
+    work=/tmp/restore
+    rm -rf "$work"
+    mkdir -p "$work"
+    trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+    # Unpacked before anything is dropped, so an archive that is not one of
+    # ours is refused while the existing database is still intact.
+    tar -xzf "$archive" -C "$work" db.sql \
+        || fail "could not read db.sql out of $archive — is it an inventory backup archive?"
+    [ -s "$work/db.sql" ] || fail "$archive carries an empty db.sql"
+
+    echo "backup: restoring \"$POSTGRES_DB\" from $archive"
+    psql -h "$DB_HOST" -U "$POSTGRES_USER" -d postgres -X -q -v ON_ERROR_STOP=1 \
+        -c "DROP DATABASE IF EXISTS \"$POSTGRES_DB\"" \
+        -c "CREATE DATABASE \"$POSTGRES_DB\"" \
+        || fail "could not recreate \"$POSTGRES_DB\""
+
+    # -o /dev/null discards the dump's own incidental result rows — the
+    # set_config and setval tables pg_dump emits — so what reaches the operator
+    # is this script's account of the restore rather than a wall of noise with
+    # the real messages buried in it. Errors are unaffected: they go to stderr,
+    # and ON_ERROR_STOP still aborts the load.
+    psql -h "$DB_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -q -o /dev/null -v ON_ERROR_STOP=1 \
+        -f "$work/db.sql" \
+        || fail "loading db.sql failed; \"$POSTGRES_DB\" holds only as much as the dump got through. Fix the cause and run the restore again — it starts by dropping the database, so a second attempt starts clean."
+
+    # Every session from the backed-up instance dies here, which the spec
+    # requires of a restore.
+    #
+    # It is not a consequence of regenerating SESSION_SECRET. A session id is an
+    # opaque random string looked up in this table
+    # (docs/specs/03-auth-and-multi-tenancy.md), signed with nothing, so
+    # reloading the dump would otherwise hand back working cookies from before
+    # the disaster — including any that were stolen along the way. The restore
+    # is therefore what has to invalidate them. Paired devices go with them: a
+    # device session is the same table and the same kind of credential.
+    #
+    # pairing_codes is cleared only if the dump carried the table, so an
+    # archive taken from an older schema still restores.
+    cat > "$work/invalidate.sql" <<'SQL'
+DELETE FROM sessions;
+DO $$
+BEGIN
+    IF to_regclass('public.pairing_codes') IS NOT NULL THEN
+        DELETE FROM pairing_codes;
+    END IF;
+END
+$$;
+SQL
+    psql -h "$DB_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -q -v ON_ERROR_STOP=1 \
+        -f "$work/invalidate.sql" \
+        || fail "could not invalidate the restored instance's sessions"
+
+    # Unpacked over whatever is already there rather than replacing the tree: a
+    # restore must not delete images belonging to an instance the operator may
+    # still be salvaging. Files the restored database does not reference are
+    # inert, and the orphan sweeps clear them in their own time.
+    tar -xzf "$archive" -C "$RESTORE_ROOT" uploads \
+        || fail "the database was restored but the uploads tree could not be unpacked into the volume"
+
+    echo "backup: restored \"$POSTGRES_DB\" and the uploads tree from $archive"
+    echo "backup: every session from the backed-up instance was invalidated; everyone logs in again"
+    echo "backup: next:"
+    echo "backup:   docker compose -f docker-compose.yml run --rm app migrate up"
+    echo "backup:   docker compose -f docker-compose.yml up -d"
+}
+
+case "${1:-backup}" in
+    backup)
+        do_backup
+        ;;
+    restore)
+        shift
+        do_restore "${1:-}"
+        ;;
+    *)
+        fail "unknown command \"$1\" (expected: backup, or restore /backups/<archive>)"
+        ;;
+esac
