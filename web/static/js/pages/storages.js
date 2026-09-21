@@ -37,6 +37,22 @@ async function init() {
   }
 
   if (me.storages.length === 0) {
+    // Where a user with no storage belongs is decided by the server, not
+    // here (docs/specs/29-first-run-admin-guidance.md). This page cannot
+    // know whether the caller is an admin — no response it reads carries
+    // that, and branching on it is forbidden
+    // (docs/specs/03-auth-and-multi-tenancy.md) — so it navigates to one
+    // neutral route and is never told what was decided. It only ever
+    // observes its own outcome: coming back here with empty=1 means "render
+    // the empty state", and nothing else.
+    //
+    // location.replace, not assign: the entry we would leave behind is the
+    // one the server just redirected away from, so Back would bounce
+    // through the same redirect again instead of leaving the app.
+    if (new URLSearchParams(location.search).get("empty") !== "1") {
+      location.replace("/no-storages");
+      return;
+    }
     switcherContainer.hidden = true;
     renderEmptyState(mainContainer);
     return;

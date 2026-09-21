@@ -231,10 +231,13 @@ developing without being imposed on every save.
 
 - A separate `docker-compose.e2e.yml` brings up the full stack (`app`,
   `db`, `traefik`) against a **disposable database**, seeds a known
-  fixture (an admin, two users, and two storages — one shared by both
-  ordinary users with a small inventory, one held by only one of them, for
-  journey 2's switcher and journey 8's non-disclosure check), and runs the
-  browser suite against it.
+  fixture (two admins, three ordinary users, and three storages — one
+  shared by two ordinary users with a small inventory, one held by only one
+  of them, for journey 2's switcher and journey 8's non-disclosure check,
+  and one held by the second admin alone; the bootstrap admin and one
+  ordinary user deliberately belong to **no** storage, which is the
+  starting position `29-first-run-admin-guidance.md` is about), and runs
+  the browser suite against it.
 - The runner is a **pre-built browser-automation image pulled from a
   registry** (e.g. the official Playwright image), used as a throwaway
   test container. This does not violate the no-toolchain rule in

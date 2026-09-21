@@ -34,8 +34,13 @@
 
       No admin affordance appears on this page, ever
       (docs/specs/03-auth-and-multi-tenancy.md). The admin password reset
-      lives on the server-rendered /admin page; there is nothing here for a
+      lives in the server-rendered admin area; there is nothing here for a
       client-side check to reveal, because there is no client-side check.
+
+      This comment names no path on purpose. An HTML comment ships to every
+      visitor verbatim, so writing the admin area's URL here would announce
+      it to exactly the people the 404 is meant to keep it from — see the
+      content check in web/embed_test.go, which is what now keeps that true.
     -->
     <section id="account-section" class="card stack">
       <h3>Account</h3>

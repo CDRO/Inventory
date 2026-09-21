@@ -29,10 +29,23 @@
 
 BEGIN;
 
+-- e2e-admin is deliberately a member of no storage. That is not an oversight
+-- in the fixture, it is the state of a freshly deployed system: is_admin
+-- grants the admin view and nothing else, so the bootstrap admin waits on a
+-- storage_members row like everybody else
+-- (docs/specs/03-auth-and-multi-tenancy.md). It is what
+-- docs/specs/29-first-run-admin-guidance.md exists to make survivable, and
+-- what e2e/specs/first-run-admin.spec.js's first journey asserts against.
+--
+-- e2e-nomad and e2e-admin-2 are the other two states that journey needs to be
+-- told apart from it: someone with no storage who is *not* an admin, and an
+-- admin who *does* have one.
 INSERT INTO users (id, username, password_hash, display_name, is_admin) VALUES
   ('00000000-0000-7000-8000-000000000001', 'e2e-admin', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Admin', true),
   ('00000000-0000-7000-8000-000000000002', 'e2e-alice',  '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Alice',     false),
-  ('00000000-0000-7000-8000-000000000003', 'e2e-bob',    '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Bob',       false)
+  ('00000000-0000-7000-8000-000000000003', 'e2e-bob',    '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Bob',       false),
+  ('00000000-0000-7000-8000-000000000004', 'e2e-nomad',   '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Nomad',     false),
+  ('00000000-0000-7000-8000-000000000005', 'e2e-admin-2', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Second Admin', true)
 ON CONFLICT DO NOTHING;
 
 -- Two storages, so the "member of storage A gets 404 for storage B"
@@ -41,15 +54,26 @@ ON CONFLICT DO NOTHING;
 -- one only: he is the caller who must be refused "E2E Other Household", and
 -- being in exactly one storage also makes him the user for whom the switcher
 -- must stay hidden entirely.
+-- "E2E Admin Household" is a third storage with exactly one member, the second
+-- admin, and no contents at all. It exists so that
+-- docs/specs/29-first-run-admin-guidance.md's boundary — an admin who *does*
+-- belong to a storage is never redirected — can be asserted without adding a
+-- member to "E2E Household", which is the shared workhorse that the
+-- create-and-list, ingestion, consumption and stocktake suites all write to
+-- under fullyParallel. One membership also gives that admin the same
+-- nothing-to-choose landing Bob gets, so the journey asserts the ordinary
+-- flow rather than a picker.
 INSERT INTO storages (id, name) VALUES
   ('00000000-0000-7000-8000-000000000010', 'E2E Household'),
-  ('00000000-0000-7000-8000-000000000011', 'E2E Other Household')
+  ('00000000-0000-7000-8000-000000000011', 'E2E Other Household'),
+  ('00000000-0000-7000-8000-000000000012', 'E2E Admin Household')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO storage_members (storage_id, user_id) VALUES
   ('00000000-0000-7000-8000-000000000010', '00000000-0000-7000-8000-000000000002'), -- Alice: household
   ('00000000-0000-7000-8000-000000000010', '00000000-0000-7000-8000-000000000003'), -- Bob: household
-  ('00000000-0000-7000-8000-000000000011', '00000000-0000-7000-8000-000000000002')  -- Alice: other household too, for the switcher journey
+  ('00000000-0000-7000-8000-000000000011', '00000000-0000-7000-8000-000000000002'), -- Alice: other household too, for the switcher journey
+  ('00000000-0000-7000-8000-000000000012', '00000000-0000-7000-8000-000000000005')  -- Second admin: their own, so an admin with a storage is not a special case of someone else's
 ON CONFLICT DO NOTHING;
 
 INSERT INTO locations (id, storage_id, name, description) VALUES
