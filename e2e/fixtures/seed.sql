@@ -287,7 +287,12 @@ INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) V
   ('00000000-0000-7000-8000-00000000004d', '00000000-0000-7000-8000-000000000014', 'Unoffered Beans',   NULL, 'long_shelf_life', 0),
   ('00000000-0000-7000-8000-00000000004e', '00000000-0000-7000-8000-000000000014', 'Hand-typed Beans',  NULL, 'long_shelf_life', 0),
   ('00000000-0000-7000-8000-00000000004f', '00000000-0000-7000-8000-000000000014', 'Pre-coded Beans',   NULL, 'long_shelf_life', 0),
-  ('00000000-0000-7000-8000-000000000050', '00000000-0000-7000-8000-000000000014', 'Control Beans',     NULL, 'long_shelf_life', 0)
+  ('00000000-0000-7000-8000-000000000050', '00000000-0000-7000-8000-000000000014', 'Control Beans',     NULL, 'long_shelf_life', 0),
+  -- For e2e/specs/barcode-hot-cache.spec.js (docs/specs/24-barcode-hot-cache.md):
+  -- one product the authoritative lookup resolves to, and one the "empty
+  -- cache degrades to spec 20 unchanged" test scans with nothing seeded.
+  ('00000000-0000-7000-8000-000000000051', '00000000-0000-7000-8000-000000000014', 'Hot Cache Preview Beans',  NULL, 'long_shelf_life', 0),
+  ('00000000-0000-7000-8000-000000000052', '00000000-0000-7000-8000-000000000014', 'Hot Cache Fallback Beans', NULL, 'long_shelf_life', 0)
 ON CONFLICT (id) DO NOTHING;
 
 -- One consumption proposal (docs/specs/09-consumption-logging.md), in the

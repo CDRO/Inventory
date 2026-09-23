@@ -328,6 +328,26 @@ func NewRouter(d Deps) http.Handler {
 			ar.Get("/api/auth/barcode-prompt", barcodePrompt.Get)
 			ar.Patch("/api/auth/barcode-prompt", barcodePrompt.Patch)
 			ar.Post("/api/auth/barcode-prompt/shown", barcodePrompt.Shown)
+
+			// The instance-wide hot-cache list
+			// (docs/specs/24-barcode-hot-cache.md): session-scoped, not
+			// storage-scoped, since catalog_barcodes carries no storage
+			// reference and every caller sees the same up to 500 rows
+			// regardless of which storage they act in. A second
+			// BarcodeHandler here rather than reaching into the storage
+			// sub-router's one below — the two are registered on different
+			// groups with different gate chains, and nothing but the
+			// constructor is shared.
+			hotBarcodes := NewBarcodeHandler(d.Store, d.BarcodeDecoder, d.ImageCache, d.ProductImages, errs)
+			ar.Get("/api/barcodes/hot", hotBarcodes.Hot)
+
+			// The picture behind a hot-cache card, on the same non-storage-
+			// scoped terms as the list itself. Absent, like the storage-scoped
+			// /images/{hash} above, when no image cache is configured.
+			if d.ImageCache != nil {
+				catalogImages := NewImageHandler(d.Images, d.ImageCache, errs)
+				ar.Get("/api/catalog-images/{hash}", catalogImages.ServeCatalog)
+			}
 		})
 
 		// The admin area: the HTML page and the JSON routes it posts to, on one

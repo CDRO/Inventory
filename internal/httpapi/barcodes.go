@@ -25,6 +25,8 @@ type BarcodeStore interface {
 	LogBarcode(ctx context.Context, storageID uuid.UUID, code string, userID *uuid.UUID, in store.BarcodeLogInput) (*store.BarcodeLogResult, error)
 	CreateProductFromBarcodeHint(ctx context.Context, storageID uuid.UUID, code string) (*store.Product, error)
 	CatalogVariants(ctx context.Context, id uuid.UUID, limit int) ([]string, error)
+	HotBarcodes(ctx context.Context) ([]store.HotBarcode, error)
+	IncrementBarcodeScanCount(ctx context.Context, code string) error
 }
 
 // PhotoDecoder reads a barcode out of image bytes.
@@ -259,6 +261,76 @@ func (h *BarcodeHandler) Lookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+
+	// Every path that reaches here is a successful lookup, local or catalog —
+	// exactly the condition docs/specs/24-barcode-hot-cache.md counts. The
+	// increment itself no-ops for a code with no catalog_barcodes row (a
+	// local-only association), so nothing here has to tell the two apart.
+	h.bumpScanCount(code)
+}
+
+// bumpScanCount records a successful lookup's scan asynchronously, after the
+// response is already on the wire — the same pattern as
+// imagesearch.Cache.Touch for spec 07's last_accessed_at update
+// (docs/specs/24-barcode-hot-cache.md): counting a scan must never add
+// latency to the lookup a person is waiting on, and a failed count update
+// must never fail the lookup itself.
+func (h *BarcodeHandler) bumpScanCount(code string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 5*time.Second)
+		defer cancel()
+		if err := h.store.IncrementBarcodeScanCount(ctx, code); err != nil {
+			h.errors.Log(ctx, "httpapi: barcode scan count increment failed", err)
+		}
+	}()
+}
+
+// hotBarcodeItem is one row of GET /api/barcodes/hot
+// (docs/specs/24-barcode-hot-cache.md).
+//
+// barcode is the client's IndexedDB cache key — the code printed on the
+// package, not an internal id — and is the one field this shape carries that
+// catalogCard does not. Everything else is display fields only, exactly like
+// catalogCard: no catalog id, no created_at, and scan_count is not a field of
+// store.HotBarcode at all, so there is nothing here that could serialize it.
+type hotBarcodeItem struct {
+	Barcode              string  `json:"barcode"`
+	DisplayName          string  `json:"display_name"`
+	CategoryPath         *string `json:"category_path"`
+	ItemType             string  `json:"item_type"`
+	ImageURL             *string `json:"image_url"`
+	IconName             *string `json:"icon_name"`
+	DefaultShelfLifeDays *int    `json:"default_shelf_life_days"`
+}
+
+// Hot serves GET /api/barcodes/hot (docs/specs/24-barcode-hot-cache.md).
+//
+// Session-scoped, not storage-scoped: catalog_barcodes carries no storage
+// reference, so there is nothing to scope this list to, and every caller —
+// whatever storage they are acting in, however many they belong to — gets
+// exactly the same up to 500 rows.
+func (h *BarcodeHandler) Hot(w http.ResponseWriter, r *http.Request) {
+	rows, err := h.store.HotBarcodes(r.Context())
+	if err != nil {
+		h.errors.WriteError(w, r, FromStoreError(err, "list hot barcodes"))
+		return
+	}
+
+	items := make([]hotBarcodeItem, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, hotBarcodeItem{
+			Barcode:              row.Barcode,
+			DisplayName:          row.DisplayName,
+			CategoryPath:         row.CategoryPath,
+			ItemType:             string(row.ItemType),
+			ImageURL:             h.pictures.catalogImageURL(r.Context(), row.ImageURL),
+			IconName:             row.IconName,
+			DefaultShelfLifeDays: row.DefaultShelfLifeDays,
+		})
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Items []hotBarcodeItem `json:"items"`
+	}{Items: items})
 }
 
 // catalogCardFor renders a catalogue hit as the stage-2 card of
