@@ -68,6 +68,14 @@ type fakeAuth struct {
 	catalogRecompute      map[uuid.UUID]int
 	catalogRecomputeCalls []uuid.UUID
 
+	// catalogBarcodes is the global barcode-hint table
+	// (docs/specs/20-barcode-recall.md), keyed by code and holding the
+	// catalogue name the hint points at. Deliberately separate from
+	// fakeBarcodes' per-storage associations: the acceptance criterion is that
+	// moderating one never touches the other, and two maps is how that stays
+	// checkable.
+	catalogBarcodes map[string]string
+
 	// audit is what the audited store methods recorded, newest last
 	// (docs/specs/18-operations-and-observability.md).
 	//
@@ -148,6 +156,8 @@ func newFakeAuth() *fakeAuth {
 		admins:   map[uuid.UUID]bool{},
 		members:  map[string]bool{},
 		settings: map[string]string{},
+
+		catalogBarcodes: map[string]string{},
 	}
 }
 

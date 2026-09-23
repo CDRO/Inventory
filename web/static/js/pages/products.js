@@ -26,6 +26,7 @@ import { initGamification } from "../gamification.js";
 import { get, patch, post, del, ApiError } from "../api.js";
 import { fetchCategories, appendCategoryOptions } from "../category-options.js";
 import { clearChildren, el, text } from "../dom.js";
+import { openScanSheet } from "../barcode.js";
 
 // The server's bound (maxShelfLifeDays in internal/httpapi/expiry.go). The
 // input carries it so a browser flags an out-of-range number before a round
@@ -176,9 +177,127 @@ function renderDetail(product) {
       renderEditForm(product),
     ]),
     renderStockCard(product),
+    renderBarcodeCard(product),
     renderHistoryCard(product),
     renderDangerCard(product),
   );
+}
+
+// renderBarcodeCard is the always-available association surface of
+// docs/specs/20-barcode-recall.md: add by scanning, add by typing, and remove.
+//
+// It is unaffected by the capture-time offer's on/off preference. That
+// preference governs being *offered* a scan at capture; this is a deliberate
+// action somebody came to the product screen to perform, and turning the offer
+// off must never take a feature away.
+function renderBarcodeCard(product) {
+  const list = el("ul", { "data-role": "barcode-list" }, []);
+  const errorLine = el("div", { class: "alert", role: "alert", hidden: true });
+  const typed = el("input", {
+    type: "text",
+    id: "p-barcode",
+    inputmode: "numeric",
+    autocomplete: "off",
+    placeholder: "4006381333931",
+  });
+
+  function fail(err) {
+    errorLine.textContent =
+      err instanceof ApiError && err.code === "conflict"
+        ? "That barcode already belongs to another product here."
+        : err instanceof ApiError
+          ? err.message
+          : "Could not reach the server. Try again.";
+    errorLine.hidden = false;
+  }
+
+  async function reload() {
+    clearChildren(list);
+    let items = [];
+    try {
+      const body = await get(`${basePath()}/${product.id}/barcodes`);
+      items = Array.isArray(body?.items) ? body.items : [];
+    } catch (err) {
+      fail(err);
+      return;
+    }
+    if (items.length === 0) {
+      list.append(el("li", { class: "empty-state" }, [text("No barcode yet.")]));
+      return;
+    }
+    for (const item of items) {
+      list.append(
+        el("li", { class: "row row--between" }, [
+          text(item.barcode),
+          el(
+            "button",
+            {
+              type: "button",
+              class: "btn btn--ghost",
+              onclick: () => remove(item.barcode),
+            },
+            [text("Remove")],
+          ),
+        ]),
+      );
+    }
+  }
+
+  async function add(code) {
+    errorLine.hidden = true;
+    try {
+      await post(`${basePath()}/${product.id}/barcodes`, { barcode: code });
+      typed.value = "";
+      await reload();
+    } catch (err) {
+      fail(err);
+    }
+  }
+
+  async function remove(code) {
+    errorLine.hidden = true;
+    try {
+      await del(`${basePath()}/${product.id}/barcodes/${encodeURIComponent(code)}`);
+      await reload();
+    } catch (err) {
+      fail(err);
+    }
+  }
+
+  const form = el("form", { class: "row" }, [
+    typed,
+    el("button", { type: "submit", class: "btn" }, [text("Add")]),
+    el(
+      "button",
+      {
+        type: "button",
+        class: "btn",
+        onclick: async () => {
+          const code = await openScanSheet(storageId, { title: "Scan a barcode" });
+          if (code) await add(code);
+        },
+      },
+      [text("Scan")],
+    ),
+  ]);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const code = typed.value.trim();
+    if (code) add(code);
+  });
+
+  reload();
+
+  return el("div", { class: "card stack" }, [
+    el("h3", {}, [text("Barcodes")]),
+    el("p", { class: "muted" }, [
+      text("Scanning one of these finds this product instantly, with no photo and no AI call."),
+    ]),
+    errorLine,
+    list,
+    el("label", { for: "p-barcode" }, [text("Add a barcode")]),
+    form,
+  ]);
 }
 
 function renderPicture(product) {

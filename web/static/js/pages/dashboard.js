@@ -23,6 +23,7 @@ import { renderInboxLink } from "../inbox-badge.js";
 import { initGamification } from "../gamification.js";
 import { get, post, ApiError } from "../api.js";
 import { el, text, clearChildren, qs, fromTemplate } from "../dom.js";
+import { offerBarcodeCapture } from "../barcode-offer.js";
 
 const switcherContainer = qs("#storage-switcher");
 const errorBox = qs("#error");
@@ -379,7 +380,7 @@ async function renderImageSuggestions(container, query) {
 async function confirmAddItem(name, productId, minStock, prefill) {
   clearError();
   try {
-    await post(`${basePath()}/items`, {
+    const added = await post(`${basePath()}/items`, {
       name,
       product_id: productId,
       min_stock: minStock,
@@ -392,6 +393,15 @@ async function confirmAddItem(name, productId, minStock, prefill) {
     addItemResult.hidden = true;
     clearChildren(addItemResult);
     await loadDashboard();
+    // The third capture point of docs/specs/20-barcode-recall.md's offer.
+    // Only a product this call created: adding a threshold to one that
+    // already existed creates nothing to attach a code to.
+    if (added?.created && added.product_id) {
+      await offerBarcodeCapture(storageId, {
+        productId: added.product_id,
+        productName: added.name || name,
+      });
+    }
   } catch (err) {
     showError(err);
   }

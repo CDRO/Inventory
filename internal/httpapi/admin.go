@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"github.com/CDRO/Inventory/internal/auth"
@@ -67,6 +68,13 @@ type AdminStore interface {
 	SearchCatalog(ctx context.Context, q string) ([]store.CatalogProduct, error)
 	CorrectCatalogShelfLife(ctx context.Context, actor, catalogID uuid.UUID, days *int) (int, error)
 	DeleteCatalogProduct(ctx context.Context, actor, id uuid.UUID) error
+
+	// DeleteCatalogBarcode is the same remedy for a wrong global barcode
+	// mapping (docs/specs/20-barcode-recall.md). catalog_barcodes is
+	// insert-only for the reason catalog_products is, so an admin removing the
+	// first, wrong claim is again the only way it is ever corrected — after
+	// which the next association may re-insert the right one.
+	DeleteCatalogBarcode(ctx context.Context, actor uuid.UUID, code string) error
 
 	// ListAdminAudit backs GET /admin/audit
 	// (docs/specs/18-operations-and-observability.md). It is the only read of
@@ -725,6 +733,33 @@ func (h *AdminHandler) DeleteCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.store.DeleteCatalogProduct(r.Context(), actor, id); err != nil {
 		h.errors.WriteError(w, r, FromStoreError(err, "catalog entry not found"))
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+// DeleteCatalogBarcode serves DELETE /api/admin/catalog-barcodes/{barcode} —
+// moderation of a wrong global mapping (docs/specs/20-barcode-recall.md).
+//
+// **It never touches any storage's product_barcodes.** A household that
+// scanned this code onto its own product keeps the association; what is
+// removed is only the anonymous hint offered to households that have never
+// seen the product.
+//
+// The barcode is not parsed or validated here. A code outside the stored
+// charset simply matches no row and is the same 404 as one that was never
+// claimed — the admin area answers unknown and inaccessible identically, like
+// everywhere else.
+func (h *AdminHandler) DeleteCatalogBarcode(w http.ResponseWriter, r *http.Request) {
+	actor, ok := adminActor(r)
+	if !ok {
+		h.errors.WriteError(w, r, NotFound(ReasonAdminAreaHidden))
+		return
+	}
+
+	code := chi.URLParam(r, "barcode")
+	if err := h.store.DeleteCatalogBarcode(r.Context(), actor, code); err != nil {
+		h.errors.WriteError(w, r, FromStoreError(err, "catalog barcode not found"))
 		return
 	}
 	writeJSON(w, http.StatusNoContent, nil)

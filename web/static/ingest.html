@@ -47,6 +47,18 @@
         </select>
       </div>
 
+      <!-- The barcode affordance beside the shutter
+           (docs/specs/20-barcode-recall.md). Shown for the two modes that log
+           one product at a time; shelf scan has none, because a shelf is not a
+           barcode. -->
+      <div id="scan-field" class="field" hidden>
+        <button id="scan-barcode" type="button" class="btn">Scan a barcode</button>
+        <p class="muted">
+          Faster than a photo for anything already scanned once here. Nothing is
+          logged until you confirm.
+        </p>
+      </div>
+
       <div class="field">
         <label for="photos">Photos</label>
         <!-- capture opens the rear camera on a phone and still allows a
