@@ -274,7 +274,8 @@ INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) V
   ('00000000-0000-7000-8000-00000000004b', '00000000-0000-7000-8000-000000000014', 'Offered Beans',     NULL, 'long_shelf_life', 0),
   ('00000000-0000-7000-8000-00000000004c', '00000000-0000-7000-8000-000000000014', 'Reoffered Beans',   NULL, 'long_shelf_life', 0),
   ('00000000-0000-7000-8000-00000000004d', '00000000-0000-7000-8000-000000000014', 'Unoffered Beans',   NULL, 'long_shelf_life', 0),
-  ('00000000-0000-7000-8000-00000000004e', '00000000-0000-7000-8000-000000000014', 'Hand-typed Beans',  NULL, 'long_shelf_life', 0)
+  ('00000000-0000-7000-8000-00000000004e', '00000000-0000-7000-8000-000000000014', 'Hand-typed Beans',  NULL, 'long_shelf_life', 0),
+  ('00000000-0000-7000-8000-00000000004f', '00000000-0000-7000-8000-000000000014', 'Pre-coded Beans',   NULL, 'long_shelf_life', 0)
 ON CONFLICT (id) DO NOTHING;
 
 -- One consumption proposal (docs/specs/09-consumption-logging.md), in the

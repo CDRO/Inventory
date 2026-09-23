@@ -36,10 +36,12 @@ const OFFERED = "00000000-0000-7000-8000-00000000004b";
 const REOFFERED = "00000000-0000-7000-8000-00000000004c";
 const UNOFFERED = "00000000-0000-7000-8000-00000000004d";
 const HAND_TYPED = "00000000-0000-7000-8000-00000000004e";
+const PRE_CODED = "00000000-0000-7000-8000-00000000004f";
 
 const RECALL_CODE = "4006381333931";
 const CONFLICT_CODE = "5449000000996";
 const TYPED_CODE = "7622210449283";
+const PRE_CODED_CODE = "3017620422003";
 
 const OFFER_DIALOG = "dialog[aria-labelledby='barcode-offer-title']";
 
@@ -195,6 +197,49 @@ test("the capture-time offer presents exactly three actions, and declining write
   await showOfferFor(page, REOFFERED);
   await expect(page.locator(OFFER_DIALOG)).toBeVisible();
   await expect(page.locator(`${OFFER_DIALOG} button`)).toHaveCount(3);
+  await page.locator(`${OFFER_DIALOG} button`).nth(1).click();
+  await expect(page.locator(OFFER_DIALOG)).toHaveCount(0);
+});
+
+// The rejection half of the criterion: "a new product created with one
+// already resolvable (e.g. the shopping-list line matched via a catalog
+// barcode hint) does not" get the offer.
+//
+// It needs its own test because it is the branch that fails silently. Every
+// other assertion here drives the offer's *visible* path; delete the
+// eligibility check in js/barcode-offer.js and all of those stay green while
+// the offer starts appearing for products that can already be recalled.
+test("a product that already has a barcode is never offered another", async ({ page }) => {
+  await loginAsDana(page);
+  expect((await page.request.patch("/api/auth/barcode-prompt", { data: { enabled: true } })).status()).toBe(200);
+
+  // The product carries a code before the offer is ever considered — the same
+  // state a product created from a catalogue barcode hint is in.
+  expect(
+    (await page.request.post(`${BASE}/products/${PRE_CODED}/barcodes`, { data: { barcode: PRE_CODED_CODE } })).status(),
+  ).toBe(201);
+
+  await page.goto(`/products.html?storage=${BARCODE_HOUSEHOLD}`);
+
+  // Awaited this time, unlike showOfferFor: the whole assertion is that it
+  // resolves without ever putting a dialog on screen.
+  await page.evaluate(
+    async ([storageId, id]) => {
+      window.__offerSettled = false;
+      const module = await import("/js/barcode-offer.js");
+      await module.offerBarcodeCapture(storageId, { productId: id });
+      window.__offerSettled = true;
+    },
+    [BARCODE_HOUSEHOLD, PRE_CODED],
+  );
+  await expect.poll(() => page.evaluate(() => window.__offerSettled)).toBe(true);
+  await expect(page.locator(OFFER_DIALOG)).toHaveCount(0);
+
+  // The control: the very same call, on the very same page, for a product
+  // with no code, does show it. Without this the test above would also pass
+  // if the offer were broken outright.
+  await showOfferFor(page, HAND_TYPED);
+  await expect(page.locator(OFFER_DIALOG)).toBeVisible();
   await page.locator(`${OFFER_DIALOG} button`).nth(1).click();
   await expect(page.locator(OFFER_DIALOG)).toHaveCount(0);
 });

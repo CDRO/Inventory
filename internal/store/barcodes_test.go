@@ -630,6 +630,85 @@ func TestBarcodePromptIsShownOnceWithTheFirstTimeCopy(t *testing.T) {
 		`SELECT count(*) FROM users WHERE id = $1 AND barcode_prompt_seen_at IS NOT NULL`, userID))
 }
 
+// TestBarcodePromptIsShownOnceUnderConcurrency is the half the sequential
+// test above cannot reach.
+//
+// MarkBarcodePromptShown claims — in its own doc comment, and in the
+// handler's — that two qualifying products arriving together cannot both be
+// told they are the first. That rests entirely on the row being *locked before
+// it is read*, in one statement. A regression to read-then-write would keep
+// every sequential test green while reintroducing exactly that race.
+//
+// # Why this is not eight goroutines racing
+//
+// It was, at first, and that version passed against a deliberately broken
+// read-then-write implementation — the calls did not actually overlap, because
+// each had to take a pool connection and open a transaction before it could
+// contend with anything. A concurrency test that passes either way is worse
+// than none: it reports confidence it has not earned.
+//
+// So the interleaving is forced instead of hoped for. A separate transaction
+// takes the row lock and marks the offer seen without committing; the call
+// under test then runs while that lock is held, and is released only once the
+// other transaction has committed. The two implementations differ visibly at
+// that point:
+//
+//   - locked read (correct): the read blocks, so it happens *after* the
+//     commit, sees a non-null seen_at, and reports FirstTime false.
+//   - plain read then write: the read does not block, so it sees the old row
+//     and decides FirstTime true; only the write blocks. The caller is told it
+//     is the first, after somebody else already was.
+func TestBarcodePromptIsShownOnceUnderConcurrency(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	userID := newUser(t, ctx)
+
+	// The competing transaction: marks the offer seen, holds the row lock.
+	blocker, err := testPool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = blocker.Rollback(ctx) }()
+	_, err = blocker.Exec(ctx,
+		`UPDATE users SET barcode_prompt_seen_at = now() WHERE id = $1`, userID)
+	require.NoError(t, err)
+
+	type outcome struct {
+		state store.BarcodePrompt
+		err   error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		state, err := s.MarkBarcodePromptShown(ctx, userID)
+		done <- outcome{state, err}
+	}()
+
+	// Wait until that call is genuinely blocked on the lock, rather than
+	// sleeping and hoping. Whichever statement blocks — the locked read or the
+	// write — it shows up here, so this works for both implementations, which
+	// is what lets the assertion below tell them apart.
+	require.Eventually(t, func() bool {
+		var waiting int
+		err := testPool.QueryRow(ctx, `
+			SELECT count(*) FROM pg_stat_activity
+			 WHERE datname = current_database()
+			   AND wait_event_type = 'Lock'`).Scan(&waiting)
+		return err == nil && waiting > 0
+	}, 5*time.Second, 20*time.Millisecond, "the call under test never contended for the row lock")
+
+	require.NoError(t, blocker.Commit(ctx))
+
+	select {
+	case got := <-done:
+		require.NoError(t, got.err)
+		assert.False(t, got.state.FirstTime,
+			"somebody else marked the offer seen first, so this caller is not the first")
+	case <-time.After(10 * time.Second):
+		t.Fatal("MarkBarcodePromptShown never returned after the lock was released")
+	}
+
+	assert.Equal(t, 1, countRows(t, ctx,
+		`SELECT count(*) FROM users WHERE id = $1 AND barcode_prompt_seen_at IS NOT NULL`, userID))
+}
+
 // TestTurningTheBarcodePromptOffStopsItEverywhereAndItStaysSeen — "the offer
 // never appears again for that user, in any storage, until they re-enable it".
 func TestTurningTheBarcodePromptOffStopsItEverywhere(t *testing.T) {
