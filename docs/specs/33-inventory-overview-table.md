@@ -65,8 +65,12 @@ storage, one row per batch. This is the natural read partner of `13`'s
   does well. The stocktake sheet already resolves `product_name` on the
   server (`13`), and this endpoint follows it.
 - **Pagination follows `04`**: cursor-based, `?limit=` defaulting to 50
-  with a maximum of 200. The cursor orders by `(product_name, id)`, which is
-  stable when two products share a name.
+  with a maximum of 200. It uses the shared id-only cursor
+  (`internal/httpapi/pagination.go`), exactly like every other list
+  endpoint. Rows are ordered by batch `id` (UUIDv7, so roughly by creation
+  time), and the cursor is the id of the last row on the page. There is no
+  composite sort key to carry across pages. Display order is the client's
+  job anyway (see below).
 - **Filters**, all optional and combinable:
   - `?location_id=`: batches at this location **or any descendant**. "What
     is in the basement" means every shelf in the basement. The stocktake
@@ -81,7 +85,8 @@ storage, one row per batch. This is the natural read partner of `13`'s
 - Batches with `quantity = 0` never exist (`13`), so the endpoint needs no
   zero filter.
 - **Sorting by urgency is done by the client, not the server**, as `08`
-  already requires. The server's order serves only the cursor.
+  already requires. The same applies to sorting by name or location. The
+  server's id order exists only so that the cursor is stable.
 
 ## Page (`inventory.html`)
 
@@ -213,7 +218,28 @@ other `/api/*` response.
   page has no horizontal scroll.
 - `/inventory.html` is in `sw.js`'s allowlist. No `/api/*` response is
   cached.
-- E2E: in the seeded shared storage, open the inventory page and see every
-  seeded batch. Filter by a parent location and see the batches of its
-  child. Sort by expiry and see the expired batch first. Press "Count this
-  shelf" on a row and land on that row's location's stocktake sheet.
+- E2E fixture: `seed.sql` gains a **dedicated read-only storage and user**,
+  for example "E2E Inventory" and `e2e-inventory`. No other E2E spec may
+  write to it. It holds:
+  - a nested location, `Cellar › Shelf A`, so that a reversed path and
+    descendant filtering both show;
+  - one expired batch, one batch with no expiry, and one batch expiring in
+    more than 14 days, with dates computed relative to `now()` in the seed so
+    that they do not go stale;
+  - two batches of one product at different locations, for grouping.
+- E2E on that storage:
+  - Every seeded batch is listed. The location column reads `Cellar › Shelf
+    A`, root first.
+  - The default order puts the expired batch first and the batch with no
+    expiry last.
+  - Filtering by `Cellar` shows the `Shelf A` batch. The summary line then
+    counts only the rows it shows.
+  - Grouping by product folds the two batches into one row with the summed
+    quantity.
+  - A filter that matches nothing shows the "no rows match" empty state
+    with "Clear filters", which is a different message from the empty
+    storage one. The empty-storage state is checked on a storage with no
+    batches.
+  - With route interception failing the second page request (`limit` set
+    low enough to force two pages), the page says the table is incomplete.
+  - "Count this shelf" on a row opens that location's stocktake sheet.

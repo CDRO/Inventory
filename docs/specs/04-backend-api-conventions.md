@@ -270,7 +270,7 @@ CREATE TABLE jobs (
 - `GET /api/storages/{storage_id}/jobs?status=…` lists jobs for the review
   inbox, and `DELETE /api/storages/{storage_id}/jobs/{job_id}` discards
   one (`DELETE …/jobs?up_to=…` discards the whole inbox at once —
-  `32-inbox-discard-all.md`). Uploading and reviewing are decoupled: a `done` job waits
+  [`32-inbox-discard-all.md`](32-inbox-discard-all.md)). Uploading and reviewing are decoupled: a `done` job waits
   indefinitely, is visible to every member of the storage, and is never
   auto-expired while unreviewed (`06-vision-shelf-ingestion.md`).
 - On process restart, jobs left `pending` are marked `failed` with a

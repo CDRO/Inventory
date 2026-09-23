@@ -199,7 +199,9 @@ lead to empty states would imply storages exist that the user cannot see
   their storages, and nobody else's.
 - `PATCH …/membership` updates only the caller's own row. An invalid value
   answers `422`, and a non-member gets `404` identical to an unknown
-  storage. Go tests cover all three.
+  storage. Go tests cover all three. Another Go test gives two members of
+  one storage different `start_page` values and checks that each member's
+  `GET /api/auth/me` returns only their own value.
 - An installed app opened by a signed-in user lands on that storage's start
   page without showing the login form. A signed-out user lands on the login
   form.
@@ -211,7 +213,21 @@ lead to empty states would imply storages exist that the user cannot see
   marked `aria-current="page"`. No page's JavaScript contains `/admin`.
 - At a width of 375 px the bar scrolls horizontally, and the page body does
   not.
-- E2E: log in and land on the dashboard. Change the start page to
-  Inventory in settings, log out, log in, and land on `inventory.html`. For
-  the user with two storages, set a different start page in each and see
-  each one respected after switching storage through the picker.
+- E2E fixture: `start_page` is durable, so these journeys **must not change
+  it for a user that other spec files log in as** (`e2e-alice`, `e2e-bob`).
+  `seed.sql` gains dedicated users:
+  - `e2e-start`, a member of one storage, who has its start page changed;
+  - `e2e-start-multi`, a member of two storages, seeded with different
+    `start_page` values (`inventory` in one, `locations` in the other), so
+    that the journey reads them and never writes them.
+- E2E: as `e2e-start`, log in and land on the dashboard. Change the start
+  page to Inventory in settings, log out, log in, and land on
+  `inventory.html`. As `e2e-start-multi`, pick each storage in the picker
+  and land on that storage's own start page.
+- **Existing test to update:** `e2e/specs/storage-switching.spec.js`
+  currently asserts that picking a storage stays on `storages.html` and
+  shows its name in `#main`. Under this spec the picker forwards to the
+  start page, so that assertion changes to "lands on the dashboard with
+  `?storage=` set". The rest of that test is unaffected. This includes
+  switching storage through the header switcher, which still keeps the
+  current page.

@@ -57,8 +57,10 @@ after the list was drawn.
   send by accident, for example from a script with an empty variable.
 - The endpoint deletes every job of the URL's storage with
   `status IN ('pending','done','failed')` and `created_at <= up_to`, in one
-  statement. It returns each deleted row's `id` and `image_filename`.
-- Once the rows are gone, it removes each job's photo and its cutouts, the
+  statement. Internally, that statement's `RETURNING id, image_filename`
+  hands the handler what it needs for file clean-up. None of it reaches the
+  HTTP response, which carries only the count (below).
+- Once the rows are gone, the handler removes each job's photo and its cutouts, the
   same way `DELETE /jobs/{id}` does (`internal/httpapi/jobs.go`). That clean-up
   is best effort, exactly as it is for one job. The rows are already gone, so
   a file that fails to delete becomes an orphan on disk and is logged. It is
@@ -106,8 +108,21 @@ The `DELETE /jobs/{id}` route is unchanged.
   unknown storage id.
 - The response's `discarded` count equals the number of rows deleted.
 - Go tests cover the status filter, the `up_to` boundary (a job exactly at
-  `T` is deleted, one later is not) and storage scoping.
-- E2E: in a storage with three inbox jobs (one `done`, one `failed`, one
-  `pending`) and one `consumed` job, press "Discard all" and confirm. The
-  inbox then shows its empty state, and the consumed job's inventory is
-  unaffected.
+  `T` is deleted, one later is not), storage scoping, `422` for a missing or
+  unparseable `up_to`, and a failing file removal that still answers `200`.
+- E2E fixture: `e2e/fixtures/seed.sql` gains a **dedicated storage and a
+  dedicated user for this journey only**, for example "E2E Inbox" and
+  `e2e-inbox`. The storage holds one `done`, one `failed`, one `pending` and
+  one `consumed` job with fixed `created_at` values. The journey deletes
+  jobs, so it must not share a storage with `ingestion.spec.js` or
+  `consumption.spec.js`, which depend on their own seeded jobs and run in
+  parallel.
+- E2E: as `e2e-inbox`, open the inbox, press "Discard all" and confirm.
+  The inbox then shows its empty state, and the consumed job's batch still
+  exists.
+- E2E, client bound: with Playwright's route interception, capture the
+  `DELETE` request and assert that its `up_to` equals the `created_at` of
+  the first job in the list response. The test also sets the page's clock
+  (`page.clock`) to an hour before the seeded jobs. If the client used the
+  device clock instead of the server's timestamp, the bound would be
+  different and the assertion would fail.

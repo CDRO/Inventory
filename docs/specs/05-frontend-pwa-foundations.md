@@ -260,7 +260,10 @@ developing without being imposed on every save.
   and one held by the second admin alone; the bootstrap admin and one
   ordinary user deliberately belong to **no** storage, which is the
   starting position `29-first-run-admin-guidance.md` is about), and runs
-  the browser suite against it.
+  the browser suite against it. A journey that writes state other journeys
+  would observe gets its **own** seeded user and storage, because the
+  suite runs files in parallel. Specs `32`–`35` each add such a dedicated
+  fixture.
 - The runner is a **pre-built browser-automation image pulled from a
   registry** (e.g. the official Playwright image), used as a throwaway
   test container. This does not violate the no-toolchain rule in

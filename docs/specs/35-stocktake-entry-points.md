@@ -130,8 +130,24 @@ the inventory table, not to the tree.
 - The navigation bar's Stocktake entry opens the chooser.
 - Back and Cancel on the sheet return to the same-origin page the user came
   from, or to `locations.html` when there is no such page.
-- E2E: open a product with stock, press "Count this shelf" on a batch,
-  correct its quantity and confirm. The product page then shows the new
-  quantity. Separately, open Stocktake from the navigation bar, pick the
-  first "Stalest first" entry, and confirm it unchanged. That location's
-  audited state then reads "today" in the chooser.
+- E2E fixture: this journey confirms stocktakes, which writes quantities
+  and `last_audited_at`, so it gets a **dedicated storage and user**, for
+  example "E2E Stocktake" and `e2e-stocktake`. The storage holds seven
+  locations. One has never been audited. The other six have
+  `last_audited_at` values spread over the past months, relative to
+  `now()`. At least one location holds a batch.
+- E2E on that storage:
+  - Open a product with stock and press "Count this shelf" on a batch.
+    Correct its quantity and confirm. The product page then shows the new
+    quantity.
+  - Open Stocktake from the navigation bar. The "Stalest first" list shows
+    exactly five entries: the never-audited location first, then the four
+    oldest audited ones, oldest first.
+  - Confirm the first entry unchanged. Back in the chooser, that location
+    reads "audited today" and has left the list.
+  - Open `stocktake.html?location=` with a random UUID, and again with the
+    id of a location in another fixture storage. Both show the same
+    not-found message and the chooser below it.
+  - Start a stocktake from `inventory.html` and press Cancel: the page
+    returns to `inventory.html`. Open a sheet by direct URL, which gives no
+    referrer, and press Cancel: the page goes to `locations.html`.
