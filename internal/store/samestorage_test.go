@@ -256,7 +256,8 @@ func TestDeleteRejectsRowsFromAnotherStorage(t *testing.T) {
 
 	assert.ErrorIs(t, s.DeleteLocation(ctx, storageA, loc.ID), store.ErrNotFound)
 	assert.ErrorIs(t, s.DeleteCategory(ctx, storageA, cat.ID), store.ErrNotFound)
-	assert.ErrorIs(t, s.DeleteProduct(ctx, storageA, prod.ID), store.ErrNotFound)
+	_, deleteProductErr := s.DeleteProduct(ctx, storageA, prod.ID)
+	assert.ErrorIs(t, deleteProductErr, store.ErrNotFound)
 
 	assert.Equal(t, 3, countRows(t, ctx,
 		`SELECT (SELECT count(*) FROM locations WHERE id = $1)

@@ -54,11 +54,21 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Bring up the stack
-        run: docker compose -f docker-compose.e2e.yml up -d --build
+      # Build, migrate, then start — in that order, and not `up -d --build`
+      # first. Since docs/specs/18-operations-and-observability.md, `serve`
+      # refuses to start against a schema that is behind the binary, so an
+      # `app` container brought up before `migrate up` exits immediately with
+      # the remediation message and the suite has nothing to talk to. This is
+      # the same order the deployment steps in
+      # docs/specs/01-architecture-and-deployment.md have always used.
+      - name: Build the images
+        run: docker compose -f docker-compose.e2e.yml build
 
       - name: Apply migrations
         run: docker compose -f docker-compose.e2e.yml run --rm app migrate up
+
+      - name: Bring up the stack
+        run: docker compose -f docker-compose.e2e.yml up -d
 
       - name: Seed fixtures
         run: |

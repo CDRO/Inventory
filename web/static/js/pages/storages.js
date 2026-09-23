@@ -123,16 +123,15 @@ function renderLanding(me, storage) {
         el("a", { class: "btn", href: withStorageParam(storage.id, "/categories.html") }, [
           text("Categories"),
         ]),
+        el("a", { class: "btn", href: withStorageParam(storage.id, "/products.html") }, [
+          text("Products"),
+        ]),
         el("a", { class: "btn", href: withStorageParam(storage.id, "/shopping-list.html") }, [
           text("Shopping list"),
         ]),
         el("a", { class: "btn", href: withStorageParam(storage.id, "/ingest.html") }, [
           text("Scan photos"),
         ]),
-      ]),
-      el("p", { class: "empty-state" }, [
-        "Browsing and managing products directly ships with its own spec issue " +
-          '— use "Scan photos" to stock up, use up, or scan a shelf in the meantime.',
       ]),
     ]),
   );

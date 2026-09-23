@@ -45,8 +45,15 @@ type Store struct {
 }
 
 // Open parses dsn and establishes the pool. It does not block on the database
-// being reachable — readiness is reported by Ping, so the process can start and
-// serve /healthz while PostgreSQL is still coming up.
+// being reachable — readiness is reported by Ping, so this call cannot be what
+// holds up startup.
+//
+// That no longer means the server reaches its listener with PostgreSQL down:
+// serve runs migrate.Check first, which does query the database and fails if
+// it cannot (docs/specs/18-operations-and-observability.md). The compose
+// healthcheck's depends_on: service_healthy is what makes that ordering hold
+// in practice, and a database that is genuinely unreachable exits non-zero for
+// the restart policy to retry rather than looping in here.
 func Open(ctx context.Context, dsn string) (*Store, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -100,15 +107,25 @@ func (s *Store) Setting(ctx context.Context, key string) (string, bool, error) {
 // parameter rather than being named for it — the shape (an admin-only,
 // database-backed override) is generic even though today's only caller
 // is not.
+//
+// The upsert and its admin_audit_log row are one transaction
+// (docs/specs/18-operations-and-observability.md). settings.updated_by already
+// records the last writer, but only the last one: the audit row is what makes
+// the sequence of model changes readable afterwards, which is the point of a
+// trail. The key and the new value both go into the details — this table holds
+// operational overrides, never a credential.
 func (s *Store) SetSetting(ctx context.Context, key, value string, updatedBy uuid.UUID) error {
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO settings (key, value, updated_by) VALUES ($1, $2, $3)
-		ON CONFLICT (key) DO UPDATE SET value = $2, updated_by = $3, updated_at = now()`,
-		key, value, updatedBy)
-	if err != nil {
-		return fmt.Errorf("store: set setting %q: %w", key, err)
-	}
-	return nil
+	return s.inTx(ctx, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO settings (key, value, updated_by) VALUES ($1, $2, $3)
+			ON CONFLICT (key) DO UPDATE SET value = $2, updated_by = $3, updated_at = now()`,
+			key, value, updatedBy); err != nil {
+			return fmt.Errorf("store: set setting %q: %w", key, err)
+		}
+		return writeAdminAudit(ctx, tx, updatedBy, ActionSettingsUpdated, key, AuditDetails{
+			Key: key, Value: value,
+		})
+	})
 }
 
 func isNoRows(err error) bool {

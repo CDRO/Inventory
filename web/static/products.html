@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#2563eb">
+  <title>Products · Inventory</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/css/tokens.css">
+  <link rel="stylesheet" href="/css/base.css">
+  <link rel="stylesheet" href="/css/components.css">
+  <link rel="stylesheet" href="/css/gamification.css">
+</head>
+<body>
+  <header class="shell row row--between">
+    <strong>Inventory</strong>
+    <div class="row">
+      <div id="storage-switcher" hidden></div>
+      <div id="gamification-ring" hidden></div>
+      <div id="inbox-link" hidden></div>
+      <a href="/storages.html" class="btn btn--ghost">Back</a>
+    </div>
+  </header>
+
+  <main id="main" class="shell" aria-live="polite">
+    <h2>Products</h2>
+
+    <!-- Errors stay on screen next to what they refer to, rather than in an
+         alert(): a refused merge needs its reason readable while the two
+         products are still in view. -->
+    <div id="error" class="alert" role="alert" hidden></div>
+    <!-- How many existing expiry dates a shelf-life change moved. -->
+    <p id="status" class="empty-state" role="status" hidden></p>
+
+    <div class="row row--between">
+      <label for="filter" class="muted">Find a product</label>
+      <input id="filter" type="search" placeholder="Type to filter" aria-label="Filter products by name">
+    </div>
+
+    <div class="row" style="align-items: flex-start; gap: 1.5rem; flex-wrap: wrap;">
+      <div id="list" class="stack" style="flex: 1 1 18rem; min-width: 16rem;"></div>
+      <div id="detail" class="stack" style="flex: 2 1 22rem; min-width: 18rem;"></div>
+    </div>
+  </main>
+
+  <script type="module" src="/js/pages/products.js"></script>
+</body>
+</html>
