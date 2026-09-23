@@ -166,6 +166,11 @@ CREATE TABLE storage_members (
 No `role` column. All members of a storage have identical read/write
 rights over that storage's data — see `03-auth-and-multi-tenancy.md`.
 
+*Amended by [`34-navigation-and-start-page.md`](34-navigation-and-start-page.md):*
+a later migration adds `start_page TEXT NOT NULL DEFAULT 'dashboard'`, the
+page this member lands on when opening this storage. It is a personal
+preference. It carries no rights and is not a role.
+
 ### `locations`
 
 Self-referencing tree, scoped per storage.
