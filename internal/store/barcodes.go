@@ -277,6 +277,85 @@ func (s *Store) LookupBarcode(ctx context.Context, storageID uuid.UUID, code str
 	return &BarcodeLookup{Catalog: catalog}, nil
 }
 
+// maxHotBarcodes bounds the instance-wide popularity list
+// (docs/specs/24-barcode-hot-cache.md).
+const maxHotBarcodes = 500
+
+// HotBarcode is one row of the instance-wide popularity list.
+//
+// Barcode is included because the client keys its local cache by the scanned
+// code — it is the thing printed on the package, not an internal id, so
+// returning it does not reopen the "no ids" rule display-field responses
+// otherwise follow. Everything else is exactly catalog_products' display
+// fields, and scan_count itself is never one of them.
+type HotBarcode struct {
+	Barcode              string
+	DisplayName          string
+	CategoryPath         *string
+	ItemType             ItemType
+	ImageURL             *string
+	IconName             *string
+	DefaultShelfLifeDays *int
+}
+
+// HotBarcodes returns the instance-wide most-scanned barcodes, ranked by
+// scan_count descending and ties broken by catalog_id for a stable order
+// across calls — never by scan_count itself, which is not part of the
+// returned type and must never reach a response
+// (docs/specs/24-barcode-hot-cache.md).
+//
+// Computed from live data on every call: at household/instance scale a
+// LIMIT 500 ordered scan of catalog_barcodes needs no materialized rollup or
+// supporting index. Revisit only if a real deployment shows otherwise.
+func (s *Store) HotBarcodes(ctx context.Context) ([]HotBarcode, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT cb.barcode, c.display_name, c.category_path, c.item_type,
+		       c.image_url, c.icon_name, c.default_shelf_life_days
+		  FROM catalog_barcodes cb
+		  JOIN catalog_products c ON c.id = cb.catalog_id
+		 ORDER BY cb.scan_count DESC, cb.catalog_id
+		 LIMIT $1`, maxHotBarcodes)
+	if err != nil {
+		return nil, fmt.Errorf("store: hot barcodes: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]HotBarcode, 0)
+	for rows.Next() {
+		var h HotBarcode
+		var itemType string
+		if err := rows.Scan(&h.Barcode, &h.DisplayName, &h.CategoryPath, &itemType,
+			&h.ImageURL, &h.IconName, &h.DefaultShelfLifeDays); err != nil {
+			return nil, fmt.Errorf("store: scan hot barcode: %w", err)
+		}
+		h.ItemType = ItemType(itemType)
+		out = append(out, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: hot barcodes: %w", err)
+	}
+	return out, nil
+}
+
+// IncrementBarcodeScanCount records one successful scan against a catalog
+// barcode's popularity counter (docs/specs/24-barcode-hot-cache.md).
+//
+// The single atomic UPDATE is the whole of the write — no read-modify-write
+// race — and it is meant to be called after a lookup's response is already on
+// the wire (see httpapi.BarcodeHandler.Lookup), never awaited by it: counting
+// a scan must never add latency to the lookup a person is waiting on, and a
+// failed count update must never fail the lookup itself. A barcode with no
+// catalog_barcodes row — a local-only association, or a code that missed
+// entirely — matches no row, so the UPDATE is a harmless no-op rather than a
+// case the caller has to detect first.
+func (s *Store) IncrementBarcodeScanCount(ctx context.Context, code string) error {
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE catalog_barcodes SET scan_count = scan_count + 1 WHERE barcode = $1`, code); err != nil {
+		return fmt.Errorf("store: increment barcode scan count: %w", err)
+	}
+	return nil
+}
+
 // DeleteCatalogBarcode is admin moderation of a wrong global mapping, the
 // counterpart of DeleteCatalogProduct and audited for the same reason: it
 // crosses every household (docs/specs/18-operations-and-observability.md).

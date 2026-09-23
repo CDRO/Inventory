@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,6 +42,24 @@ type fakeBarcodes struct {
 	logCalls  int
 	lastLog   store.BarcodeLogInput
 	lastCode  string
+
+	// hot is what HotBarcodes answers.
+	hot    []store.HotBarcode
+	hotErr error
+
+	// incrementErr, when set, is what IncrementBarcodeScanCount answers.
+	// incrementCalls records every code it was asked to bump, guarded by a
+	// mutex because BarcodeHandler.bumpScanCount calls it from its own
+	// goroutine, after the response is already on the wire.
+	incrementErr   error
+	incrementMu    sync.Mutex
+	incrementCalls []string
+}
+
+func (f *fakeBarcodes) incrementedCodes() []string {
+	f.incrementMu.Lock()
+	defer f.incrementMu.Unlock()
+	return append([]string(nil), f.incrementCalls...)
 }
 
 func newFakeBarcodes() *fakeBarcodes {
@@ -139,6 +158,20 @@ func (f *fakeBarcodes) CreateProductFromBarcodeHint(_ context.Context, storageID
 
 func (f *fakeBarcodes) CatalogVariants(_ context.Context, _ uuid.UUID, _ int) ([]string, error) {
 	return f.variants, nil
+}
+
+func (f *fakeBarcodes) HotBarcodes(_ context.Context) ([]store.HotBarcode, error) {
+	if f.hotErr != nil {
+		return nil, f.hotErr
+	}
+	return f.hot, nil
+}
+
+func (f *fakeBarcodes) IncrementBarcodeScanCount(_ context.Context, code string) error {
+	f.incrementMu.Lock()
+	f.incrementCalls = append(f.incrementCalls, code)
+	f.incrementMu.Unlock()
+	return f.incrementErr
 }
 
 // fakeBarcodePrompt stands in for the capture-time offer's user columns.
@@ -408,6 +441,148 @@ func TestScanningWritesNothing(t *testing.T) {
 
 	assert.Zero(t, f.barcodes.logCalls, "only the confirm tap writes")
 	assert.Equal(t, uuid.Nil, f.batches.lastBatchID, "and it never goes round the batch routes either")
+}
+
+// --- scan counting & the hot cache (docs/specs/24-barcode-hot-cache.md) -----
+
+// TestLookupBumpsScanCountAsynchronouslyOnALocalHit — the acceptance
+// criterion's "whether the lookup itself resolved as a local hit or a
+// catalog hit" half. The response is already recorded by the time the fake's
+// call lands, which is the point of require.Eventually here rather than a
+// synchronous assertion straight after f.do.
+func TestLookupBumpsScanCountAsynchronouslyOnALocalHit(t *testing.T) {
+	t.Parallel()
+	f := newAPIFixture(t)
+	f.barcodes.lookup["4006381333931"] = &store.BarcodeLookup{
+		Product: &store.Product{ID: uuid.New(), Name: "Beans", ItemType: store.ItemLongShelfLife},
+	}
+
+	rec := f.do(http.MethodGet, f.base()+"/barcodes/4006381333931", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.Eventually(t, func() bool {
+		return len(f.barcodes.incrementedCodes()) == 1
+	}, time.Second, 5*time.Millisecond, "a successful local hit must bump the scan count")
+	assert.Equal(t, []string{"4006381333931"}, f.barcodes.incrementedCodes())
+}
+
+// TestLookupBumpsScanCountAsynchronouslyOnACatalogHit is the other half —
+// the increment fires on a catalog hit exactly as it does on a local one.
+func TestLookupBumpsScanCountAsynchronouslyOnACatalogHit(t *testing.T) {
+	t.Parallel()
+	f := newAPIFixture(t)
+	f.barcodes.lookup["4006381333931"] = &store.BarcodeLookup{
+		Catalog: &store.CatalogProduct{ID: uuid.New(), DisplayName: "Beans", ItemType: store.ItemLongShelfLife},
+	}
+
+	rec := f.do(http.MethodGet, f.base()+"/barcodes/4006381333931", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.Eventually(t, func() bool {
+		return len(f.barcodes.incrementedCodes()) == 1
+	}, time.Second, 5*time.Millisecond, "a successful catalog hit must bump the scan count too")
+}
+
+// TestLookupOfAnUnknownCodeNeverBumpsScanCount — a miss increments nothing,
+// per the acceptance criterion. There is no later event to wait on, so this
+// asserts the negative held over a short window instead of forever.
+func TestLookupOfAnUnknownCodeNeverBumpsScanCount(t *testing.T) {
+	t.Parallel()
+	f := newAPIFixture(t)
+
+	rec := f.do(http.MethodGet, f.base()+"/barcodes/0000000000000", "")
+	require.Equal(t, http.StatusNotFound, rec.Code)
+
+	assert.Never(t, func() bool {
+		return len(f.barcodes.incrementedCodes()) > 0
+	}, 200*time.Millisecond, 10*time.Millisecond, "a miss must never reach the increment")
+}
+
+// TestHotBarcodesReturnsDisplayFieldsPlusBarcodeOnly is the response-shape
+// parity assertion the acceptance criteria ask for: barcode (the client's
+// cache key) plus exactly catalogCard's display fields, and scan_count
+// nowhere in the body regardless of what internal field names it might be
+// guessed under.
+func TestHotBarcodesReturnsDisplayFieldsPlusBarcodeOnly(t *testing.T) {
+	t.Parallel()
+	f := newAPIFixture(t)
+	path := "Food/Tinned"
+	shelfLife := 720
+	icon := "mdi:food-can"
+	f.barcodes.hot = []store.HotBarcode{{
+		Barcode:              "4006381333931",
+		DisplayName:          "Canned Tomatoes",
+		CategoryPath:         &path,
+		ItemType:             store.ItemLongShelfLife,
+		IconName:             &icon,
+		DefaultShelfLifeDays: &shelfLife,
+	}}
+
+	rec := f.do(http.MethodGet, "/api/barcodes/hot", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		Items []map[string]json.RawMessage `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Len(t, body.Items, 1)
+
+	keys := make([]string, 0, len(body.Items[0]))
+	for key := range body.Items[0] {
+		keys = append(keys, key)
+	}
+	assert.ElementsMatch(t,
+		[]string{"barcode", "display_name", "category_path", "item_type", "image_url", "icon_name",
+			"default_shelf_life_days"},
+		keys)
+
+	assert.NotContains(t, rec.Body.String(), "scan_count")
+	assert.NotContains(t, rec.Body.String(), "created_at")
+	assert.NotContains(t, rec.Body.String(), "\"id\"")
+}
+
+// TestHotBarcodesPreservesStoreOrder — rank is array order, nothing else; the
+// handler must not re-sort or otherwise second-guess what the store returned.
+func TestHotBarcodesPreservesStoreOrder(t *testing.T) {
+	t.Parallel()
+	f := newAPIFixture(t)
+	f.barcodes.hot = []store.HotBarcode{
+		{Barcode: "111", DisplayName: "Most scanned", ItemType: store.ItemLongShelfLife},
+		{Barcode: "222", DisplayName: "Second", ItemType: store.ItemLongShelfLife},
+		{Barcode: "333", DisplayName: "Least of the three", ItemType: store.ItemLongShelfLife},
+	}
+
+	rec := f.do(http.MethodGet, "/api/barcodes/hot", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		Items []struct {
+			Barcode string `json:"barcode"`
+		} `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Len(t, body.Items, 3)
+	assert.Equal(t, []string{"111", "222", "333"}, []string{body.Items[0].Barcode, body.Items[1].Barcode, body.Items[2].Barcode})
+}
+
+// TestHotBarcodesIsTheSameForEveryCaller — session-scoped, not storage-
+// scoped: two entirely different callers (different users, different
+// storages) see byte-identical bodies for the same underlying list.
+func TestHotBarcodesIsTheSameForEveryCaller(t *testing.T) {
+	t.Parallel()
+	shared := []store.HotBarcode{{Barcode: "111", DisplayName: "Beans", ItemType: store.ItemLongShelfLife}}
+
+	first := newAPIFixture(t)
+	first.barcodes.hot = shared
+	second := newAPIFixture(t)
+	second.barcodes.hot = shared
+	require.NotEqual(t, first.storageID, second.storageID, "the two callers must genuinely differ")
+
+	a := first.do(http.MethodGet, "/api/barcodes/hot", "")
+	b := second.do(http.MethodGet, "/api/barcodes/hot", "")
+	require.Equal(t, http.StatusOK, a.Code)
+	require.Equal(t, http.StatusOK, b.Code)
+	assert.JSONEq(t, a.Body.String(), b.Body.String())
 }
 
 // --- the quick-log sheet ----------------------------------------------------

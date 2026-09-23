@@ -894,6 +894,121 @@ func TestDeletingAProductTakesItsBarcodesWithIt(t *testing.T) {
 		`SELECT count(*) FROM product_barcodes WHERE storage_id = $1 AND barcode = $2`, storageID, code))
 }
 
+// --- the hot cache (docs/specs/24-barcode-hot-cache.md) ---------------------
+
+// TestIncrementBarcodeScanCountIncrementsExactlyOnce is the single atomic
+// statement spec 24 names, checked against the real column rather than
+// through any handler.
+func TestIncrementBarcodeScanCountIncrementsExactlyOnce(t *testing.T) {
+	code := uniqueCode()
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	product, _ := catalogued(t, ctx, s, storageID, "Scan Count Increment Product")
+	_, err := s.AssociateBarcode(ctx, storageID, product.ID, code)
+	require.NoError(t, err)
+
+	require.NoError(t, s.IncrementBarcodeScanCount(ctx, code))
+	assert.Equal(t, 1, scanCountOf(t, ctx, code))
+
+	require.NoError(t, s.IncrementBarcodeScanCount(ctx, code))
+	assert.Equal(t, 2, scanCountOf(t, ctx, code))
+}
+
+// TestIncrementBarcodeScanCountNoOpsForAnUnknownBarcode is the acceptance
+// criterion's other half: a code with no catalog_barcodes row — a local-only
+// association or a plain miss — increments nothing and errors on nothing.
+func TestIncrementBarcodeScanCountNoOpsForAnUnknownBarcode(t *testing.T) {
+	code := uniqueCode()
+	s := requireDB(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.IncrementBarcodeScanCount(ctx, code))
+	assert.Equal(t, 0, countRows(t, ctx, `SELECT count(*) FROM catalog_barcodes WHERE barcode = $1`, code),
+		"the no-op UPDATE must not have created a row")
+}
+
+// scanCountOf reads scan_count straight from the table — the one thing no
+// store method may ever hand back to a caller.
+func scanCountOf(t *testing.T, ctx context.Context, code string) int {
+	t.Helper()
+	var count int
+	require.NoError(t, testPool.QueryRow(ctx,
+		`SELECT scan_count FROM catalog_barcodes WHERE barcode = $1`, code).Scan(&count))
+	return count
+}
+
+// TestHotBarcodesOrdersByScanCountDescending is the ranking rule, checked
+// with strictly positive counts so the result is independent of how many
+// zero-count rows other tests in this package may have left behind in the
+// same shared, un-scoped table.
+func TestHotBarcodesOrdersByScanCountDescending(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+
+	codeMost := uniqueCode()
+	productMost, _ := catalogued(t, ctx, s, storageID, "Hot Cache Ordering Most Scanned")
+	_, err := s.AssociateBarcode(ctx, storageID, productMost.ID, codeMost)
+	require.NoError(t, err)
+
+	codeMid := uniqueCode()
+	productMid, _ := catalogued(t, ctx, s, storageID, "Hot Cache Ordering Middle")
+	_, err = s.AssociateBarcode(ctx, storageID, productMid.ID, codeMid)
+	require.NoError(t, err)
+
+	codeLeast := uniqueCode()
+	productLeast, _ := catalogued(t, ctx, s, storageID, "Hot Cache Ordering Least Scanned")
+	_, err = s.AssociateBarcode(ctx, storageID, productLeast.ID, codeLeast)
+	require.NoError(t, err)
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, s.IncrementBarcodeScanCount(ctx, codeMost))
+	}
+	for i := 0; i < 2; i++ {
+		require.NoError(t, s.IncrementBarcodeScanCount(ctx, codeMid))
+	}
+	require.NoError(t, s.IncrementBarcodeScanCount(ctx, codeLeast))
+
+	rows, err := s.HotBarcodes(ctx)
+	require.NoError(t, err)
+
+	position := map[string]int{}
+	for i, row := range rows {
+		position[row.Barcode] = i
+	}
+	require.Contains(t, position, codeMost)
+	require.Contains(t, position, codeMid)
+	require.Contains(t, position, codeLeast)
+	assert.Less(t, position[codeMost], position[codeMid], "more scans must rank higher")
+	assert.Less(t, position[codeMid], position[codeLeast], "more scans must rank higher")
+}
+
+// TestHotBarcodesCapsAtFiveHundred is the LIMIT the endpoint's whole privacy
+// story depends on: however many barcodes have ever been scanned across
+// every household, at most 500 of them are ever handed back. The bulk insert
+// goes straight at the table because building 501 rows through the full
+// AssociateBarcode path would need 501 products and storages for no benefit
+// — only catalog_barcodes' shape matters here.
+func TestHotBarcodesCapsAtFiveHundred(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+
+	catalog, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{DisplayName: "Hot Cache Bulk Product"})
+	require.NoError(t, err)
+
+	const bulkCount = 501
+	_, err = testPool.Exec(ctx, `
+		INSERT INTO catalog_barcodes (barcode, catalog_id)
+		SELECT '9' || lpad(gs::text, 12, '0') || 'h', $1
+		  FROM generate_series(1, $2) AS gs`, catalog.ID, bulkCount)
+	require.NoError(t, err)
+
+	rows, err := s.HotBarcodes(ctx)
+	require.NoError(t, err)
+	assert.Len(t, rows, 500)
+}
+
 // stockOf is the live sum of a product's batches, read straight from the
 // table rather than through the store's own reader.
 func stockOf(t *testing.T, ctx context.Context, storageID, productID uuid.UUID) int {

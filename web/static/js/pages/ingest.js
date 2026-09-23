@@ -25,6 +25,7 @@ import { get, post, postForm, ApiError } from "../api.js";
 import { pollJob, JobFailedError } from "../jobs.js";
 import { el, fromTemplate, qs, qsa, text } from "../dom.js";
 import { openScanSheet } from "../barcode.js";
+import { ensureHotBarcodesFresh, lookupHotBarcode } from "../barcodes.js";
 
 // The endpoint each mode uploads to (docs/specs/09-consumption-logging.md's
 // capture-mode table) and, for the ones docs/specs/06-vision-shelf-ingestion.md
@@ -92,6 +93,11 @@ async function init() {
   setUpModeSelector();
   form.addEventListener("submit", onSubmit);
   scanBarcodeButton.addEventListener("click", onScanBarcode);
+
+  // Fire-and-forget: warms the local hot-cache preview
+  // (docs/specs/24-barcode-hot-cache.md) so it is ready by the time this
+  // page's own scan button is used, without making page load wait on it.
+  ensureHotBarcodesFresh();
 }
 
 // setUpModeSelector restores the last-used mode (defaulting on a first visit),
@@ -294,10 +300,18 @@ async function onScanBarcode() {
   const code = await openScanSheet(storageId, { title: "Scan a barcode" });
   if (!code) return;
 
+  // The hot-cache hit is an optimistic preview only (docs/specs/24-barcode-
+  // hot-cache.md): a missing or stale local copy renders nothing here and
+  // the flow below is exactly spec 20's — this call is never skipped, hit or
+  // miss, and its answer always replaces whatever the preview showed.
+  const cached = await lookupHotBarcode(code);
+  const preview = cached ? showHotBarcodePreview(cached) : null;
+
   let hit;
   try {
     hit = await get(`/api/storages/${storageId}/barcodes/${encodeURIComponent(code)}`);
   } catch (err) {
+    preview?.close();
     if (err instanceof ApiError && err.status === 404) {
       onUnknownCode(code);
       return;
@@ -305,6 +319,7 @@ async function onScanBarcode() {
     showError(err);
     return;
   }
+  preview?.close();
 
   if (hit.product) {
     await openQuickLog(code, hit.product);
@@ -313,6 +328,35 @@ async function onScanBarcode() {
   if (hit.catalog_suggestion) {
     await onCatalogHit(code, hit.catalog_suggestion);
   }
+}
+
+// showHotBarcodePreview renders the cached card immediately, with no loading
+// state, while the authoritative lookup above is still in flight
+// (docs/specs/24-barcode-hot-cache.md). It offers no action and supplies no
+// data any sheet is built from — only the authoritative answer does — so
+// there is nothing here for a person to act on before that answer arrives,
+// only something other than a blank screen between a scan and an answer.
+function showHotBarcodePreview(card) {
+  const titleId = "barcode-preview-title";
+  const children = [el("h2", { id: titleId }, [text(card.display_name)])];
+  if (card.category_path) {
+    children.push(el("p", { class: "muted" }, [text(card.category_path)]));
+  }
+  children.push(el("p", { class: "empty-state", role: "status" }, [text("Checking this storage…")]));
+
+  const dialog = el("dialog", { class: "card stack", "aria-labelledby": titleId }, children);
+  document.body.append(dialog);
+  dialog.showModal();
+
+  let closed = false;
+  return {
+    close() {
+      if (closed) return;
+      closed = true;
+      dialog.close();
+      dialog.remove();
+    },
+  };
 }
 
 // onUnknownCode is the miss: the system has never seen this product, so
