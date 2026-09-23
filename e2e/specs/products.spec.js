@@ -40,6 +40,8 @@ const QUICK_CREATE_PRODUCT = "00000000-0000-7000-8000-000000000090";
 const QUICK_CREATE_BATCH = "00000000-0000-7000-8000-000000000091";
 const CANCEL_PRODUCT = "00000000-0000-7000-8000-000000000092";
 const CANCEL_BATCH = "00000000-0000-7000-8000-000000000093";
+const MOVE_QUICK_CREATE_PRODUCT = "00000000-0000-7000-8000-000000000096";
+const MOVE_QUICK_CREATE_BATCH = "00000000-0000-7000-8000-000000000097";
 
 // "E2E Other Household" (...011) — Alice's, not Bob's — and its own Garage
 // location, used only as a target_location_id/location_id from *another*
@@ -314,4 +316,55 @@ test("cancelling the location modal from the split picker leaves the in-progress
     await expect(form.locator("input")).toHaveValue("3");
     await expect(form.locator("select")).toHaveValue(FRIDGE);
   }
+});
+
+// The split and move forms wire their own "+ New location" trigger
+// independently in products.js (each its own openedSelect, pushed into the
+// same shared locationSelects array) — a test of the split form's trigger
+// (above) says nothing about whether the move form's is wired correctly,
+// so this covers the move form on its own dedicated product/batch.
+test("a location can be created from the move picker, without leaving products.html, and the move completes against it", async ({
+  page,
+}) => {
+  await logIn(page);
+  await openProduct(page, "E2E Quick-Create Move Source");
+
+  const row = batchRow(page, MOVE_QUICK_CREATE_BATCH);
+  await expect(row).toContainText("3 × Pantry");
+  await row.locator('[data-role="move-toggle"]').click();
+
+  const form = row.locator('[data-role="move-form"]');
+  await expect(form).toBeVisible();
+
+  await form.locator('[data-role="location-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByRole("button", { name: "Add top-level location" }).click();
+  await dialog.locator('input[aria-label="Name of the new top-level location"]').fill("Quick Create Move Shelf");
+  await dialog.locator("#location-modal-add-root-form button[type=submit]").click();
+  await expect(dialog).toContainText("Quick Create Move Shelf");
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeHidden();
+
+  // Preselected in the move form's own select, not merely appended somewhere
+  // — proof the trigger's openedSelect points at moveTarget, not splitTarget.
+  const targetSelect = form.locator("select");
+  await expect(targetSelect.locator("option:checked")).toContainText("Quick Create Move Shelf");
+
+  const [moveResponse] = await Promise.all([
+    page.waitForResponse(
+      (res) => res.url().endsWith(`/inventory-batches/${MOVE_QUICK_CREATE_BATCH}`) && res.request().method() === "PATCH",
+    ),
+    form.locator('button[type="submit"]').click(),
+  ]);
+  expect(moveResponse.status()).toBe(200);
+
+  const newLocationId = await targetSelect.inputValue();
+  const product = await fetchProduct(page, MOVE_QUICK_CREATE_PRODUCT);
+  expect(product.batches).toHaveLength(1);
+  const moved = product.batches[0];
+  expect(moved.id).toBe(MOVE_QUICK_CREATE_BATCH); // same batch, not a new one
+  expect(moved.quantity).toBe(3); // unchanged
+  expect(moved.location_id).toBe(newLocationId);
 });
