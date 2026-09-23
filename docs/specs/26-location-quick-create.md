@@ -111,6 +111,13 @@ New module `js/location-modal.js`:
 // in creation order. Never navigates the page.
 ```
 
+Superseded by [`27-category-quick-create.md`](27-category-quick-create.md),
+which generalizes this module to categories: the file is renamed
+`js/tree-modal.js` and the export becomes `openTreeManager(storageId,
+{kind})`, with `{kind: "locations"}` as this spec's own call shape carried
+over unchanged. The description above is this spec's own contract as
+originally shipped; the current module name and signature are `27`'s.
+
 `js/review.js` calls it from a field's trigger, and on resolve:
 
 - Re-fetches `GET /api/storages/{storage_id}/locations` **once** and

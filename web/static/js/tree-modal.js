@@ -22,6 +22,14 @@ import { get, post, patch, ApiError } from "./api.js";
 import { el, text, clearChildren } from "./dom.js";
 import { createShelfLifeDetail, resolveInheritance } from "./category-shelf-life.js";
 
+// The locations kind's DOM ids keep their pre-rename "location-modal-*"
+// spelling on purpose: e2e/specs/ingestion.spec.js and
+// e2e/specs/shopping-list.spec.js already hardcode
+// "#location-modal-add-root-form" for the location-quick-create tests this
+// module's predecessor shipped with, and this generalization changes the
+// module's shape, not its locations behavior or its tests
+// (docs/specs/27-category-quick-create.md). The categories kind, being new,
+// gets its own "category-modal-*" ids below rather than inheriting these.
 const KINDS = {
   locations: {
     endpoint: "locations",
@@ -86,8 +94,12 @@ export function openTreeManager(storageId, { kind }) {
   }
 
   // inherited is only ever populated for the categories kind (see reload
-  // below); the locations kind's renderDetail stays unset, exactly as
-  // locations.html's own TreeView never passes one.
+  // below); the locations kind's renderDetail stays unset here, as it did
+  // on this module's predecessor (js/location-modal.js) before this spec.
+  // locations.html's own page-level TreeView does pass one — the audit
+  // staleness detail (docs/specs/13-stocktake-and-audit.md) — but that was
+  // never part of the modal's own contract (docs/specs/26-location-quick-create.md)
+  // and adding it here is out of this spec's scope.
   let inherited = new Map();
 
   const view = new TreeView(treeContainer, {
