@@ -53,7 +53,7 @@ several volumes and images per package, per wave.
 A wave with `"dockerCleanup": true` gets it removed **after its consolidation
 has finished** (the wave issue is closed, so no session is using any of it),
 by `scripts/wellen-docker-cleanup.ps1`. In this plan the field is set on waves
-3 to 6. It must be `true` or `false`; anything else fails `-Validate`.
+3 to 7. It must be `true` or `false`; anything else fails `-Validate`.
 
 - **What is removed:** the containers (with their anonymous volumes), networks,
   named volumes and image tags of every Compose project that belongs to the
@@ -134,7 +134,21 @@ Before the orchestrator can work through a wave, these must exist:
 - **The FIRST wave's integration branch** on origin. Every later wave's
   branch is created by the previous wave's consolidation session (the last
   step of its prompt); only the first one needs to be branched and pushed by
-  the planning session. If the work the plan is built on has not merged into
+  the planning session.
+- **Extending a plan while the orchestrator is running.** The orchestrator
+  reads the wave file once, at start. A consolidation prompt built from that
+  copy names the next wave from that copy, so the wave before a newly added
+  one would finish without creating its branch. Get the extended file into
+  the main checkout (merge its PR, pull `main`), then stop the running
+  orchestrator and start it again. That is restart-safe (see the script's
+  `.RESTART SAFETY`): packages whose worktree exists are not started twice.
+  From then on the new wave's branch is created by the previous
+  consolidation as usual. The one exception is a consolidation that had
+  already started before the restart. It keeps its old prompt, so push the
+  next wave's branch from `main` by hand once that consolidation has merged.
+  Also record the new wave and any migration number it reserves in the
+  plan issue's **body**, not only in a comment, because the next planner
+  reads the body first. If the work the plan is built on has not merged into
   `main` yet, branch from that work's own branch instead of `origin/main` —
   the consolidation PR against `main` will carry it in naturally. Do not
   wait on a separate PR just to satisfy "branch from main" as a formality.
