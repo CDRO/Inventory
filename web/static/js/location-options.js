@@ -36,7 +36,10 @@ export async function fetchLocations(storageId) {
 
 /**
  * appendLocationOptions adds one option per location to select. Names go in
- * through textContent — a location name is user text.
+ * through textContent — a location name is user text. Each option carries
+ * data-location so refreshLocationOptions below can tell it apart from an
+ * option this module did not add — a leading placeholder, or review.html's
+ * synthesized "Create: …" proposed-path option.
  *
  * @param {HTMLSelectElement} select
  * @param {FlatLocation[]} locations
@@ -48,6 +51,30 @@ export function appendLocationOptions(select, locations) {
     // Non-breaking spaces survive in an option's text where plain ones
     // collapse, so the indentation actually shows.
     option.textContent = NBSP.repeat(2 * loc.depth) + loc.name;
+    option.dataset.location = "1";
     select.append(option);
+  }
+}
+
+/**
+ * refreshLocationOptions replaces every option appendLocationOptions
+ * previously added to select with a fresh flat list, leaving every other
+ * option exactly where it was. Used by js/pages/review.js and
+ * js/pages/shopping-list.js once js/location-modal.js resolves, so a field's
+ * placeholder or proposed-path option and its current selection survive a
+ * tree that just changed underneath it (docs/specs/26-location-quick-create.md).
+ *
+ * @param {HTMLSelectElement} select
+ * @param {FlatLocation[]} locations
+ * @param {string} [keepValue] - reselected if still a valid option after the
+ *   refresh; defaults to the select's own current value.
+ */
+export function refreshLocationOptions(select, locations, keepValue = select.value) {
+  for (const option of select.querySelectorAll("option[data-location]")) {
+    option.remove();
+  }
+  appendLocationOptions(select, locations);
+  if ([...select.options].some((option) => option.value === keepValue)) {
+    select.value = keepValue;
   }
 }

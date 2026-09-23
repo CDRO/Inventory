@@ -35,6 +35,11 @@ const STORAGE_ID = "00000000-0000-4000-8000-000000000000";
 const BASE = `/api/storages/${STORAGE_ID}`;
 const HASH = "a".repeat(64);
 const OTHER_HOUSEHOLD = "00000000-0000-7000-8000-000000000011";
+// "E2E Admin Household": zero locations, zero products, exactly one member
+// (Second Admin) — otherwise unused except by first-run-admin.spec.js's
+// membership-boundary journey, which never touches locations or shopping
+// lists, so it is free for the zero-locations case below.
+const ADMIN_HOUSEHOLD = "00000000-0000-7000-8000-000000000012";
 const PASSWORD = "e2e-fixture-password";
 // Fixture ids in OTHER_HOUSEHOLD (e2e/fixtures/seed.sql). Garage is its only
 // location, so it is where every confirmed line in this suite lands.
@@ -473,4 +478,51 @@ test("an ambiguous line can be treated as a new item, or entered by hand", async
     new_product: { from: "manual", name: "Almond Milk", item_type: "long_shelf_life", min_stock: 0 },
   });
   await expect(page.locator("#error")).toBeHidden();
+});
+
+// docs/specs/26-location-quick-create.md: in a storage with zero locations,
+// the "+ New location" escape hatch is what makes a line resolvable at all —
+// without it "Choose a location…" would be the only option, forever.
+test("a location can be created from the resolution screen, in a storage seeded with zero locations", async ({
+  page,
+}) => {
+  const login = await page.request.post("/api/auth/login", {
+    data: { username: "e2e-admin-2", password: PASSWORD },
+  });
+  expect(login.status(), "fixture login").toBe(200);
+
+  await page.goto(`/shopping-list.html?storage=${ADMIN_HOUSEHOLD}`);
+  await expect(page.locator("#compose")).toBeVisible();
+  await page.fill("#raw-text", "birthday candles");
+  await page.click("#submit");
+  await expect(page.locator("#results")).toBeVisible();
+
+  const line = lineFor(page, "birthday candles");
+  // No catalog and no local product in this storage, so the new-product form
+  // is already open, named from the line itself — nothing to click before
+  // the location field matters.
+  await expect(line.locator('[data-field="new-product"]')).toBeVisible();
+  await expect(line.locator('[data-field="location"] option')).toHaveCount(1); // the placeholder alone
+
+  await line.locator('[data-field="location-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(dialog).toContainText("No locations yet");
+
+  await dialog.getByRole("button", { name: "Add top-level location" }).click();
+  await dialog.locator('input[aria-label="Name of the new top-level location"]').fill("Balcony Box");
+  await dialog.locator("#location-modal-add-root-form button[type=submit]").click();
+  await expect(dialog).toContainText("Balcony Box");
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeHidden();
+
+  // The location just created is immediately selectable — no reload — and is
+  // what the resolve endpoint (07's own, not a second creation path) is then
+  // called against, completing the line.
+  await expect(line.locator('[data-field="location"]')).not.toHaveValue("");
+  await line.locator('[data-action="resolve"]').click();
+  await expect(line.locator('[data-field="status"]')).toHaveText("Done");
+
+  const reread = await page.request.get(`/api/storages/${ADMIN_HOUSEHOLD}/locations`);
+  const tree = await reread.json();
+  expect(tree.items.map((n) => n.name)).toContain("Balcony Box");
 });

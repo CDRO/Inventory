@@ -21,7 +21,8 @@ import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "..
 import { renderStorageSwitcher } from "../storage-switcher.js";
 import { initGamification } from "../gamification.js";
 import { ReviewList } from "../review.js";
-import { fetchLocations, appendLocationOptions } from "../location-options.js";
+import { fetchLocations, appendLocationOptions, refreshLocationOptions } from "../location-options.js";
+import { openLocationManager } from "../location-modal.js";
 import { fetchCategories, appendCategoryOptions } from "../category-options.js";
 import { fetchProducts } from "../product-options.js";
 import { get, post, del, ApiError } from "../api.js";
@@ -42,6 +43,10 @@ let list = null;
 // backgroundRemoval is the job's own word on whether a picture's background
 // can be removed right now. Without it no such control is shown at all.
 let backgroundRemoval = false;
+// locations is this storage's flat tree, refreshed in place by onAddLocation
+// below whenever js/location-modal.js resolves — not re-fetched by anything
+// else, so every row's location field reads the same list.
+let locations = [];
 /**
  * cutout is the background-removed picture made for the row, if any: which
  * source it was cut from, and its id for the confirm.
@@ -130,7 +135,7 @@ async function load() {
 }
 
 async function render(job) {
-  let locations, categories, products;
+  let categories, products;
   try {
     [locations, categories, products] = await Promise.all([
       fetchLocations(storageId),
@@ -390,6 +395,29 @@ function setupLocation(el, row, proposal, locations) {
     select.value = "new";
   } else if (known(proposal.location_hint_id)) {
     select.value = proposal.location_hint_id;
+  }
+
+  qs('[data-role="location-add"]', el).addEventListener("click", () => onAddLocation(select));
+}
+
+// onAddLocation opens the shared location editor (js/location-modal.js) and,
+// once it closes, refreshes every row's location field from a single GET —
+// never one request per row (docs/specs/26-location-quick-create.md). Only
+// the field whose trigger was clicked is preselected, and only when exactly
+// one location was created; every other field just gets the refreshed
+// option list, its own current selection untouched.
+async function onAddLocation(openedSelect) {
+  const { createdIds } = await openLocationManager(storageId);
+  try {
+    locations = await fetchLocations(storageId);
+  } catch (err) {
+    showError(err);
+    return;
+  }
+  const preselect = createdIds.length === 1 ? createdIds[0] : null;
+  for (const { el } of rows.values()) {
+    const select = qs('[data-role="location"]', el);
+    refreshLocationOptions(select, locations, select === openedSelect && preselect ? preselect : select.value);
   }
 }
 

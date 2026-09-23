@@ -15,6 +15,7 @@ const HOUSEHOLD = "00000000-0000-7000-8000-000000000010";
 const SHELF_JOB = "00000000-0000-7000-8000-000000000070";
 const PRODUCT_JOB = "00000000-0000-7000-8000-000000000071";
 const LOOK_ONLY_JOB = "00000000-0000-7000-8000-000000000072";
+const LOCATION_MODAL_JOB = "00000000-0000-7000-8000-000000000074";
 const TOMATOES = "00000000-0000-7000-8000-000000000040";
 const PANTRY = "00000000-0000-7000-8000-000000000020";
 
@@ -279,4 +280,64 @@ test("a new product's picture can be taken from the reviewed photo", async ({ pa
   // And the job is still waiting on the server, untouched.
   const job = await page.request.get(`/api/storages/${HOUSEHOLD}/jobs/${LOOK_ONLY_JOB}`);
   expect((await job.json()).status).toBe("done");
+});
+
+// docs/specs/26-location-quick-create.md: the "+ New location" escape hatch
+// on every location field, in a storage that already has locations — Pantry
+// and Fridge here — so this also proves the trigger is not conditional on an
+// empty tree.
+test("a location can be created from the review screen without leaving it, refreshing every row from one GET", async ({
+  page,
+}) => {
+  await logInAsBob(page);
+  await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOCATION_MODAL_JOB}`);
+  const rows = page.locator("#rows .review-row");
+  await expect(rows).toHaveCount(2);
+
+  const first = rows.nth(0);
+  const second = rows.nth(1);
+
+  // An edit on the row that never opens the modal — proof it survives the
+  // other row's use of it.
+  await second.locator('[data-role="quantity"]').fill("9");
+
+  await first.locator('[data-role="location-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Pantry");
+
+  await dialog.getByRole("button", { name: "Add top-level location" }).click();
+  await dialog.locator('input[aria-label="Name of the new top-level location"]').fill("Loft Shelf");
+  await dialog.locator("#location-modal-add-root-form button[type=submit]").click();
+  await expect(dialog).toContainText("Loft Shelf");
+
+  // Closing the modal once must refresh both rows' option lists from exactly
+  // one GET — never one request per open field.
+  let getCalls = 0;
+  await page.route(`**/api/storages/${HOUSEHOLD}/locations`, async (route) => {
+    if (route.request().method() === "GET") getCalls++;
+    await route.continue();
+  });
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeHidden();
+  expect(getCalls).toBe(1);
+  await page.unroute(`**/api/storages/${HOUSEHOLD}/locations`);
+
+  // Preselected in the field whose trigger opened the modal…
+  await expect(first.locator('[data-role="location"] option', { hasText: "Loft Shelf" })).toHaveCount(1);
+  await expect(first.locator('[data-role="location"]')).not.toHaveValue("");
+  // …offered, but not forced, on the row that never opened it, whose own
+  // edit is exactly as it was left.
+  await expect(second.locator('[data-role="location"] option', { hasText: "Loft Shelf" })).toHaveCount(1);
+  await expect(second.locator('[data-role="location"]')).toHaveValue("");
+  await expect(second.locator('[data-role="quantity"]')).toHaveValue("9");
+
+  // Cancelling (Esc), with nothing created, leaves the selection exactly as
+  // it was.
+  const beforeCancel = await second.locator('[data-role="location"]').inputValue();
+  await second.locator('[data-role="location-add"]').click();
+  await expect(page.getByRole("dialog", { name: "Locations" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "Locations" })).toBeHidden();
+  await expect(second.locator('[data-role="location"]')).toHaveValue(beforeCancel);
 });

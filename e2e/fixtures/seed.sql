@@ -187,6 +187,27 @@ INSERT INTO jobs (id, storage_id, kind, status, payload, created_by) VALUES
    '00000000-0000-7000-8000-000000000003')
 ON CONFLICT (id) DO NOTHING;
 
+-- One more shelf-ingestion job, dedicated to
+-- e2e/specs/ingestion.spec.js's location-quick-create test
+-- (docs/specs/26-location-quick-create.md). Two rows so that test can prove
+-- one row's own edit survives the other row's use of the modal; neither row
+-- proposes a location, so both start on the plain "Choose a location…"
+-- placeholder rather than the "new" option ingestion.spec.js's other job
+-- exercises. This job is only ever looked at, never confirmed, so it can be
+-- revisited by that test however many times it is run.
+INSERT INTO jobs (id, storage_id, kind, status, payload, created_by) VALUES
+  ('00000000-0000-7000-8000-000000000074', '00000000-0000-7000-8000-000000000010', 'shelf_ingestion', 'done',
+   '{"mode":"shelf","location_hint_id":null,"rows":[
+      {"row_id":"0","label":"Chili Flakes","confidence":0.8,"quantity":1,"bounding_box":null,
+       "match":{"status":"new_item","product":null,"candidates":[],"catalog":null},
+       "location":{"path":[],"location_id":null}},
+      {"row_id":"1","label":"Cumin","confidence":0.8,"quantity":1,"bounding_box":null,
+       "match":{"status":"new_item","product":null,"candidates":[],"catalog":null},
+       "location":{"path":[],"location_id":null}}
+   ]}',
+   '00000000-0000-7000-8000-000000000003')
+ON CONFLICT (id) DO NOTHING;
+
 -- One consumption proposal (docs/specs/09-consumption-logging.md), in the
 -- shape internal/consume writes: no location placement, a stage-1-only match
 -- against this storage's own products. Row 0 matches Greek Yogurt, which has
