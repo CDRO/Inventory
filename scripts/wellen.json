@@ -138,13 +138,6 @@
           "branch": "specs-13-20/w4-category-quick-create",
           "spec": "Spec 27",
           "focus": "Sequential after Spec 26 in this wave - it generalizes 26's modal, so that module must already exist. Frontend-only, no migration. Rename js/location-modal.js to js/tree-modal.js with openTreeManager(storageId, {kind}) and update EVERY call site plus SHELL_ASSETS in web/static/sw.js and CACHE_VERSION - a stale cached shell that still imports the old module name silently breaks 26's location trigger. Category creation goes only through the existing POST /api/storages/{storage_id}/categories, so the category_created scoring (spec 51) and the shelf-life default behave exactly as on categories.html; the flow must work unchanged with gamification switched off. The location field keeps behaving exactly as spec 26 specifies - this changes the module's shape, not its behavior. Written as 'spec 14' before the renumbering."
-        },
-        {
-          "specIssue": 107,
-          "slug": "w4-batch-move-quick-create",
-          "branch": "specs-13-20/w4-batch-move-quick-create",
-          "spec": "Spec 28",
-          "focus": "Sequential after Spec 27 in this wave - call openTreeManager with kind locations, since the modal module is already generalized by then. Frontend-only, no migration. Keep the edit confined to the batch move/split picker on products.html: spec 16 (earlier wave) and spec 20 (later wave) touch the same page. The split/move endpoints stay untouched and authoritative - same-storage target_location_id validation, and a split still writes its two 'move' log rows so net product stock is unchanged. Cancelling the modal must leave the in-progress quantity and selected batch exactly as they were. Written as 'spec 15' before the renumbering."
         }
       ]
     },
@@ -172,6 +165,20 @@
           "model": "claude-sonnet-5",
           "effort": "high",
           "focus": "Sequential after Spec 20 in this wave - needs its catalog_barcodes table and lookup endpoint to exist first. Migration 00012_barcode_hot_cache.sql adds catalog_barcodes.scan_count, no other number. The increment on a successful lookup is asynchronous and best-effort, same pattern as the suggestion-cache's last_accessed_at update in spec 07 - it must never add latency to the lookup response, and a failed count update must never fail the lookup. No response anywhere - including GET /api/barcodes/hot itself - ever serializes scan_count; rank is conveyed by array order only. The client-side hot-cache hit is an optimistic preview only: the real per-storage lookup (spec 20) is called for every scan regardless, and its answer always wins over the cached preview when they differ. This is explicitly not an offline-editing feature - the one network call is never skipped."
+        },
+        {
+          "specIssue": 145,
+          "slug": "w5-batch-picker",
+          "branch": "specs-13-20/w5-batch-picker",
+          "spec": "Issue #145 (batch split/move picker, prerequisite of Spec 28)",
+          "focus": "Sequential after Spec 24 in this wave; it exists only so the next package (Spec 28, #107) has a field to attach its trigger to. docs/specs/28 presumes a split/move picker on products.html's batch list, but renderStockCard in js/pages/products.js renders a read-only list and neither it nor any other file under web/static calls the split or move endpoint - read #145 first. Build the minimal picker for 'One batch, one location - and how to split one' in docs/specs/06: a quantity input, a target-location select, and split-versus-move semantics, calling only the existing POST /api/storages/{storage_id}/inventory-batches/{id}/split and PATCH /api/storages/{storage_id}/inventory-batches/{id}. Frontend-only: no backend change, no migration. The endpoints stay authoritative - never reimplement same-storage target_location_id validation client-side, and surface their errors as they come. A split writes its two 'move' log rows, so net product stock is unchanged: assert that end to end. Build the target-location select through js/location-options.js so #107 only has to attach the trigger. Keep the edit confined to the stock card's batch list on products.html: spec 16 (earlier wave) and spec 20 (earlier in this wave) touch the same page, and spec 35 (wave 7) edits the same card. Amend docs/specs/28's 'Why this spec exists' and 'Scope' to say that the picker is delivered by this package, before the trigger - do not open a new spec number for it. Location names are user text: textContent only. Any new file under web/static/ goes into SHELL_ASSETS in web/static/sw.js with a CACHE_VERSION bump. Close #145 from the PR."
+        },
+        {
+          "specIssue": 107,
+          "slug": "w5-batch-move-quick-create",
+          "branch": "specs-13-20/w5-batch-move-quick-create",
+          "spec": "Spec 28",
+          "focus": "Moved here from wave 4, where it was blocked by #145: sequential after the batch picker package (#145) in this wave, which builds the split/move picker this spec attaches to. Call openTreeManager with kind locations - js/tree-modal.js is already on main from wave 4. Frontend-only, no migration. Keep the edit confined to the batch move/split picker on products.html: spec 16 and spec 20 touch the same page. The split/move endpoints stay untouched and authoritative - same-storage target_location_id validation, and a split still writes its two 'move' log rows so net product stock is unchanged. Cancelling the modal must leave the in-progress quantity and selected batch exactly as they were. Written as 'spec 15' before the renumbering."
         }
       ]
     },
@@ -226,7 +233,7 @@
           "slug": "w7-stocktake-entry-points",
           "branch": "specs-32-35/w7-stocktake-entry-points",
           "spec": "Spec 35",
-          "focus": "Frontend only: no API change, and spec 13's stocktake endpoints and exact-row-set confirm stay untouched. The root cause being fixed is js/pages/products.js renderStockCard linking stocktake.html without ?location=, after which the page dead-ends on 'No location given'. stocktake.html without ?location= becomes a chooser built from the existing js/tree.js with a new read-only option ({ editable: false }) - do not write a second tree - plus a 'Stalest first' list: never-audited first, then oldest last_audited_at, at most five. A foreign or deleted ?location= shows the not-found message and the chooser, and the two cases look identical. On products.html each batch row names its location path and links 'Count this shelf' to its own location, and the stock card no longer claims that locations and expiry are edited on the stocktake sheet. Build around the batch move/split picker that #107 added to the same stock card - do not disturb it. Back and Cancel on the sheet use a same-origin document.referrer, with locations.html as the fallback. The Stocktake entry in js/nav.js already exists from spec 34 and now lands on the chooser. Dedicated E2E fixture (for example 'E2E Stocktake' / e2e-stocktake) with last_audited_at values relative to now(). Every new user-visible string goes through spec 19's catalogs, with the key in both en.json and de.json."
+          "focus": "Frontend only: no API change, and spec 13's stocktake endpoints and exact-row-set confirm stay untouched. The root cause being fixed is js/pages/products.js renderStockCard linking stocktake.html without ?location=, after which the page dead-ends on 'No location given'. stocktake.html without ?location= becomes a chooser built from the existing js/tree.js with a new read-only option ({ editable: false }) - do not write a second tree - plus a 'Stalest first' list: never-audited first, then oldest last_audited_at, at most five. A foreign or deleted ?location= shows the not-found message and the chooser, and the two cases look identical. On products.html each batch row names its location path and links 'Count this shelf' to its own location, and the stock card no longer claims that locations and expiry are edited on the stocktake sheet. Build around the batch move/split picker that #145 and #107 (wave 5) added to the same stock card - do not disturb it. Back and Cancel on the sheet use a same-origin document.referrer, with locations.html as the fallback. The Stocktake entry in js/nav.js already exists from spec 34 and now lands on the chooser. Dedicated E2E fixture (for example 'E2E Stocktake' / e2e-stocktake) with last_audited_at values relative to now(). Every new user-visible string goes through spec 19's catalogs, with the key in both en.json and de.json."
         }
       ]
     }
