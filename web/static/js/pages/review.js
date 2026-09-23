@@ -21,7 +21,7 @@ import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "..
 import { renderStorageSwitcher } from "../storage-switcher.js";
 import { initGamification } from "../gamification.js";
 import { ReviewList } from "../review.js";
-import { fetchLocations, appendLocationOptions } from "../location-options.js";
+import { fetchLocations, appendLocationOptions, openLocationField } from "../location-options.js";
 import { fetchCategories, appendCategoryOptions } from "../category-options.js";
 import { fetchProducts } from "../product-options.js";
 import { get, post, del, ApiError } from "../api.js";
@@ -42,6 +42,11 @@ let list = null;
 // backgroundRemoval is the job's own word on whether a picture's background
 // can be removed right now. Without it no such control is shown at all.
 let backgroundRemoval = false;
+// locations is this storage's flat tree as of the initial render, used only
+// to seed each row's location field once. A "+ New location" trigger's own
+// refresh (location-options.js's openLocationField) fetches its own fresh
+// copy directly into the affected <select>s rather than updating this one.
+let locations = [];
 /**
  * cutout is the background-removed picture made for the row, if any: which
  * source it was cut from, and its id for the confirm.
@@ -130,7 +135,7 @@ async function load() {
 }
 
 async function render(job) {
-  let locations, categories, products;
+  let categories, products;
   try {
     [locations, categories, products] = await Promise.all([
       fetchLocations(storageId),
@@ -391,6 +396,17 @@ function setupLocation(el, row, proposal, locations) {
   } else if (known(proposal.location_hint_id)) {
     select.value = proposal.location_hint_id;
   }
+
+  const addButton = qs('[data-role="location-add"]', el);
+  addButton.addEventListener("click", () =>
+    openLocationField({
+      storageId,
+      trigger: addButton,
+      openedSelect: select,
+      getOpenSelects: () => Array.from(rows.values(), ({ el }) => qs('[data-role="location"]', el)),
+      onError: showMessage,
+    }),
+  );
 }
 
 // buildItems turns the screen into the confirm body, or marks what is missing.

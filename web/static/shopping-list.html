@@ -88,10 +88,13 @@
           Quantity
           <input type="number" data-field="quantity" min="0" step="1" value="1">
         </label>
-        <label>
-          Put it in
-          <select data-field="location"></select>
-        </label>
+        <div class="field">
+          <label>
+            Put it in
+            <select data-field="location"></select>
+          </label>
+          <button type="button" class="btn btn--ghost" data-field="location-add">+ New location</button>
+        </div>
         <button type="button" class="btn" data-action="resolve">Confirm</button>
         <button type="button" class="btn btn--ghost" data-action="dismiss">Not bought</button>
       </div>

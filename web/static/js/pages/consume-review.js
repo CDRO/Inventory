@@ -16,6 +16,15 @@ import "../register-sw.js";
 // explicitly, because the server refuses a confirm that leaves any row out.
 // "Analyze again" replaces the whole proposal with a new analysis of the same
 // photo, the same way review.html's does.
+//
+// Unlike review.js's and shopping-list.js's page modules, this one never
+// calls location-options.js's openLocationField: this screen has no
+// location field to attach that trigger to. Consumption only ever decrements
+// an existing batch (renderBatches below reads each one's location_id only
+// to display it), and the confirm body — {row_id, decision, product_id,
+// decrements} — has no field a newly created location id could travel
+// through. docs/specs/26-location-quick-create.md scopes its escape hatch to
+// review.html and shopping-list.html for exactly this reason.
 
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
