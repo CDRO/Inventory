@@ -506,6 +506,12 @@ test("a category can be created from the new-product form, without leaving the s
   await expect(line.locator('[data-field="new-product"]')).toBeVisible();
   await expect(line.locator('[data-field="category"] option')).toHaveCount(1); // "No category" alone
 
+  // Filled in BEFORE the modal opens: closing it must leave every other field
+  // on this row exactly as the user left it (spec 27, "no loss of any other
+  // field already filled in"), which only shows if there is something to lose.
+  await line.locator('[data-field="location"]').selectOption(GARAGE);
+  await line.locator('[data-field="name"]').fill("Dried Oregano");
+
   await line.locator('[data-field="category-add"]').click();
   const dialog = page.getByRole("dialog", { name: "Categories" });
   await expect(dialog).toContainText("No categories yet");
@@ -521,9 +527,9 @@ test("a category can be created from the new-product form, without leaving the s
   // carries once the line is completed against it.
   await expect(line.locator('[data-field="category"]')).not.toHaveValue("");
   const categoryId = await line.locator('[data-field="category"]').inputValue();
+  await expect(line.locator('[data-field="location"]')).toHaveValue(GARAGE);
+  await expect(line.locator('[data-field="name"]')).toHaveValue("Dried Oregano");
 
-  await line.locator('[data-field="location"]').selectOption(GARAGE);
-  await line.locator('[data-field="name"]').fill("Dried Oregano");
   await line.locator('[data-action="resolve"]').click();
   await expect(line.locator('[data-field="status"]')).toHaveText("Done");
 
