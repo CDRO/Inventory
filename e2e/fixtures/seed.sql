@@ -45,7 +45,8 @@ INSERT INTO users (id, username, password_hash, display_name, is_admin) VALUES
   ('00000000-0000-7000-8000-000000000002', 'e2e-alice',  '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Alice',     false),
   ('00000000-0000-7000-8000-000000000003', 'e2e-bob',    '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Bob',       false),
   ('00000000-0000-7000-8000-000000000004', 'e2e-nomad',   '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Nomad',     false),
-  ('00000000-0000-7000-8000-000000000005', 'e2e-admin-2', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Second Admin', true)
+  ('00000000-0000-7000-8000-000000000005', 'e2e-admin-2', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Second Admin', true),
+  ('00000000-0000-7000-8000-000000000006', 'e2e-casey',   '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Casey',     false)
 ON CONFLICT DO NOTHING;
 
 -- Two storages, so the "member of storage A gets 404 for storage B"
@@ -54,8 +55,8 @@ ON CONFLICT DO NOTHING;
 -- one only: he is the caller who must be refused "E2E Other Household", and
 -- being in exactly one storage also makes him the user for whom the switcher
 -- must stay hidden entirely.
--- "E2E Admin Household" is a third storage with exactly one member, the second
--- admin, and no contents at all. It exists so that
+-- "E2E Admin Household" is a third storage with exactly one member, the
+-- second admin, and (originally) no contents at all. It exists so that
 -- docs/specs/29-first-run-admin-guidance.md's boundary — an admin who *does*
 -- belong to a storage is never redirected — can be asserted without adding a
 -- member to "E2E Household", which is the shared workhorse that the
@@ -63,17 +64,31 @@ ON CONFLICT DO NOTHING;
 -- under fullyParallel. One membership also gives that admin the same
 -- nothing-to-choose landing Bob gets, so the journey asserts the ordinary
 -- flow rather than a picker.
+-- "E2E Zero-Locations Household" is a fourth storage, with its own dedicated
+-- member (Casey, who belongs to nothing else): e2e/specs/shopping-list.spec.js's
+-- and e2e/specs/ingestion.spec.js's zero-locations location-quick-create tests
+-- (docs/specs/26-location-quick-create.md) each need a storage that is
+-- genuinely empty of locations *at the moment they load it*, and both create
+-- one for real. Sharing "E2E Admin Household" between the two under
+-- fullyParallel raced: whichever test's job ran first left a location behind
+-- for the other to see. Casey exists so shopping-list.spec.js's test has its
+-- own storage instead; "E2E Admin Household" stays dedicated to
+-- ingestion.spec.js's version of the same test, and to
+-- docs/specs/29-first-run-admin-guidance.md's boundary journey, which never
+-- touches locations.
 INSERT INTO storages (id, name) VALUES
   ('00000000-0000-7000-8000-000000000010', 'E2E Household'),
   ('00000000-0000-7000-8000-000000000011', 'E2E Other Household'),
-  ('00000000-0000-7000-8000-000000000012', 'E2E Admin Household')
+  ('00000000-0000-7000-8000-000000000012', 'E2E Admin Household'),
+  ('00000000-0000-7000-8000-000000000013', 'E2E Zero-Locations Household')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO storage_members (storage_id, user_id) VALUES
   ('00000000-0000-7000-8000-000000000010', '00000000-0000-7000-8000-000000000002'), -- Alice: household
   ('00000000-0000-7000-8000-000000000010', '00000000-0000-7000-8000-000000000003'), -- Bob: household
   ('00000000-0000-7000-8000-000000000011', '00000000-0000-7000-8000-000000000002'), -- Alice: other household too, for the switcher journey
-  ('00000000-0000-7000-8000-000000000012', '00000000-0000-7000-8000-000000000005')  -- Second admin: their own, so an admin with a storage is not a special case of someone else's
+  ('00000000-0000-7000-8000-000000000012', '00000000-0000-7000-8000-000000000005'), -- Second admin: their own, so an admin with a storage is not a special case of someone else's
+  ('00000000-0000-7000-8000-000000000013', '00000000-0000-7000-8000-000000000006')  -- Casey: zero-locations household, and nothing else
 ON CONFLICT DO NOTHING;
 
 INSERT INTO locations (id, storage_id, name, description) VALUES
@@ -206,6 +221,22 @@ INSERT INTO jobs (id, storage_id, kind, status, payload, created_by) VALUES
        "location":{"path":[],"location_id":null}}
    ]}',
    '00000000-0000-7000-8000-000000000003')
+ON CONFLICT (id) DO NOTHING;
+
+-- One shelf-ingestion job in "E2E Admin Household" (...012), the one seeded
+-- storage with zero locations, dedicated to
+-- e2e/specs/ingestion.spec.js's zero-locations location-quick-create test
+-- (docs/specs/26-location-quick-create.md's first acceptance criterion).
+-- Never confirmed, so it can be revisited by that test however many times it
+-- is run; created_by is the second admin, this storage's only member.
+INSERT INTO jobs (id, storage_id, kind, status, payload, created_by) VALUES
+  ('00000000-0000-7000-8000-000000000075', '00000000-0000-7000-8000-000000000012', 'shelf_ingestion', 'done',
+   '{"mode":"shelf","location_hint_id":null,"rows":[
+      {"row_id":"0","label":"Board Games Box","confidence":0.8,"quantity":1,"bounding_box":null,
+       "match":{"status":"new_item","product":null,"candidates":[],"catalog":null},
+       "location":{"path":[],"location_id":null}}
+   ]}',
+   '00000000-0000-7000-8000-000000000005')
 ON CONFLICT (id) DO NOTHING;
 
 -- One consumption proposal (docs/specs/09-consumption-logging.md), in the

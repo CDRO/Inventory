@@ -27,8 +27,7 @@ import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "..
 import { renderStorageSwitcher } from "../storage-switcher.js";
 import { renderInboxLink } from "../inbox-badge.js";
 import { initGamification } from "../gamification.js";
-import { fetchLocations, appendLocationOptions, refreshLocationOptions } from "../location-options.js";
-import { openLocationManager } from "../location-modal.js";
+import { fetchLocations, appendLocationOptions, openLocationField } from "../location-options.js";
 import { fetchCategories, appendCategoryOptions } from "../category-options.js";
 import { get, post, ApiError } from "../api.js";
 import { el, text, clearChildren, qs } from "../dom.js";
@@ -154,7 +153,18 @@ function renderItem(item) {
   locationSelect.append(placeholder);
   appendLocationOptions(locationSelect, locations);
   if (locations.length === 1) locationSelect.value = locations[0].id;
-  field(node, "location-add").addEventListener("click", () => onAddLocation(locationSelect));
+
+  const addLocationButton = field(node, "location-add");
+  addLocationButton.addEventListener("click", () =>
+    openLocationField({
+      storageId,
+      trigger: addLocationButton,
+      openedSelect: locationSelect,
+      getOpenSelects: () =>
+        Array.from(itemsContainer.querySelectorAll('[data-field="location"]')).filter((s) => !s.disabled),
+      onError: (message) => showError(new Error(message)),
+    }),
+  );
 
   appendCategoryOptions(field(node, "category"), categories);
 
@@ -163,29 +173,6 @@ function renderItem(item) {
   node.querySelector('[data-action="resolve"]').addEventListener("click", () => resolveItem(node, item));
   node.querySelector('[data-action="dismiss"]').addEventListener("click", () => dismissItem(node, item));
   return node;
-}
-
-// onAddLocation opens the shared location editor (js/location-modal.js) and,
-// once it closes, refreshes every currently open line's "Put it in" field
-// from a single GET — never one request per line
-// (docs/specs/26-location-quick-create.md). Only the field whose trigger was
-// clicked is preselected, and only when exactly one location was created;
-// every other field just gets the refreshed option list, its own current
-// selection untouched. A resolved line's select is disabled and was never
-// given options in the first place, so it is skipped.
-async function onAddLocation(openedSelect) {
-  const { createdIds } = await openLocationManager(storageId);
-  try {
-    locations = await fetchLocations(storageId);
-  } catch (err) {
-    showError(err);
-    return;
-  }
-  const preselect = createdIds.length === 1 ? createdIds[0] : null;
-  for (const select of itemsContainer.querySelectorAll('[data-field="location"]')) {
-    if (select.disabled) continue;
-    refreshLocationOptions(select, locations, select === openedSelect && preselect ? preselect : select.value);
-  }
 }
 
 function renderResolved(node, item) {

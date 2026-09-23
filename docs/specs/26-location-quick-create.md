@@ -43,10 +43,11 @@ field's edits intact, with the new location immediately selectable.
 
 ## Scope
 
-Applies to every location field rendered by `js/review.js` — the row of
-`06`'s `review.html`, the resolution UI of `07`'s `shopping-list.html`, and
-the correction UI of `09`'s `consume-review.html`. Implemented once in the
-shared component, so all three inherit it identically — the same rule `05`
+Applies to every location field rendered by `js/review.js` that actually
+exists: the row of `06`'s `review.html` and the resolution UI of `07`'s
+`shopping-list.html`. `09`'s `consume-review.html` renders no location field
+at all and is out of scope — see below. Implemented once per page module, so
+both inherit the same trigger and the same single-GET refresh rule `05`
 already applies to the three row actions (accept/correct/reject).
 
 No backend change. This is a frontend-only addition that composes two
@@ -64,6 +65,15 @@ a single reviewable PR:
   Item screens this spec covers — see
   [`27-category-quick-create.md`](27-category-quick-create.md), which
   generalizes the modal this spec introduces.
+
+Also out of scope, but not picked up anywhere else, because there is nothing
+to build: `09`'s `consume-review.html`. Consumption logging only ever
+decrements an existing batch, and every batch already carries a location —
+there is no point in that flow where a user would create a new one, and its
+confirm body (`{row_id, decision, product_id, decrements}`,
+`09-consumption-logging.md`) has no field a location id could travel through.
+Wiring this spec's trigger into that screen would mean building UI the data
+model has nowhere to send.
 
 ## The escape hatch
 
@@ -118,10 +128,10 @@ value — it is the same document throughout.
 
 ## Acceptance criteria
 
-- In a storage with zero locations, from `06` review, `07` resolution, and
-  `09` correction alike, the user opens the modal, creates a root location,
-  closes the modal, and that location is immediately selectable — no page
-  reload.
+- In a storage with zero locations, from `06` review and `07` resolution
+  alike (`09` is out of scope — see "Scope" above), the user opens the
+  modal, creates a root location, closes the modal, and that location is
+  immediately selectable — no page reload.
 - In a storage that already has locations, the same trigger still works to
   add a further one the picker doesn't yet offer — the trigger is not
   conditional on an empty tree.
@@ -137,7 +147,6 @@ value — it is the same document throughout.
   and closing it once triggers one `GET
   /api/storages/{storage_id}/locations` call, not one per field.
 - E2E: extend `e2e/specs/locations.spec.js` or the relevant flow's own spec
-  (`ingestion.spec.js`, `shopping-list.spec.js`, `consumption.spec.js`) to
-  cover creating a location from within the review/resolution screen and
-  completing that row's confirm against it, in a fixture storage seeded
-  with zero locations.
+  (`ingestion.spec.js`, `shopping-list.spec.js`) to cover creating a location
+  from within the review/resolution screen and completing that row's confirm
+  against it, in a fixture storage seeded with zero locations.

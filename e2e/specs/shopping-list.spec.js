@@ -35,11 +35,12 @@ const STORAGE_ID = "00000000-0000-4000-8000-000000000000";
 const BASE = `/api/storages/${STORAGE_ID}`;
 const HASH = "a".repeat(64);
 const OTHER_HOUSEHOLD = "00000000-0000-7000-8000-000000000011";
-// "E2E Admin Household": zero locations, zero products, exactly one member
-// (Second Admin) — otherwise unused except by first-run-admin.spec.js's
-// membership-boundary journey, which never touches locations or shopping
-// lists, so it is free for the zero-locations case below.
-const ADMIN_HOUSEHOLD = "00000000-0000-7000-8000-000000000012";
+// "E2E Zero-Locations Household": zero locations, zero products, one
+// dedicated member (Casey) who belongs to nothing else — its own storage so
+// this test's location-quick-create writes never race
+// e2e/specs/ingestion.spec.js's own zero-locations test, which uses "E2E
+// Admin Household" for the same acceptance criterion on the review screen.
+const ZERO_LOCATIONS_HOUSEHOLD = "00000000-0000-7000-8000-000000000013";
 const PASSWORD = "e2e-fixture-password";
 // Fixture ids in OTHER_HOUSEHOLD (e2e/fixtures/seed.sql). Garage is its only
 // location, so it is where every confirmed line in this suite lands.
@@ -487,11 +488,11 @@ test("a location can be created from the resolution screen, in a storage seeded 
   page,
 }) => {
   const login = await page.request.post("/api/auth/login", {
-    data: { username: "e2e-admin-2", password: PASSWORD },
+    data: { username: "e2e-casey", password: PASSWORD },
   });
   expect(login.status(), "fixture login").toBe(200);
 
-  await page.goto(`/shopping-list.html?storage=${ADMIN_HOUSEHOLD}`);
+  await page.goto(`/shopping-list.html?storage=${ZERO_LOCATIONS_HOUSEHOLD}`);
   await expect(page.locator("#compose")).toBeVisible();
   await page.fill("#raw-text", "birthday candles");
   await page.click("#submit");
@@ -522,7 +523,7 @@ test("a location can be created from the resolution screen, in a storage seeded 
   await line.locator('[data-action="resolve"]').click();
   await expect(line.locator('[data-field="status"]')).toHaveText("Done");
 
-  const reread = await page.request.get(`/api/storages/${ADMIN_HOUSEHOLD}/locations`);
+  const reread = await page.request.get(`/api/storages/${ZERO_LOCATIONS_HOUSEHOLD}/locations`);
   const tree = await reread.json();
   expect(tree.items.map((n) => n.name)).toContain("Balcony Box");
 });

@@ -7,6 +7,7 @@
 // custom widget.
 
 import { get } from "./api.js";
+import { openLocationManager } from "./location-modal.js";
 
 const NBSP = String.fromCharCode(0xa0);
 
@@ -76,5 +77,59 @@ export function refreshLocationOptions(select, locations, keepValue = select.val
   appendLocationOptions(select, locations);
   if ([...select.options].some((option) => option.value === keepValue)) {
     select.value = keepValue;
+  }
+}
+
+/**
+ * openLocationField is what a location field's "+ New location" trigger
+ * calls: open js/location-modal.js, then refresh every currently open
+ * location field from a single GET once it resolves — never one request per
+ * field (docs/specs/26-location-quick-create.md). Shared by
+ * js/pages/review.js and js/pages/shopping-list.js, the two page modules
+ * with a location field to attach this trigger to (09's consume-review.js
+ * has none — see docs/specs/26-location-quick-create.md's "Scope").
+ *
+ * @param {Object} args
+ * @param {string} args.storageId
+ * @param {HTMLButtonElement} args.trigger - disabled for the duration of the
+ *   modal. Without this, a second click before the first dialog closes would
+ *   open a second one stacked on top of it — openLocationManager returns a
+ *   promise the caller never awaits before the user can click again.
+ * @param {HTMLSelectElement} args.openedSelect - the field whose trigger this
+ *   is; preselected once resolved, but only when exactly one location was
+ *   created (docs/specs/26-location-quick-create.md).
+ * @param {() => HTMLSelectElement[]} args.getOpenSelects - returns every
+ *   currently open location field to refresh, called after the modal closes
+ *   so a page's own state since the trigger was clicked (e.g. a
+ *   meanwhile-resolved shopping-list line) is reflected.
+ * @param {(message: string) => void} args.onError - shown only if the
+ *   post-close refresh itself fails; a location the user just created can
+ *   still exist server-side even though this call never sees it.
+ */
+export async function openLocationField({ storageId, trigger, openedSelect, getOpenSelects, onError }) {
+  if (trigger.disabled) return; // a dialog for this trigger is already open
+  trigger.disabled = true;
+  let createdIds;
+  try {
+    ({ createdIds } = await openLocationManager(storageId));
+  } finally {
+    trigger.disabled = false;
+  }
+
+  let locations;
+  try {
+    locations = await fetchLocations(storageId);
+  } catch {
+    onError(
+      createdIds.length > 0
+        ? "A location was created, but the list could not be refreshed. Reload the page to see it."
+        : "Could not reach the server. Check your connection and try again.",
+    );
+    return;
+  }
+
+  const preselect = createdIds.length === 1 ? createdIds[0] : null;
+  for (const select of getOpenSelects()) {
+    refreshLocationOptions(select, locations, select === openedSelect && preselect ? preselect : select.value);
   }
 }

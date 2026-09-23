@@ -16,6 +16,8 @@ const SHELF_JOB = "00000000-0000-7000-8000-000000000070";
 const PRODUCT_JOB = "00000000-0000-7000-8000-000000000071";
 const LOOK_ONLY_JOB = "00000000-0000-7000-8000-000000000072";
 const LOCATION_MODAL_JOB = "00000000-0000-7000-8000-000000000074";
+const ZERO_LOCATIONS_JOB = "00000000-0000-7000-8000-000000000075";
+const ZERO_LOCATIONS_HOUSEHOLD = "00000000-0000-7000-8000-000000000012"; // "E2E Admin Household"
 const TOMATOES = "00000000-0000-7000-8000-000000000040";
 const PANTRY = "00000000-0000-7000-8000-000000000020";
 
@@ -320,8 +322,6 @@ test("a location can be created from the review screen without leaving it, refre
   });
   await dialog.getByRole("button", { name: "Done" }).click();
   await expect(dialog).toBeHidden();
-  expect(getCalls).toBe(1);
-  await page.unroute(`**/api/storages/${HOUSEHOLD}/locations`);
 
   // Preselected in the field whose trigger opened the modal…
   await expect(first.locator('[data-role="location"] option', { hasText: "Loft Shelf" })).toHaveCount(1);
@@ -332,6 +332,11 @@ test("a location can be created from the review screen without leaving it, refre
   await expect(second.locator('[data-role="location"]')).toHaveValue("");
   await expect(second.locator('[data-role="quantity"]')).toHaveValue("9");
 
+  // Only now that both rows are confirmed refreshed: exactly one GET did it,
+  // never one request per open field.
+  expect(getCalls).toBe(1);
+  await page.unroute(`**/api/storages/${HOUSEHOLD}/locations`);
+
   // Cancelling (Esc), with nothing created, leaves the selection exactly as
   // it was.
   const beforeCancel = await second.locator('[data-role="location"]').inputValue();
@@ -340,4 +345,40 @@ test("a location can be created from the review screen without leaving it, refre
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog", { name: "Locations" })).toBeHidden();
   await expect(second.locator('[data-role="location"]')).toHaveValue(beforeCancel);
+});
+
+// docs/specs/26-location-quick-create.md's first acceptance criterion, for
+// `06` review specifically: "in a storage with zero locations ... the user
+// opens the modal, creates a root location, closes the modal, and that
+// location is immediately selectable — no page reload." The test above
+// covers the *second* bullet (an already-populated tree); this one starts
+// from "E2E Admin Household", the one seeded storage with no locations at
+// all, so the placeholder-only select, the empty-tree message inside the
+// modal, and setupLocation's option handling with nothing already appended
+// are all exercised from a genuine cold start.
+test("a location can be created from the review screen in a storage with zero locations", async ({ page }) => {
+  const login = await page.request.post("/api/auth/login", {
+    data: { username: "e2e-admin-2", password: "e2e-fixture-password" },
+  });
+  expect(login.status()).toBe(200);
+
+  await page.goto(`/review.html?storage=${ZERO_LOCATIONS_HOUSEHOLD}&job=${ZERO_LOCATIONS_JOB}`);
+  const row = page.locator("#rows .review-row").first();
+  await expect(row).toBeVisible();
+  await expect(row.locator('[data-role="location"] option')).toHaveCount(1); // the placeholder alone
+
+  await row.locator('[data-role="location-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(dialog).toContainText("No locations yet");
+
+  await dialog.getByRole("button", { name: "Add top-level location" }).click();
+  await dialog.locator('input[aria-label="Name of the new top-level location"]').fill("Hall Closet");
+  await dialog.locator("#location-modal-add-root-form button[type=submit]").click();
+  await expect(dialog).toContainText("Hall Closet");
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeHidden();
+
+  // Immediately selectable — no reload.
+  await expect(row.locator('[data-role="location"] option', { hasText: "Hall Closet" })).toHaveCount(1);
+  await expect(row.locator('[data-role="location"]')).not.toHaveValue("");
 });
