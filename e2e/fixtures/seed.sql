@@ -155,12 +155,25 @@ ON CONFLICT (id) DO NOTHING;
 -- fixtures. The last two back the cross-storage-target rejection scenario:
 -- "E2E Other Household" (...011, below) already has a location of its own
 -- (Garage, ...022) to send as a foreign target_location_id/location_id.
+-- Three more, dedicated to docs/specs/28-batch-move-quick-create.md's own
+-- e2e coverage (the "+ New location" trigger on this picker, #107): one for
+-- the create-then-complete-the-split journey, one for the cancel-preserves-
+-- the-form journey, one for the create-then-complete-the-move journey (the
+-- split and move forms wire the trigger independently in products.js, each
+-- with its own `openedSelect` — a test of one says nothing about the other).
+-- Kept separate for the same one-product-per-scenario reason as the five
+-- above — the cancel scenario never submits the split itself, but it does
+-- read this row's rendered quantity, and a concurrent real split/move on a
+-- shared row would make that a race.
 INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
   ('00000000-0000-7000-8000-000000000080', '00000000-0000-7000-8000-000000000010', 'E2E Split Source', NULL, 'non_perishable', 0),
   ('00000000-0000-7000-8000-000000000081', '00000000-0000-7000-8000-000000000010', 'E2E Move Source', NULL, 'non_perishable', 0),
   ('00000000-0000-7000-8000-000000000082', '00000000-0000-7000-8000-000000000010', 'E2E Reject Source', NULL, 'non_perishable', 0),
   ('00000000-0000-7000-8000-000000000089', '00000000-0000-7000-8000-000000000010', 'E2E Cross-Storage Split Source', NULL, 'non_perishable', 0),
-  ('00000000-0000-7000-8000-00000000008a', '00000000-0000-7000-8000-000000000010', 'E2E Cross-Storage Move Source', NULL, 'non_perishable', 0)
+  ('00000000-0000-7000-8000-00000000008a', '00000000-0000-7000-8000-000000000010', 'E2E Cross-Storage Move Source', NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000090', '00000000-0000-7000-8000-000000000010', 'E2E Quick-Create Source', NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000092', '00000000-0000-7000-8000-000000000010', 'E2E Quick-Create Cancel Source', NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000096', '00000000-0000-7000-8000-000000000010', 'E2E Quick-Create Move Source', NULL, 'non_perishable', 0)
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_date, expiration_source) VALUES
@@ -168,7 +181,10 @@ INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration
   ('00000000-0000-7000-8000-000000000084', '00000000-0000-7000-8000-000000000081', '00000000-0000-7000-8000-000000000020', 2, NULL, 'derived'),
   ('00000000-0000-7000-8000-000000000085', '00000000-0000-7000-8000-000000000082', '00000000-0000-7000-8000-000000000020', 3, NULL, 'derived'),
   ('00000000-0000-7000-8000-00000000008b', '00000000-0000-7000-8000-000000000089', '00000000-0000-7000-8000-000000000020', 5, NULL, 'derived'),
-  ('00000000-0000-7000-8000-00000000008c', '00000000-0000-7000-8000-00000000008a', '00000000-0000-7000-8000-000000000020', 2, NULL, 'derived')
+  ('00000000-0000-7000-8000-00000000008c', '00000000-0000-7000-8000-00000000008a', '00000000-0000-7000-8000-000000000020', 2, NULL, 'derived'),
+  ('00000000-0000-7000-8000-000000000091', '00000000-0000-7000-8000-000000000090', '00000000-0000-7000-8000-000000000020', 6, NULL, 'derived'),
+  ('00000000-0000-7000-8000-000000000093', '00000000-0000-7000-8000-000000000092', '00000000-0000-7000-8000-000000000020', 4, NULL, 'derived'),
+  ('00000000-0000-7000-8000-000000000097', '00000000-0000-7000-8000-000000000096', '00000000-0000-7000-8000-000000000020', 3, NULL, 'derived')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
@@ -179,7 +195,10 @@ ON CONFLICT (id) DO NOTHING;
 INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
   ('00000000-0000-7000-8000-000000000086', '00000000-0000-7000-8000-000000000080', '00000000-0000-7000-8000-000000000083', 5, 'purchase', '00000000-0000-7000-8000-000000000003'),
   ('00000000-0000-7000-8000-000000000087', '00000000-0000-7000-8000-000000000081', '00000000-0000-7000-8000-000000000084', 2, 'purchase', '00000000-0000-7000-8000-000000000003'),
-  ('00000000-0000-7000-8000-000000000088', '00000000-0000-7000-8000-000000000082', '00000000-0000-7000-8000-000000000085', 3, 'purchase', '00000000-0000-7000-8000-000000000003')
+  ('00000000-0000-7000-8000-000000000088', '00000000-0000-7000-8000-000000000082', '00000000-0000-7000-8000-000000000085', 3, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000094', '00000000-0000-7000-8000-000000000090', '00000000-0000-7000-8000-000000000091', 6, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000095', '00000000-0000-7000-8000-000000000092', '00000000-0000-7000-8000-000000000093', 4, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000098', '00000000-0000-7000-8000-000000000096', '00000000-0000-7000-8000-000000000097', 3, 'purchase', '00000000-0000-7000-8000-000000000003')
 ON CONFLICT (id) DO NOTHING;
 
 -- "E2E Other Household" (...011), Alice's second storage. It held nothing at

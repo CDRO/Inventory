@@ -27,7 +27,7 @@ import { renderInboxLink } from "../inbox-badge.js";
 import { initGamification } from "../gamification.js";
 import { get, patch, post, del, ApiError } from "../api.js";
 import { fetchCategories, appendCategoryOptions } from "../category-options.js";
-import { fetchLocations, appendLocationOptions } from "../location-options.js";
+import { fetchLocations, appendLocationOptions, openLocationField } from "../location-options.js";
 import { clearChildren, el, text } from "../dom.js";
 import { openScanSheet } from "../barcode.js";
 
@@ -491,7 +491,12 @@ async function offerMerge(survivor, source) {
 }
 
 function renderStockCard(product) {
-  const rows = product.batches.map((batch) => renderBatchRow(batch));
+  // Shared across every batch row's split/move target field, so a single
+  // "+ New location" trigger refreshes all of them from one GET
+  // (docs/specs/28-batch-move-quick-create.md, matching 26's refresh
+  // contract) rather than one request per open field.
+  const locationSelects = [];
+  const rows = product.batches.map((batch) => renderBatchRow(batch, locationSelects));
 
   return el("div", { class: "card stack" }, [
     el("h3", {}, [text(`In stock: ${product.current_stock}`)]),
@@ -514,15 +519,24 @@ function renderStockCard(product) {
  * valid, because the server is the only thing holding a lock on the row and
  * therefore the only thing that actually knows (docs/specs/28 supersedes the
  * "linking to 06/08/13" reading of docs/specs/16).
+ *
+ * @param {Object} batch
+ * @param {HTMLSelectElement[]} locationSelects - every batch row's target-
+ *   location field on the currently rendered product, shared so the "+ New
+ *   location" trigger can refresh all of them from one GET
+ *   (docs/specs/28-batch-move-quick-create.md).
  */
-function renderBatchRow(batch) {
+function renderBatchRow(batch, locationSelects) {
   const locationName = locationNameFor(batch.location_id);
   const errorLine = el("div", { class: "alert", role: "alert", hidden: true });
 
-  function fail(err) {
-    errorLine.textContent =
-      err instanceof ApiError ? err.message : "Could not reach the server. Try again.";
+  function showFieldError(message) {
+    errorLine.textContent = message;
     errorLine.hidden = false;
+  }
+
+  function fail(err) {
+    showFieldError(err instanceof ApiError ? err.message : "Could not reach the server. Try again.");
   }
 
   function locationOptionsWithPlaceholder(select) {
@@ -543,12 +557,28 @@ function renderBatchRow(batch) {
   });
   const splitTarget = el("select", { "aria-label": "Split target location", "data-field": "location" });
   locationOptionsWithPlaceholder(splitTarget);
+  locationSelects.push(splitTarget);
+  const splitLocationAdd = el(
+    "button",
+    { type: "button", class: "btn btn--ghost", "data-role": "location-add" },
+    [text("+ New location")],
+  );
+  splitLocationAdd.addEventListener("click", () =>
+    openLocationField({
+      storageId,
+      trigger: splitLocationAdd,
+      openedSelect: splitTarget,
+      getOpenSelects: () => locationSelects,
+      onError: showFieldError,
+    }),
+  );
   const splitForm = el(
     "form",
     { class: "row", hidden: true, "data-role": "split-form" },
     [
       splitQuantity,
       splitTarget,
+      splitLocationAdd,
       el("button", { type: "submit", class: "btn btn--primary" }, [text("Split")]),
       el(
         "button",
@@ -577,11 +607,27 @@ function renderBatchRow(batch) {
   // from split, not a split of the full quantity.
   const moveTarget = el("select", { "aria-label": "Move target location", "data-field": "location" });
   locationOptionsWithPlaceholder(moveTarget);
+  locationSelects.push(moveTarget);
+  const moveLocationAdd = el(
+    "button",
+    { type: "button", class: "btn btn--ghost", "data-role": "location-add" },
+    [text("+ New location")],
+  );
+  moveLocationAdd.addEventListener("click", () =>
+    openLocationField({
+      storageId,
+      trigger: moveLocationAdd,
+      openedSelect: moveTarget,
+      getOpenSelects: () => locationSelects,
+      onError: showFieldError,
+    }),
+  );
   const moveForm = el(
     "form",
     { class: "row", hidden: true, "data-role": "move-form" },
     [
       moveTarget,
+      moveLocationAdd,
       el("button", { type: "submit", class: "btn btn--primary" }, [text("Move")]),
       el(
         "button",
