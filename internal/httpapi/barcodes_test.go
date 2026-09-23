@@ -585,6 +585,48 @@ func TestHotBarcodesIsTheSameForEveryCaller(t *testing.T) {
 	assert.JSONEq(t, a.Body.String(), b.Body.String())
 }
 
+// TestHotBarcodesStoreErrorIsSurfacedAsAFailure — a store failure on the read
+// goes through the same serializer as every other route, not a bespoke 200
+// with an empty list.
+func TestHotBarcodesStoreErrorIsSurfacedAsAFailure(t *testing.T) {
+	t.Parallel()
+	f := newAPIFixture(t)
+	f.barcodes.hotErr = errors.New("boom")
+
+	rec := f.do(http.MethodGet, "/api/barcodes/hot", "")
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Equal(t, "internal_error", errorCode(t, rec))
+}
+
+// TestHotBarcodesRequiresASession — session-scoped is still a gate, not an
+// open route, exactly like /api/catalog-images/{hash} beside it.
+func TestHotBarcodesRequiresASession(t *testing.T) {
+	t.Parallel()
+	f := newAPIFixture(t)
+
+	rec := f.anonymous(http.MethodGet, "/api/barcodes/hot", "")
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, "unauthorized", errorCode(t, rec))
+}
+
+// TestScanCountIncrementFailureDoesNotFailTheLookup is the other half of the
+// spec's "a failed count update must never fail the lookup itself" —
+// checked, not just structurally implied by write-then-bump ordering.
+func TestScanCountIncrementFailureDoesNotFailTheLookup(t *testing.T) {
+	t.Parallel()
+	f := newAPIFixture(t)
+	f.barcodes.lookup["4006381333931"] = &store.BarcodeLookup{
+		Product: &store.Product{ID: uuid.New(), Name: "Beans", ItemType: store.ItemLongShelfLife},
+	}
+	f.barcodes.incrementErr = errors.New("boom")
+
+	rec := f.do(http.MethodGet, f.base()+"/barcodes/4006381333931", "")
+
+	require.Equal(t, http.StatusOK, rec.Code, "a failed count update must never fail the lookup")
+}
+
 // --- the quick-log sheet ----------------------------------------------------
 
 func TestQuickLogInWritesOnConfirm(t *testing.T) {
