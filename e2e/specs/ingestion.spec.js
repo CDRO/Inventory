@@ -416,6 +416,18 @@ test("a category can be created from the review screen's new-product form, as a 
   await expect(dialog).toContainText("Canned Goods");
 
   const cannedGoods = dialog.locator(`.tree-node[data-id="${CANNED_GOODS}"]`);
+
+  // The shelf-life-rule detail beside "Canned Goods" is categories.html's
+  // own renderer (js/category-shelf-life.js), not a stripped-down copy: its
+  // label and editor behave here exactly as there. No save — mutating this
+  // shared household's shelf life would ripple into every other test that
+  // reads Canned Tomatoes' batches.
+  await expect(cannedGoods).toContainText("730 days");
+  await cannedGoods.getByRole("button", { name: "730 days" }).click();
+  await expect(cannedGoods.locator('input[type="number"]')).toHaveValue("730");
+  await cannedGoods.getByRole("button", { name: "Cancel" }).click();
+  await expect(cannedGoods).toContainText("730 days");
+
   await cannedGoods.getByRole("button", { name: "Add" }).click();
   await dialog.locator("li.row input[type=text]").fill("Frozen Goods");
   await dialog.locator("li.row").getByRole("button", { name: "Add" }).click();
@@ -426,12 +438,36 @@ test("a category can be created from the review screen's new-product form, as a 
 
   // Preselected in the field whose trigger opened the modal…
   await expect(first.locator('[data-role="new-product-category"] option', { hasText: "Frozen Goods" })).toHaveCount(1);
-  await expect(first.locator('[data-role="new-product-category"]')).not.toHaveValue("");
+  const categoryId = await first.locator('[data-role="new-product-category"]').inputValue();
+  expect(categoryId).not.toBe("");
   // …offered, but not forced, on the row that never opened it, whose own
   // edit is exactly as it was left.
   await expect(second.locator('[data-role="new-product-category"] option', { hasText: "Frozen Goods" })).toHaveCount(1);
   await expect(second.locator('[data-role="new-product-category"]')).toHaveValue("");
   await expect(second.locator('[data-role="new-product-name"]')).toHaveValue("Ground Cumin");
+
+  // Completing the row's confirm against it: the category created above
+  // travels through unchanged, on the same POST .../confirm review.js
+  // already sends — no second creation path. The confirm itself is
+  // intercepted rather than let through for real, so this job stays
+  // "never confirmed" for any other test that reuses it; the second row is
+  // rejected so it needs no location of its own.
+  await first.locator('[data-role="location"]').selectOption(PANTRY);
+  await second.locator('[data-action="reject"]').click();
+
+  let confirmBody;
+  await page.route(`**/api/storages/${HOUSEHOLD}/ingest/${LOCATION_MODAL_JOB}/confirm`, async (route) => {
+    confirmBody = route.request().postDataJSON();
+    await route.fulfill({
+      json: { batch_ids: ["00000000-0000-7000-8000-0000000000ff"], products_created: 1, locations_created: 0 },
+    });
+  });
+  await page.click("#confirm");
+  await expect(page).toHaveURL(/\/inbox\.html/);
+
+  const accepted = confirmBody.items.find((item) => item.row_id === "0");
+  expect(accepted.decision).toBe("accept");
+  expect(accepted.new_product.category_id).toBe(categoryId);
 });
 
 // docs/specs/27-category-quick-create.md's first acceptance criterion, the
