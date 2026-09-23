@@ -18,7 +18,7 @@ import "../register-sw.js";
 // photo, the same way review.html's does.
 //
 // Unlike review.js's and shopping-list.js's page modules, this one never
-// calls js/location-modal.js's openLocationManager: this screen has no
+// calls location-options.js's openLocationField: this screen has no
 // location field to attach that trigger to. Consumption only ever decrements
 // an existing batch (renderBatches below reads each one's location_id only
 // to display it), and the confirm body — {row_id, decision, product_id,

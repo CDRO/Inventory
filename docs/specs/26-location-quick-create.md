@@ -6,32 +6,34 @@ tree view, shared review component, no-build-step constraint),
 [`06-vision-shelf-ingestion.md`](06-vision-shelf-ingestion.md) (location
 CRUD endpoints, ingestion review UI),
 [`07-shopping-list-reconciliation.md`](07-shopping-list-reconciliation.md)
-(resolution UI), [`09-consumption-logging.md`](09-consumption-logging.md)
-(manual correction UI).
+(resolution UI).
 
 ## Why this spec exists
 
-Three review-style screens ask the user to attach a **location** to an item
+Two review-style screens ask the user to attach a **location** to an item
 while reviewing/resolving it: the ingestion review row
-(`06-vision-shelf-ingestion.md`), a shopping-list line's resolution
-(`07-shopping-list-reconciliation.md`), and a consumption row's manual
-correction (`09-consumption-logging.md`). All three render through one
-shared component, `js/review.js` (`05-frontend-pwa-foundations.md`).
+(`06-vision-shelf-ingestion.md`) and a shopping-list line's resolution
+(`07-shopping-list-reconciliation.md`). Both render through one shared
+component, `js/review.js` (`05-frontend-pwa-foundations.md`). A third
+screen built on the same component, `09-consumption-logging.md`'s manual
+correction, has no location field at all — consumption only ever decrements
+an existing batch, and every batch already carries a location — so it never
+had this gap to begin with; see "Scope" below.
 
 Only the ingestion confirm endpoint (`06`) accepts a location **path** and
 silently creates any node on it that doesn't exist yet. The shopping-list
-resolve endpoint and the consumption accept/correct endpoint both require an
-existing `location_id` — by design, so the same-storage id validation `06`'s
-confirm handler does ("creates any newly-referenced `locations` nodes that
-were only proposed until now") doesn't have to be reimplemented, audited,
-and kept in sync across three handlers. The consequence is that two of the
-three review screens have **no way at all** to add a location the user
-needs but hasn't created yet — not only when a storage's location tree is
-completely empty, but any time the specific node needed (a new shelf, a new
-box) doesn't exist. Today the only way out is to abandon the screen,
-navigate to `locations.html`, create it there, and start over — discarding
-every other row's edits and any in-flight upload job, because these review
-screens hold their state in memory only until "Confirm" is pressed
+resolve endpoint requires an existing `location_id` — by design, so the
+same-storage id validation `06`'s confirm handler does ("creates any
+newly-referenced `locations` nodes that were only proposed until now")
+doesn't have to be reimplemented, audited, and kept in sync across two
+handlers. The consequence is that the resolution screen has **no way at
+all** to add a location the user needs but hasn't created yet — not only
+when a storage's location tree is completely empty, but any time the
+specific node needed (a new shelf, a new box) doesn't exist. Today the only
+way out is to abandon the screen, navigate to `locations.html`, create it
+there, and start over — discarding every other row's edits and any
+in-flight upload job, because these review screens hold their state in
+memory only until "Confirm" is pressed
 (`05-frontend-pwa-foundations.md`: no client-side router, nothing persisted
 before confirm).
 
