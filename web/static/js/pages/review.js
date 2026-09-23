@@ -21,8 +21,8 @@ import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "..
 import { renderStorageSwitcher } from "../storage-switcher.js";
 import { initGamification } from "../gamification.js";
 import { ReviewList } from "../review.js";
-import { fetchLocations, appendLocationOptions } from "../location-options.js";
-import { fetchCategories, appendCategoryOptions } from "../category-options.js";
+import { fetchLocations, appendLocationOptions, openLocationField } from "../location-options.js";
+import { fetchCategories, appendCategoryOptions, openCategoryField } from "../category-options.js";
 import { fetchProducts } from "../product-options.js";
 import { get, post, del, ApiError } from "../api.js";
 import { pollJob, JobFailedError, reanalyzeJob, reanalyzeFailureMessage } from "../jobs.js";
@@ -42,6 +42,11 @@ let list = null;
 // backgroundRemoval is the job's own word on whether a picture's background
 // can be removed right now. Without it no such control is shown at all.
 let backgroundRemoval = false;
+// locations is this storage's flat tree as of the initial render, used only
+// to seed each row's location field once. A "+ New location" trigger's own
+// refresh (location-options.js's openLocationField) fetches its own fresh
+// copy directly into the affected <select>s rather than updating this one.
+let locations = [];
 /**
  * cutout is the background-removed picture made for the row, if any: which
  * source it was cut from, and its id for the confirm.
@@ -130,7 +135,7 @@ async function load() {
 }
 
 async function render(job) {
-  let locations, categories, products;
+  let categories, products;
   try {
     [locations, categories, products] = await Promise.all([
       fetchLocations(storageId),
@@ -179,7 +184,7 @@ function setupRow(el, row, proposal, locations, categories, products, hasImage) 
   qs('[data-role="confidence"]', el).textContent = `${Math.round((row.confidence || 0) * 100)}%`;
 
   setupProduct(el, row, products);
-  appendCategoryOptions(qs('[data-role="new-product-category"]', el), categories);
+  setupCategory(el, categories);
   qs('[data-role="quantity"]', el).value = String(row.quantity);
   setupLocation(el, row, proposal, locations);
 
@@ -366,6 +371,25 @@ function onCorrect(rowId, el) {
   list.markCorrected(rowId);
 }
 
+// setupCategory wires a row's new-product category field and its "+ New
+// category" trigger (docs/specs/27-category-quick-create.md), the
+// categories-kind counterpart of setupLocation below.
+function setupCategory(el, categories) {
+  const select = qs('[data-role="new-product-category"]', el);
+  appendCategoryOptions(select, categories);
+
+  const addButton = qs('[data-role="new-product-category-add"]', el);
+  addButton.addEventListener("click", () =>
+    openCategoryField({
+      storageId,
+      trigger: addButton,
+      openedSelect: select,
+      getOpenSelects: () => Array.from(rows.values(), ({ el }) => qs('[data-role="new-product-category"]', el)),
+      onError: showMessage,
+    }),
+  );
+}
+
 function setupLocation(el, row, proposal, locations) {
   const select = qs('[data-role="location"]', el);
   const placeholder = document.createElement("option");
@@ -391,6 +415,17 @@ function setupLocation(el, row, proposal, locations) {
   } else if (known(proposal.location_hint_id)) {
     select.value = proposal.location_hint_id;
   }
+
+  const addButton = qs('[data-role="location-add"]', el);
+  addButton.addEventListener("click", () =>
+    openLocationField({
+      storageId,
+      trigger: addButton,
+      openedSelect: select,
+      getOpenSelects: () => Array.from(rows.values(), ({ el }) => qs('[data-role="location"]', el)),
+      onError: showMessage,
+    }),
+  );
 }
 
 // buildItems turns the screen into the confirm body, or marks what is missing.

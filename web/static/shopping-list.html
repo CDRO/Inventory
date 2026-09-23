@@ -73,9 +73,12 @@
               <option value="non_perishable">Does not expire</option>
             </select>
           </label>
-          <label>Category
-            <select data-field="category"></select>
-          </label>
+          <div class="field">
+            <label>Category
+              <select data-field="category"></select>
+            </label>
+            <button type="button" class="btn btn--ghost" data-field="category-add">+ New category</button>
+          </div>
           <label>Keep at least
             <input type="number" data-field="min_stock" min="0" step="1" value="0">
           </label>
@@ -88,10 +91,13 @@
           Quantity
           <input type="number" data-field="quantity" min="0" step="1" value="1">
         </label>
-        <label>
-          Put it in
-          <select data-field="location"></select>
-        </label>
+        <div class="field">
+          <label>
+            Put it in
+            <select data-field="location"></select>
+          </label>
+          <button type="button" class="btn btn--ghost" data-field="location-add">+ New location</button>
+        </div>
         <button type="button" class="btn" data-action="resolve">Confirm</button>
         <button type="button" class="btn btn--ghost" data-action="dismiss">Not bought</button>
       </div>
