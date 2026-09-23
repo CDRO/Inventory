@@ -39,6 +39,7 @@ web/static/
 ├── review.html                # ingestion proposal review/confirm (06)
 ├── consume-review.html        # consumption proposal review/confirm (09)
 ├── dashboard.html             # reorder + analytics (10, 11)
+├── inventory.html             # every batch, sortable table (33)
 ├── css/
 │   ├── tokens.css             # design tokens as CSS custom properties
 │   ├── base.css               # reset, typography, layout primitives
@@ -51,6 +52,7 @@ web/static/
 │   ├── review.js              # shared proposal-review component
 │   ├── tree.js                # shared tree view (locations + categories)
 │   ├── dom.js                 # small helpers: el(), render templates, escape
+│   ├── nav.js                 # shared navigation bar + logout (34)
 │   └── pages/                 # one module per HTML page, imported by that page
 ├── vendor/                    # single-file vendored libraries (see 11)
 ├── icons/                     # PWA icons (192, 512)
@@ -99,6 +101,12 @@ link is always sufficient to describe where the user is.
   selecting one navigates to the same page with the new `?storage=` value,
   so deep links stay meaningful. Persist the last selection in
   `localStorage` and use it to resolve a page opened without `?storage=`.
+- *Amended by [`34-navigation-and-start-page.md`](34-navigation-and-start-page.md):*
+  once a storage is resolved, `storages.html` forwards (`location.replace`)
+  to that member's chosen start page, the dashboard by default, instead of
+  rendering a landing card. Every storage-scoped page renders the shared
+  navigation bar from `js/nav.js`. The picker, the header switcher's
+  same-page rule and the zero-storage path above are unchanged.
 
 ## Shared job polling (`js/jobs.js`)
 
@@ -172,10 +180,19 @@ reference tokens so urgency looks identical everywhere it appears. Layout
 uses CSS grid/flexbox; the app must be usable one-handed on a phone, since
 the primary flows start with a camera capture.
 
+Pages use `.shell` (a `40rem` column). A page whose content is a wide table
+may use the `.shell--wide` modifier (`80rem`) on both its header and its
+main element. The first such page is the inventory table,
+[`33-inventory-overview-table.md`](33-inventory-overview-table.md).
+
 ## PWA
 
 - `manifest.json` — name, icons (192px and 512px), `display: "standalone"`,
-  theme color, `start_url: "/index.html"`.
+  theme color, `start_url: "/storages.html"`. *(Amended by
+  [`34-navigation-and-start-page.md`](34-navigation-and-start-page.md); was
+  `/index.html`, which showed a signed-in user the login form on every
+  launch. A signed-out user still reaches the login form, through the `401`
+  redirect in `api.js`.)*
 - `sw.js` — hand-written service worker that caches the app shell (HTML,
   CSS, JS, icons) with a cache-first strategy and a versioned cache name
   bumped on release. It must **not** cache `/api/*` responses: there is no
@@ -243,7 +260,10 @@ developing without being imposed on every save.
   and one held by the second admin alone; the bootstrap admin and one
   ordinary user deliberately belong to **no** storage, which is the
   starting position `29-first-run-admin-guidance.md` is about), and runs
-  the browser suite against it.
+  the browser suite against it. A journey that writes state other journeys
+  would observe gets its **own** seeded user and storage, because the
+  suite runs files in parallel. Specs `32`–`35` each add such a dedicated
+  fixture.
 - The runner is a **pre-built browser-automation image pulled from a
   registry** (e.g. the official Playwright image), used as a throwaway
   test container. This does not violate the no-toolchain rule in

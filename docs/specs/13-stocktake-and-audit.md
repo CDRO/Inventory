@@ -151,6 +151,12 @@ on `locations.html` (or a dedicated `stocktake.html?location=…` deep
 link), one row per batch with a quantity stepper, an "add item" row using
 the product picker, and a single Confirm.
 
+*Amended by [`35-stocktake-entry-points.md`](35-stocktake-entry-points.md):*
+`stocktake.html` opened without `?location=` renders a location chooser
+(read-only tree, "stalest first" list) instead of an error. It is linked
+from the navigation bar, from every batch on `products.html` and from every
+row of the inventory table. The sheet and its endpoints are unchanged.
+
 ## Not scored
 
 Audit corrections deliberately earn nothing in the gamification layer —

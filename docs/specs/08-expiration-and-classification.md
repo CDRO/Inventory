@@ -219,8 +219,10 @@ rule — and would reasonably conclude the app ignores them.
 ## Sorting & filtering by urgency
 
 The inventory list view (part of `05-frontend-pwa-foundations.md`'s
-product/inventory screens) supports sorting/filtering by urgency, computed
-client-side from `expiration_date` relative to "today":
+product/inventory screens; defined as `inventory.html` in
+[`33-inventory-overview-table.md`](33-inventory-overview-table.md)) supports
+sorting/filtering by urgency, computed client-side from `expiration_date`
+relative to "today":
 
 | Urgency | Condition |
 |---|---|
