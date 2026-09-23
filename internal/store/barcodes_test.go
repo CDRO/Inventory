@@ -685,16 +685,35 @@ func TestBarcodePromptIsShownOnceUnderConcurrency(t *testing.T) {
 	// sleeping and hoping. Whichever statement blocks — the locked read or the
 	// write — it shows up here, so this works for both implementations, which
 	// is what lets the assertion below tell them apart.
+	//
+	// The predicate is narrowed to the statement under test on purpose. A bare
+	// `wait_event_type = 'Lock'` matches any backend in this database waiting
+	// on anything, so an unrelated lock elsewhere would satisfy it, the commit
+	// below would fire before this call had issued its statement at all, and
+	// the test would quietly stop discriminating between the two
+	// implementations — passing either way, which is exactly the failure the
+	// discarded eight-goroutine version had. pg_blocking_pids proves the wait
+	// is on another backend, and the query filter proves it is this call: both
+	// implementations name barcode_prompt_seen_at in whichever statement
+	// blocks.
 	require.Eventually(t, func() bool {
 		var waiting int
 		err := testPool.QueryRow(ctx, `
 			SELECT count(*) FROM pg_stat_activity
 			 WHERE datname = current_database()
-			   AND wait_event_type = 'Lock'`).Scan(&waiting)
+			   AND cardinality(pg_blocking_pids(pid)) > 0
+			   AND query ILIKE '%barcode_prompt_seen_at%'`).Scan(&waiting)
 		return err == nil && waiting > 0
-	}, 5*time.Second, 20*time.Millisecond, "the call under test never contended for the row lock")
+	}, 5*time.Second, 20*time.Millisecond,
+		"the call under test never blocked on the row lock this test holds")
 
 	require.NoError(t, blocker.Commit(ctx))
+
+	// The timestamp the competing transaction wrote, read after its commit.
+	// The call under test must leave it exactly as it is.
+	var markedAt time.Time
+	require.NoError(t, testPool.QueryRow(ctx,
+		`SELECT barcode_prompt_seen_at FROM users WHERE id = $1`, userID).Scan(&markedAt))
 
 	select {
 	case got := <-done:
@@ -705,8 +724,16 @@ func TestBarcodePromptIsShownOnceUnderConcurrency(t *testing.T) {
 		t.Fatal("MarkBarcodePromptShown never returned after the lock was released")
 	}
 
-	assert.Equal(t, 1, countRows(t, ctx,
-		`SELECT count(*) FROM users WHERE id = $1 AND barcode_prompt_seen_at IS NOT NULL`, userID))
+	// Not "seen_at is set" — the competing transaction already guaranteed that,
+	// so such an assertion would pass whatever the call under test did. What
+	// discriminates is that the value is *unchanged*: a read-then-write
+	// implementation overwrites it with its own now(), moving the moment the
+	// offer was first shown to a user who was never the first to see it.
+	var after time.Time
+	require.NoError(t, testPool.QueryRow(ctx,
+		`SELECT barcode_prompt_seen_at FROM users WHERE id = $1`, userID).Scan(&after))
+	assert.True(t, after.Equal(markedAt),
+		"the losing caller must not overwrite the moment the offer was first shown")
 }
 
 // TestTurningTheBarcodePromptOffStopsItEverywhereAndItStaysSeen — "the offer

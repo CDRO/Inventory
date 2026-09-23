@@ -263,10 +263,21 @@ INSERT INTO locations (id, storage_id, name, description) VALUES
   ('00000000-0000-7000-8000-000000000026', '00000000-0000-7000-8000-000000000014', 'Larder', 'The only shelf in the barcode household')
 ON CONFLICT (id) DO NOTHING;
 
--- One product per test in e2e/specs/barcode-recall.spec.js. They are not
--- shared: a barcode names exactly one product per storage, and the offer only
--- applies to a product that has none — so two tests reusing a product would
--- decide each other's outcome by running order.
+-- Products for e2e/specs/barcode-recall.spec.js, one per test plus one
+-- control.
+--
+-- They are kept separate because a barcode names exactly one product per
+-- storage, and the offer only applies to a product that has none — so two
+-- tests sharing a product would decide each other's outcome by running order.
+-- That file runs serially (test.describe.configure), so the hazard is order,
+-- not concurrency; it is still a hazard, and one product per test is what
+-- removes it rather than documents it.
+--
+-- 'Hand-typed Beans' is the one deliberate exception: the turn-off test only
+-- reads it through a call that is already disabled and writes nothing, and the
+-- product-page test attaches and then removes its own code. 'Control Beans'
+-- exists so the rejection test's control assertion does not become a third
+-- writer of it.
 INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
   ('00000000-0000-7000-8000-000000000048', '00000000-0000-7000-8000-000000000014', 'Recall Beans',      NULL, 'long_shelf_life', 0),
   ('00000000-0000-7000-8000-000000000049', '00000000-0000-7000-8000-000000000014', 'Claimed Beans',     NULL, 'long_shelf_life', 0),
@@ -275,7 +286,8 @@ INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) V
   ('00000000-0000-7000-8000-00000000004c', '00000000-0000-7000-8000-000000000014', 'Reoffered Beans',   NULL, 'long_shelf_life', 0),
   ('00000000-0000-7000-8000-00000000004d', '00000000-0000-7000-8000-000000000014', 'Unoffered Beans',   NULL, 'long_shelf_life', 0),
   ('00000000-0000-7000-8000-00000000004e', '00000000-0000-7000-8000-000000000014', 'Hand-typed Beans',  NULL, 'long_shelf_life', 0),
-  ('00000000-0000-7000-8000-00000000004f', '00000000-0000-7000-8000-000000000014', 'Pre-coded Beans',   NULL, 'long_shelf_life', 0)
+  ('00000000-0000-7000-8000-00000000004f', '00000000-0000-7000-8000-000000000014', 'Pre-coded Beans',   NULL, 'long_shelf_life', 0),
+  ('00000000-0000-7000-8000-000000000050', '00000000-0000-7000-8000-000000000014', 'Control Beans',     NULL, 'long_shelf_life', 0)
 ON CONFLICT (id) DO NOTHING;
 
 -- One consumption proposal (docs/specs/09-consumption-logging.md), in the

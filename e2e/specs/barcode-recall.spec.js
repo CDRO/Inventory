@@ -37,6 +37,7 @@ const REOFFERED = "00000000-0000-7000-8000-00000000004c";
 const UNOFFERED = "00000000-0000-7000-8000-00000000004d";
 const HAND_TYPED = "00000000-0000-7000-8000-00000000004e";
 const PRE_CODED = "00000000-0000-7000-8000-00000000004f";
+const CONTROL = "00000000-0000-7000-8000-000000000050";
 
 const RECALL_CODE = "4006381333931";
 const CONFLICT_CODE = "5449000000996";
@@ -238,7 +239,11 @@ test("a product that already has a barcode is never offered another", async ({ p
   // The control: the very same call, on the very same page, for a product
   // with no code, does show it. Without this the test above would also pass
   // if the offer were broken outright.
-  await showOfferFor(page, HAND_TYPED);
+  //
+  // Its own fixture product, not one another test also writes to: a control
+  // that silently stopped being code-less would turn this test green for the
+  // wrong reason.
+  await showOfferFor(page, CONTROL);
   await expect(page.locator(OFFER_DIALOG)).toBeVisible();
   await page.locator(`${OFFER_DIALOG} button`).nth(1).click();
   await expect(page.locator(OFFER_DIALOG)).toHaveCount(0);
