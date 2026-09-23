@@ -108,6 +108,8 @@ type APIStore interface {
 	StocktakeStore
 	NotificationStore
 	ExportStore
+	BarcodeStore
+	BarcodePromptStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -189,6 +191,16 @@ type Deps struct {
 	// answerable without SSH. Empty reports "dev", which is what an
 	// unstamped build is.
 	Version string
+	// BarcodeDecoder reads a printed barcode out of an uploaded photograph
+	// (docs/specs/20-barcode-recall.md's decode fallback). Nil uses the
+	// package decoder in internal/barcode, which is what the running server
+	// wants; a test substitutes one so the route's non-retention guarantee can
+	// be asserted without depending on a real photo decoding.
+	//
+	// Unlike every other optional collaborator here, a nil value does not make
+	// the route absent: there is always a decoder, because decoding is local
+	// and has no configuration to be missing.
+	BarcodeDecoder PhotoDecoder
 }
 
 // NewRouter builds the application's HTTP handler.
@@ -307,6 +319,15 @@ func NewRouter(d Deps) http.Handler {
 			ar.Get("/api/me/progress", gamification.MeProgress)
 			ar.Get("/api/me/preferences", gamification.MePreferences)
 			ar.Put("/api/me/preferences", gamification.UpdateMePreferences)
+
+			// The capture-time barcode offer's per-user preference
+			// (docs/specs/20-barcode-recall.md). Session-scoped beside
+			// /api/auth/password, not storage-scoped: the preference is the
+			// person's, and it applies in every storage they belong to.
+			barcodePrompt := NewBarcodePromptHandler(d.Store, errs)
+			ar.Get("/api/auth/barcode-prompt", barcodePrompt.Get)
+			ar.Patch("/api/auth/barcode-prompt", barcodePrompt.Patch)
+			ar.Post("/api/auth/barcode-prompt/shown", barcodePrompt.Shown)
 		})
 
 		// The admin area: the HTML page and the JSON routes it posts to, on one
@@ -371,6 +392,12 @@ func NewRouter(d Deps) http.Handler {
 			ad.Get("/api/admin/catalog", adminAPI.SearchCatalog)
 			ad.Patch("/api/admin/catalog/{id}", adminAPI.PatchCatalog)
 			ad.Delete("/api/admin/catalog/{id}", adminAPI.DeleteCatalog)
+
+			// Moderation of a wrong global barcode mapping
+			// (docs/specs/20-barcode-recall.md). Its own path rather than a
+			// sub-route of /api/admin/catalog/{id}: catalog_barcodes is keyed
+			// by the code, not by a catalog UUID, so {id} would not parse.
+			ad.Delete("/api/admin/catalog-barcodes/{barcode}", adminAPI.DeleteCatalogBarcode)
 
 			// The admin audit trail
 			// (docs/specs/18-operations-and-observability.md). Server-rendered
@@ -541,6 +568,24 @@ func NewRouter(d Deps) http.Handler {
 			// are flat.
 			exports := NewExportHandler(d.Store, d.ProductImages, errs)
 			sr.Get("/export", exports.Export)
+
+			// Barcode recall (docs/specs/20-barcode-recall.md). Membership is
+			// the whole of the access control, like everything else on this
+			// sub-router: a non-member gets the same 404 for a scanned code as
+			// for a storage that does not exist, and one storage's association
+			// is invisible to another by the (storage_id, barcode) key alone.
+			//
+			// The log route is the only write in the scan flow, and it fires
+			// on the confirm tap; the lookup above it is a read. Idempotency
+			// rides the group's middleware like every other write here.
+			barcodes := NewBarcodeHandler(d.Store, d.BarcodeDecoder, d.ImageCache, d.ProductImages, errs)
+			sr.Get("/products/{product_id}/barcodes", barcodes.ListForProduct)
+			sr.Post("/products/{product_id}/barcodes", barcodes.Associate)
+			sr.Delete("/products/{product_id}/barcodes/{barcode}", barcodes.Delete)
+			sr.Post("/barcodes/decode", barcodes.DecodePhoto)
+			sr.Get("/barcodes/{code}", barcodes.Lookup)
+			sr.Post("/barcodes/{code}/log", barcodes.Log)
+			sr.Post("/barcodes/{code}/product", barcodes.AcceptCatalog)
 		})
 
 		// First-run guidance (docs/specs/29-first-run-admin-guidance.md): the

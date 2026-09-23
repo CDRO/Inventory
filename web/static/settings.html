@@ -54,6 +54,19 @@
         <span id="display-name-status" class="empty-state" hidden></span>
       </div>
 
+      <!-- The capture-time barcode offer's per-user switch
+           (docs/specs/20-barcode-recall.md). This is the only place it can be
+           turned back on once dismissed, and turning it off takes no inventory
+           feature away: barcodes can still be added from any product's page. -->
+      <h4>Barcode prompt</h4>
+      <div class="field">
+        <label class="row">
+          <input type="checkbox" id="barcode-prompt-enabled">
+          Offer to scan a barcode when I add a product I have not seen before
+        </label>
+        <span id="barcode-prompt-status" class="empty-state" hidden></span>
+      </div>
+
       <h4>Change password</h4>
       <p class="empty-state">
         Changing your password signs out every other browser and paired

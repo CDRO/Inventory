@@ -35,6 +35,12 @@ const (
 	ActionSettingsUpdated      AdminAction = "settings_updated"
 	ActionCatalogEntryUpdated  AdminAction = "catalog_entry_updated"
 	ActionCatalogEntryDeleted  AdminAction = "catalog_entry_deleted"
+	// ActionCatalogBarcodeDeleted is moderation of a wrong global barcode
+	// mapping (docs/specs/20-barcode-recall.md). Its target is the barcode
+	// itself rather than a UUID — catalog_barcodes is keyed by the code — and
+	// the details carry the catalogue name the mapping pointed at, which is
+	// the only record of it that survives the delete.
+	ActionCatalogBarcodeDeleted AdminAction = "catalog_barcode_deleted"
 )
 
 // SystemActor is the actor for an audited write that no admin performed — the

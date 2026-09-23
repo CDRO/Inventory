@@ -6,6 +6,7 @@ require (
 	github.com/go-chi/chi/v5 v5.1.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.1
+	github.com/makiuchi-d/gozxing v0.1.1
 	github.com/pressly/goose/v3 v3.22.1
 	github.com/stretchr/testify v1.9.0
 	golang.org/x/crypto v0.27.0
@@ -26,5 +27,6 @@ require (
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

@@ -34,6 +34,8 @@ const resetStatus = qs("#reset-status");
 const displayNameInput = qs("#display-name");
 const displayNameSaveButton = qs("#display-name-save");
 const displayNameStatus = qs("#display-name-status");
+const barcodePromptEnabled = qs("#barcode-prompt-enabled");
+const barcodePromptStatus = qs("#barcode-prompt-status");
 const passwordForm = qs("#password-form");
 const currentPasswordInput = qs("#current-password");
 const newPasswordInput = qs("#new-password");
@@ -77,6 +79,7 @@ async function init() {
   displayNameSaveButton.addEventListener("click", saveDisplayName);
   passwordForm.addEventListener("submit", changePassword);
   loadDevices();
+  loadBarcodePrompt();
 
   const resolved = resolveStorage(me.storages);
   if (resolved == null) {
@@ -192,6 +195,45 @@ async function removeHolidayWeek(week) {
     renderHolidayWeeks();
   } catch (err) {
     showError(err);
+  }
+}
+
+// --- The capture-time barcode offer (docs/specs/20-barcode-recall.md) ---
+//
+// A per-user preference, not a per-storage one, and deliberately not a field
+// on PATCH /api/auth/me: that route's contract is display name and nothing
+// else, and it refuses an unknown field outright.
+//
+// The checkbox is left as the markup renders it until the server answers, so a
+// failed read shows no state rather than a wrong one.
+
+async function loadBarcodePrompt() {
+  try {
+    const state = await get("/api/auth/barcode-prompt");
+    barcodePromptEnabled.checked = Boolean(state.enabled);
+    barcodePromptEnabled.addEventListener("change", saveBarcodePrompt);
+  } catch {
+    // Reading a preference is not worth an error banner on a page full of
+    // other working sections; the checkbox simply stays inert.
+    barcodePromptEnabled.disabled = true;
+  }
+}
+
+async function saveBarcodePrompt() {
+  barcodePromptStatus.hidden = true;
+  barcodePromptEnabled.disabled = true;
+  try {
+    const state = await patch("/api/auth/barcode-prompt", { enabled: barcodePromptEnabled.checked });
+    barcodePromptEnabled.checked = Boolean(state.enabled);
+    barcodePromptStatus.textContent = "Saved.";
+    barcodePromptStatus.hidden = false;
+  } catch (err) {
+    // Put the checkbox back where the server still has it, so the screen never
+    // claims a preference that was not stored.
+    barcodePromptEnabled.checked = !barcodePromptEnabled.checked;
+    showError(err);
+  } finally {
+    barcodePromptEnabled.disabled = false;
   }
 }
 

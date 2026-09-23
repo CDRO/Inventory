@@ -299,6 +299,23 @@ func (f *fakeAuth) DeleteCatalogProduct(_ context.Context, actor, id uuid.UUID) 
 	return store.ErrNotFound
 }
 
+// catalogBarcodes is the fake's global barcode-hint table, keyed by code.
+// Moderating one must never reach any storage's own associations, which is
+// what the barcode tests assert against this map staying separate from
+// fakeBarcodes' own state.
+func (f *fakeAuth) DeleteCatalogBarcode(_ context.Context, actor uuid.UUID, code string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	name, ok := f.catalogBarcodes[code]
+	if !ok {
+		return store.ErrNotFound
+	}
+	delete(f.catalogBarcodes, code)
+	f.recordAudit(actor, store.ActionCatalogBarcodeDeleted, code,
+		store.AuditDetails{DisplayName: name})
+	return nil
+}
+
 // newAdminFixture is newAPIFixture with the caller promoted to admin.
 func newAdminFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 	t.Helper()

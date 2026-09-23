@@ -259,6 +259,8 @@ type fakeAPI struct {
 	*fakeStocktake
 	*fakeNotifications
 	*fakeExportStore
+	*fakeBarcodes
+	*fakeBarcodePrompt
 }
 
 // newFakeAPI builds the whole fake store around an auth fake, with every other
@@ -273,6 +275,8 @@ func newFakeAPI(auth *fakeAuth) fakeAPI {
 		fakeGamification: newFakeGamification(), fakeStocktake: &fakeStocktake{},
 		fakeNotifications: &fakeNotifications{},
 		fakeExportStore:   &fakeExportStore{},
+		fakeBarcodes:      newFakeBarcodes(),
+		fakeBarcodePrompt: newFakeBarcodePrompt(),
 	}
 }
 
@@ -306,6 +310,8 @@ type apiFixture struct {
 	notifier      *fakeNotifier
 	exports       *fakeExportStore
 	adminVision   *fakeAdminVision
+	barcodes      *fakeBarcodes
+	barcodePrompt *fakeBarcodePrompt
 	storageID     uuid.UUID
 	user          *store.User
 	session       *store.Session
@@ -331,6 +337,8 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 	notifications := &fakeNotifications{}
 	notifier := &fakeNotifier{}
 	exports := &fakeExportStore{}
+	barcodes := newFakeBarcodes()
+	barcodePrompt := newFakeBarcodePrompt()
 	user, session := auth.addUser(t, false)
 	storageID := uuid.New()
 	auth.addMember(storageID, user.ID)
@@ -361,6 +369,8 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 			fakeGamification: gamification, fakeStocktake: stocktake,
 			fakeNotifications: notifications,
 			fakeExportStore:   exports,
+			fakeBarcodes:      barcodes,
+			fakeBarcodePrompt: barcodePrompt,
 		},
 		Matcher:       matcher,
 		Images:        images,
@@ -392,6 +402,8 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 		notifier:      notifier,
 		exports:       exports,
 		adminVision:   adminVision,
+		barcodes:      barcodes,
+		barcodePrompt: barcodePrompt,
 		storageID:     storageID, user: user, session: session,
 	}
 }
@@ -483,6 +495,14 @@ func storageRoutes(base string) []struct {
 		{http.MethodPost, base + "/locations/" + id + "/stocktake", `{"batches":[]}`},
 		// Member export (docs/specs/15-backup-restore-and-export.md).
 		{http.MethodGet, base + "/export", ""},
+		// Barcode recall (docs/specs/20-barcode-recall.md).
+		{http.MethodGet, base + "/products/" + id + "/barcodes", ""},
+		{http.MethodPost, base + "/products/" + id + "/barcodes", `{"barcode":"4006381333931"}`},
+		{http.MethodDelete, base + "/products/" + id + "/barcodes/4006381333931", ""},
+		{http.MethodGet, base + "/barcodes/4006381333931", ""},
+		{http.MethodPost, base + "/barcodes/4006381333931/log", `{"direction":"out","quantity":1}`},
+		{http.MethodPost, base + "/barcodes/4006381333931/product", ""},
+		{http.MethodPost, base + "/barcodes/decode", ""},
 	}
 }
 

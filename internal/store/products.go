@@ -573,15 +573,20 @@ func (s *Store) MergeProducts(ctx context.Context, storageID, survivorID, source
 			return err
 		}
 
-		// Re-point history and references. All three must precede the DELETE
+		// Re-point history and references. All four must precede the DELETE
 		// below: shopping_list_items.matched_product_id is ON DELETE SET NULL,
 		// so a delete that ran first would silently drop the matches instead
-		// of failing.
+		// of failing — and product_barcodes.product_id is ON DELETE CASCADE,
+		// so a delete that ran first would take the source's codes with it
+		// rather than handing them to the survivor.
 		//
-		// When docs/specs/20-barcode-recall.md lands, product_barcodes.product_id
-		// is re-pointed here too — a barcode already on the survivor wins on
-		// conflict, and the source's duplicate row is dropped. That table does
-		// not exist yet, so this is the marker for where it attaches.
+		// repointBarcodes (barcodes.go) is the barcode half
+		// (docs/specs/20-barcode-recall.md): a code already on the survivor
+		// wins, and the source's duplicate row is dropped.
+		if err := repointBarcodes(ctx, tx, storageID, survivorID, sourceID); err != nil {
+			return err
+		}
+
 		batchTag, err := tx.Exec(ctx,
 			`UPDATE inventory_batches SET product_id = $1 WHERE product_id = $2`, survivorID, sourceID)
 		if err != nil {

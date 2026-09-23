@@ -233,6 +233,16 @@ test("a pasted list lands in all three match states, and each resolves", async (
   await newItem.locator('[data-action="resolve"]').click();
   await expect(lineFor(page, "smoked paprika").locator('[data-field="status"]')).toHaveText("Done");
 
+  // This line creates a product, so the capture-time offer of
+  // docs/specs/20-barcode-recall.md follows it. Dismissed here — one tap, and
+  // it writes nothing — so the rest of this journey runs against the page
+  // rather than a modal over it. That offer's own contract is asserted in
+  // e2e/specs/barcode-recall.spec.js.
+  const barcodeOffer = page.locator("dialog[aria-labelledby='barcode-offer-title']");
+  await expect(barcodeOffer).toBeVisible();
+  await barcodeOffer.getByRole("button", { name: "Not this time" }).click();
+  await expect(barcodeOffer).toHaveCount(0);
+
   for (const raw of ["sourdough bread", "milk", "smoked paprika"]) {
     const line = lineFor(page, raw);
     await expect(line.locator('[data-field="detail"]')).toContainText("Confirmed.");

@@ -31,6 +31,7 @@ import { fetchLocations, appendLocationOptions, openLocationField } from "../loc
 import { fetchCategories, appendCategoryOptions, openCategoryField } from "../category-options.js";
 import { get, post, ApiError } from "../api.js";
 import { el, text, clearChildren, qs } from "../dom.js";
+import { offerBarcodeCapture } from "../barcode-offer.js";
 
 const switcherContainer = qs("#storage-switcher");
 const errorBox = qs("#error");
@@ -471,6 +472,15 @@ async function send(node, item, body) {
   try {
     const updated = await post(`${basePath()}/${listId}/items/${item.id}/resolve`, body);
     node.replaceWith(renderItem({ ...item, ...updated, status: "resolved" }));
+    // A New Item that created a product is one of the three capture points
+    // docs/specs/20-barcode-recall.md's offer attaches to. A line that only
+    // matched an existing product created nothing, so nothing is offered.
+    if (updated.product_created && updated.matched_product?.id) {
+      await offerBarcodeCapture(storageId, {
+        productId: updated.matched_product.id,
+        productName: updated.matched_product.name || "",
+      });
+    }
   } catch (err) {
     for (const button of buttons) button.disabled = false;
     showError(err);

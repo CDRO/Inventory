@@ -270,11 +270,18 @@ func (h *IngestHandler) Confirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// created_product_ids is additive to the shape
+	// docs/specs/06-vision-shelf-ingestion.md documents, and it is there for
+	// docs/specs/20-barcode-recall.md's capture-time offer: the offer applies
+	// to a *new* product with no barcode yet, and products_created is a count,
+	// which cannot say which product that is. Every id in it is this storage's
+	// own, created by this very request.
 	writeJSON(w, http.StatusOK, struct {
-		BatchIDs         []uuid.UUID `json:"batch_ids"`
-		ProductsCreated  int         `json:"products_created"`
-		LocationsCreated int         `json:"locations_created"`
-	}{result.BatchIDs, result.ProductsCreated, result.LocationsCreated})
+		BatchIDs          []uuid.UUID `json:"batch_ids"`
+		ProductsCreated   int         `json:"products_created"`
+		CreatedProductIDs []uuid.UUID `json:"created_product_ids"`
+		LocationsCreated  int         `json:"locations_created"`
+	}{result.BatchIDs, result.ProductsCreated, result.CreatedProductIDs, result.LocationsCreated})
 }
 
 // writeProductImages cuts each requested picture out of the reviewed photo,
