@@ -32,6 +32,22 @@ const MOVE_PRODUCT = "00000000-0000-7000-8000-000000000081";
 const MOVE_BATCH = "00000000-0000-7000-8000-000000000084";
 const REJECT_PRODUCT = "00000000-0000-7000-8000-000000000082";
 const REJECT_BATCH = "00000000-0000-7000-8000-000000000085";
+const CROSS_SPLIT_PRODUCT = "00000000-0000-7000-8000-000000000089";
+const CROSS_SPLIT_BATCH = "00000000-0000-7000-8000-00000000008b";
+const CROSS_MOVE_PRODUCT = "00000000-0000-7000-8000-00000000008a";
+const CROSS_MOVE_BATCH = "00000000-0000-7000-8000-00000000008c";
+
+// "E2E Other Household" (...011) — Alice's, not Bob's — and its own Garage
+// location, used only as a target_location_id/location_id from *another*
+// storage. This is never reachable through the picker's own <select>: it is
+// built by js/location-options.js's fetchLocations against
+// GET /api/storages/{storage_id}/locations, which is scoped to the storage
+// in the URL, so the option simply never exists to click. Sent directly here
+// to prove the deployed stack still refuses it — the same guarantee
+// docs/specs/06-vision-shelf-ingestion.md gives every location id in a
+// request, and the one docs/specs/28-batch-move-quick-create.md's picker
+// acceptance criteria say this frontend leans on rather than reimplements.
+const FOREIGN_LOCATION = "00000000-0000-7000-8000-000000000022";
 
 async function logIn(page) {
   const res = await page.request.post("/api/auth/login", {
@@ -154,4 +170,31 @@ test("a split quantity the server rejects shows its message and leaves the batch
   expect(unchanged.id).toBe(REJECT_BATCH);
   expect(unchanged.quantity).toBe(3);
   expect(unchanged.location_id).toBe(PANTRY);
+});
+
+test("a target location from another storage is refused on both split and move, exactly like a nonexistent one", async ({ page }) => {
+  await logIn(page);
+
+  // Sent directly against the deployed endpoints — see FOREIGN_LOCATION's
+  // comment above for why the picker's own UI cannot produce this request.
+  const splitRes = await page.request.post(`${BASE}/inventory-batches/${CROSS_SPLIT_BATCH}/split`, {
+    data: { quantity: 1, target_location_id: FOREIGN_LOCATION },
+  });
+  expect(splitRes.status()).toBe(404);
+  expect((await splitRes.json()).error.code).toBe("not_found");
+
+  const moveRes = await page.request.patch(`${BASE}/inventory-batches/${CROSS_MOVE_BATCH}`, {
+    data: { location_id: FOREIGN_LOCATION },
+  });
+  expect(moveRes.status()).toBe(404);
+  expect((await moveRes.json()).error.code).toBe("not_found");
+
+  // Neither refusal wrote anything.
+  const splitProduct = await fetchProduct(page, CROSS_SPLIT_PRODUCT);
+  expect(splitProduct.batches).toHaveLength(1);
+  expect(splitProduct.batches[0].quantity).toBe(5);
+
+  const moveProduct = await fetchProduct(page, CROSS_MOVE_PRODUCT);
+  expect(moveProduct.batches[0].location_id).toBe(PANTRY);
+  expect(moveProduct.batches[0].quantity).toBe(2);
 });
