@@ -145,6 +145,43 @@ INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, create
   ('00000000-0000-7000-8000-000000000063', '00000000-0000-7000-8000-000000000041', '00000000-0000-7000-8000-000000000053', 3, 'purchase', '00000000-0000-7000-8000-000000000002')
 ON CONFLICT (id) DO NOTHING;
 
+-- Five products dedicated to e2e/specs/products.spec.js's batch split/move
+-- picker (docs/specs/06-vision-shelf-ingestion.md, "One batch, one location —
+-- and how to split one"; docs/specs/28-batch-move-quick-create.md). One
+-- product per scenario, each with a single batch at Pantry, so the split
+-- test's decremented source and the move test's relocated batch cannot be the
+-- same row another parallel test in this file reads — the same reasoning
+-- e2e/specs/barcode-recall.spec.js gives for its own one-product-per-test
+-- fixtures. The last two back the cross-storage-target rejection scenario:
+-- "E2E Other Household" (...011, below) already has a location of its own
+-- (Garage, ...022) to send as a foreign target_location_id/location_id.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
+  ('00000000-0000-7000-8000-000000000080', '00000000-0000-7000-8000-000000000010', 'E2E Split Source', NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000081', '00000000-0000-7000-8000-000000000010', 'E2E Move Source', NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000082', '00000000-0000-7000-8000-000000000010', 'E2E Reject Source', NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000089', '00000000-0000-7000-8000-000000000010', 'E2E Cross-Storage Split Source', NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-00000000008a', '00000000-0000-7000-8000-000000000010', 'E2E Cross-Storage Move Source', NULL, 'non_perishable', 0)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_date, expiration_source) VALUES
+  ('00000000-0000-7000-8000-000000000083', '00000000-0000-7000-8000-000000000080', '00000000-0000-7000-8000-000000000020', 5, '2031-06-15', 'user'),
+  ('00000000-0000-7000-8000-000000000084', '00000000-0000-7000-8000-000000000081', '00000000-0000-7000-8000-000000000020', 2, NULL, 'derived'),
+  ('00000000-0000-7000-8000-000000000085', '00000000-0000-7000-8000-000000000082', '00000000-0000-7000-8000-000000000020', 3, NULL, 'derived'),
+  ('00000000-0000-7000-8000-00000000008b', '00000000-0000-7000-8000-000000000089', '00000000-0000-7000-8000-000000000020', 5, NULL, 'derived'),
+  ('00000000-0000-7000-8000-00000000008c', '00000000-0000-7000-8000-00000000008a', '00000000-0000-7000-8000-000000000020', 2, NULL, 'derived')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
+  ('00000000-0000-7000-8000-00000000008d', '00000000-0000-7000-8000-000000000089', '00000000-0000-7000-8000-00000000008b', 5, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-00000000008e', '00000000-0000-7000-8000-00000000008a', '00000000-0000-7000-8000-00000000008c', 2, 'purchase', '00000000-0000-7000-8000-000000000003')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
+  ('00000000-0000-7000-8000-000000000086', '00000000-0000-7000-8000-000000000080', '00000000-0000-7000-8000-000000000083', 5, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000087', '00000000-0000-7000-8000-000000000081', '00000000-0000-7000-8000-000000000084', 2, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000088', '00000000-0000-7000-8000-000000000082', '00000000-0000-7000-8000-000000000085', 3, 'purchase', '00000000-0000-7000-8000-000000000003')
+ON CONFLICT (id) DO NOTHING;
+
 -- "E2E Other Household" (...011), Alice's second storage. It held nothing at
 -- all until now, which was enough for journey 8's non-disclosure check — Bob
 -- is refused it whether or not it has contents — but not for two others:
