@@ -209,6 +209,9 @@ across several sittings, without losing anything.
   drops the proposal and its image. Nothing is auto-deleted while
   unreviewed; a retention sweep only removes jobs already `consumed` or
   explicitly discarded (images older than 30 days in that state).
+  *Amended by [`32-inbox-discard-all.md`](32-inbox-discard-all.md):* the
+  whole inbox can also be discarded in one confirmed step, bounded by the
+  newest job the user was shown.
 - Live polling (`js/jobs.js`) is used only when the user chooses to wait
   on the upload screen. It is a convenience, never the path by which
   results are obtained.
