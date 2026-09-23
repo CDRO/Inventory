@@ -20,6 +20,7 @@ const ZERO_LOCATIONS_JOB = "00000000-0000-7000-8000-000000000075";
 const ZERO_LOCATIONS_HOUSEHOLD = "00000000-0000-7000-8000-000000000012"; // "E2E Admin Household"
 const TOMATOES = "00000000-0000-7000-8000-000000000040";
 const PANTRY = "00000000-0000-7000-8000-000000000020";
+const CANNED_GOODS = "00000000-0000-7000-8000-000000000030";
 
 // Stand-in photo bytes. The upload is refused on the model check, which runs
 // before the body is read, so these never need to be a decodable image.
@@ -381,4 +382,122 @@ test("a location can be created from the review screen in a storage with zero lo
   // Immediately selectable — no reload.
   await expect(row.locator('[data-role="location"] option', { hasText: "Hall Closet" })).toHaveCount(1);
   await expect(row.locator('[data-role="location"]')).not.toHaveValue("");
+});
+
+// docs/specs/27-category-quick-create.md: js/tree-modal.js generalized to a
+// "categories" kind, with the same "+ New category" escape hatch beside a
+// new product's category field. Reuses LOCATION_MODAL_JOB — never
+// confirmed, so it can be revisited by this test however many times it is
+// run, same as the location test above — and adds the new category as a
+// child of the seeded "Canned Goods" node, matching the acceptance
+// criterion's own example ("adds it as a child of an existing node").
+test("a category can be created from the review screen's new-product form, as a child of an existing node", async ({
+  page,
+}) => {
+  await logInAsBob(page);
+  await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOCATION_MODAL_JOB}`);
+  const rows = page.locator("#rows .review-row");
+  await expect(rows).toHaveCount(2);
+
+  const first = rows.nth(0);
+  const second = rows.nth(1);
+
+  // Neither row matched an existing product, so the new-product fields —
+  // category included — are already visible.
+  await expect(first.locator('[data-role="new-product"]')).toBeVisible();
+
+  // An edit on the row that never opens the modal — proof it survives the
+  // other row's use of it.
+  await second.locator('[data-role="new-product-name"]').fill("Ground Cumin");
+
+  await first.locator('[data-role="new-product-category-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Categories" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Canned Goods");
+
+  const cannedGoods = dialog.locator(`.tree-node[data-id="${CANNED_GOODS}"]`);
+
+  // The shelf-life-rule detail beside "Canned Goods" is categories.html's
+  // own renderer (js/category-shelf-life.js), not a stripped-down copy: its
+  // label and editor behave here exactly as there. No save — mutating this
+  // shared household's shelf life would ripple into every other test that
+  // reads Canned Tomatoes' batches.
+  await expect(cannedGoods).toContainText("730 days");
+  await cannedGoods.getByRole("button", { name: "730 days" }).click();
+  await expect(cannedGoods.locator('input[type="number"]')).toHaveValue("730");
+  await cannedGoods.getByRole("button", { name: "Cancel" }).click();
+  await expect(cannedGoods).toContainText("730 days");
+
+  await cannedGoods.getByRole("button", { name: "Add" }).click();
+  await dialog.locator("li.row input[type=text]").fill("Frozen Goods");
+  await dialog.locator("li.row").getByRole("button", { name: "Add" }).click();
+  await expect(dialog).toContainText("Frozen Goods");
+
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeHidden();
+
+  // Preselected in the field whose trigger opened the modal…
+  await expect(first.locator('[data-role="new-product-category"] option', { hasText: "Frozen Goods" })).toHaveCount(1);
+  const categoryId = await first.locator('[data-role="new-product-category"]').inputValue();
+  expect(categoryId).not.toBe("");
+  // …offered, but not forced, on the row that never opened it, whose own
+  // edit is exactly as it was left.
+  await expect(second.locator('[data-role="new-product-category"] option', { hasText: "Frozen Goods" })).toHaveCount(1);
+  await expect(second.locator('[data-role="new-product-category"]')).toHaveValue("");
+  await expect(second.locator('[data-role="new-product-name"]')).toHaveValue("Ground Cumin");
+
+  // Completing the row's confirm against it: the category created above
+  // travels through unchanged, on the same POST .../confirm review.js
+  // already sends — no second creation path. The confirm itself is
+  // intercepted rather than let through for real, so this job stays
+  // "never confirmed" for any other test that reuses it; the second row is
+  // rejected so it needs no location of its own.
+  await first.locator('[data-role="location"]').selectOption(PANTRY);
+  await second.locator('[data-action="reject"]').click();
+
+  let confirmBody;
+  await page.route(`**/api/storages/${HOUSEHOLD}/ingest/${LOCATION_MODAL_JOB}/confirm`, async (route) => {
+    confirmBody = route.request().postDataJSON();
+    await route.fulfill({
+      json: { batch_ids: ["00000000-0000-7000-8000-0000000000ff"], products_created: 1, locations_created: 0 },
+    });
+  });
+  await page.click("#confirm");
+  await expect(page).toHaveURL(/\/inbox\.html/);
+
+  const accepted = confirmBody.items.find((item) => item.row_id === "0");
+  expect(accepted.decision).toBe("accept");
+  expect(accepted.new_product.category_id).toBe(categoryId);
+});
+
+// docs/specs/27-category-quick-create.md's first acceptance criterion, the
+// same "zero" scenario the location test above covers, for categories: "E2E
+// Admin Household" has none seeded either, so the placeholder-only select
+// and the modal's empty-tree message are both exercised from a genuine cold
+// start.
+test("a category can be created from the review screen in a storage with zero categories", async ({ page }) => {
+  const login = await page.request.post("/api/auth/login", {
+    data: { username: "e2e-admin-2", password: "e2e-fixture-password" },
+  });
+  expect(login.status()).toBe(200);
+
+  await page.goto(`/review.html?storage=${ZERO_LOCATIONS_HOUSEHOLD}&job=${ZERO_LOCATIONS_JOB}`);
+  const row = page.locator("#rows .review-row").first();
+  await expect(row).toBeVisible();
+  await expect(row.locator('[data-role="new-product-category"] option')).toHaveCount(1); // "No category" alone
+
+  await row.locator('[data-role="new-product-category-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Categories" });
+  await expect(dialog).toContainText("No categories yet");
+
+  await dialog.getByRole("button", { name: "Add top-level category" }).click();
+  await dialog.locator('input[aria-label="Name of the new top-level category"]').fill("Games");
+  await dialog.locator("#category-modal-add-root-form button[type=submit]").click();
+  await expect(dialog).toContainText("Games");
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeHidden();
+
+  // Immediately selectable — no reload.
+  await expect(row.locator('[data-role="new-product-category"] option', { hasText: "Games" })).toHaveCount(1);
+  await expect(row.locator('[data-role="new-product-category"]')).not.toHaveValue("");
 });
