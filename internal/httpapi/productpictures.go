@@ -154,6 +154,23 @@ func (p productPictures) cardImageURL(ctx context.Context, storageID uuid.UUID, 
 	return &url
 }
 
+// catalogImageURL is cardImageURL's non-storage-scoped twin, for a response
+// that is the same for every caller regardless of which storage they are
+// acting in (docs/specs/24-barcode-hot-cache.md's hot-cache list). The
+// provider URL itself still never reaches a browser — only the address of our
+// own cached copy does.
+func (p productPictures) catalogImageURL(ctx context.Context, source *string) *string {
+	if source == nil || p.cache == nil {
+		return nil
+	}
+	hash, err := p.cache.Fetch(ctx, *source)
+	if err != nil {
+		return nil
+	}
+	url := "/api/catalog-images/" + hash
+	return &url
+}
+
 // remove deletes pictures written for a write that did not go through. A
 // failure only leaves an unreferenced file, which is unreachable and costs
 // disk space, so it is logged rather than reported.

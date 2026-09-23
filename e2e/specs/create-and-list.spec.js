@@ -142,6 +142,23 @@ test("a product added from the dashboard appears in the reorder list", async ({ 
   await expect(confirm).toBeVisible();
   await confirm.click();
 
+  // This confirm creates a product, so the capture-time offer of
+  // docs/specs/20-barcode-recall.md follows it. This is the third of the three
+  // creation points that spec names ("created via 06, 07, or 10") and the only
+  // one reached through docs/specs/10-reorder-and-shopping-export.md, so it is
+  // asserted here: the wiring in js/pages/dashboard.js's confirmAddItem has no
+  // other test driving it through the real page, and deleting that call would
+  // otherwise leave the whole suite green.
+  //
+  // Dismissed with one tap — which writes nothing — so the reorder-list
+  // assertions below run against the page rather than a modal over it. The
+  // offer's own contract (three actions, decline, disable) belongs to
+  // e2e/specs/barcode-recall.spec.js and is not restated here.
+  const barcodeOffer = page.locator("dialog[aria-labelledby='barcode-offer-title']");
+  await expect(barcodeOffer).toBeVisible();
+  await barcodeOffer.getByRole("button", { name: "Not this time" }).click();
+  await expect(barcodeOffer).toHaveCount(0);
+
   // min_stock defaults to 1 and the new product has no batches, so current
   // stock is 0: the out-of-stock bucket by definition
   // (internal/httpapi/reorder.go's classifyReorder).

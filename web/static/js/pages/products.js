@@ -6,12 +6,14 @@ import "../register-sw.js";
 // screen" without ever specifying.
 //
 // What it owns: the edit surface (name, category, item type, min_stock, the
-// storage-local shelf-life override, the icon), the duplicate merge, and the
-// delete. What it deliberately does not own: batch editing. The batch list
-// here links to the screens that already do that
-// (docs/specs/06-vision-shelf-ingestion.md, 08, 13) rather than growing a
-// second implementation of them — which is also what
-// docs/specs/28-batch-move-quick-create.md will attach to later.
+// storage-local shelf-life override, the icon), the duplicate merge, the
+// delete, and the batch list's split/move picker
+// (docs/specs/06-vision-shelf-ingestion.md, "One batch, one location — and
+// how to split one"). The target-location field of both actions is built
+// through js/location-options.js so docs/specs/28-batch-move-quick-create.md
+// only has to attach its "+ New location" trigger. What it deliberately does
+// not own: quantity correction and expiry edits, which stay on the stocktake
+// screen (docs/specs/13-stocktake-and-audit.md).
 //
 // The "merge instead?" affordance on a rename is a **courtesy, not a server
 // rule** (spec 16 says so in as many words): the server never blocks a rename
@@ -25,7 +27,9 @@ import { renderInboxLink } from "../inbox-badge.js";
 import { initGamification } from "../gamification.js";
 import { get, patch, post, del, ApiError } from "../api.js";
 import { fetchCategories, appendCategoryOptions } from "../category-options.js";
+import { fetchLocations, appendLocationOptions, openLocationField } from "../location-options.js";
 import { clearChildren, el, text } from "../dom.js";
+import { openScanSheet } from "../barcode.js";
 
 // The server's bound (maxShelfLifeDays in internal/httpapi/expiry.go). The
 // input carries it so a browser flags an out-of-range number before a round
@@ -52,6 +56,8 @@ let storageId = null;
 let products = [];
 /** @type {{id: string, name: string, depth: number}[]} */
 let categories = [];
+/** @type {{id: string, name: string, depth: number, path: string[]}[]} */
+let locations = [];
 let selectedId = null;
 
 init();
@@ -91,6 +97,10 @@ async function init() {
 
 function basePath() {
   return `/api/storages/${storageId}/products`;
+}
+
+function batchesBasePath() {
+  return `/api/storages/${storageId}/inventory-batches`;
 }
 
 async function reload() {
@@ -158,7 +168,10 @@ async function showDetail(productId) {
 
   let product;
   try {
-    product = await get(`${basePath()}/${productId}`);
+    // Fetched together so the target-location field always reflects the
+    // current tree — including a location another tab or #107's quick-create
+    // trigger just added.
+    [product, locations] = await Promise.all([get(`${basePath()}/${productId}`), fetchLocations(storageId)]);
   } catch (err) {
     showError(err);
     return;
@@ -176,9 +189,127 @@ function renderDetail(product) {
       renderEditForm(product),
     ]),
     renderStockCard(product),
+    renderBarcodeCard(product),
     renderHistoryCard(product),
     renderDangerCard(product),
   );
+}
+
+// renderBarcodeCard is the always-available association surface of
+// docs/specs/20-barcode-recall.md: add by scanning, add by typing, and remove.
+//
+// It is unaffected by the capture-time offer's on/off preference. That
+// preference governs being *offered* a scan at capture; this is a deliberate
+// action somebody came to the product screen to perform, and turning the offer
+// off must never take a feature away.
+function renderBarcodeCard(product) {
+  const list = el("ul", { "data-role": "barcode-list" }, []);
+  const errorLine = el("div", { class: "alert", role: "alert", hidden: true });
+  const typed = el("input", {
+    type: "text",
+    id: "p-barcode",
+    inputmode: "numeric",
+    autocomplete: "off",
+    placeholder: "4006381333931",
+  });
+
+  function fail(err) {
+    errorLine.textContent =
+      err instanceof ApiError && err.code === "conflict"
+        ? "That barcode already belongs to another product here."
+        : err instanceof ApiError
+          ? err.message
+          : "Could not reach the server. Try again.";
+    errorLine.hidden = false;
+  }
+
+  async function reload() {
+    clearChildren(list);
+    let items = [];
+    try {
+      const body = await get(`${basePath()}/${product.id}/barcodes`);
+      items = Array.isArray(body?.items) ? body.items : [];
+    } catch (err) {
+      fail(err);
+      return;
+    }
+    if (items.length === 0) {
+      list.append(el("li", { class: "empty-state" }, [text("No barcode yet.")]));
+      return;
+    }
+    for (const item of items) {
+      list.append(
+        el("li", { class: "row row--between" }, [
+          text(item.barcode),
+          el(
+            "button",
+            {
+              type: "button",
+              class: "btn btn--ghost",
+              onclick: () => remove(item.barcode),
+            },
+            [text("Remove")],
+          ),
+        ]),
+      );
+    }
+  }
+
+  async function add(code) {
+    errorLine.hidden = true;
+    try {
+      await post(`${basePath()}/${product.id}/barcodes`, { barcode: code });
+      typed.value = "";
+      await reload();
+    } catch (err) {
+      fail(err);
+    }
+  }
+
+  async function remove(code) {
+    errorLine.hidden = true;
+    try {
+      await del(`${basePath()}/${product.id}/barcodes/${encodeURIComponent(code)}`);
+      await reload();
+    } catch (err) {
+      fail(err);
+    }
+  }
+
+  const form = el("form", { class: "row" }, [
+    typed,
+    el("button", { type: "submit", class: "btn" }, [text("Add")]),
+    el(
+      "button",
+      {
+        type: "button",
+        class: "btn",
+        onclick: async () => {
+          const code = await openScanSheet(storageId, { title: "Scan a barcode" });
+          if (code) await add(code);
+        },
+      },
+      [text("Scan")],
+    ),
+  ]);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const code = typed.value.trim();
+    if (code) add(code);
+  });
+
+  reload();
+
+  return el("div", { class: "card stack" }, [
+    el("h3", {}, [text("Barcodes")]),
+    el("p", { class: "muted" }, [
+      text("Scanning one of these finds this product instantly, with no photo and no AI call."),
+    ]),
+    errorLine,
+    list,
+    el("label", { for: "p-barcode" }, [text("Add a barcode")]),
+    form,
+  ]);
 }
 
 function renderPicture(product) {
@@ -360,26 +491,224 @@ async function offerMerge(survivor, source) {
 }
 
 function renderStockCard(product) {
-  const rows = product.batches.map((batch) =>
-    el("li", {}, [
-      text(`${batch.quantity} × `),
-      el("a", { href: withStorageParam(storageId, "/locations.html") }, [text("in stock")]),
-      text(batch.expiration_date ? ` — expires ${batch.expiration_date}` : " — no expiry"),
-      text(batch.expiration_source === "user" ? " (you set this)" : ""),
-    ]),
-  );
+  // Shared across every batch row's split/move target field, so a single
+  // "+ New location" trigger refreshes all of them from one GET
+  // (docs/specs/28-batch-move-quick-create.md, matching 26's refresh
+  // contract) rather than one request per open field.
+  const locationSelects = [];
+  const rows = product.batches.map((batch) => renderBatchRow(batch, locationSelects));
 
   return el("div", { class: "card stack" }, [
     el("h3", {}, [text(`In stock: ${product.current_stock}`)]),
     rows.length
-      ? el("ul", {}, rows)
+      ? el("ul", { class: "stack" }, rows)
       : el("p", { class: "empty-state" }, [text("Nothing on the shelf.")]),
     el("p", { class: "muted" }, [
-      text("Quantities, locations and expiry dates are edited on the "),
+      text("Quantity corrections and expiry edits happen on the "),
       el("a", { href: withStorageParam(storageId, "/stocktake.html") }, [text("stocktake screen")]),
       text("."),
     ]),
   ]);
+}
+
+/**
+ * renderBatchRow is one batch's line plus its split/move picker
+ * (docs/specs/06-vision-shelf-ingestion.md, "One batch, one location — and
+ * how to split one"). Both forms call the endpoints directly — no
+ * client-side check of whether the split quantity or the target location is
+ * valid, because the server is the only thing holding a lock on the row and
+ * therefore the only thing that actually knows (docs/specs/28 supersedes the
+ * "linking to 06/08/13" reading of docs/specs/16).
+ *
+ * @param {Object} batch
+ * @param {HTMLSelectElement[]} locationSelects - every batch row's target-
+ *   location field on the currently rendered product, shared so the "+ New
+ *   location" trigger can refresh all of them from one GET
+ *   (docs/specs/28-batch-move-quick-create.md).
+ */
+function renderBatchRow(batch, locationSelects) {
+  const locationName = locationNameFor(batch.location_id);
+  const errorLine = el("div", { class: "alert", role: "alert", hidden: true });
+
+  function showFieldError(message) {
+    errorLine.textContent = message;
+    errorLine.hidden = false;
+  }
+
+  function fail(err) {
+    showFieldError(err instanceof ApiError ? err.message : "Could not reach the server. Try again.");
+  }
+
+  function locationOptionsWithPlaceholder(select) {
+    select.append(el("option", { value: "" }, [text("Choose a location…")]));
+    appendLocationOptions(select, locations);
+  }
+
+  // Split: a new batch at the target, carrying the same quantity, off the
+  // current one. The server rejects a quantity at or above the source's
+  // current quantity — that request is splitting the whole batch, which is
+  // the move action below, not this one.
+  const splitQuantity = el("input", {
+    type: "number",
+    min: "1",
+    step: "1",
+    "aria-label": "Quantity to split off",
+    placeholder: "Quantity",
+  });
+  const splitTarget = el("select", { "aria-label": "Split target location", "data-field": "location" });
+  locationOptionsWithPlaceholder(splitTarget);
+  locationSelects.push(splitTarget);
+  const splitLocationAdd = el(
+    "button",
+    { type: "button", class: "btn btn--ghost", "data-role": "location-add" },
+    [text("+ New location")],
+  );
+  splitLocationAdd.addEventListener("click", () =>
+    openLocationField({
+      storageId,
+      trigger: splitLocationAdd,
+      openedSelect: splitTarget,
+      getOpenSelects: () => locationSelects,
+      onError: showFieldError,
+    }),
+  );
+  const splitForm = el(
+    "form",
+    { class: "row", hidden: true, "data-role": "split-form" },
+    [
+      splitQuantity,
+      splitTarget,
+      splitLocationAdd,
+      el("button", { type: "submit", class: "btn btn--primary" }, [text("Split")]),
+      el(
+        "button",
+        { type: "button", class: "btn btn--ghost", onclick: () => closeForms() },
+        [text("Cancel")],
+      ),
+    ],
+  );
+  splitForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const quantity = Number.parseInt(splitQuantity.value, 10);
+    if (!Number.isFinite(quantity) || !splitTarget.value) return;
+    errorLine.hidden = true;
+    try {
+      await post(`${batchesBasePath()}/${batch.id}/split`, {
+        quantity,
+        target_location_id: splitTarget.value,
+      });
+      await reload();
+    } catch (err) {
+      fail(err);
+    }
+  });
+
+  // Move: the whole batch, same id, new location_id — a different endpoint
+  // from split, not a split of the full quantity.
+  const moveTarget = el("select", { "aria-label": "Move target location", "data-field": "location" });
+  locationOptionsWithPlaceholder(moveTarget);
+  locationSelects.push(moveTarget);
+  const moveLocationAdd = el(
+    "button",
+    { type: "button", class: "btn btn--ghost", "data-role": "location-add" },
+    [text("+ New location")],
+  );
+  moveLocationAdd.addEventListener("click", () =>
+    openLocationField({
+      storageId,
+      trigger: moveLocationAdd,
+      openedSelect: moveTarget,
+      getOpenSelects: () => locationSelects,
+      onError: showFieldError,
+    }),
+  );
+  const moveForm = el(
+    "form",
+    { class: "row", hidden: true, "data-role": "move-form" },
+    [
+      moveTarget,
+      moveLocationAdd,
+      el("button", { type: "submit", class: "btn btn--primary" }, [text("Move")]),
+      el(
+        "button",
+        { type: "button", class: "btn btn--ghost", onclick: () => closeForms() },
+        [text("Cancel")],
+      ),
+    ],
+  );
+  moveForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!moveTarget.value) return;
+    errorLine.hidden = true;
+    try {
+      await patch(`${batchesBasePath()}/${batch.id}`, { location_id: moveTarget.value });
+      await reload();
+    } catch (err) {
+      fail(err);
+    }
+  });
+
+  function closeForms() {
+    splitForm.hidden = true;
+    moveForm.hidden = true;
+    errorLine.hidden = true;
+  }
+
+  const summary = el("div", { class: "row row--between" }, [
+    el("span", {}, [
+      text(`${batch.quantity} × ${locationName}`),
+      text(batch.expiration_date ? ` — expires ${batch.expiration_date}` : " — no expiry"),
+      text(batch.expiration_source === "user" ? " (you set this)" : ""),
+    ]),
+    el("div", { class: "row" }, [
+      el(
+        "button",
+        {
+          type: "button",
+          class: "btn btn--ghost",
+          "data-role": "split-toggle",
+          onclick: () => {
+            const opening = splitForm.hidden;
+            closeForms();
+            splitForm.hidden = !opening;
+          },
+        },
+        [text("Split")],
+      ),
+      el(
+        "button",
+        {
+          type: "button",
+          class: "btn btn--ghost",
+          "data-role": "move-toggle",
+          onclick: () => {
+            const opening = moveForm.hidden;
+            closeForms();
+            moveForm.hidden = !opening;
+          },
+        },
+        [text("Move")],
+      ),
+    ]),
+  ]);
+
+  return el("li", { class: "stack", "data-role": "batch-row", "data-batch-id": batch.id }, [
+    summary,
+    errorLine,
+    splitForm,
+    moveForm,
+  ]);
+}
+
+/**
+ * locationNameFor looks up a batch's current location by id against the
+ * flat tree this page already fetched. Falls back to "Unknown location"
+ * rather than throwing — a batch can briefly point at a location deleted by
+ * another member between this page's two loads.
+ */
+function locationNameFor(locationId) {
+  const match = locations.find((loc) => loc.id === locationId);
+  return match ? match.name : "Unknown location";
 }
 
 function renderHistoryCard(product) {

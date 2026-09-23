@@ -101,8 +101,24 @@ func (h *ImageHandler) Serve(w http.ResponseWriter, r *http.Request) {
 		h.errors.WriteError(w, r, Internal(errNoStorageInContext))
 		return
 	}
+	h.serveHash(w, r, chi.URLParam(r, "hash"))
+}
 
-	hash := chi.URLParam(r, "hash")
+// ServeCatalog serves GET /api/catalog-images/{hash} — the picture behind a
+// hot-cache card (docs/specs/24-barcode-hot-cache.md). Addressed without a
+// storage_id because the list it illustrates carries none: catalog_barcodes
+// and catalog_products are the same for every caller, so the picture behind
+// them is served from a path that is too, gated by RequireSession alone
+// rather than RequireStorageMember. Otherwise identical to Serve — same
+// cache, same hash validation, same immutable-content headers.
+func (h *ImageHandler) ServeCatalog(w http.ResponseWriter, r *http.Request) {
+	h.serveHash(w, r, chi.URLParam(r, "hash"))
+}
+
+// serveHash is Serve and ServeCatalog's shared body: the two differ only in
+// whether a storage_id gates the route above them, never in how the bytes
+// themselves are served.
+func (h *ImageHandler) serveHash(w http.ResponseWriter, r *http.Request, hash string) {
 	if !cacheHashPattern.MatchString(hash) {
 		// Not 400: a malformed hash names nothing, and saying so precisely
 		// would confirm what a well-formed one looks like.
@@ -131,9 +147,9 @@ func (h *ImageHandler) Serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", contentType)
 
 	// A cached suggestion is immutable: its key is the hash of its source URL
-	// and its bytes are normalized once at fetch time. Private, because the
-	// route sits behind a membership check and a shared proxy must not serve
-	// it to someone who has not passed one.
+	// and its bytes are normalized once at fetch time. Private, because both
+	// routes sit behind a session check and a shared proxy must not serve it
+	// to someone who has not passed one.
 	w.Header().Set("Cache-Control", "private, max-age=86400")
 
 	w.WriteHeader(http.StatusOK)

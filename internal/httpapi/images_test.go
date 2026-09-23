@@ -220,6 +220,104 @@ func TestImageRoutesAreBehindTheGateChain(t *testing.T) {
 	assert.Zero(t, f.images.lastQuery, "a refused caller must not cause a provider call")
 }
 
+// --- the catalog-images route (docs/specs/24-barcode-hot-cache.md) ---------
+//
+// /api/catalog-images/{hash} is Serve's non-storage-scoped twin: the picture
+// behind a hot-cache card, on the same origin, gated by session alone
+// because the list it illustrates carries no storage reference either.
+
+// TestServeCatalogImageCarriesTheHardeningHeaders mirrors
+// TestServedImagesCarryTheHardeningHeaders for the non-storage-scoped route:
+// the two share their serving logic, and the headers must too.
+func TestServeCatalogImageCarriesTheHardeningHeaders(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	f.imageData.data = []byte(`<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>`)
+	f.imageData.contentType = "image/svg+xml"
+
+	hash := strings.Repeat("b", 64)
+	rec := f.do(http.MethodGet, "/api/catalog-images/"+hash, "")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	csp := rec.Header().Get("Content-Security-Policy")
+	assert.Contains(t, csp, "default-src 'none'")
+	assert.Contains(t, csp, "sandbox")
+	assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
+	assert.Equal(t, "image/svg+xml", rec.Header().Get("Content-Type"))
+}
+
+// TestServeCatalogImageMalformedHashIs404 mirrors
+// TestAMalformedHashIs404NotATraversal for the new route.
+func TestServeCatalogImageMalformedHashIs404(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	rec := f.do(http.MethodGet, "/api/catalog-images/../../etc/passwd", "")
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Empty(t, f.imageData.touched)
+}
+
+// TestServeCatalogImageNeedsNoStorageMembership is the point of the route:
+// unlike /api/storages/{id}/images/{hash}, a caller with no storage
+// membership at all still gets the picture — the same "not storage-scoped"
+// property GET /api/barcodes/hot has, checked here for its image mechanism.
+func TestServeCatalogImageNeedsNoStorageMembership(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	f.auth.removeMember(f.storageID, f.user.ID)
+	hash := strings.Repeat("f", 64)
+
+	rec := f.do(http.MethodGet, "/api/catalog-images/"+hash, "")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+// TestServeCatalogImageRequiresASession — session-scoped is still a gate, not
+// an open route.
+func TestServeCatalogImageRequiresASession(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	rec := f.anonymous(http.MethodGet, "/api/catalog-images/"+strings.Repeat("a", 64), "")
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, "unauthorized", errorCode(t, rec))
+}
+
+// TestHotBarcodesImageURLPointsAtTheCatalogImagesRoute — the hot-cache
+// handler builds its picture address with the non-storage-scoped twin, never
+// the storage-scoped one a caller might not be allowed to use for every
+// storage they belong to.
+func TestHotBarcodesImageURLPointsAtTheCatalogImagesRoute(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	source := "https://provider.example/tomatoes.jpg"
+	f.barcodes.hot = []store.HotBarcode{{
+		Barcode: "4006381333931", DisplayName: "Canned Tomatoes",
+		ItemType: store.ItemLongShelfLife, ImageURL: &source,
+	}}
+
+	rec := f.do(http.MethodGet, "/api/barcodes/hot", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		Items []struct {
+			ImageURL *string `json:"image_url"`
+		} `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Len(t, body.Items, 1)
+	require.NotNil(t, body.Items[0].ImageURL)
+	assert.True(t, strings.HasPrefix(*body.Items[0].ImageURL, "/api/catalog-images/"),
+		"got %q", *body.Items[0].ImageURL)
+	assert.NotContains(t, *body.Items[0].ImageURL, f.storageID.String(),
+		"the address must not be scoped to whichever storage happened to ask")
+}
+
 // TestShoppingListRoutesAreBehindTheGateChain covers the other new group the
 // same way.
 func TestShoppingListRoutesAreBehindTheGateChain(t *testing.T) {

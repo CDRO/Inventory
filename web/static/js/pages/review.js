@@ -27,6 +27,7 @@ import { fetchProducts } from "../product-options.js";
 import { get, post, del, ApiError } from "../api.js";
 import { pollJob, JobFailedError, reanalyzeJob, reanalyzeFailureMessage } from "../jobs.js";
 import { qs, qsa, clearChildren } from "../dom.js";
+import { offerBarcodeCapture, offerScannedBarcode } from "../barcode-offer.js";
 
 const statusLine = qs("#status");
 const errorBox = qs("#error");
@@ -515,6 +516,12 @@ async function onConfirm() {
   setBusy(true);
   try {
     const result = await post(`/api/storages/${storageId}/ingest/${jobId}/confirm`, { items });
+    // The capture-time barcode offer, for each product this confirm brought
+    // into existence (docs/specs/20-barcode-recall.md). It runs after the
+    // write and before the navigation, which is the only moment the item is
+    // still in the user's hand; it never fails the confirm, and answering it
+    // with "not this time" costs one tap.
+    await offerBarcodesFor(result.created_product_ids || []);
     // What the server actually wrote, not what the screen asked for: the inbox
     // reports it back so a reviewer sees the outcome of their confirm.
     location.assign(
@@ -533,6 +540,44 @@ async function onConfirm() {
     } else {
       showError(err);
     }
+  }
+}
+
+// PENDING_BARCODE_PREFIX is where ingest.html parked a code this storage
+// could not resolve, keyed by the job the photo created
+// (docs/specs/20-barcode-recall.md's miss path: "its value is kept
+// client-side through the flow").
+const PENDING_BARCODE_PREFIX = "inventory:barcode-for-job:";
+
+// offerBarcodesFor runs the capture-time offer over the products this confirm
+// created.
+//
+// When the photo was taken because a scan came back unknown, and this confirm
+// identified exactly one product, that product is the one the code belongs to
+// and the offer arrives with the code already in hand. Anything else — several
+// new products, or no pending code — is the ordinary offer.
+async function offerBarcodesFor(createdIds) {
+  const pending = takePendingBarcode();
+  if (pending && createdIds.length === 1) {
+    await offerScannedBarcode(storageId, { productId: createdIds[0], code: pending });
+    return;
+  }
+  for (const id of createdIds) {
+    await offerBarcodeCapture(storageId, { productId: id });
+  }
+}
+
+// takePendingBarcode reads the parked code and removes it in the same breath:
+// it belongs to this one confirm, and a code left behind would be offered
+// again for an unrelated product later in the session.
+function takePendingBarcode() {
+  try {
+    const key = PENDING_BARCODE_PREFIX + jobId;
+    const code = sessionStorage.getItem(key);
+    sessionStorage.removeItem(key);
+    return code;
+  } catch {
+    return null;
   }
 }
 

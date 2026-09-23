@@ -1,5 +1,6 @@
 // Location pickers as plain <select> elements, for the upload and review
-// screens of docs/specs/06-vision-shelf-ingestion.md.
+// screens of docs/specs/06-vision-shelf-ingestion.md, and for the batch
+// split/move picker on products.html (docs/specs/28-batch-move-quick-create.md).
 //
 // GET /locations answers with a nested tree; a select needs a flat list. Depth
 // is shown by indentation in the option's text, so the picker stays a native
@@ -85,9 +86,13 @@ export function refreshLocationOptions(select, locations, keepValue = select.val
  * calls: open js/tree-modal.js, then refresh every currently open
  * location field from a single GET once it resolves — never one request per
  * field (docs/specs/26-location-quick-create.md). Shared by
- * js/pages/review.js and js/pages/shopping-list.js, the two page modules
- * with a location field to attach this trigger to (09's consume-review.js
- * has none — see docs/specs/26-location-quick-create.md's "Scope").
+ * js/pages/review.js and js/pages/shopping-list.js, the two review-style
+ * screens 26 was written for (09's consume-review.js has none — see
+ * docs/specs/26-location-quick-create.md's "Scope"), and by
+ * js/pages/products.js's batch split/move picker
+ * (docs/specs/28-batch-move-quick-create.md) — there, a batch row's split
+ * and move target fields both count as "open" for the refresh below, since
+ * both exist in the DOM regardless of which form is toggled visible.
  *
  * @param {Object} args
  * @param {string} args.storageId

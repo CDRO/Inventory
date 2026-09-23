@@ -114,6 +114,16 @@ test("a proposal is reviewed and confirmed into inventory", async ({ page }) => 
     await route.fulfill({ response });
   });
   await page.getByRole("button", { name: "Confirm" }).click();
+
+  // Row 1 creates a product ("Oat Milk 1L") with no barcode, so the
+  // capture-time offer of docs/specs/20-barcode-recall.md appears between the
+  // confirm and the navigation. Declining it is one tap and writes nothing —
+  // e2e/specs/barcode-recall.spec.js asserts that offer's own contract; here
+  // it is dismissed so this journey goes on testing the confirm.
+  const barcodeOffer = page.locator("dialog[aria-labelledby='barcode-offer-title']");
+  await expect(barcodeOffer).toBeVisible();
+  await barcodeOffer.getByRole("button", { name: "Not this time" }).click();
+
   await expect(page).toHaveURL(/\/inbox\.html/);
 
   // What the screen sent: every row decided, and the reviewer's edits intact —

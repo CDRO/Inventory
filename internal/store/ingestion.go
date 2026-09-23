@@ -60,9 +60,18 @@ type NewIngestLocation struct {
 
 // IngestResult is what a confirm wrote.
 type IngestResult struct {
-	BatchIDs         []uuid.UUID
-	ProductsCreated  int
-	LocationsCreated int
+	BatchIDs []uuid.UUID
+	// CreatedProductIDs are the products this confirm brought into existence,
+	// in the order the accepted rows created them.
+	//
+	// ProductsCreated is len(CreatedProductIDs) and is kept as its own field
+	// because it is the number docs/specs/06-vision-shelf-ingestion.md's
+	// response already reports. The ids were added for
+	// docs/specs/20-barcode-recall.md's capture-time offer, which has to know
+	// *which* product is new to offer a barcode for it — a count cannot say.
+	CreatedProductIDs []uuid.UUID
+	ProductsCreated   int
+	LocationsCreated  int
 }
 
 // ConfirmIngestion applies a reviewed proposal, all or nothing.
@@ -85,7 +94,7 @@ type IngestResult struct {
 //     proposal issued. A missing row is not an implicit rejection: that would
 //     be the one way an item could vanish without anyone deciding it should.
 func (s *Store) ConfirmIngestion(ctx context.Context, storageID, jobID uuid.UUID, userID *uuid.UUID, decisions []IngestDecision) (*IngestResult, error) {
-	result := &IngestResult{BatchIDs: []uuid.UUID{}}
+	result := &IngestResult{BatchIDs: []uuid.UUID{}, CreatedProductIDs: []uuid.UUID{}}
 
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
 		var status JobStatus
@@ -131,6 +140,7 @@ func (s *Store) ConfirmIngestion(ctx context.Context, storageID, jobID uuid.UUID
 			}
 			if created {
 				result.ProductsCreated++
+				result.CreatedProductIDs = append(result.CreatedProductIDs, productID)
 			}
 
 			// The model proposed a confident, single product for this row, and

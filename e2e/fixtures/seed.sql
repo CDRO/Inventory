@@ -46,7 +46,14 @@ INSERT INTO users (id, username, password_hash, display_name, is_admin) VALUES
   ('00000000-0000-7000-8000-000000000003', 'e2e-bob',    '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Bob',       false),
   ('00000000-0000-7000-8000-000000000004', 'e2e-nomad',   '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Nomad',     false),
   ('00000000-0000-7000-8000-000000000005', 'e2e-admin-2', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Second Admin', true),
-  ('00000000-0000-7000-8000-000000000006', 'e2e-casey',   '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Casey',     false)
+  ('00000000-0000-7000-8000-000000000006', 'e2e-casey',   '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Casey',     false),
+  -- Dana exists only for e2e/specs/barcode-recall.spec.js
+  -- (docs/specs/20-barcode-recall.md). The capture-time offer's state —
+  -- barcode_prompt_enabled and barcode_prompt_seen_at — is per *user*, and
+  -- that suite turns the offer off and back on again. A user shared with any
+  -- other suite would have those flips land under playwright.config.js's
+  -- fullyParallel, so Dana belongs to nothing but the storage below.
+  ('00000000-0000-7000-8000-000000000007', 'e2e-dana',    '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Dana',      false)
 ON CONFLICT DO NOTHING;
 
 -- Two storages, so the "member of storage A gets 404 for storage B"
@@ -80,7 +87,13 @@ INSERT INTO storages (id, name) VALUES
   ('00000000-0000-7000-8000-000000000010', 'E2E Household'),
   ('00000000-0000-7000-8000-000000000011', 'E2E Other Household'),
   ('00000000-0000-7000-8000-000000000012', 'E2E Admin Household'),
-  ('00000000-0000-7000-8000-000000000013', 'E2E Zero-Locations Household')
+  ('00000000-0000-7000-8000-000000000013', 'E2E Zero-Locations Household'),
+  -- "E2E Barcode Household" is the fifth storage, Dana's alone, for
+  -- docs/specs/20-barcode-recall.md. Barcodes are unique per storage by
+  -- primary key, and the suite associates, deletes and re-associates the same
+  -- code; doing that in a shared storage would collide with any other suite
+  -- that later wanted one.
+  ('00000000-0000-7000-8000-000000000014', 'E2E Barcode Household')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO storage_members (storage_id, user_id) VALUES
@@ -88,7 +101,8 @@ INSERT INTO storage_members (storage_id, user_id) VALUES
   ('00000000-0000-7000-8000-000000000010', '00000000-0000-7000-8000-000000000003'), -- Bob: household
   ('00000000-0000-7000-8000-000000000011', '00000000-0000-7000-8000-000000000002'), -- Alice: other household too, for the switcher journey
   ('00000000-0000-7000-8000-000000000012', '00000000-0000-7000-8000-000000000005'), -- Second admin: their own, so an admin with a storage is not a special case of someone else's
-  ('00000000-0000-7000-8000-000000000013', '00000000-0000-7000-8000-000000000006')  -- Casey: zero-locations household, and nothing else
+  ('00000000-0000-7000-8000-000000000013', '00000000-0000-7000-8000-000000000006'), -- Casey: zero-locations household, and nothing else
+  ('00000000-0000-7000-8000-000000000014', '00000000-0000-7000-8000-000000000007')  -- Dana: barcode household, and nothing else
 ON CONFLICT DO NOTHING;
 
 INSERT INTO locations (id, storage_id, name, description) VALUES
@@ -129,6 +143,62 @@ ON CONFLICT (id) DO NOTHING;
 INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
   ('00000000-0000-7000-8000-000000000062', '00000000-0000-7000-8000-000000000041', '00000000-0000-7000-8000-000000000052', 4, 'purchase', '00000000-0000-7000-8000-000000000002'),
   ('00000000-0000-7000-8000-000000000063', '00000000-0000-7000-8000-000000000041', '00000000-0000-7000-8000-000000000053', 3, 'purchase', '00000000-0000-7000-8000-000000000002')
+ON CONFLICT (id) DO NOTHING;
+
+-- Five products dedicated to e2e/specs/products.spec.js's batch split/move
+-- picker (docs/specs/06-vision-shelf-ingestion.md, "One batch, one location —
+-- and how to split one"; docs/specs/28-batch-move-quick-create.md). One
+-- product per scenario, each with a single batch at Pantry, so the split
+-- test's decremented source and the move test's relocated batch cannot be the
+-- same row another parallel test in this file reads — the same reasoning
+-- e2e/specs/barcode-recall.spec.js gives for its own one-product-per-test
+-- fixtures. The last two back the cross-storage-target rejection scenario:
+-- "E2E Other Household" (...011, below) already has a location of its own
+-- (Garage, ...022) to send as a foreign target_location_id/location_id.
+-- Three more, dedicated to docs/specs/28-batch-move-quick-create.md's own
+-- e2e coverage (the "+ New location" trigger on this picker, #107): one for
+-- the create-then-complete-the-split journey, one for the cancel-preserves-
+-- the-form journey, one for the create-then-complete-the-move journey (the
+-- split and move forms wire the trigger independently in products.js, each
+-- with its own `openedSelect` — a test of one says nothing about the other).
+-- Kept separate for the same one-product-per-scenario reason as the five
+-- above — the cancel scenario never submits the split itself, but it does
+-- read this row's rendered quantity, and a concurrent real split/move on a
+-- shared row would make that a race.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
+  ('00000000-0000-7000-8000-000000000080', '00000000-0000-7000-8000-000000000010', 'E2E Split Source', NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000081', '00000000-0000-7000-8000-000000000010', 'E2E Move Source', NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000082', '00000000-0000-7000-8000-000000000010', 'E2E Reject Source', NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000089', '00000000-0000-7000-8000-000000000010', 'E2E Cross-Storage Split Source', NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-00000000008a', '00000000-0000-7000-8000-000000000010', 'E2E Cross-Storage Move Source', NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000090', '00000000-0000-7000-8000-000000000010', 'E2E Quick-Create Source', NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000092', '00000000-0000-7000-8000-000000000010', 'E2E Quick-Create Cancel Source', NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000096', '00000000-0000-7000-8000-000000000010', 'E2E Quick-Create Move Source', NULL, 'non_perishable', 0)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_date, expiration_source) VALUES
+  ('00000000-0000-7000-8000-000000000083', '00000000-0000-7000-8000-000000000080', '00000000-0000-7000-8000-000000000020', 5, '2031-06-15', 'user'),
+  ('00000000-0000-7000-8000-000000000084', '00000000-0000-7000-8000-000000000081', '00000000-0000-7000-8000-000000000020', 2, NULL, 'derived'),
+  ('00000000-0000-7000-8000-000000000085', '00000000-0000-7000-8000-000000000082', '00000000-0000-7000-8000-000000000020', 3, NULL, 'derived'),
+  ('00000000-0000-7000-8000-00000000008b', '00000000-0000-7000-8000-000000000089', '00000000-0000-7000-8000-000000000020', 5, NULL, 'derived'),
+  ('00000000-0000-7000-8000-00000000008c', '00000000-0000-7000-8000-00000000008a', '00000000-0000-7000-8000-000000000020', 2, NULL, 'derived'),
+  ('00000000-0000-7000-8000-000000000091', '00000000-0000-7000-8000-000000000090', '00000000-0000-7000-8000-000000000020', 6, NULL, 'derived'),
+  ('00000000-0000-7000-8000-000000000093', '00000000-0000-7000-8000-000000000092', '00000000-0000-7000-8000-000000000020', 4, NULL, 'derived'),
+  ('00000000-0000-7000-8000-000000000097', '00000000-0000-7000-8000-000000000096', '00000000-0000-7000-8000-000000000020', 3, NULL, 'derived')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
+  ('00000000-0000-7000-8000-00000000008d', '00000000-0000-7000-8000-000000000089', '00000000-0000-7000-8000-00000000008b', 5, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-00000000008e', '00000000-0000-7000-8000-00000000008a', '00000000-0000-7000-8000-00000000008c', 2, 'purchase', '00000000-0000-7000-8000-000000000003')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
+  ('00000000-0000-7000-8000-000000000086', '00000000-0000-7000-8000-000000000080', '00000000-0000-7000-8000-000000000083', 5, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000087', '00000000-0000-7000-8000-000000000081', '00000000-0000-7000-8000-000000000084', 2, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000088', '00000000-0000-7000-8000-000000000082', '00000000-0000-7000-8000-000000000085', 3, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000094', '00000000-0000-7000-8000-000000000090', '00000000-0000-7000-8000-000000000091', 6, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000095', '00000000-0000-7000-8000-000000000092', '00000000-0000-7000-8000-000000000093', 4, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000098', '00000000-0000-7000-8000-000000000096', '00000000-0000-7000-8000-000000000097', 3, 'purchase', '00000000-0000-7000-8000-000000000003')
 ON CONFLICT (id) DO NOTHING;
 
 -- "E2E Other Household" (...011), Alice's second storage. It held nothing at
@@ -237,6 +307,48 @@ INSERT INTO jobs (id, storage_id, kind, status, payload, created_by) VALUES
        "location":{"path":[],"location_id":null}}
    ]}',
    '00000000-0000-7000-8000-000000000005')
+ON CONFLICT (id) DO NOTHING;
+
+-- "E2E Barcode Household" (...014), Dana's alone
+-- (docs/specs/20-barcode-recall.md). One location to stock into and two
+-- products: one the suite attaches a code to, one for the 409 that proves a
+-- code names exactly one product per storage. Neither carries a catalog_id, so
+-- associating a code here writes no global catalog_barcodes row and cannot
+-- affect any other suite.
+INSERT INTO locations (id, storage_id, name, description) VALUES
+  ('00000000-0000-7000-8000-000000000026', '00000000-0000-7000-8000-000000000014', 'Larder', 'The only shelf in the barcode household')
+ON CONFLICT (id) DO NOTHING;
+
+-- Products for e2e/specs/barcode-recall.spec.js, one per test plus one
+-- control.
+--
+-- They are kept separate because a barcode names exactly one product per
+-- storage, and the offer only applies to a product that has none — so two
+-- tests sharing a product would decide each other's outcome by running order.
+-- That file runs serially (test.describe.configure), so the hazard is order,
+-- not concurrency; it is still a hazard, and one product per test is what
+-- removes it rather than documents it.
+--
+-- 'Hand-typed Beans' is the one deliberate exception: the turn-off test only
+-- reads it through a call that is already disabled and writes nothing, and the
+-- product-page test attaches and then removes its own code. 'Control Beans'
+-- exists so the rejection test's control assertion does not become a third
+-- writer of it.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
+  ('00000000-0000-7000-8000-000000000048', '00000000-0000-7000-8000-000000000014', 'Recall Beans',      NULL, 'long_shelf_life', 0),
+  ('00000000-0000-7000-8000-000000000049', '00000000-0000-7000-8000-000000000014', 'Claimed Beans',     NULL, 'long_shelf_life', 0),
+  ('00000000-0000-7000-8000-00000000004a', '00000000-0000-7000-8000-000000000014', 'Rival Beans',       NULL, 'long_shelf_life', 0),
+  ('00000000-0000-7000-8000-00000000004b', '00000000-0000-7000-8000-000000000014', 'Offered Beans',     NULL, 'long_shelf_life', 0),
+  ('00000000-0000-7000-8000-00000000004c', '00000000-0000-7000-8000-000000000014', 'Reoffered Beans',   NULL, 'long_shelf_life', 0),
+  ('00000000-0000-7000-8000-00000000004d', '00000000-0000-7000-8000-000000000014', 'Unoffered Beans',   NULL, 'long_shelf_life', 0),
+  ('00000000-0000-7000-8000-00000000004e', '00000000-0000-7000-8000-000000000014', 'Hand-typed Beans',  NULL, 'long_shelf_life', 0),
+  ('00000000-0000-7000-8000-00000000004f', '00000000-0000-7000-8000-000000000014', 'Pre-coded Beans',   NULL, 'long_shelf_life', 0),
+  ('00000000-0000-7000-8000-000000000050', '00000000-0000-7000-8000-000000000014', 'Control Beans',     NULL, 'long_shelf_life', 0),
+  -- For e2e/specs/barcode-hot-cache.spec.js (docs/specs/24-barcode-hot-cache.md):
+  -- one product the authoritative lookup resolves to, and one the "empty
+  -- cache degrades to spec 20 unchanged" test scans with nothing seeded.
+  ('00000000-0000-7000-8000-000000000051', '00000000-0000-7000-8000-000000000014', 'Hot Cache Preview Beans',  NULL, 'long_shelf_life', 0),
+  ('00000000-0000-7000-8000-000000000052', '00000000-0000-7000-8000-000000000014', 'Hot Cache Fallback Beans', NULL, 'long_shelf_life', 0)
 ON CONFLICT (id) DO NOTHING;
 
 -- One consumption proposal (docs/specs/09-consumption-logging.md), in the

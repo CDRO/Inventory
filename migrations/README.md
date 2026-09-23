@@ -31,10 +31,13 @@ Two details in that command are load-bearing:
 | `00007_gamification_quests.sql` | `quests`, `quest_contributors`, plus `clean_since`/`well_stocked_since` on `storage_gamification_settings` — weekly quests and the clean-storage/well-stocked milestones of [`docs/specs/52-gamification-quests-and-ui.md`](../docs/specs/52-gamification-quests-and-ui.md) |
 | `00008_stocktake.sql` | `locations.last_audited_at` — the "when was this shelf last walked" timestamp of [`docs/specs/13-stocktake-and-audit.md`](../docs/specs/13-stocktake-and-audit.md) |
 | `00009_notifications.sql` | `notification_settings` — the per-storage, opt-in expiry digest configuration of [`docs/specs/17-expiry-notifications.md`](../docs/specs/17-expiry-notifications.md) |
+| `00010_admin_audit_log.sql` | `admin_audit_log` — the append-only record of admin actions in [`docs/specs/18-operations-and-observability.md`](../docs/specs/18-operations-and-observability.md) |
+| `00011_barcodes.sql` | `product_barcodes`, `catalog_barcodes`, and the two `users` columns behind the capture-time offer in [`docs/specs/20-barcode-recall.md`](../docs/specs/20-barcode-recall.md) |
+| `00012_barcode_hot_cache.sql` | `catalog_barcodes.scan_count` — the instance-wide scan popularity counter behind the client's hot-cache preview in [`docs/specs/24-barcode-hot-cache.md`](../docs/specs/24-barcode-hot-cache.md) |
 
 Every file carries both `-- +goose Up` and `-- +goose Down`, and the down path
-is exercised in CI-equivalent form: `down` nine times empties the schema and
-`up` restores all twenty-seven tables.
+is exercised in CI-equivalent form: stepping `down` once per migration empties
+the schema, and `up` restores every table.
 
 `00001`'s down step deliberately does **not** drop the extension. Other schemas
 in the same database may depend on `pg_trgm`, and dropping it would take their
