@@ -21,13 +21,9 @@ import { renderStorageSwitcher } from "../storage-switcher.js";
 import { renderInboxLink } from "../inbox-badge.js";
 import { initGamification } from "../gamification.js";
 import { TreeView } from "../tree.js";
+import { createShelfLifeDetail, resolveInheritance } from "../category-shelf-life.js";
 import { get, post, patch, ApiError } from "../api.js";
 import { clearChildren, el, text } from "../dom.js";
-
-// The server's bound (maxShelfLifeDays in internal/httpapi/expiry.go). The
-// input carries it so a browser flags an out-of-range number before a round
-// trip; the server still decides.
-const MAX_SHELF_LIFE_DAYS = 36500;
 
 const switcherContainer = document.querySelector("#storage-switcher");
 const treeContainer = document.querySelector("#tree");
@@ -85,7 +81,12 @@ async function init() {
     // parent_id is sent explicitly, including as null — "make this a root" —
     // for the reason locations.js's moveLocation gives.
     onMove: (id, newParentId) => runMutation(() => patch(`${basePath()}/${id}`, { parent_id: newParentId })),
-    renderDetail: renderShelfLife,
+    renderDetail: createShelfLifeDetail({
+      basePath,
+      runMutation,
+      showStatus,
+      getInherited: () => inherited,
+    }),
   });
 
   addRootButton.addEventListener("click", showAddRootForm);
@@ -138,101 +139,6 @@ function createCategory(parentId, name) {
   return post(basePath(), { name, parent_id: parentId });
 }
 
-/**
- * renderShelfLife draws one node's rule as a button that opens its editor.
- * The label always says which rule is in force, so an inheriting node is
- * never mistaken for one with no expiry at all.
- *
- * @param {import("../tree.js").TreeNode & {default_shelf_life_days: number|null}} node
- */
-function renderShelfLife(node) {
-  const wrapper = el("span", { class: "tree-detail" });
-  const button = el(
-    "button",
-    {
-      type: "button",
-      class: "btn btn--ghost tree-shelf-life",
-      title: `Edit the shelf life of ${node.name}`,
-      onclick: () => openShelfLifeEditor(node, wrapper),
-    },
-    [text(shelfLifeLabel(node))],
-  );
-  wrapper.append(button);
-  return wrapper;
-}
-
-function shelfLifeLabel(node) {
-  if (node.default_shelf_life_days != null) {
-    return days(node.default_shelf_life_days);
-  }
-  const rule = inherited.get(node.id);
-  if (rule) {
-    return `${days(rule.days)} (from ${rule.from})`;
-  }
-  // Nothing above sets a rule: the product's item type decides
-  // (docs/specs/08-expiration-and-classification.md, step 5).
-  return "By item type";
-}
-
-function days(n) {
-  return n === 1 ? "1 day" : `${n} days`;
-}
-
-// openShelfLifeEditor swaps the label for a small inline form. An empty field
-// means "inherit", which is sent as null — a different statement from 0,
-// which would mean "expires the day it arrives".
-function openShelfLifeEditor(node, wrapper) {
-  const input = el("input", {
-    type: "number",
-    min: "0",
-    max: String(MAX_SHELF_LIFE_DAYS),
-    step: "1",
-    inputmode: "numeric",
-    class: "tree-shelf-life-input",
-    "aria-label": `Shelf life of ${node.name} in days; leave empty to inherit`,
-    placeholder: "Inherit",
-    value: node.default_shelf_life_days == null ? "" : String(node.default_shelf_life_days),
-  });
-
-  const form = el(
-    "form",
-    {
-      class: "row",
-      onsubmit: (event) => {
-        event.preventDefault();
-        if (!input.reportValidity()) return;
-        const raw = input.value.trim();
-        const value = raw === "" ? null : Number(raw);
-        runMutation(() => saveShelfLife(node, value));
-      },
-    },
-    [
-      input,
-      el("button", { type: "submit", class: "btn btn--primary" }, [text("Save")]),
-      el("button", { type: "button", class: "btn btn--ghost", onclick: () => view.render(view.nodes) }, [
-        text("Cancel"),
-      ]),
-    ],
-  );
-
-  clearChildren(wrapper);
-  wrapper.append(form);
-  input.focus();
-}
-
-async function saveShelfLife(node, value) {
-  const body = await patch(`${basePath()}/${node.id}/shelf-life`, { default_shelf_life_days: value });
-  // The count is the point of this route
-  // (docs/specs/08-expiration-and-classification.md): a person changing a
-  // rule is doing it to change dates, so say how many actually moved.
-  const moved = body.recomputed_batches;
-  showStatus(
-    moved === 0
-      ? `Saved the shelf life for ${node.name}. No existing expiry dates needed to change.`
-      : `Saved the shelf life for ${node.name}. ${moved} existing expiry ${moved === 1 ? "date was" : "dates were"} updated.`,
-  );
-}
-
 // runMutation applies one change and then re-reads the tree, redrawing from
 // the server's answer for the reasons locations.js's runMutation gives.
 async function runMutation(mutate) {
@@ -259,21 +165,6 @@ async function reload() {
   } catch (err) {
     showError(err);
   }
-}
-
-// resolveInheritance walks the tree once, carrying the nearest rule set above
-// each node, so every node's label can name the rule it falls back on.
-function resolveInheritance(roots) {
-  const out = new Map();
-  const walk = (nodes, fromAbove) => {
-    for (const node of nodes) {
-      out.set(node.id, fromAbove);
-      const own = node.default_shelf_life_days;
-      walk(node.children || [], own != null ? { days: own, from: node.name } : fromAbove);
-    }
-  };
-  walk(roots, null);
-  return out;
 }
 
 function renderEmptyTree() {

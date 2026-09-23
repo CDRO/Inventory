@@ -7,7 +7,7 @@
 // custom widget.
 
 import { get } from "./api.js";
-import { openLocationManager } from "./location-modal.js";
+import { openTreeManager } from "./tree-modal.js";
 
 const NBSP = String.fromCharCode(0xa0);
 
@@ -61,7 +61,7 @@ export function appendLocationOptions(select, locations) {
  * refreshLocationOptions replaces every option appendLocationOptions
  * previously added to select with a fresh flat list, leaving every other
  * option exactly where it was. Used by js/pages/review.js and
- * js/pages/shopping-list.js once js/location-modal.js resolves, so a field's
+ * js/pages/shopping-list.js once js/tree-modal.js resolves, so a field's
  * placeholder or proposed-path option and its current selection survive a
  * tree that just changed underneath it (docs/specs/26-location-quick-create.md).
  *
@@ -82,7 +82,7 @@ export function refreshLocationOptions(select, locations, keepValue = select.val
 
 /**
  * openLocationField is what a location field's "+ New location" trigger
- * calls: open js/location-modal.js, then refresh every currently open
+ * calls: open js/tree-modal.js, then refresh every currently open
  * location field from a single GET once it resolves — never one request per
  * field (docs/specs/26-location-quick-create.md). Shared by
  * js/pages/review.js and js/pages/shopping-list.js, the two page modules
@@ -93,7 +93,7 @@ export function refreshLocationOptions(select, locations, keepValue = select.val
  * @param {string} args.storageId
  * @param {HTMLButtonElement} args.trigger - disabled for the duration of the
  *   modal. Without this, a second click before the first dialog closes would
- *   open a second one stacked on top of it — openLocationManager returns a
+ *   open a second one stacked on top of it — openTreeManager returns a
  *   promise the caller never awaits before the user can click again.
  * @param {HTMLSelectElement} args.openedSelect - the field whose trigger this
  *   is; preselected once resolved, but only when exactly one location was
@@ -111,7 +111,7 @@ export async function openLocationField({ storageId, trigger, openedSelect, getO
   trigger.disabled = true;
   let createdIds;
   try {
-    ({ createdIds } = await openLocationManager(storageId));
+    ({ createdIds } = await openTreeManager(storageId, { kind: "locations" }));
   } finally {
     trigger.disabled = false;
   }

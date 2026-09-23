@@ -28,7 +28,7 @@ import { renderStorageSwitcher } from "../storage-switcher.js";
 import { renderInboxLink } from "../inbox-badge.js";
 import { initGamification } from "../gamification.js";
 import { fetchLocations, appendLocationOptions, openLocationField } from "../location-options.js";
-import { fetchCategories, appendCategoryOptions } from "../category-options.js";
+import { fetchCategories, appendCategoryOptions, openCategoryField } from "../category-options.js";
 import { get, post, ApiError } from "../api.js";
 import { el, text, clearChildren, qs } from "../dom.js";
 
@@ -166,7 +166,20 @@ function renderItem(item) {
     }),
   );
 
-  appendCategoryOptions(field(node, "category"), categories);
+  const categorySelect = field(node, "category");
+  appendCategoryOptions(categorySelect, categories);
+
+  const addCategoryButton = field(node, "category-add");
+  addCategoryButton.addEventListener("click", () =>
+    openCategoryField({
+      storageId,
+      trigger: addCategoryButton,
+      openedSelect: categorySelect,
+      getOpenSelects: () =>
+        Array.from(itemsContainer.querySelectorAll('[data-field="category"]')).filter((s) => !s.disabled),
+      onError: (message) => showError(new Error(message)),
+    }),
+  );
 
   renderDetail(node, item);
 

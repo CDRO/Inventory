@@ -73,9 +73,12 @@
               <option value="non_perishable">Does not expire</option>
             </select>
           </label>
-          <label>Category
-            <select data-field="category"></select>
-          </label>
+          <div class="field">
+            <label>Category
+              <select data-field="category"></select>
+            </label>
+            <button type="button" class="btn btn--ghost" data-field="category-add">+ New category</button>
+          </div>
           <label>Keep at least
             <input type="number" data-field="min_stock" min="0" step="1" value="0">
           </label>

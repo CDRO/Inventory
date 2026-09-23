@@ -22,7 +22,7 @@ import { renderStorageSwitcher } from "../storage-switcher.js";
 import { initGamification } from "../gamification.js";
 import { ReviewList } from "../review.js";
 import { fetchLocations, appendLocationOptions, openLocationField } from "../location-options.js";
-import { fetchCategories, appendCategoryOptions } from "../category-options.js";
+import { fetchCategories, appendCategoryOptions, openCategoryField } from "../category-options.js";
 import { fetchProducts } from "../product-options.js";
 import { get, post, del, ApiError } from "../api.js";
 import { pollJob, JobFailedError, reanalyzeJob, reanalyzeFailureMessage } from "../jobs.js";
@@ -184,7 +184,7 @@ function setupRow(el, row, proposal, locations, categories, products, hasImage) 
   qs('[data-role="confidence"]', el).textContent = `${Math.round((row.confidence || 0) * 100)}%`;
 
   setupProduct(el, row, products);
-  appendCategoryOptions(qs('[data-role="new-product-category"]', el), categories);
+  setupCategory(el, categories);
   qs('[data-role="quantity"]', el).value = String(row.quantity);
   setupLocation(el, row, proposal, locations);
 
@@ -369,6 +369,25 @@ function onCorrect(rowId, el) {
   name.value = "";
   name.focus();
   list.markCorrected(rowId);
+}
+
+// setupCategory wires a row's new-product category field and its "+ New
+// category" trigger (docs/specs/27-category-quick-create.md), the
+// categories-kind counterpart of setupLocation below.
+function setupCategory(el, categories) {
+  const select = qs('[data-role="new-product-category"]', el);
+  appendCategoryOptions(select, categories);
+
+  const addButton = qs('[data-role="new-product-category-add"]', el);
+  addButton.addEventListener("click", () =>
+    openCategoryField({
+      storageId,
+      trigger: addButton,
+      openedSelect: select,
+      getOpenSelects: () => Array.from(rows.values(), ({ el }) => qs('[data-role="new-product-category"]', el)),
+      onError: showMessage,
+    }),
+  );
 }
 
 function setupLocation(el, row, proposal, locations) {

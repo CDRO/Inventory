@@ -481,6 +481,65 @@ test("an ambiguous line can be treated as a new item, or entered by hand", async
   await expect(page.locator("#error")).toBeHidden();
 });
 
+// docs/specs/27-category-quick-create.md: js/tree-modal.js generalized to a
+// "categories" kind, with the same "+ New category" escape hatch beside the
+// New Item form's category field. "E2E Other Household" has no categories
+// seeded, so this also exercises the modal's empty-tree message. The resolve
+// itself is mocked (captureResolves), for the reason this file's own comment
+// above CARD gives — only the category creation and its GET/POST are real.
+//
+// A line of its own ("dried oregano leaves"), distinct from every other
+// line this file pastes: the real journey-6 test above resolves "smoked
+// paprika" for real, and fullyParallel gives no guarantee that runs before
+// or after this one — reusing its text could turn this line into an
+// exact_match against that just-created product depending on run order.
+test("a category can be created from the new-product form, without leaving the screen", async ({ page }) => {
+  let rawTextById = {};
+  const sent = await captureResolves(page, () => rawTextById);
+
+  const created = await pasteList(page, ["dried oregano leaves"]);
+  expect(created.items[0].status).toBe("new_item");
+  rawTextById = Object.fromEntries(created.items.map((item) => [item.id, item.raw_text]));
+  const line = lineFor(page, "dried oregano leaves");
+
+  // No catalog and no local match, so the new-product form is already open.
+  await expect(line.locator('[data-field="new-product"]')).toBeVisible();
+  await expect(line.locator('[data-field="category"] option')).toHaveCount(1); // "No category" alone
+
+  await line.locator('[data-field="category-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Categories" });
+  await expect(dialog).toContainText("No categories yet");
+
+  await dialog.getByRole("button", { name: "Add top-level category" }).click();
+  await dialog.locator('input[aria-label="Name of the new top-level category"]').fill("Spices");
+  await dialog.locator("#category-modal-add-root-form button[type=submit]").click();
+  await expect(dialog).toContainText("Spices");
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeHidden();
+
+  // Immediately selectable — no reload — and it is what the resolve body
+  // carries once the line is completed against it.
+  await expect(line.locator('[data-field="category"]')).not.toHaveValue("");
+  const categoryId = await line.locator('[data-field="category"]').inputValue();
+
+  await line.locator('[data-field="location"]').selectOption(GARAGE);
+  await line.locator('[data-field="name"]').fill("Dried Oregano");
+  await line.locator('[data-action="resolve"]').click();
+  await expect(line.locator('[data-field="status"]')).toHaveText("Done");
+
+  expect(sent["dried oregano leaves"]).toEqual({
+    quantity: 1,
+    location_id: GARAGE,
+    new_product: {
+      from: "manual",
+      name: "Dried Oregano",
+      item_type: "long_shelf_life",
+      min_stock: 0,
+      category_id: categoryId,
+    },
+  });
+});
+
 // docs/specs/26-location-quick-create.md: in a storage with zero locations,
 // the "+ New location" escape hatch is what makes a line resolvable at all —
 // without it "Choose a location…" would be the only option, forever.
