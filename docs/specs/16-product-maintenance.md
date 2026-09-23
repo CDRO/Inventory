@@ -71,10 +71,10 @@ One transaction:
 
 1. **Re-point history and references** from source to survivor:
    `inventory_batches.product_id`, `inventory_logs.product_id`,
-   `shopping_list_items.matched_product_id`, and — when
-   `20-barcode-recall.md` is implemented — `product_barcodes.product_id`
-   (a barcode already on the survivor wins on conflict; the source's
-   duplicate row is dropped).
+   `shopping_list_items.matched_product_id`, and
+   `product_barcodes.product_id` (`20-barcode-recall.md`) — a barcode
+   already on the survivor wins on conflict; the source's duplicate row
+   is dropped.
 2. **The survivor's fields win, unchanged.** Name, image, category,
    item type, `min_stock`, shelf-life override — nothing is copied from
    the source. A merge is "these were the same thing all along, and
