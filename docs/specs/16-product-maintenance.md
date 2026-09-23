@@ -28,9 +28,11 @@ spec is that screen and those endpoints.
 view per product. The detail view shows: name, image (with the change
 paths from `07` — suggestion picker, custom upload), category, item
 type, `min_stock`, the storage-local shelf-life override, current stock
-with its batches (location, quantity, expiry — linking to the batch
-editing defined in `06`/`08`/`13`), and this product's recent
-`inventory_logs`.
+with its batches (location, quantity, expiry, and — per `06`'s "One batch,
+one location — and how to split one" — an inline split/move picker calling
+`06`'s split and move endpoints directly), and this product's recent
+`inventory_logs`. Quantity corrections and expiry edits are a separate
+surface, the stocktake screen (`13`).
 
 `PATCH /api/storages/{storage_id}/products/{id}` accepts, individually
 or together:
