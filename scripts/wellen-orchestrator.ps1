@@ -5,7 +5,9 @@
     scripts\wellen.json), waits for the previous wave, creates one worktree
     per package, starts a visible, interactive Claude Code session with the
     matching prompt/model/effort, waits for completion (issue closed),
-    kicks off consolidation, and moves on to the next wave.
+    kicks off consolidation, removes the Docker leftovers of the wave's
+    worktrees (waves with "dockerCleanup": true), and moves on to the next
+    wave.
 
     New waves are planned exclusively in the JSON file - this script never
     needs to change for that. How a wave is planned is described in
@@ -28,11 +30,26 @@
     docs/specs/01-architecture-and-deployment.md, "Running more than one
     instance of the stack locally".
 
+.DOCKER CLEANUP
+    Every package worktree leaves containers, a network, named volumes and
+    built images behind. For a wave with "dockerCleanup": true, the script
+    runs wellen-docker-cleanup.ps1 once the wave's consolidation is done
+    (its wave issue is closed): it removes the Docker resources of that
+    wave's package worktrees, decided by Docker's own labels, and never the
+    main checkout's stack or the images that are shared with it. A failure is
+    logged and does not stop the next wave. A wave that is already complete
+    at start-up is cleaned as well; waves skipped with -StartWave are not.
+    The orchestrator and the wave file are read once at start-up, so a
+    running orchestrator does not pick up a change to either (the cleanup
+    script is read afresh at every call). Details and manual use:
+    scripts\wellen-planen.md, "Docker cleanup after a wave".
+
 .ARCHITECTURE
     This script itself makes NO git/GitHub write operations other than
     "worktree add" and copying .env - every substantive action (branching,
     committing, pushing, opening a PR, merging, running the reviewers) is
-    done by the Claude Code session it starts. The script is only the
+    done by the Claude Code session it starts. The only other thing it does
+    is the Docker cleanup above. The script is only the
     metronome: it knows WHEN each prompt is due, and polls the same GitHub
     state a person would check by hand (issue open/closed).
 
@@ -232,6 +249,13 @@ function Import-WavePlan {
 
         if ((Get-Field $wave 'waveIssue' 0) -le 0) { Add-ErrorMsg "${wPath}.waveIssue: missing or not a positive number" }
         if (-not (Get-Field $wave 'integrationBranch')) { Add-ErrorMsg "${wPath}.integrationBranch: missing" }
+
+        # Read the property itself: Get-Field turns "" and null into "not set", and
+        # a value that is present but not a boolean must not silently mean false.
+        $dockerCleanupProperty = $wave.PSObject.Properties['dockerCleanup']
+        if ($null -ne $dockerCleanupProperty -and $dockerCleanupProperty.Value -isnot [bool]) {
+            Add-ErrorMsg "${wPath}.dockerCleanup: must be true or false, not '$($dockerCleanupProperty.Value)'"
+        }
 
         $external = [bool](Get-Field $wave 'external' $false)
         $packages = @(Get-Field $wave 'packages' @())
@@ -509,6 +533,11 @@ function Get-ConsolidationPrompt {
     param($Plan, $Standards, $Wave, $NextWave)
     $limit = Get-Field $Standards 'roundLimitConsolidation' 4
     $branch = $Wave.integrationBranch
+    # A session must not clean Docker up itself: it runs in the main checkout,
+    # whose own stack and shared images are not the wave's to remove.
+    $dockerNote = if ([bool](Get-Field $Wave 'dockerCleanup' $false)) {
+        "Do not remove Docker resources yourself and never run docker system, volume, network or image prune: once you are done, the orchestrator removes the Docker resources that this wave's package worktrees created. "
+    } else { '' }
     $tail = if ($null -ne $NextWave) {
         "After the merge: close the wave issue, comment on wave plan #$($Plan.planIssue), delete the wave branch, and create $($NextWave.integrationBranch) from current origin/main and push it - no commit, no PR, so wave $($NextWave.number) can start immediately."
     } else {
@@ -517,8 +546,57 @@ function Get-ConsolidationPrompt {
     return @"
 /pickup
 
-Start the consolidation of wave $($Wave.number) of $($Plan.name) (wave issue #$($Wave.waveIssue), wave plan #$($Plan.planIssue)). First check: every package of this wave is merged and no PR against $branch is still open. Then merge origin/main into $branch (a merge commit, no rebase, no force-push), note every conflict resolution, run both suites, and open the PR $branch -> main, with Closes for every spec issue in this wave. Then the review loop with round limit $limit instead of 2: all THREE reviewers (review-go, review-tests, review-docs) get the full diff main...$branch and the list of package PRs. Merge with a merge commit once all three approve in the same round and the suite is green. Whatever is still open after round $limit becomes an issue and is named with its risk in the report. $tail Stop and report if you hit the round limit ($limit).
+Start the consolidation of wave $($Wave.number) of $($Plan.name) (wave issue #$($Wave.waveIssue), wave plan #$($Plan.planIssue)). First check: every package of this wave is merged and no PR against $branch is still open. Then merge origin/main into $branch (a merge commit, no rebase, no force-push), note every conflict resolution, run both suites, and open the PR $branch -> main, with Closes for every spec issue in this wave. Then the review loop with round limit $limit instead of 2: all THREE reviewers (review-go, review-tests, review-docs) get the full diff main...$branch and the list of package PRs. Merge with a merge commit once all three approve in the same round and the suite is green. Whatever is still open after round $limit becomes an issue and is named with its risk in the report. ${dockerNote}$tail Stop and report if you hit the round limit ($limit).
 "@
+}
+
+# ---------------------------------------------------------------------------
+# Docker cleanup after a wave
+# ---------------------------------------------------------------------------
+
+# For a wave with "dockerCleanup": true, removes what its package worktrees
+# left in Docker (containers, networks, volumes, the images built for them),
+# by running wellen-docker-cleanup.ps1 - see its header for how ownership is
+# decided and what is never touched. Run once the wave's consolidation has
+# finished. The script is called with -Wave and checks for itself, through the
+# wave issue, that the wave is over, and refuses otherwise. It runs as a job with
+# a time limit, and a failure or a timeout only logs: the next wave must not wait
+# on housekeeping. Idempotent.
+$DockerCleanupScript = Join-Path $PSScriptRoot 'wellen-docker-cleanup.ps1'
+$DockerCleanupTimeoutSeconds = 900
+
+function Invoke-WaveDockerCleanup {
+    param($Wave)
+    if (-not [bool](Get-Field $Wave 'dockerCleanup' $false)) { return }
+    $slugs = @(@(Get-Field $Wave 'packages' @()) | ForEach-Object { $_.slug })
+    if ($slugs.Count -eq 0) { return }
+    if ($DryRun) {
+        Write-Log "[DryRun] would remove the Docker resources of wave $($Wave.number)'s package worktrees ($($slugs -join ', ')): $DockerCleanupScript -Wave $($Wave.number)"
+        return
+    }
+    Write-Log "Removing the Docker resources of wave $($Wave.number)'s package worktrees ($($slugs -join ', '))."
+    $params = @{ Wave = [int]$Wave.number; WaveFile = $WaveFile; RepoRoot = $RepoRoot; GhRepo = [string]$GhRepo }
+    $job = $null
+    try {
+        $job = Start-Job -ScriptBlock { param($script, $p) & $script @p } -ArgumentList $DockerCleanupScript, $params
+        if (-not (Wait-Job -Job $job -Timeout $DockerCleanupTimeoutSeconds)) {
+            Stop-Job -Job $job
+            Write-Log "Docker cleanup of wave $($Wave.number) did not finish within $DockerCleanupTimeoutSeconds s and was stopped - continuing. Run scripts\wellen-docker-cleanup.ps1 -Wave $($Wave.number) -DryRun by hand." 'WARN'
+            return
+        }
+        foreach ($line in @(Receive-Job -Job $job -ErrorAction SilentlyContinue)) {
+            $level = if ("$line" -match '^\s*WARNING') { 'WARN' } else { 'INFO' }
+            Write-Log "  $line" $level
+        }
+        if ($job.State -eq 'Failed') {
+            $reason = $job.ChildJobs[0].JobStateInfo.Reason.Message
+            Write-Log "Docker cleanup of wave $($Wave.number) did not run: $reason - continuing. Run scripts\wellen-docker-cleanup.ps1 -Wave $($Wave.number) by hand once it is safe." 'WARN'
+        }
+    } catch {
+        Write-Log "Docker cleanup of wave $($Wave.number) failed: $($_.Exception.Message) - continuing. Run scripts\wellen-docker-cleanup.ps1 -Wave $($Wave.number) by hand." 'WARN'
+    } finally {
+        if ($null -ne $job) { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -535,6 +613,9 @@ function Invoke-Wave {
 
     if (Test-IssueClosed -Number $Wave.waveIssue) {
         Write-Log "Wave $n is already complete (issue #$($Wave.waveIssue) closed) - skipping."
+        # It may have finished under an orchestrator that did not know about the
+        # cleanup yet (or before it was switched on): the cleanup is idempotent.
+        Invoke-WaveDockerCleanup -Wave $Wave
         return
     }
 
@@ -605,6 +686,7 @@ function Invoke-Wave {
         Wait-ForIssueClosed -Number $Wave.waveIssue -Description "consolidation wave $n"
         Remove-Item -Path $marker -ErrorAction SilentlyContinue
     }
+    Invoke-WaveDockerCleanup -Wave $Wave
     Write-Log "=== Wave ${n}: done ==="
 }
 
