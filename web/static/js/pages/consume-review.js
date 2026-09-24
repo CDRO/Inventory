@@ -26,6 +26,7 @@ import "../register-sw.js";
 // through. docs/specs/26-location-quick-create.md scopes its escape hatch to
 // review.html and shopping-list.html for exactly this reason.
 
+import { t, apiErrorMessage } from "../i18n.js";
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
 import { initGamification } from "../gamification.js";
@@ -81,7 +82,7 @@ async function init() {
 
   jobId = new URLSearchParams(location.search).get("job");
   if (!jobId) {
-    setStatus("No proposal was named. Open one from your inbox.");
+    setStatus(t("consumeReview.noProposal"));
     return;
   }
 
@@ -97,7 +98,7 @@ async function load() {
     job = await get(`/api/storages/${storageId}/jobs/${jobId}`);
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) {
-      setStatus("This proposal no longer exists. It may have been confirmed or discarded by someone else.");
+      setStatus(t("consumeReview.proposalGone"));
       return;
     }
     showError(err);
@@ -106,7 +107,7 @@ async function load() {
 
   switch (job.status) {
     case "pending":
-      setStatus("This photo is still being analysed…");
+      setStatus(t("consumeReview.analyzing"));
       try {
         await pollJob(storageId, jobId);
       } catch (err) {
@@ -118,14 +119,16 @@ async function load() {
       await load();
       return;
     case "failed":
-      setStatus(job.error || "This photo could not be analysed.");
+      // job.error is server-authored text (docs/specs/19-localization.md:
+      // the API stays English) — only the fallback default is translated.
+      setStatus(job.error || t("consumeReview.analysisFailed"));
       proposalSection.hidden = false;
       confirmButton.hidden = true;
       // A failed analysis is exactly what analysing again is for.
       reanalyzeButton.hidden = !job.has_image;
       return;
     case "consumed":
-      setStatus("This proposal has already been applied to your inventory.");
+      setStatus(t("consumeReview.alreadyApplied"));
       return;
     case "done":
       confirmButton.hidden = false;
@@ -133,7 +136,7 @@ async function load() {
       await render(job);
       return;
     default:
-      setStatus("This proposal cannot be reviewed.");
+      setStatus(t("consumeReview.cannotReview"));
   }
 }
 
@@ -167,7 +170,7 @@ async function render(job) {
   await Promise.all(proposal.rows.map((row) => setupRow(rows.get(row.row_id).el, row, job.has_image)));
 
   if (proposal.rows.length === 0) {
-    setStatus("Nothing was found in this photo. Confirm to clear it from your inbox, or discard it.");
+    setStatus(t("consumeReview.nothingFound"));
   } else {
     statusLine.hidden = true;
   }
@@ -185,7 +188,7 @@ async function setupRow(el, row, hasImage) {
       const py = box.height >= 1 ? 0 : (box.y / (1 - box.height)) * 100;
       crop.style.backgroundPosition = `${px}% ${py}%`;
     }
-    crop.setAttribute("aria-label", `Photo of ${row.label}`);
+    crop.setAttribute("aria-label", t("consumeReview.photoOfAriaLabel", { label: row.label }));
   }
 
   qs('[data-role="confidence"]', el).textContent = `${Math.round((row.confidence || 0) * 100)}%`;
@@ -212,7 +215,7 @@ function setupProductSelect(el, row) {
     if (match.product && candidate.id === match.product.id) continue;
     add(`product:${candidate.id}`, candidate.name);
   }
-  add("search", "Search your products…");
+  add("search", t("consumeReview.searchOption"));
 
   if (match.product) {
     select.value = `product:${match.product.id}`;
@@ -245,7 +248,7 @@ async function onProductChange(el, row) {
     if (chosen) {
       await renderBatches(el, chosen.id, row.quantity);
     } else {
-      clearBatches(el, "Search above and pick a product to see its stock.");
+      clearBatches(el, t("consumeReview.searchHint"));
     }
     if (!searchInput.dataset.wired) {
       searchInput.dataset.wired = "1";
@@ -279,20 +282,20 @@ function clearBatches(el, message) {
 async function renderBatches(rowEl, productId, suggestedQty) {
   const container = qs('[data-role="batches"]', rowEl);
   clearChildren(container);
-  container.append(buildEl("p", { class: "empty-state" }, [text("Loading stock…")]));
+  container.append(buildEl("p", { class: "empty-state" }, [text(t("consumeReview.loadingStock"))]));
 
   let batches;
   try {
     batches = await fetchProductBatches(storageId, productId);
   } catch {
     clearChildren(container);
-    container.append(buildEl("p", { class: "empty-state" }, [text("Could not load this product's stock.")]));
+    container.append(buildEl("p", { class: "empty-state" }, [text(t("consumeReview.stockLoadFailed"))]));
     return;
   }
 
   clearChildren(container);
   if (batches.length === 0) {
-    container.append(buildEl("p", { class: "empty-state" }, [text("This product has no stock to remove from.")]));
+    container.append(buildEl("p", { class: "empty-state" }, [text(t("consumeReview.noStock"))]));
     return;
   }
 
@@ -312,13 +315,15 @@ async function renderBatches(rowEl, productId, suggestedQty) {
     input.addEventListener("input", updateTotal);
     inputs.push(input);
 
-    const where = locationNames.get(batch.location_id) || "Unknown location";
-    const when = batch.expiration_date ? `expires ${batch.expiration_date}` : "no expiry date";
+    const where = locationNames.get(batch.location_id) || t("consumeReview.unknownLocation");
+    const when = batch.expiration_date
+      ? t("consumeReview.expiresOn", { date: batch.expiration_date })
+      : t("consumeReview.noExpiryDate");
     container.append(
       buildEl("label", { class: "row row--between" }, [
-        text(`${where} · ${when}`),
+        text(t("consumeReview.batchSummary", { where, when })),
         input,
-        text(`of ${batch.quantity}`),
+        text(t("consumeReview.ofQuantity", { quantity: batch.quantity })),
       ]),
     );
   }
@@ -326,7 +331,7 @@ async function renderBatches(rowEl, productId, suggestedQty) {
 
   function updateTotal() {
     const sum = inputs.reduce((acc, i) => acc + (Number.parseInt(i.value, 10) || 0), 0);
-    total.textContent = `Total to remove: ${sum}`;
+    total.textContent = t("consumeReview.totalToRemove", { sum });
   }
   updateTotal();
 }
@@ -381,7 +386,7 @@ function buildItems() {
     if (select.value === "search") {
       const chosen = findProductByName(qs('[data-role="product-input"]', el).value);
       if (chosen) productId = chosen.id;
-      else problems.push("Pick a product from the list.");
+      else problems.push(t("consumeReview.problems.pickProduct"));
     } else {
       productId = select.value.slice("product:".length);
     }
@@ -394,7 +399,7 @@ function buildItems() {
         decrements.push({ batch_id: input.dataset.batchId, quantity });
       }
     }
-    if (decrements.length === 0) problems.push("Choose at least one batch to remove stock from.");
+    if (decrements.length === 0) problems.push(t("consumeReview.problems.chooseBatch"));
     item.decrements = decrements;
 
     if (problems.length > 0) {
@@ -411,7 +416,7 @@ async function onConfirm() {
   clearError();
   const items = buildItems();
   if (items == null) {
-    showMessage("Some rows need attention before they can be confirmed.");
+    showMessage(t("consumeReview.someRowsNeedAttention"));
     return;
   }
 
@@ -422,9 +427,9 @@ async function onConfirm() {
   } catch (err) {
     setBusy(false);
     if (err instanceof ApiError && err.status === 409) {
-      showMessage("This proposal has already been applied, or is no longer waiting for review.");
+      showMessage(t("consumeReview.alreadyAppliedConflict"));
     } else if (err instanceof ApiError && err.status === 404) {
-      showMessage("Something this review refers to no longer exists — a product or batch may have changed. Reload and try again.");
+      showMessage(t("consumeReview.referencedGone"));
     } else {
       showError(err);
     }
@@ -435,7 +440,7 @@ async function onConfirm() {
 // everything on this screen, corrections included, so it asks first — and it
 // is the only way the model ever sees this photo twice.
 async function onReanalyze() {
-  if (!window.confirm("Analyze this photo again? The current proposal, and any changes made to it here, will be replaced.")) {
+  if (!window.confirm(t("consumeReview.reanalyzeConfirm"))) {
     return;
   }
   clearError();
@@ -459,7 +464,7 @@ async function onReanalyze() {
 }
 
 async function onDiscard() {
-  if (!window.confirm("Discard this photo and its proposal? Nothing will be removed from your inventory.")) {
+  if (!window.confirm(t("consumeReview.discardConfirm"))) {
     return;
   }
   clearError();
@@ -496,7 +501,7 @@ function showMessage(message) {
 }
 
 function showError(err) {
-  showMessage(err instanceof ApiError ? err.message : "Could not reach the server. Check your connection and try again.");
+  showMessage(err instanceof ApiError ? apiErrorMessage(err) : t("consumeReview.networkError"));
 }
 
 function clearError() {

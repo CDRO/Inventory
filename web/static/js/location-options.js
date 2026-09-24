@@ -9,6 +9,7 @@
 
 import { get } from "./api.js";
 import { openTreeManager } from "./tree-modal.js";
+import { t } from "./i18n.js";
 
 const NBSP = String.fromCharCode(0xa0);
 
@@ -127,8 +128,8 @@ export async function openLocationField({ storageId, trigger, openedSelect, getO
   } catch {
     onError(
       createdIds.length > 0
-        ? "A location was created, but the list could not be refreshed. Reload the page to see it."
-        : "Could not reach the server. Check your connection and try again.",
+        ? t("locationOptions.createdButRefreshFailed")
+        : t("locationOptions.networkError"),
     );
     return;
   }

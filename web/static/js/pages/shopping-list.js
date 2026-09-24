@@ -32,6 +32,7 @@ import { fetchCategories, appendCategoryOptions, openCategoryField } from "../ca
 import { get, post, ApiError } from "../api.js";
 import { el, text, clearChildren, qs } from "../dom.js";
 import { offerBarcodeCapture } from "../barcode-offer.js";
+import { t, apiErrorMessage, applyI18n } from "../i18n.js";
 
 const switcherContainer = qs("#storage-switcher");
 const errorBox = qs("#error");
@@ -102,7 +103,7 @@ function basePath() {
 async function submitList() {
   const rawText = rawTextInput.value;
   if (!rawText.trim()) {
-    showError(new Error("Add at least one line."));
+    showError(new Error(t("shoppingList.errors.emptyList")));
     return;
   }
 
@@ -137,6 +138,10 @@ function renderList(list) {
 // always what is on screen.
 function renderItem(item) {
   const node = itemTemplate.content.firstElementChild.cloneNode(true);
+  // `<template>` content is a DocumentFragment, not part of `document`, so
+  // i18n.js's own load-time pass over `[data-i18n]` never reaches it — every
+  // clone needs this instead (labels, option text, buttons in the template).
+  applyI18n(node);
 
   field(node, "raw_text").textContent = item.raw_text;
   field(node, "status").textContent = statusLabel(item.status);
@@ -150,7 +155,7 @@ function renderItem(item) {
   }
 
   const locationSelect = field(node, "location");
-  const placeholder = el("option", { value: "" }, [text("Choose a location…")]);
+  const placeholder = el("option", { value: "" }, [text(t("shoppingList.item.chooseLocation"))]);
   locationSelect.append(placeholder);
   appendLocationOptions(locationSelect, locations);
   if (locations.length === 1) locationSelect.value = locations[0].id;
@@ -194,7 +199,11 @@ function renderResolved(node, item) {
   clearChildren(detail);
   detail.append(
     el("p", { class: "empty-state" }, [
-      text(item.matched_product || item.resolved_quantity > 0 ? "Confirmed." : "Not bought."),
+      text(
+        item.matched_product || item.resolved_quantity > 0
+          ? t("shoppingList.item.confirmed")
+          : t("shoppingList.item.notBought"),
+      ),
     ]),
   );
   for (const control of node.querySelectorAll("input, select, button")) {
@@ -214,13 +223,13 @@ function renderDetail(node, item) {
 
   if (item.status === "exact_match" && item.matched_product) {
     node.choice = { kind: "product", productId: item.matched_product.id };
-    detail.append(el("p", {}, [text(`Matches ${item.matched_product.name}.`)]));
+    detail.append(el("p", {}, [text(t("shoppingList.detail.matches", { name: item.matched_product.name }))]));
     return;
   }
 
   if (item.status === "ambiguous") {
     node.choice = null;
-    detail.append(el("p", {}, [text("Which one did you mean?")]));
+    detail.append(el("p", {}, [text(t("shoppingList.detail.whichOne"))]));
     const buttons = item.candidates.map((candidate) =>
       el(
         "button",
@@ -238,8 +247,8 @@ function renderDetail(node, item) {
     );
     detail.append(el("div", { class: "stack" }, buttons));
     escape.append(
-      escapeButton("Treat as new item", () => describeManually(node, item, lineName(item))),
-      escapeButton("Enter manually", () => describeManually(node, item, "")),
+      escapeButton(t("shoppingList.detail.treatAsNew"), () => describeManually(node, item, lineName(item))),
+      escapeButton(t("shoppingList.detail.enterManually"), () => describeManually(node, item, "")),
     );
     return;
   }
@@ -248,12 +257,12 @@ function renderDetail(node, item) {
   if (item.catalog) {
     node.choice = { kind: "catalog", variant: null };
     detail.append(renderCatalogCard(node, item.catalog));
-    escape.append(escapeButton("It's something else", () => describeManually(node, item, "")));
+    escape.append(escapeButton(t("shoppingList.detail.somethingElse"), () => describeManually(node, item, "")));
     return;
   }
 
   detail.append(
-    el("p", { class: "empty-state" }, [text("Nothing known about this yet. Describe it to add it.")]),
+    el("p", { class: "empty-state" }, [text(t("shoppingList.detail.nothingKnown"))]),
   );
   describeManually(node, item, lineName(item));
 }
@@ -299,7 +308,7 @@ function renderCatalogCard(node, catalog) {
   if (catalog.default_shelf_life_days != null) {
     lines.push(
       el("p", { class: "empty-state" }, [
-        text(`Keeps about ${catalog.default_shelf_life_days} days.`),
+        text(t("shoppingList.catalog.keepsAbout", { days: catalog.default_shelf_life_days })),
       ]),
     );
   }
@@ -312,7 +321,7 @@ function renderCatalogCard(node, catalog) {
   const addThis = el(
     "button",
     { type: "button", class: "btn btn--ghost btn--selected", "aria-pressed": "true", onclick: (e) => pick(null, e.currentTarget) },
-    [text(`Add this: ${catalog.display_name}`)],
+    [text(t("shoppingList.catalog.addThis", { name: catalog.display_name }))],
   );
   choices.append(addThis);
   for (const name of catalog.variants || []) {
@@ -337,7 +346,7 @@ async function renderPictureChoices(node, item) {
   clearChildren(container);
   node.picture = null;
 
-  const status = el("span", { class: "empty-state" }, [text("Looking for pictures…")]);
+  const status = el("span", { class: "empty-state" }, [text(t("shoppingList.pictures.loading"))]);
   container.append(status);
 
   const query = field(node, "name").value.trim() || lineName(item);
@@ -348,16 +357,16 @@ async function renderPictureChoices(node, item) {
   } catch {
     // A provider being unreachable must not block the line: the spec's own
     // degradation rule, carried through to the UI.
-    status.textContent = "Picture search is unavailable right now. You can still continue without one.";
+    status.textContent = t("shoppingList.pictures.unavailable");
     return;
   }
 
   if (suggestions.length === 0) {
-    status.textContent = "No pictures found. You can continue without one.";
+    status.textContent = t("shoppingList.pictures.none");
     return;
   }
 
-  status.textContent = "Pick a picture, or continue without one.";
+  status.textContent = t("shoppingList.pictures.pick");
   const row = el("div", { class: "row" });
   const none = el(
     "button",
@@ -370,7 +379,7 @@ async function renderPictureChoices(node, item) {
         markChosen(row, event.currentTarget);
       },
     },
-    [text("No picture")],
+    [text(t("shoppingList.pictures.noPicture"))],
   );
   row.append(none);
 
@@ -383,7 +392,7 @@ async function renderPictureChoices(node, item) {
           type: "button",
           class: "btn btn--ghost",
           "aria-pressed": "false",
-          "aria-label": `Use this ${suggestion.type}`,
+          "aria-label": t("shoppingList.pictures.useThis", { type: suggestion.type }),
           onclick: (event) => {
             node.picture = hash;
             markChosen(row, event.currentTarget);
@@ -413,15 +422,15 @@ function markChosen(container, button) {
 // names what is still missing.
 function buildResolve(node) {
   const choice = node.choice;
-  if (!choice) return { problem: "Pick which one you meant, or describe it as a new item." };
+  if (!choice) return { problem: t("shoppingList.errors.pickChoice") };
 
   const quantity = Number.parseInt(field(node, "quantity").value, 10);
-  if (!Number.isInteger(quantity) || quantity < 0) return { problem: "Enter how many you bought." };
+  if (!Number.isInteger(quantity) || quantity < 0) return { problem: t("shoppingList.errors.enterQuantity") };
 
   const body = { quantity };
   const locationId = field(node, "location").value;
   if (quantity > 0) {
-    if (!locationId) return { problem: "Choose where it goes." };
+    if (!locationId) return { problem: t("shoppingList.errors.chooseLocationProblem") };
     body.location_id = locationId;
   }
 
@@ -435,7 +444,7 @@ function buildResolve(node) {
       break;
     case "manual": {
       const name = field(node, "name").value.trim();
-      if (!name) return { problem: "Name the product." };
+      if (!name) return { problem: t("shoppingList.errors.nameProduct") };
       body.new_product = {
         from: "manual",
         name,
@@ -455,7 +464,7 @@ async function resolveItem(node, item) {
   clearError();
   const { body, problem } = buildResolve(node);
   if (problem) {
-    showError(new Error(`${item.raw_text}: ${problem}`));
+    showError(new Error(t("shoppingList.errors.lineProblem", { line: item.raw_text, problem })));
     return;
   }
   await send(node, item, body);
@@ -499,13 +508,13 @@ function lineName(item) {
 function statusLabel(status) {
   switch (status) {
     case "exact_match":
-      return "Match";
+      return t("shoppingList.status.match");
     case "ambiguous":
-      return "Which one?";
+      return t("shoppingList.status.ambiguous");
     case "new_item":
-      return "New";
+      return t("shoppingList.status.new");
     case "resolved":
-      return "Done";
+      return t("shoppingList.status.done");
     default:
       return status;
   }
@@ -517,7 +526,7 @@ function field(node, name) {
 
 function showError(err) {
   errorBox.textContent =
-    err instanceof ApiError ? err.message : err.message || "Something went wrong.";
+    err instanceof ApiError ? apiErrorMessage(err) : err.message || t("common.unexpectedError");
   errorBox.hidden = false;
 }
 

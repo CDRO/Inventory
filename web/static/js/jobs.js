@@ -11,6 +11,7 @@
 // (docs/specs/06-vision-shelf-ingestion.md).
 
 import { get, post, ApiError } from "./api.js";
+import { t, apiErrorMessage } from "./i18n.js";
 
 const POLL_INTERVAL_MS = 1500;
 
@@ -40,22 +41,22 @@ export function reanalyzeJob(storageId, jobId) {
  */
 export function reanalyzeFailureMessage(err) {
   if (!(err instanceof ApiError)) {
-    return "Could not reach the server. Check your connection and try again.";
+    return t("jobs.networkError");
   }
   if (err.code === "model_unavailable") {
-    return "The AI model is unavailable, so this photo cannot be analysed again right now. Ask an admin to choose another model.";
+    return t("jobs.reanalyzeModelUnavailable");
   }
   if (err.status === 409) {
-    return "This photo cannot be analysed again right now: it is already being analysed, or its proposal has been applied. Reload to see where it stands.";
+    return t("jobs.reanalyzeConflict");
   }
-  return err.message;
+  return apiErrorMessage(err);
 }
 
 /** JobFailedError is thrown when a job reaches status "failed". */
 export class JobFailedError extends Error {
   /** @param {{id: string, status: string, error?: string}} job */
   constructor(job) {
-    super(job.error || "The job failed.");
+    super(job.error || t("jobs.failed"));
     this.name = "JobFailedError";
     this.job = job;
   }

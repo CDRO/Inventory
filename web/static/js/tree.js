@@ -10,6 +10,7 @@
 // textContent, never through a template string turned into markup.
 
 import { el, text, clearChildren } from "./dom.js";
+import { t } from "./i18n.js";
 
 /**
  * TreeNode is the shape both `GET /api/storages/{id}/locations` and the
@@ -96,7 +97,7 @@ export class TreeView {
         class: "tree-toggle",
         type: "button",
         "aria-expanded": hasChildren ? String(isExpanded) : undefined,
-        title: hasChildren ? "Expand or collapse" : undefined,
+        title: hasChildren ? t("tree.expandCollapse") : undefined,
         onclick: hasChildren ? () => this._toggleExpanded(node.id) : undefined,
       },
       [text(!hasChildren ? "" : isExpanded ? "▾" : "▸")],
@@ -118,13 +119,13 @@ export class TreeView {
         ...(detail ? [detail] : []),
         el("div", { class: "row" }, [
           el("button", { type: "button", class: "btn btn--ghost", onclick: () => this._startRename(node, nameSpan) }, [
-            text("Rename"),
+            text(t("tree.rename")),
           ]),
           el("button", { type: "button", class: "btn btn--ghost", onclick: () => this._startAddChild(node.id, li) }, [
-            text("Add"),
+            text(t("tree.add")),
           ]),
           el("button", { type: "button", class: "btn btn--ghost", onclick: () => this._openMovePicker(node.id) }, [
-            text("Move to…"),
+            text(t("tree.moveTo")),
           ]),
         ]),
       ],
@@ -176,9 +177,9 @@ export class TreeView {
   }
 
   _startAddChild(parentId, afterLi) {
-    const input = el("input", { type: "text", placeholder: "New name" });
-    const confirmBtn = el("button", { type: "button", class: "btn btn--primary" }, [text("Add")]);
-    const cancelBtn = el("button", { type: "button", class: "btn btn--ghost" }, [text("Cancel")]);
+    const input = el("input", { type: "text", placeholder: t("tree.newNamePlaceholder") });
+    const confirmBtn = el("button", { type: "button", class: "btn btn--primary" }, [text(t("tree.add"))]);
+    const cancelBtn = el("button", { type: "button", class: "btn btn--ghost" }, [text(t("common.cancel"))]);
     const row = el("li", { class: "row" }, [input, confirmBtn, cancelBtn]);
 
     afterLi.after(row);
@@ -211,13 +212,13 @@ export class TreeView {
       "select",
       {},
       [
-        el("option", { value: "" }, [text("No parent (root)")]),
+        el("option", { value: "" }, [text(t("tree.noParentRoot"))]),
         ...options.map((entry) => el("option", { value: entry.id }, [text("  ".repeat(entry.depth) + entry.name)])),
       ],
     );
 
     const dialog = el("dialog", { class: "card" }, [
-      el("h2", {}, [text("Move to…")]),
+      el("h2", {}, [text(t("tree.moveTo"))]),
       select,
       el("div", { class: "row", style: "margin-top: 1rem" }, [
         el("button", {
@@ -227,8 +228,8 @@ export class TreeView {
             this.onMove(nodeId, select.value || null);
             dialog.close();
           },
-        }, [text("Move")]),
-        el("button", { type: "button", class: "btn btn--ghost", onclick: () => dialog.close() }, [text("Cancel")]),
+        }, [text(t("tree.move"))]),
+        el("button", { type: "button", class: "btn btn--ghost", onclick: () => dialog.close() }, [text(t("common.cancel"))]),
       ]),
     ]);
 

@@ -24,6 +24,7 @@ import { TreeView } from "../tree.js";
 import { createShelfLifeDetail, resolveInheritance } from "../category-shelf-life.js";
 import { get, post, patch, ApiError } from "../api.js";
 import { clearChildren, el, text } from "../dom.js";
+import { t, apiErrorMessage } from "../i18n.js";
 
 const switcherContainer = document.querySelector("#storage-switcher");
 const treeContainer = document.querySelector("#tree");
@@ -102,8 +103,8 @@ function showAddRootForm() {
   const input = el("input", {
     type: "text",
     id: "add-root-name",
-    "aria-label": "Name of the new top-level category",
-    placeholder: "Food",
+    "aria-label": t("categories.addRootNameLabel"),
+    placeholder: t("categories.addRootNamePlaceholder"),
     required: true,
   });
 
@@ -122,8 +123,8 @@ function showAddRootForm() {
     },
     [
       input,
-      el("button", { type: "submit", class: "btn" }, [text("Add")]),
-      el("button", { type: "button", class: "btn btn--ghost", onclick: () => form.remove() }, [text("Cancel")]),
+      el("button", { type: "submit", class: "btn" }, [text(t("categories.add"))]),
+      el("button", { type: "button", class: "btn btn--ghost", onclick: () => form.remove() }, [text(t("common.cancel"))]),
     ],
   );
 
@@ -171,7 +172,7 @@ function renderEmptyTree() {
   clearChildren(treeContainer);
   treeContainer.append(
     el("p", { class: "empty-state" }, [
-      text("No categories yet. Add a top-level one — Food, Household, Collectibles — to sort products and set how long they keep."),
+      text(t("categories.empty")),
     ]),
   );
 }
@@ -183,14 +184,15 @@ function showStatus(message) {
 
 function showError(err) {
   if (!(err instanceof ApiError)) {
-    errorBox.textContent = "Could not reach the server. Check your connection and try again.";
+    errorBox.textContent = t("categories.networkError");
   } else {
-    // ApiError.message is the server's human-readable text: a cycle and a
-    // category products still use each say what went wrong. A 422's message
-    // is generic, so its per-field messages — an out-of-range shelf life,
-    // say — are what tell the person what to fix.
+    // apiErrorMessage renders the server's stable code in the active
+    // language; a 422's per-field messages come straight from the server and
+    // stay in English (docs/specs/19-localization.md's API-stays-English
+    // boundary) — an out-of-range shelf life, say — because they are what
+    // tell the person what to fix.
     const details = err.fields ? Object.values(err.fields).flat() : [];
-    errorBox.textContent = [err.message, ...details].join(" ");
+    errorBox.textContent = [apiErrorMessage(err), ...details].join(" ");
   }
   errorBox.hidden = false;
 }

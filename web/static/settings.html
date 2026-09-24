@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#2563eb">
-  <title>Settings · Inventory</title>
+  <title data-i18n="settings.pageTitle">Settings · Inventory</title>
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" href="/icons/icon-192.png">
   <link rel="apple-touch-icon" href="/icons/icon-192.png">
@@ -15,15 +15,15 @@
 </head>
 <body>
   <header class="shell row row--between">
-    <strong>Inventory</strong>
+    <strong data-i18n="common.appName">Inventory</strong>
     <div class="row">
       <div id="storage-switcher" hidden></div>
-      <a href="/dashboard.html" class="btn btn--ghost">Back</a>
+      <a href="/dashboard.html" class="btn btn--ghost" data-i18n="common.back">Back</a>
     </div>
   </header>
 
   <main id="main" class="shell stack" aria-live="polite">
-    <h2>Settings</h2>
+    <h2 data-i18n="settings.title">Settings</h2>
 
     <div id="error" class="alert" role="alert" hidden></div>
 
@@ -43,14 +43,14 @@
       content check in web/embed_test.go, which is what now keeps that true.
     -->
     <section id="account-section" class="card stack">
-      <h3>Account</h3>
+      <h3 data-i18n="settings.account.title">Account</h3>
 
       <div class="field">
-        <label for="display-name">Display name</label>
+        <label for="display-name" data-i18n="settings.account.displayName">Display name</label>
         <input type="text" id="display-name" maxlength="255" autocomplete="name">
       </div>
       <div class="row">
-        <button id="display-name-save" type="button" class="btn btn--primary">Save display name</button>
+        <button id="display-name-save" type="button" class="btn btn--primary" data-i18n="settings.account.saveDisplayName">Save display name</button>
         <span id="display-name-status" class="empty-state" hidden></span>
       </div>
 
@@ -58,64 +58,84 @@
            (docs/specs/20-barcode-recall.md). This is the only place it can be
            turned back on once dismissed, and turning it off takes no inventory
            feature away: barcodes can still be added from any product's page. -->
-      <h4>Barcode prompt</h4>
+      <h4 data-i18n="settings.barcodePrompt.title">Barcode prompt</h4>
       <div class="field">
         <label class="row">
           <input type="checkbox" id="barcode-prompt-enabled">
-          Offer to scan a barcode when I add a product I have not seen before
+          <span data-i18n="settings.barcodePrompt.label">Offer to scan a barcode when I add a product I have not seen before</span>
         </label>
         <span id="barcode-prompt-status" class="empty-state" hidden></span>
       </div>
 
-      <h4>Change password</h4>
-      <p class="empty-state">
+      <h4 data-i18n="settings.password.title">Change password</h4>
+      <p class="empty-state" data-i18n="settings.password.hint">
         Changing your password signs out every other browser and paired
         device straight away. This one stays signed in. Paired devices need
         to be paired again afterwards.
       </p>
       <form id="password-form" class="stack">
         <div class="field">
-          <label for="current-password">Current password</label>
+          <label for="current-password" data-i18n="settings.password.current">Current password</label>
           <input type="password" id="current-password" autocomplete="current-password" required>
         </div>
         <div class="field">
-          <label for="new-password">New password</label>
+          <label for="new-password" data-i18n="settings.password.new">New password</label>
           <input type="password" id="new-password" autocomplete="new-password" minlength="10" required>
-          <span class="empty-state">At least 10 characters. Nothing else is required of it.</span>
+          <span class="empty-state" data-i18n="settings.password.newHint">At least 10 characters. Nothing else is required of it.</span>
         </div>
         <div class="field">
-          <label for="repeat-password">Repeat new password</label>
+          <label for="repeat-password" data-i18n="settings.password.repeat">Repeat new password</label>
           <input type="password" id="repeat-password" autocomplete="new-password" minlength="10" required>
         </div>
         <p id="password-error" class="field-error" hidden></p>
         <p id="password-status" class="alert alert--success" role="status" hidden></p>
-        <button type="submit" class="btn btn--primary">Change password</button>
+        <button type="submit" class="btn btn--primary" data-i18n="settings.password.submit">Change password</button>
       </form>
 
-      <h4>Signed-in devices</h4>
-      <p class="empty-state">
+      <h4 data-i18n="settings.devices.title">Signed-in devices</h4>
+      <p class="empty-state" data-i18n="settings.devices.hint">
         Every browser and paired device currently signed in as you. Revoking
         one takes effect immediately.
       </p>
       <div id="devices" class="stack"></div>
     </section>
 
+    <!--
+      Language override (docs/specs/19-localization.md). The only place the
+      localStorage override this spec resolves against is ever written —
+      everywhere else the language is detected from the browser. Reloading
+      after a change is deliberate: the page has already fetched and applied
+      the old catalog, and a partial in-place re-translation is not worth
+      building when a reload does it correctly for free.
+    -->
+    <section id="language-section" class="card stack">
+      <h3 data-i18n="settings.language.title">Language</h3>
+      <div class="field">
+        <label for="language-select" data-i18n="settings.language.label">Language</label>
+        <select id="language-select">
+          <option value="" data-i18n="settings.language.auto">Match my browser</option>
+          <option value="en" data-i18n="settings.language.en">English</option>
+          <option value="de" data-i18n="settings.language.de">Deutsch</option>
+        </select>
+      </div>
+    </section>
+
     <section class="card stack">
-      <h3>Gamification</h3>
-      <p class="empty-state">
+      <h3 data-i18n="settings.gamification.title">Gamification</h3>
+      <p class="empty-state" data-i18n="settings.gamification.hint">
         XP, levels, quests and streaks are entirely optional. Turning this
         off never changes how any inventory feature works, for you or
         anyone else in your storages.
       </p>
       <label class="row">
         <input type="checkbox" id="gamification-enabled">
-        <span>Enable XP, levels, quests and streaks</span>
+        <span data-i18n="settings.gamification.enable">Enable XP, levels, quests and streaks</span>
       </label>
     </section>
 
     <section id="holiday-section" class="card stack">
-      <h3>Holiday mode</h3>
-      <p class="empty-state">
+      <h3 data-i18n="settings.holiday.title">Holiday mode</h3>
+      <p class="empty-state" data-i18n="settings.holiday.hint">
         Mark a week you'll be away so it pauses your streak instead of
         breaking it. Up to 8 weeks in any rolling year. Only this week or a
         future week can be marked; a marked week can only be un-marked while
@@ -124,27 +144,27 @@
       <div id="holiday-weeks" class="stack"></div>
       <div class="row">
         <div class="field">
-          <label for="holiday-week-input">Week starting (a Monday)</label>
+          <label for="holiday-week-input" data-i18n="settings.holiday.weekStarting">Week starting (a Monday)</label>
           <input type="date" id="holiday-week-input">
         </div>
-        <button id="holiday-add" type="button" class="btn">Mark as holiday</button>
+        <button id="holiday-add" type="button" class="btn" data-i18n="settings.holiday.mark">Mark as holiday</button>
       </div>
     </section>
 
     <section id="storage-section" class="card stack">
-      <h3>This storage</h3>
-      <p class="empty-state">
+      <h3 data-i18n="settings.storage.title">This storage</h3>
+      <p class="empty-state" data-i18n="settings.storage.hint">
         These settings apply to everyone in the currently selected storage.
       </p>
       <label class="row">
         <input type="checkbox" id="leaderboard-enabled">
-        <span>Show an individual leaderboard alongside the shared goal</span>
+        <span data-i18n="settings.storage.leaderboard">Show an individual leaderboard alongside the shared goal</span>
       </label>
       <div class="field">
-        <label for="weekly-goal">Weekly goal (contributions from all members combined)</label>
+        <label for="weekly-goal" data-i18n="settings.storage.weeklyGoal">Weekly goal (contributions from all members combined)</label>
         <input type="number" id="weekly-goal" min="0" step="1">
       </div>
-      <button id="storage-save" type="button" class="btn btn--primary">Save storage settings</button>
+      <button id="storage-save" type="button" class="btn btn--primary" data-i18n="settings.storage.save">Save storage settings</button>
     </section>
 
     <!--
@@ -158,13 +178,13 @@
       itself.
     -->
     <section id="notifications-section" class="card stack" hidden>
-      <h3>Expiry notifications</h3>
-      <p class="empty-state">
+      <h3 data-i18n="settings.notify.title">Expiry notifications</h3>
+      <p class="empty-state" data-i18n="settings.notify.hint1">
         Off unless you turn it on. One short daily digest — what has expired
         and what is about to — posted to whatever URL you put below. Nothing
         is sent on a day with nothing to report, and no photos are ever sent.
       </p>
-      <p class="empty-state">
+      <p class="empty-state" data-i18n="settings.notify.hint2">
         This is meant for a notification service you run yourself, on your own
         network. Nothing here checks that: a public URL would put your product
         names, quantities and locations wherever it points.
@@ -172,65 +192,65 @@
 
       <label class="row">
         <input type="checkbox" id="notify-enabled">
-        <span>Send a daily expiry digest for this storage</span>
+        <span data-i18n="settings.notify.enable">Send a daily expiry digest for this storage</span>
       </label>
 
       <div class="field">
-        <label for="notify-kind">Service</label>
+        <label for="notify-kind" data-i18n="settings.notify.service">Service</label>
         <select id="notify-kind">
           <option value="ntfy">ntfy</option>
           <option value="gotify">Gotify</option>
-          <option value="webhook">Webhook</option>
+          <option value="webhook" data-i18n="settings.notify.webhook">Webhook</option>
         </select>
       </div>
 
       <div class="field">
-        <label for="notify-url">URL</label>
+        <label for="notify-url" data-i18n="settings.notify.url">URL</label>
         <input type="url" id="notify-url" placeholder="https://ntfy.example/inventory" autocomplete="off">
         <span id="notify-url-hint" class="empty-state"></span>
       </div>
 
       <div class="field">
-        <label for="notify-token">Access token (optional)</label>
+        <label for="notify-token" data-i18n="settings.notify.token">Access token (optional)</label>
         <input type="password" id="notify-token" autocomplete="off">
-        <span class="empty-state">
+        <span class="empty-state" data-i18n="settings.notify.tokenHint">
           Stored on the server and never shown again. Leave this blank to keep
           the one already saved.
         </span>
         <label class="row" id="notify-token-remove-row" hidden>
           <input type="checkbox" id="notify-token-remove">
-          <span>Remove the saved token when I save</span>
+          <span data-i18n="settings.notify.tokenRemove">Remove the saved token when I save</span>
         </label>
       </div>
 
       <div class="field">
-        <label for="notify-hour">Send at (hour of the day, server time)</label>
+        <label for="notify-hour" data-i18n="settings.notify.hour">Send at (hour of the day, server time)</label>
         <input type="number" id="notify-hour" min="0" max="23" step="1">
       </div>
 
       <label class="row">
         <input type="checkbox" id="notify-include-soon">
-        <span>Also list items expiring within 14 days, not just 3</span>
+        <span data-i18n="settings.notify.includeSoon">Also list items expiring within 14 days, not just 3</span>
       </label>
 
       <p id="notify-last-result" class="empty-state" hidden></p>
 
       <div class="row">
-        <button id="notify-save" type="button" class="btn btn--primary">Save notification settings</button>
-        <button id="notify-test" type="button" class="btn">Send a test</button>
+        <button id="notify-save" type="button" class="btn btn--primary" data-i18n="settings.notify.save">Save notification settings</button>
+        <button id="notify-test" type="button" class="btn" data-i18n="settings.notify.test">Send a test</button>
       </div>
       <p id="notify-test-status" class="empty-state" hidden></p>
     </section>
 
     <section id="reset-section" class="card stack">
-      <h3>Local app data</h3>
-      <p class="empty-state">
+      <h3 data-i18n="settings.reset.title">Local app data</h3>
+      <p class="empty-state" data-i18n="settings.reset.hint">
         If a page keeps showing old data after an update, this clears the
         service worker and everything it has cached in this browser, then
         reloads. It never touches your inventory — only what this browser
         has stored locally.
       </p>
-      <button id="reset-local-data" type="button" class="btn btn--ghost">Reset local app data</button>
+      <button id="reset-local-data" type="button" class="btn btn--ghost" data-i18n="settings.reset.button">Reset local app data</button>
       <p id="reset-status" class="empty-state" hidden></p>
     </section>
   </main>

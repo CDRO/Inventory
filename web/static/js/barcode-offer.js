@@ -35,6 +35,7 @@
 import { get, post, patch } from "./api.js";
 import { el, text } from "./dom.js";
 import { openScanSheet } from "./barcode.js";
+import { t } from "./i18n.js";
 
 /**
  * shouldOffer asks the server whether the offer applies to this user and in
@@ -148,16 +149,14 @@ function showOffer(storageId, { productId, productName, firstTime, presetCode = 
 
   // The first-ever occurrence explains why; every later one is the same three
   // actions with plain copy. No streak, no points, no second onboarding.
-  const heading = firstTime ? "One scan now, one tap forever" : "Scan its barcode?";
-  const body = firstTime
-    ? "Scan it once now, and every future one of these is a single tap — no photo, no waiting, no guessing."
-    : "Scanning it now makes the next one a single tap.";
+  const heading = firstTime ? t("barcodeOffer.firstTimeHeading") : t("barcodeOffer.heading");
+  const body = firstTime ? t("barcodeOffer.firstTimeBody") : t("barcodeOffer.body");
 
   const nowButton = el("button", { type: "button", class: "btn btn--primary" }, [
-    text(presetCode ? "Attach the code you scanned" : "Scan it now"),
+    text(presetCode ? t("barcodeOffer.attachScanned") : t("barcodeOffer.scanNow")),
   ]);
-  const laterButton = el("button", { type: "button", class: "btn btn--ghost" }, [text("Not this time")]);
-  const offButton = el("button", { type: "button", class: "btn btn--ghost" }, [text("Turn this off")]);
+  const laterButton = el("button", { type: "button", class: "btn btn--ghost" }, [text(t("barcodeOffer.notThisTime"))]);
+  const offButton = el("button", { type: "button", class: "btn btn--ghost" }, [text(t("barcodeOffer.turnOff"))]);
 
   const children = [el("h2", { id: titleId }, [text(heading)])];
   if (productName) children.push(el("p", { class: "muted" }, [text(productName)]));
@@ -192,8 +191,8 @@ function showOffer(storageId, { productId, productName, firstTime, presetCode = 
     const code =
       presetCode ||
       (await openScanSheet(storageId, {
-        title: "Scan a barcode",
-        hint: productName ? `This code will mean “${productName}” in this storage.` : "",
+        title: t("barcode.defaultTitle"),
+        hint: productName ? t("barcodeOffer.hint", { productName }) : "",
       }));
     if (!code) return; // The sheet was dismissed; the offer is still open.
 
@@ -202,9 +201,7 @@ function showOffer(storageId, { productId, productName, firstTime, presetCode = 
       finish(code);
     } catch (err) {
       errorBox.textContent =
-        err && err.code === "conflict"
-          ? "That barcode already belongs to another product here."
-          : "That barcode could not be attached. Try again, or skip it for now.";
+        err && err.code === "conflict" ? t("barcodeOffer.conflictError") : t("barcodeOffer.attachError");
       errorBox.hidden = false;
     }
   });

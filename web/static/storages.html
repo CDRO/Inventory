@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#2563eb">
-  <title>Inventory</title>
+  <title data-i18n="common.appName">Inventory</title>
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" href="/icons/icon-192.png">
   <link rel="apple-touch-icon" href="/icons/icon-192.png">
@@ -15,18 +15,18 @@
 </head>
 <body>
   <header class="shell row row--between">
-    <strong>Inventory</strong>
+    <strong data-i18n="common.appName">Inventory</strong>
     <div class="row">
       <div id="storage-switcher" hidden></div>
       <div id="gamification-ring" hidden></div>
       <div id="inbox-link" hidden></div>
-      <a href="/settings.html" class="btn btn--ghost">Settings</a>
-      <button id="logout" type="button" class="btn btn--ghost">Log out</button>
+      <a href="/settings.html" class="btn btn--ghost" data-i18n="common.settings">Settings</a>
+      <button id="logout" type="button" class="btn btn--ghost" data-i18n="common.logout">Log out</button>
     </div>
   </header>
 
   <main id="main" class="shell" aria-live="polite">
-    <p class="empty-state">Loading…</p>
+    <p class="empty-state" data-i18n="common.loading">Loading…</p>
   </main>
 
   <script type="module" src="/js/pages/storages.js"></script>

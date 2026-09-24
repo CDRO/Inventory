@@ -14,6 +14,7 @@ import { renderStorageSwitcher } from "../storage-switcher.js";
 import { initGamification } from "../gamification.js";
 import { get, del, ApiError } from "../api.js";
 import { el, fromTemplate, qs, text } from "../dom.js";
+import { t, tCount, apiErrorMessage } from "../i18n.js";
 
 const jobsList = qs("#jobs");
 const moreButton = qs("#more");
@@ -21,17 +22,17 @@ const template = qs("#job-template");
 const errorBox = qs("#error");
 const notice = qs("#notice");
 
-const KIND_LABELS = {
-  shelf_ingestion: "Shelf photo",
-  product_photo: "Product photo",
-  shopping_list_photo: "Shopping list photo",
-  consumption_photo: "Consumption photo",
+const KIND_KEYS = {
+  shelf_ingestion: "inbox.kind.shelf_ingestion",
+  product_photo: "inbox.kind.product_photo",
+  shopping_list_photo: "inbox.kind.shopping_list_photo",
+  consumption_photo: "inbox.kind.consumption_photo",
 };
 
-const STATUS_LABELS = {
-  pending: "Analysing",
-  done: "Ready to review",
-  failed: "Failed",
+const STATUS_KEYS = {
+  pending: "inbox.status.pending",
+  done: "inbox.status.done",
+  failed: "inbox.status.failed",
 };
 
 let storageId = null;
@@ -92,7 +93,7 @@ async function loadPage() {
 
     if (!cursor && page.items.length === 0) {
       jobsList.replaceChildren(
-        el("p", { class: "empty-state" }, [text("Nothing waiting. Photos you upload appear here until you review them.")]),
+        el("p", { class: "empty-state" }, [text(t("inbox.emptyState"))]),
       );
     }
     for (const job of page.items) {
@@ -112,8 +113,8 @@ function renderJob(job) {
   const card = fromTemplate(template);
   card.dataset.jobId = job.id;
 
-  qs('[data-role="kind"]', card).textContent = KIND_LABELS[job.kind] || job.kind;
-  qs('[data-role="status"]', card).textContent = STATUS_LABELS[job.status] || job.status;
+  qs('[data-role="kind"]', card).textContent = KIND_KEYS[job.kind] ? t(KIND_KEYS[job.kind]) : job.kind;
+  qs('[data-role="status"]', card).textContent = STATUS_KEYS[job.status] ? t(STATUS_KEYS[job.status]) : job.status;
 
   if (job.has_image) {
     const thumb = qs('[data-role="thumb"]', card);
@@ -123,7 +124,7 @@ function renderJob(job) {
 
   const parts = [age(job.created_at)];
   if (job.status === "done" && job.item_count != null) {
-    parts.push(job.item_count === 1 ? "1 item" : `${job.item_count} items`);
+    parts.push(tCount("inbox.itemCount", job.item_count));
   }
   if (job.status === "failed" && job.error) {
     // The server writes these messages for the reader; still text, never markup.
@@ -140,16 +141,16 @@ function renderJob(job) {
     const page = job.kind === "consumption_photo" ? "/consume-review.html" : "/review.html";
     const href = new URL(withStorageParam(storageId, page), location.origin);
     href.searchParams.set("job", job.id);
-    actions.append(el("a", { class: "btn btn--primary", href: href.pathname + href.search }, [text("Review")]));
+    actions.append(el("a", { class: "btn btn--primary", href: href.pathname + href.search }, [text(t("inbox.review"))]));
   }
   actions.append(
-    el("button", { type: "button", class: "btn btn--ghost", onclick: () => discard(job, card) }, [text("Discard")]),
+    el("button", { type: "button", class: "btn btn--ghost", onclick: () => discard(job, card) }, [text(t("inbox.discard"))]),
   );
   return card;
 }
 
 async function discard(job, card) {
-  if (!window.confirm("Discard this photo and its proposal? Nothing has been added to your inventory from it.")) {
+  if (!window.confirm(t("inbox.discardConfirm"))) {
     return;
   }
   clearError();
@@ -165,35 +166,33 @@ async function discard(job, card) {
 // They arrive through the URL, so they are read as numbers and only numbers
 // are printed.
 function confirmationText(batches, products, locations) {
-  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
   if (!Number.isInteger(batches) || batches <= 0) {
-    return "Proposal applied. Nothing was added to your inventory.";
+    return t("inbox.confirmNothingAdded");
   }
-  const parts = [plural(batches, "item", "items") + " added to your inventory"];
-  if (products > 0) parts.push(plural(products, "new product", "new products"));
-  if (locations > 0) parts.push(plural(locations, "new location", "new locations"));
-  return `Proposal applied: ${parts.join(", ")}.`;
+  const parts = [tCount("inbox.confirmItemsAdded", batches)];
+  if (products > 0) parts.push(tCount("inbox.confirmNewProducts", products));
+  if (locations > 0) parts.push(tCount("inbox.confirmNewLocations", locations));
+  return t("inbox.confirmApplied", { parts: parts.join(", ") });
 }
 
 // consumptionText summarises a consumption confirm from the batch count the
 // server returned, arriving through the URL and read as a number.
 function consumptionText(batches) {
   if (!Number.isInteger(batches) || batches <= 0) {
-    return "Proposal applied. Nothing was removed from your inventory.";
+    return t("inbox.consumeNothingRemoved");
   }
-  return `Proposal applied: ${batches} ${batches === 1 ? "batch" : "batches"} updated.`;
+  return tCount("inbox.consumeBatchesUpdated", batches);
 }
 
 function age(iso) {
   const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
-  if (days <= 0) return "Today";
-  if (days === 1) return "Yesterday";
-  return `${days} days ago`;
+  if (days <= 0) return t("inbox.today");
+  if (days === 1) return t("inbox.yesterday");
+  return tCount("inbox.daysAgo", days);
 }
 
 function showError(err) {
-  errorBox.textContent =
-    err instanceof ApiError ? err.message : "Could not reach the server. Check your connection and try again.";
+  errorBox.textContent = err instanceof ApiError ? apiErrorMessage(err) : t("inbox.networkError");
   errorBox.hidden = false;
 }
 

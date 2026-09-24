@@ -26,6 +26,7 @@ import { pollJob, JobFailedError } from "../jobs.js";
 import { el, fromTemplate, qs, qsa, text } from "../dom.js";
 import { openScanSheet } from "../barcode.js";
 import { ensureHotBarcodesFresh, lookupHotBarcode } from "../barcodes.js";
+import { t, tCount, apiErrorMessage } from "../i18n.js";
 
 // The endpoint each mode uploads to (docs/specs/09-consumption-logging.md's
 // capture-mode table) and, for the ones docs/specs/06-vision-shelf-ingestion.md
@@ -170,7 +171,7 @@ async function onSubmit(event) {
 }
 
 async function upload(card, endpoint, file, hint, mode) {
-  setStatus(card, "Uploading…", "");
+  setStatus(card, t("ingest.status.uploading"), "");
   const body = new FormData();
   body.append("image", file);
   if (hint) body.append("location_id", hint);
@@ -191,14 +192,14 @@ async function upload(card, endpoint, file, hint, mode) {
       }
       pendingScanCode = null;
     }
-    setStatus(card, "Uploaded", "Being analysed. It will be waiting in your inbox.");
+    setStatus(card, t("ingest.status.uploaded"), t("ingest.status.uploadedDetail"));
     setActions(card, [
       el("button", { type: "button", class: "btn btn--ghost", onclick: () => waitFor(card, jobId, mode) }, [
-        text("Wait here for the result"),
+        text(t("ingest.actions.waitHere")),
       ]),
     ]);
   } catch (err) {
-    setStatus(card, "Not uploaded", uploadErrorMessage(err));
+    setStatus(card, t("ingest.status.notUploaded"), uploadErrorMessage(err));
   }
 }
 
@@ -207,15 +208,15 @@ async function waitFor(card, jobId, mode) {
   try {
     const payload = await pollJob(storageId, jobId);
     const count = Array.isArray(payload?.rows) ? payload.rows.length : 0;
-    setStatus(card, "Ready", count === 1 ? "1 item found." : `${count} items found.`);
+    setStatus(card, t("ingest.status.ready"), tCount("ingest.itemsFound", count));
     setActions(card, [
-      el("a", { class: "btn btn--primary", href: reviewHref(jobId, mode) }, [text("Review now")]),
+      el("a", { class: "btn btn--primary", href: reviewHref(jobId, mode) }, [text(t("ingest.actions.reviewNow"))]),
     ]);
   } catch (err) {
     if (err instanceof JobFailedError) {
-      setStatus(card, "Failed", err.message);
+      setStatus(card, t("ingest.status.failed"), err.message);
     } else {
-      setStatus(card, "Unknown", "Could not check on this photo. Look for it in your inbox.");
+      setStatus(card, t("ingest.status.unknown"), t("ingest.status.unknownDetail"));
     }
     setActions(card, []);
   }
@@ -223,17 +224,17 @@ async function waitFor(card, jobId, mode) {
 
 function uploadErrorMessage(err) {
   if (!(err instanceof ApiError)) {
-    return "Could not reach the server. Check your connection and try again.";
+    return t("ingest.errors.network");
   }
   switch (err.code) {
     case "model_unavailable":
       // A configuration problem, not something wrong with the photo
       // (docs/specs/06-vision-shelf-ingestion.md).
-      return "Photo analysis is not available right now: the configured AI model is unavailable. An admin needs to choose another one.";
+      return t("ingest.errors.modelUnavailable");
     case "payload_too_large":
-      return "This photo is too large to upload.";
+      return t("ingest.errors.payloadTooLarge");
     default:
-      return err.message || "The photo could not be uploaded.";
+      return apiErrorMessage(err);
   }
 }
 
@@ -261,8 +262,7 @@ function setActions(card, nodes) {
 }
 
 function showError(err) {
-  errorBox.textContent =
-    err instanceof ApiError ? err.message : "Could not reach the server. Check your connection and try again.";
+  errorBox.textContent = err instanceof ApiError ? apiErrorMessage(err) : t("ingest.errors.network");
   errorBox.hidden = false;
 }
 
@@ -297,7 +297,7 @@ function syncScanField(mode) {
 
 async function onScanBarcode() {
   clearError();
-  const code = await openScanSheet(storageId, { title: "Scan a barcode" });
+  const code = await openScanSheet(storageId, { title: t("ingest.scanBarcode") });
   if (!code) return;
 
   // The hot-cache hit is an optimistic preview only (docs/specs/24-barcode-
@@ -342,7 +342,7 @@ function showHotBarcodePreview(card) {
   if (card.category_path) {
     children.push(el("p", { class: "muted" }, [text(card.category_path)]));
   }
-  children.push(el("p", { class: "empty-state", role: "status" }, [text("Checking this storage…")]));
+  children.push(el("p", { class: "empty-state", role: "status" }, [text(t("ingest.barcode.checking"))]));
 
   const dialog = el("dialog", { class: "card stack", "aria-labelledby": titleId }, children);
   document.body.append(dialog);
@@ -366,9 +366,7 @@ function showHotBarcodePreview(card) {
 // (docs/specs/00-overview.md).
 function onUnknownCode(code) {
   pendingScanCode = code;
-  errorBox.textContent =
-    "That barcode is not known here yet. Take a photo of the item and confirm what it is — " +
-    "the code will be offered for it afterwards.";
+  errorBox.textContent = t("ingest.barcode.unknownCode");
   errorBox.hidden = false;
   photosInput.focus();
 }
@@ -391,21 +389,21 @@ async function onCatalogHit(code, card) {
 // it.
 function openCatalogCard(card) {
   const titleId = "barcode-card-title";
-  const addButton = el("button", { type: "button", class: "btn btn--primary" }, [text("Add it to this storage")]);
-  const cancelButton = el("button", { type: "button", class: "btn btn--ghost" }, [text("Cancel")]);
+  const addButton = el("button", { type: "button", class: "btn btn--primary" }, [text(t("ingest.barcode.addToStorage"))]);
+  const cancelButton = el("button", { type: "button", class: "btn btn--ghost" }, [text(t("common.cancel"))]);
 
   const details = [];
   if (card.category_path) details.push(el("p", { class: "muted" }, [text(card.category_path)]));
   if (Array.isArray(card.variants) && card.variants.length > 0) {
-    details.push(el("p", { class: "muted" }, [text(`Also known as: ${card.variants.join(", ")}`)]));
+    details.push(el("p", { class: "muted" }, [text(t("ingest.barcode.alsoKnownAs", { variants: card.variants.join(", ") }))]));
   }
 
   const dialog = el("dialog", { class: "card stack", "aria-labelledby": titleId }, [
-    el("h2", { id: titleId }, [text("Someone has described this before")]),
+    el("h2", { id: titleId }, [text(t("ingest.barcode.catalogTitle"))]),
     el("p", {}, [text(card.display_name)]),
     ...details,
     el("p", { class: "muted" }, [
-      text("Adding it creates this product here, with that description, and attaches the code you scanned."),
+      text(t("ingest.barcode.catalogHint")),
     ]),
     el("div", { class: "row" }, [addButton, cancelButton]),
   ]);
@@ -448,7 +446,7 @@ async function openQuickLog(code, product) {
 function sheetFrame(titleId, title, product, fields, confirmLabel, onConfirm) {
   const errorLine = el("div", { class: "alert", role: "alert", hidden: true });
   const confirmButton = el("button", { type: "submit", class: "btn btn--primary" }, [text(confirmLabel)]);
-  const cancelButton = el("button", { type: "button", class: "btn btn--ghost" }, [text("Cancel")]);
+  const cancelButton = el("button", { type: "button", class: "btn btn--ghost" }, [text(t("common.cancel"))]);
 
   const form = el("form", { class: "stack" }, [
     ...fields,
@@ -458,7 +456,7 @@ function sheetFrame(titleId, title, product, fields, confirmLabel, onConfirm) {
 
   const dialog = el("dialog", { class: "card stack", "aria-labelledby": titleId }, [
     el("h2", { id: titleId }, [text(title)]),
-    el("p", { class: "muted" }, [text(`${product.name} · ${product.current_stock} in stock`)]),
+    el("p", { class: "muted" }, [text(t("ingest.barcode.stockLine", { name: product.name, stock: product.current_stock }))]),
     form,
   ]);
 
@@ -479,8 +477,7 @@ function sheetFrame(titleId, title, product, fields, confirmLabel, onConfirm) {
         finish(await onConfirm());
       } catch (err) {
         confirmButton.disabled = false;
-        errorLine.textContent =
-          err instanceof ApiError ? err.message : "Could not reach the server. Try again.";
+        errorLine.textContent = err instanceof ApiError ? apiErrorMessage(err) : t("ingest.errors.formNetwork");
         errorLine.hidden = false;
       }
     });
@@ -511,7 +508,7 @@ function sheetFrame(titleId, title, product, fields, confirmLabel, onConfirm) {
 async function openStockingUpSheet(code, product) {
   const quantity = el("input", { type: "number", min: "1", step: "1", inputmode: "numeric", value: "1", id: "quick-qty" });
   const locations = el("select", { id: "quick-location" });
-  locations.append(el("option", { value: "" }, [text("Choose a location…")]));
+  locations.append(el("option", { value: "" }, [text(t("ingest.barcode.chooseLocation"))]));
   for (const option of locationSelect.options) {
     if (option.value) locations.append(el("option", { value: option.value }, [text(option.textContent)]));
   }
@@ -523,25 +520,32 @@ async function openStockingUpSheet(code, product) {
   const expiry = el("input", { type: "date", id: "quick-expiry" });
 
   const fields = [
-    el("div", { class: "field" }, [el("label", { for: "quick-qty" }, [text("How many?")]), quantity]),
-    el("div", { class: "field" }, [el("label", { for: "quick-location" }, [text("Where?")]), locations]),
+    el("div", { class: "field" }, [el("label", { for: "quick-qty" }, [text(t("ingest.barcode.howMany"))]), quantity]),
+    el("div", { class: "field" }, [el("label", { for: "quick-location" }, [text(t("ingest.barcode.where"))]), locations]),
     el("div", { class: "field" }, [
-      el("label", { for: "quick-expiry" }, [text("Expires (optional)")]),
+      el("label", { for: "quick-expiry" }, [text(t("ingest.barcode.expiresOptional"))]),
       expiry,
-      el("p", { class: "muted" }, [text("Leave empty to use this product's usual shelf life.")]),
+      el("p", { class: "muted" }, [text(t("ingest.barcode.expiryHint"))]),
     ]),
   ];
 
-  const result = await sheetFrame("quick-log-title", "Stocking up", product, fields, "Add to inventory", async () => {
-    const body = {
-      direction: "in",
-      quantity: Number.parseInt(quantity.value, 10) || 0,
-      location_id: locations.value || null,
-    };
-    if (expiry.value) body.expiration_date = expiry.value;
-    return post(`/api/storages/${storageId}/barcodes/${encodeURIComponent(code)}/log`, body);
-  });
-  if (result) announceLogged(product.name, `now ${result.current_stock} in stock`);
+  const result = await sheetFrame(
+    "quick-log-title",
+    t("ingest.barcode.stockingUpTitle"),
+    product,
+    fields,
+    t("ingest.barcode.addToInventory"),
+    async () => {
+      const body = {
+        direction: "in",
+        quantity: Number.parseInt(quantity.value, 10) || 0,
+        location_id: locations.value || null,
+      };
+      if (expiry.value) body.expiration_date = expiry.value;
+      return post(`/api/storages/${storageId}/barcodes/${encodeURIComponent(code)}/log`, body);
+    },
+  );
+  if (result) announceLogged(product.name, t("ingest.barcode.nowInStock", { stock: result.current_stock }));
 }
 
 // openUsingUpSheet applies the decrement under docs/specs/09-consumption-logging.md's
@@ -551,19 +555,25 @@ async function openStockingUpSheet(code, product) {
 async function openUsingUpSheet(code, product) {
   const quantity = el("input", { type: "number", min: "1", step: "1", inputmode: "numeric", value: "1", id: "quick-qty" });
   const fields = [
-    el("div", { class: "field" }, [el("label", { for: "quick-qty" }, [text("How many did you use?")]), quantity]),
+    el("div", { class: "field" }, [el("label", { for: "quick-qty" }, [text(t("ingest.barcode.howManyUsed"))]), quantity]),
     el("p", { class: "muted" }, [
-      text("Taken from the batch that expires soonest first. Use the product page to split it differently."),
+      text(t("ingest.barcode.usingUpHint")),
     ]),
   ];
 
-  const result = await sheetFrame("quick-log-title", "Using up", product, fields, "Remove from inventory", () =>
-    post(`/api/storages/${storageId}/barcodes/${encodeURIComponent(code)}/log`, {
-      direction: "out",
-      quantity: Number.parseInt(quantity.value, 10) || 0,
-    }),
+  const result = await sheetFrame(
+    "quick-log-title",
+    t("ingest.barcode.usingUpTitle"),
+    product,
+    fields,
+    t("ingest.barcode.removeFromInventory"),
+    () =>
+      post(`/api/storages/${storageId}/barcodes/${encodeURIComponent(code)}/log`, {
+        direction: "out",
+        quantity: Number.parseInt(quantity.value, 10) || 0,
+      }),
   );
-  if (result) announceLogged(product.name, `now ${result.current_stock} in stock`);
+  if (result) announceLogged(product.name, t("ingest.barcode.nowInStock", { stock: result.current_stock }));
 }
 
 async function mostRecentLocation(productId) {
@@ -582,6 +592,6 @@ async function mostRecentLocation(productId) {
 
 function announceLogged(name, detail) {
   const card = addUploadCard(name);
-  setStatus(card, "Logged", detail);
+  setStatus(card, t("ingest.status.logged"), detail);
   setActions(card, []);
 }
