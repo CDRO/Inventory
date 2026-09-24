@@ -191,4 +191,43 @@ test.describe("a batch expiry date under a non-UTC browser timezone", () => {
     await expect(row).toContainText("Jan 1, 2030");
     await expect(row).not.toContainText("Dec 31, 2029");
   });
+
+  // The mechanism-level test above proves formatDate() itself renders German
+  // conventions; this proves a real page that calls it — products.html's
+  // batch list — actually does, once de is active, not just in isolation.
+  test("renders the same date in German once the language override is set", async ({ page }) => {
+    const login = await page.request.post("/api/auth/login", {
+      data: { username: "e2e-alice", password: PASSWORD },
+    });
+    expect(login.status()).toBe(200);
+
+    await page.goto("/index.html");
+    await page.evaluate(() => localStorage.setItem("inventory.language", "de"));
+
+    await page.goto(`/products.html?storage=${HOUSEHOLD_STORAGE}`);
+    await expect(page.locator("html")).toHaveAttribute("lang", "de");
+    await page.getByRole("button", { name: "Greek Yogurt", exact: true }).click();
+
+    const row = page.locator('[data-role="batch-row"][data-batch-id="' + YOGURT_FRIDGE_BATCH + '"]');
+    await expect(row).toContainText("01.01.2030"); // Intl.DateTimeFormat("de", {dateStyle:"medium"})
+  });
+
+  // stocktake.js's expiry badge is a separate call site with the identical
+  // fix (web/static/js/pages/stocktake.js:161) — proven separately because a
+  // revert of just this site would otherwise pass every other test here.
+  const FRIDGE_LOCATION = "00000000-0000-7000-8000-000000000021";
+
+  test("stocktake.html's expiry badge also survives the same non-UTC timezone", async ({ page }) => {
+    const login = await page.request.post("/api/auth/login", {
+      data: { username: "e2e-alice", password: PASSWORD },
+    });
+    expect(login.status()).toBe(200);
+
+    await page.goto(`/stocktake.html?location=${FRIDGE_LOCATION}&storage=${HOUSEHOLD_STORAGE}`);
+    const row = page.locator("#rows .review-row").filter({ hasText: "Greek Yogurt" });
+    // stocktake.js's formatDate() call passes no dateStyle, so Intl's default
+    // (numeric) format applies: "1/1/2030" for "en".
+    await expect(row).toContainText("1/1/2030");
+    await expect(row).not.toContainText("12/31/2029");
+  });
 });
