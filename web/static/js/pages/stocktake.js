@@ -2,7 +2,10 @@ import "../register-sw.js";
 
 // Page module for stocktake.html — the guided walk of one location
 // (docs/specs/13-stocktake-and-audit.md), deep-linked as
-// stocktake.html?location=…&storage=….
+// stocktake.html?location=…&storage=…. With no `?location=`, or one that
+// resolves to nothing, this module renders a location chooser instead
+// (docs/specs/35-stocktake-entry-points.md): the read-only tree plus a
+// "Stalest first" shortlist — see renderChooser below.
 //
 // There is no server-side stocktake session, draft or partial state. Like a
 // review job, the sheet is either confirmed whole or abandoned by leaving the
@@ -449,8 +452,13 @@ async function confirm() {
     const result = await post(`/api/storages/${storageId}/locations/${locationId}/stocktake`, body);
     found = [];
     renderFound();
-    showNotice(summarize(result));
+    // reload() first, notice second: reload()'s own clearError() would
+    // otherwise hide this notice in the same tick it was shown in, since
+    // nothing here yields to the browser between the two calls — confirmed
+    // live, this was a pre-existing bug that left every successful confirm
+    // with no visible feedback at all.
     await reload();
+    showNotice(summarize(result));
   } catch (err) {
     showError(err);
     if (err instanceof ApiError && err.status === 422) {

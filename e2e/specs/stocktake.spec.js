@@ -42,6 +42,11 @@ test("Count this shelf on the product page corrects the quantity, and Back retur
   await page.goto(`/products.html?storage=${STORAGE}`);
   await page.getByRole("button", { name: PRODUCT_NAME, exact: true }).click();
 
+  // The stock card no longer claims locations or expiry dates are edited on
+  // the stocktake sheet — only quantities are, corrected shelf by shelf.
+  await expect(page.locator("main")).toContainText("Counts are corrected shelf by shelf on the");
+  await expect(page.locator("main")).toContainText("stocktake sheet");
+
   const row = page.locator(`[data-role="batch-row"][data-batch-id="${BATCH}"]`);
   await expect(row).toContainText("3 × Fridge");
   await row.getByRole("link", { name: "Count this shelf" }).click();
@@ -55,6 +60,11 @@ test("Count this shelf on the product page corrects the quantity, and Back retur
 
   await page.locator("#back").click();
   await expect(page).toHaveURL(new RegExp(`/products\\.html\\?storage=${STORAGE}`));
+
+  // Back lands on products.html with no ?product=, so the detail view — and
+  // the batch row inside it — is not shown until the product is selected
+  // again (products.js only auto-opens one from a ?product= deep link).
+  await page.getByRole("button", { name: PRODUCT_NAME, exact: true }).click();
   await expect(row).toContainText("7 × Fridge");
 });
 
@@ -81,6 +91,17 @@ test("Stocktake from the navigation bar shows the Stalest-first chooser, and con
   const stalestText = await page.locator("#stalest").textContent();
   expect(stalestText).not.toContain("Freezer");
 
+  // The chooser's own read-only tree (not just the "Stalest first" list)
+  // renders every location with the same audited state and a Count link, and
+  // stays read-only: no rename/add-child/move-to controls, unlike the same
+  // component on locations.html (js/tree.js's new `editable: false` mode).
+  const chooserTree = page.locator("#chooser-tree");
+  await expect(chooserTree.locator(".tree-node")).toHaveCount(7);
+  await expect(chooserTree.getByRole("link", { name: "Count" })).toHaveCount(7);
+  await expect(chooserTree.getByRole("button", { name: "Rename" })).toHaveCount(0);
+  await expect(chooserTree.getByRole("button", { name: "Add", exact: true })).toHaveCount(0);
+  await expect(chooserTree.getByRole("button", { name: "Move to…" })).toHaveCount(0);
+
   // Confirm the first entry (Pantry, empty shelf) unchanged.
   await stalestItems.first().getByRole("link", { name: "Count" }).click();
   await expect(page).toHaveURL(new RegExp(`/stocktake\\.html\\?location=${PANTRY}`));
@@ -92,11 +113,14 @@ test("Stocktake from the navigation bar shows the Stalest-first chooser, and con
   await page.locator("#back").click();
   await expect(page.locator("#chooser")).toBeVisible();
 
+  // Pantry is now audited (just now) and has left the list; Freezer (10 days
+  // ago) is now the fifth-oldest, since Fridge — audited by the other test in
+  // this file — is fresher than it either way this file's tests happen to be
+  // scheduled (this file runs serially; see the header comment).
   const namesAfter = await Promise.all(
     (await page.locator("#stalest li").all()).map((item) => item.locator("span").first().textContent()),
   );
-  expect(namesAfter).not.toContain("Pantry");
-  expect(namesAfter[0]).toBe("Shed"); // the oldest audited one is still oldest
+  expect(namesAfter).toEqual(["Shed", "Attic", "Cellar", "Garage", "Freezer"]);
 });
 
 test("a random or foreign location shows the same not-found message and the chooser below it", async ({ page }) => {

@@ -55,11 +55,13 @@ export class TreeView {
    *   (docs/specs/02-data-model.md).
    * @param {(node: TreeNode) => (Node|null)} [callbacks.renderDetail] -
    *   optional; returns an element to show between a node's name and its
-   *   actions, such as the category tree's shelf-life rule
-   *   (docs/specs/08-expiration-and-classification.md). Called on every
-   *   render, including the ones expand/collapse triggers internally, so
-   *   whatever it draws always matches the node beside it. Omitted, nothing
-   *   extra is drawn — the locations tree does not pass it.
+   *   actions — the category tree's shelf-life rule
+   *   (docs/specs/08-expiration-and-classification.md), the locations
+   *   tree's audited state and Stocktake link
+   *   (docs/specs/13-stocktake-and-audit.md), or the read-only chooser's
+   *   audited state and Count link below. Called on every render, including
+   *   the ones expand/collapse triggers internally, so whatever it draws
+   *   always matches the node beside it. Omitted, nothing extra is drawn.
    * @param {boolean} [callbacks.editable] - default true. false renders
    *   expand/collapse and renderDetail only: no rename, add-child or "move
    *   to…" button, and no drag-and-drop. This is the read-only mode

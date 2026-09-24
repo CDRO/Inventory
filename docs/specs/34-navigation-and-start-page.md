@@ -182,8 +182,10 @@ is the same rule `05` applies to the review component and the tree.
 - Every page's existing header "Back" link that pointed to
   `/storages.html` is removed, because the bar replaces it. Contextual back
   links that point somewhere specific stay. Examples are review and
-  consume-review returning to the inbox, stocktake returning to locations,
-  and settings returning to the dashboard (which becomes the start page).
+  consume-review returning to the inbox, stocktake returning to the
+  same-origin page it was opened from — the inventory table, a product, or
+  the locations tree it defaults to (`35`) — and settings returning to the
+  dashboard (which becomes the start page).
 
 Pages without a resolved storage do not render the bar. These are
 `index.html`, the storage picker and the zero-storage empty state. There
