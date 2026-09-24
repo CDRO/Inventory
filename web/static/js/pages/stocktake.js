@@ -56,12 +56,13 @@ init();
 
 async function init() {
   locationId = new URLSearchParams(location.search).get("location");
-  if (!locationId) {
-    // Without a location there is no shelf to walk, and guessing one would be
-    // worse than saying so.
-    statusLine.textContent = t("stocktake.noLocation");
-    return;
-  }
+
+  // The missing-location case is handled below rather than here, after the
+  // session and storage have been resolved. Returning before that left this
+  // page with no navigation bar at all
+  // (docs/specs/34-navigation-and-start-page.md) — and it is the page the
+  // bar's own Stocktake entry links to, so a user who took that entry landed
+  // somewhere with no way onward but the browser's Back button.
 
   let me;
   try {
@@ -98,6 +99,16 @@ async function init() {
   const locationsHref = `/locations.html?storage=${encodeURIComponent(storageId)}`;
   backLink.href = locationsHref;
   cancelLink.href = locationsHref;
+
+  if (!locationId) {
+    // Without a location there is no shelf to walk, and guessing one would be
+    // worse than saying so. The bar above is rendered either way, so this is
+    // a page with nothing on it rather than a dead end.
+    // docs/specs/35-stocktake-entry-points.md replaces this message with a
+    // location chooser.
+    statusLine.textContent = t("stocktake.noLocation");
+    return;
+  }
 
   foundForm.addEventListener("submit", addFound);
   confirmButton.addEventListener("click", confirm);

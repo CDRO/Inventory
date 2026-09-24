@@ -122,6 +122,46 @@ test("the bar marks the current page and never links to the admin area", async (
   expect(hrefs.filter((href) => href && href.includes("/admin"))).toEqual([]);
 });
 
+// Every storage-scoped page marks its own entry, in the browser.
+//
+// web/nav_test.go cross-checks the `current` key each page module passes
+// against nav.js's vocabulary, which catches a wrong or missing key in the
+// merge gate. This is the other half: that the key actually becomes
+// `aria-current="page"` on the rendered bar. Inbox earns its row especially —
+// its entry is built by js/inbox-badge.js rather than by nav.js's own
+// navLink, so it is the one entry whose marking goes through a second code
+// path.
+const PAGES = [
+  { file: "dashboard.html", label: "Dashboard" },
+  { file: "inventory.html", label: "Inventory" },
+  { file: "products.html", label: "Products" },
+  { file: "locations.html", label: "Locations" },
+  { file: "categories.html", label: "Categories" },
+  { file: "shopping-list.html", label: "Shopping list" },
+  { file: "stocktake.html", label: "Stocktake" },
+  { file: "ingest.html", label: "Scan" },
+  { file: "inbox.html", label: "Inbox" },
+  { file: "settings.html", label: "Settings" },
+];
+
+for (const { file, label } of PAGES) {
+  test(`${file} marks its own entry in the bar`, async ({ page }) => {
+    await logIn(page, "e2e-start-multi");
+    await expect(page.locator("#main")).toContainText("Choose a storage");
+    await page.goto(`/${file}?storage=${START_TWO}`);
+
+    const nav = page.locator("#nav");
+    await expect(nav).toBeVisible();
+    await expect(nav.getByRole("link", { name: label, exact: true })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    // Exactly one entry is marked: a page that marked two would read as being
+    // in two places at once to a screen reader.
+    await expect(nav.locator('[aria-current="page"]')).toHaveCount(1);
+  });
+}
+
 // At phone width the bar scrolls sideways and the page body does not. A bar
 // that simply overflowed would look the same in a screenshot and make every
 // page horizontally scrollable, which is the failure this pins.

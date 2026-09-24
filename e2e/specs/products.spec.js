@@ -263,6 +263,11 @@ test("a location can be created from the split picker, without leaving products.
   await expect(targetSelect.locator("option:checked")).toContainText("Quick Create Shelf");
   await expect(form.locator("input")).toHaveValue("2");
 
+  // Read before the submit below, not after: confirming the split rebuilds
+  // the batch list, and with it this form, so a read afterwards races the
+  // re-render and comes back empty whenever the rebuild wins.
+  const newLocationId = await targetSelect.inputValue();
+
   const [splitResponse] = await Promise.all([
     page.waitForResponse(
       (res) => res.url().endsWith(`/inventory-batches/${QUICK_CREATE_BATCH}/split`) && res.request().method() === "POST",
@@ -270,8 +275,6 @@ test("a location can be created from the split picker, without leaving products.
     form.locator('button[type="submit"]').click(),
   ]);
   expect(splitResponse.status()).toBe(201);
-
-  const newLocationId = await targetSelect.inputValue();
   const product = await fetchProduct(page, QUICK_CREATE_PRODUCT);
   expect(product.current_stock).toBe(6); // net stock unchanged by a split
 
@@ -352,6 +355,11 @@ test("a location can be created from the move picker, without leaving products.h
   const targetSelect = form.locator("select");
   await expect(targetSelect.locator("option:checked")).toContainText("Quick Create Move Shelf");
 
+  // Read before the submit below, not after: confirming the move rebuilds
+  // the batch list, and with it this form, so a read afterwards races the
+  // re-render and comes back empty whenever the rebuild wins.
+  const newLocationId = await targetSelect.inputValue();
+
   const [moveResponse] = await Promise.all([
     page.waitForResponse(
       (res) => res.url().endsWith(`/inventory-batches/${MOVE_QUICK_CREATE_BATCH}`) && res.request().method() === "PATCH",
@@ -359,8 +367,6 @@ test("a location can be created from the move picker, without leaving products.h
     form.locator('button[type="submit"]').click(),
   ]);
   expect(moveResponse.status()).toBe(200);
-
-  const newLocationId = await targetSelect.inputValue();
   const product = await fetchProduct(page, MOVE_QUICK_CREATE_PRODUCT);
   expect(product.batches).toHaveLength(1);
   const moved = product.batches[0];
