@@ -26,7 +26,7 @@ import "../register-sw.js";
 // through. docs/specs/26-location-quick-create.md scopes its escape hatch to
 // review.html and shopping-list.html for exactly this reason.
 
-import { t, apiErrorMessage } from "../i18n.js";
+import { t, apiErrorMessage, formatDate } from "../i18n.js";
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
 import { initGamification } from "../gamification.js";
@@ -317,7 +317,7 @@ async function renderBatches(rowEl, productId, suggestedQty) {
 
     const where = locationNames.get(batch.location_id) || t("consumeReview.unknownLocation");
     const when = batch.expiration_date
-      ? t("consumeReview.expiresOn", { date: batch.expiration_date })
+      ? t("consumeReview.expiresOn", { date: formatDate(new Date(batch.expiration_date), { dateStyle: "medium" }) })
       : t("consumeReview.noExpiryDate");
     container.append(
       buildEl("label", { class: "row row--between" }, [
