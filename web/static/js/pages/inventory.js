@@ -499,9 +499,13 @@ function renderGroupRow(group) {
 
 function productCell(imageUrl, name, productId) {
   const thumb = imageUrl ? [el("img", { class: "inventory-table__thumb", src: imageUrl, alt: "" })] : [];
+  // A plain template, not withStorageParam, for the same reason
+  // stocktakeHref below gives: it would carry this page's own filter/sort
+  // query params into products.html, which has no use for them.
+  const href = `/products.html?storage=${encodeURIComponent(storageId)}&product=${encodeURIComponent(productId)}`;
   return el("span", { class: "inventory-table__product" }, [
     ...thumb,
-    el("a", { href: `/products.html?storage=${encodeURIComponent(storageId)}&product=${encodeURIComponent(productId)}` }, [text(name)]),
+    el("a", { href }, [text(name)]),
   ]);
 }
 
