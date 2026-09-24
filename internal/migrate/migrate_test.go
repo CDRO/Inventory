@@ -330,3 +330,89 @@ func TestRecoverFatalReraisesOtherPanics(t *testing.T) {
 		panic("unrelated panic")
 	}()
 }
+
+// TestRunDownRollsBackTheRepositorysOwnMigrations is the rollback half of
+// check_test.go's TestCheckAcceptsTheRepositorysOwnMigrations, and the only
+// place any real `-- +goose Down` block under migrations/ is ever executed.
+//
+// Every other test in this package writes its own migration files, and both
+// internal/store's test-database helper and that end-to-end guard stop at
+// `up`. So without this test a typo in a down block — a misspelled column, the
+// wrong table, a DROP naming something the up block never created — ships
+// green and surfaces only the day an operator rolls an upgrade back, which is
+// exactly the moment they have least appetite for a surprise
+// (docs/specs/18-operations-and-observability.md).
+//
+// It is written against whatever migration landed last rather than a fixed
+// version, so it keeps covering the newest down block as the schema grows: it
+// rolls back one step at a time from the top and asserts that
+// storage_members.start_page — the column
+// migrations/00013_storage_member_start_page.sql adds, whose acceptance
+// criterion in docs/specs/34-navigation-and-start-page.md is "its down
+// migration drops the column" — is present above version 13 and gone below it.
+// `migrate up` afterwards must put it back: a rollback an operator cannot undo
+// is not a rollback.
+func TestRunDownRollsBackTheRepositorysOwnMigrations(t *testing.T) {
+	// Not parallel: chdir mutates process state.
+	ctx := context.Background()
+	dsn := newTestDatabase(t)
+	chdir(t, filepath.Join("..", ".."))
+
+	// The version that introduced the column asserted below. Raise this
+	// together with the column when a later migration replaces it.
+	const startPageVersion int64 = 13
+
+	versions, err := shippedVersions("migrations")
+	require.NoError(t, err)
+	require.NotEmpty(t, versions, "the repository ships migrations")
+	newest := versions[len(versions)-1]
+	require.GreaterOrEqual(t, newest, startPageVersion,
+		"migration %d is shipped, so the newest version cannot be below it", startPageVersion)
+
+	require.NoError(t, Run(ctx, dsn, "up", io.Discard))
+	require.True(t, columnExists(t, dsn, "storage_members", "start_page"),
+		"migrate up must add the column migration %d declares", startPageVersion)
+
+	// One step per migration from the newest down to startPageVersion
+	// inclusive. Run's "down" rolls back exactly one, which is what an
+	// operator undoing a single upgrade step does.
+	for v := newest; v >= startPageVersion; v-- {
+		require.NoError(t, Run(ctx, dsn, "down", io.Discard),
+			"rolling back migration %d", v)
+	}
+
+	assert.False(t, columnExists(t, dsn, "storage_members", "start_page"),
+		"migration %d's down block must drop start_page", startPageVersion)
+
+	require.NoError(t, Run(ctx, dsn, "up", io.Discard))
+	assert.True(t, columnExists(t, dsn, "storage_members", "start_page"),
+		"re-applying must restore the column")
+	assert.NoError(t, Check(ctx, dsn),
+		"a database rolled back and migrated up again must satisfy the shipped binary")
+}
+
+// columnExists asks the database's own catalogue whether public.table.column
+// is there.
+//
+// Reading the catalogue rather than goose_db_version is the whole point: the
+// bookkeeping table records that goose *ran* a down block, not that the block
+// did what it claims. Only information_schema can tell an ALTER that took
+// effect from one that was recorded and did nothing.
+func columnExists(t *testing.T, dsn, table, column string) bool {
+	t.Helper()
+
+	db, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	var exists bool
+	require.NoError(t, db.QueryRow(`
+		SELECT EXISTS (
+		       SELECT 1
+		         FROM information_schema.columns
+		        WHERE table_schema = 'public'
+		          AND table_name   = $1
+		          AND column_name  = $2)`,
+		table, column).Scan(&exists))
+	return exists
+}
