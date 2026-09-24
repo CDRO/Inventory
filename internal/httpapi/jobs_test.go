@@ -190,6 +190,13 @@ func TestAnotherStoragesJobIsAPlain404(t *testing.T) {
 
 	list := f.do(http.MethodGet, f.base()+"/jobs", "")
 	assert.NotContains(t, list.Body.String(), foreign.ID.String())
+
+	// "Discard all" rides the same gate: a storage the caller is not a member
+	// of answers the identical 404, and nothing in it is touched.
+	discardForeign := f.do(http.MethodDelete, "/api/storages/"+foreign.StorageID.String()+"/jobs?up_to=2099-01-01T00:00:00Z", "")
+	assert.Equal(t, missing.Body.String(), discardForeign.Body.String())
+	_, err = f.jobs.Job(context.Background(), foreign.StorageID, foreign.ID)
+	assert.NoError(t, err, "a refused discard-all must not discard")
 }
 
 // TestJobInboxExcludesAppliedJobsByDefault — with no status filter the list is
@@ -325,6 +332,46 @@ func TestDiscardAllRequiresUpTo(t *testing.T) {
 
 	_, err := f.jobs.Job(context.Background(), f.storageID, job.ID)
 	assert.NoError(t, err, "a refused discard-all must not discard")
+}
+
+// TestDiscardAllCountsEveryJobItDeletes — the response's discarded count adds
+// up across every deleted job, not just one, and still excludes a consumed
+// job and one created after the boundary
+// (docs/specs/32-inbox-discard-all.md). The equivalent boundary and status
+// logic is exercised in full against the real database in
+// TestDiscardJobsDeletesTheStatusAndTimeWindow (internal/store/jobs_test.go);
+// this pins the same shape at the HTTP layer, where the count is assembled.
+func TestDiscardAllCountsEveryJobItDeletes(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	older := time.Now().Add(-time.Hour)
+	newer := time.Now().Add(time.Hour)
+
+	pending := f.jobs.add(t, f.storageID, store.JobPending, "")
+	pending.CreatedAt = older
+	done := f.jobs.add(t, f.storageID, store.JobDone, `{}`)
+	done.CreatedAt = older
+	failed := f.jobs.add(t, f.storageID, store.JobFailed, "")
+	failed.CreatedAt = older
+	consumed := f.jobs.add(t, f.storageID, store.JobConsumed, `{}`)
+	consumed.CreatedAt = older
+	tooNew := f.jobs.add(t, f.storageID, store.JobDone, `{}`)
+	tooNew.CreatedAt = newer
+
+	upTo := time.Now().UTC().Format(time.RFC3339)
+	rec := f.do(http.MethodDelete, f.base()+"/jobs?up_to="+upTo, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.JSONEq(t, `{"discarded":3}`, rec.Body.String())
+
+	for _, id := range []uuid.UUID{pending.ID, done.ID, failed.ID} {
+		_, err := f.jobs.Job(context.Background(), f.storageID, id)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	}
+	_, err := f.jobs.Job(context.Background(), f.storageID, consumed.ID)
+	assert.NoError(t, err, "a consumed job must survive discard-all")
+	_, err = f.jobs.Job(context.Background(), f.storageID, tooNew.ID)
+	assert.NoError(t, err, "a job created after the boundary must survive")
 }
 
 // TestDiscardAllIsBestEffortOnFileRemoval — a photo that fails to delete from
