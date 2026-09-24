@@ -34,10 +34,24 @@ Two details in that command are load-bearing:
 | `00010_admin_audit_log.sql` | `admin_audit_log` — the append-only record of admin actions in [`docs/specs/18-operations-and-observability.md`](../docs/specs/18-operations-and-observability.md) |
 | `00011_barcodes.sql` | `product_barcodes`, `catalog_barcodes`, and the two `users` columns behind the capture-time offer in [`docs/specs/20-barcode-recall.md`](../docs/specs/20-barcode-recall.md) |
 | `00012_barcode_hot_cache.sql` | `catalog_barcodes.scan_count` — the instance-wide scan popularity counter behind the client's hot-cache preview in [`docs/specs/24-barcode-hot-cache.md`](../docs/specs/24-barcode-hot-cache.md) |
+| `00013_storage_member_start_page.sql` | `storage_members.start_page` — the per-person, per-storage start page of [`docs/specs/34-navigation-and-start-page.md`](../docs/specs/34-navigation-and-start-page.md). Grants nothing: `storage_members` still carries no role and no rights |
 
-Every file carries both `-- +goose Up` and `-- +goose Down`, and the down path
-is exercised in CI-equivalent form: stepping `down` once per migration empties
-the schema, and `up` restores every table.
+Every file carries both `-- +goose Up` and `-- +goose Down`. **Only one of those
+down blocks is covered by a test**, and it is the newest:
+`TestRunDownRollsBackTheRepositorysOwnMigrations`
+(`internal/migrate/migrate_test.go`) rolls the shipped migrations back from the
+top down to `00013`, checks against `information_schema` that the column that
+migration adds is gone, then migrates up again. Nothing exercises the down block
+of `00001`–`00012`, and no script, workflow or deployment step in this
+repository runs `migrate down` at all.
+
+So if you edit an older down block, no test will contradict you. That is a
+deliberate consequence of the policy in
+[`docs/specs/18-operations-and-observability.md`](../docs/specs/18-operations-and-observability.md),
+not an oversight: production never rolls back with `migrate down` — restoring
+the pre-upgrade backup is the rollback — precisely because down-migrations
+against real data are "tested never and trusted always". Treat every down block
+as untested unless you extend that test to reach it.
 
 `00001`'s down step deliberately does **not** drop the extension. Other schemas
 in the same database may depend on `pg_trgm`, and dropping it would take their

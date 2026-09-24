@@ -339,19 +339,28 @@ func TestRecoverFatalReraisesOtherPanics(t *testing.T) {
 // internal/store's test-database helper and that end-to-end guard stop at
 // `up`. So without this test a typo in a down block — a misspelled column, the
 // wrong table, a DROP naming something the up block never created — ships
-// green and surfaces only the day an operator rolls an upgrade back, which is
-// exactly the moment they have least appetite for a surprise
-// (docs/specs/18-operations-and-observability.md).
+// green and is never contradicted by anything.
 //
-// It is written against whatever migration landed last rather than a fixed
-// version, so it keeps covering the newest down block as the schema grows: it
-// rolls back one step at a time from the top and asserts that
-// storage_members.start_page — the column
+// Where that surfaces is *not* a production rollback:
+// docs/specs/18-operations-and-observability.md forecloses `migrate down` in
+// production outright — the backup taken before an upgrade is the rollback,
+// "because down-migrations against real data are tested never and trusted
+// always". This test narrows that "tested never" by one migration. What it
+// protects is the dev and staging use of `migrate down`, and the maintainer who
+// reads a down block and assumes it works.
+//
+// The assertion is on storage_members.start_page, the column
 // migrations/00013_storage_member_start_page.sql adds, whose acceptance
 // criterion in docs/specs/34-navigation-and-start-page.md is "its down
-// migration drops the column" — is present above version 13 and gone below it.
-// `migrate up` afterwards must put it back: a rollback an operator cannot undo
-// is not a rollback.
+// migration drops the column". `migrate up` afterwards must put it back: a
+// rollback that cannot be undone is not a rollback.
+//
+// The rollback walks the shipped migration list from the newest version down to
+// startPageVersion rather than naming a fixed number of steps, so it keeps
+// covering the newest down block as the schema grows. **Today 00013 *is* the
+// newest, so that walk is a single step** — the loop is written for the schema
+// this test will live in, not for the one it has now, and there is currently no
+// version above 13 at which to observe the column still present.
 func TestRunDownRollsBackTheRepositorysOwnMigrations(t *testing.T) {
 	// Not parallel: chdir mutates process state.
 	ctx := context.Background()
@@ -373,12 +382,17 @@ func TestRunDownRollsBackTheRepositorysOwnMigrations(t *testing.T) {
 	require.True(t, columnExists(t, dsn, "storage_members", "start_page"),
 		"migrate up must add the column migration %d declares", startPageVersion)
 
-	// One step per migration from the newest down to startPageVersion
-	// inclusive. Run's "down" rolls back exactly one, which is what an
-	// operator undoing a single upgrade step does.
-	for v := newest; v >= startPageVersion; v-- {
+	// One call per *shipped migration* from the newest down to
+	// startPageVersion inclusive — iterating the versions slice rather than
+	// counting integers down from newest. Run's "down" rolls back exactly one
+	// applied migration, so an integer range would fire the wrong number of
+	// calls the moment migration numbering has a gap in it: the assertion
+	// below would still pass, having rolled back past the migration under
+	// test, and the diagnostic would name a version that was never the target
+	// of that call.
+	for i := len(versions) - 1; i >= 0 && versions[i] >= startPageVersion; i-- {
 		require.NoError(t, Run(ctx, dsn, "down", io.Discard),
-			"rolling back migration %d", v)
+			"rolling back migration %d", versions[i])
 	}
 
 	assert.False(t, columnExists(t, dsn, "storage_members", "start_page"),
