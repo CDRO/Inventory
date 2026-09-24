@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#2563eb">
-  <title>Review consumption · Inventory</title>
+  <title data-i18n="consumeReview.pageTitle">Review consumption · Inventory</title>
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" href="/icons/icon-192.png">
   <link rel="apple-touch-icon" href="/icons/icon-192.png">
@@ -15,31 +15,31 @@
 </head>
 <body>
   <header class="shell row row--between">
-    <strong>Inventory</strong>
+    <strong data-i18n="common.appName">Inventory</strong>
     <div class="row">
       <div id="storage-switcher" hidden></div>
       <div id="gamification-ring" hidden></div>
-      <a id="back" href="/inbox.html" class="btn btn--ghost">Inbox</a>
+      <a id="back" href="/inbox.html" class="btn btn--ghost" data-i18n="consumeReview.backToInbox">Inbox</a>
     </div>
   </header>
 
   <main id="main" class="shell stack" aria-live="polite">
-    <h2>Review · using up</h2>
+    <h2 data-i18n="consumeReview.title">Review · using up</h2>
 
     <div id="error" class="alert" role="alert" hidden></div>
-    <p id="status" class="empty-state">Loading…</p>
+    <p id="status" class="empty-state" data-i18n="common.loading">Loading…</p>
 
     <section id="proposal" class="stack" hidden>
-      <p class="muted">
+      <p class="muted" data-i18n="consumeReview.hint">
         Nothing is removed from your inventory until you confirm. Reject
         anything that is not really there; correct anything the photo got
         wrong to an existing product — consumption never creates a new one.
       </p>
       <div id="rows" class="review-list"></div>
       <div class="row">
-        <button id="confirm" type="button" class="btn btn--primary">Confirm</button>
-        <button id="reanalyze" type="button" class="btn btn--ghost" hidden>Analyze again</button>
-        <button id="discard" type="button" class="btn btn--ghost">Discard</button>
+        <button id="confirm" type="button" class="btn btn--primary" data-i18n="consumeReview.confirm">Confirm</button>
+        <button id="reanalyze" type="button" class="btn btn--ghost" hidden data-i18n="consumeReview.reanalyze">Analyze again</button>
+        <button id="discard" type="button" class="btn btn--ghost" data-i18n="consumeReview.discard">Discard</button>
       </div>
     </section>
   </main>
@@ -60,16 +60,16 @@
         </div>
 
         <div class="field">
-          <label>Product
+          <label><span data-i18n="consumeReview.row.product">Product</span>
             <select data-role="product"></select>
           </label>
         </div>
         <div class="field" data-role="product-search" hidden>
-          <label>Search your products
-            <input type="text" data-role="product-input" list="product-datalist" placeholder="Start typing a product name…">
+          <label><span data-i18n="consumeReview.row.searchLabel">Search your products</span>
+            <input type="text" data-role="product-input" list="product-datalist" data-i18n-placeholder="consumeReview.row.searchPlaceholder" placeholder="Start typing a product name…">
           </label>
         </div>
-        <p class="empty-state" data-role="unrecognized" hidden>
+        <p class="empty-state" data-role="unrecognized" hidden data-i18n="consumeReview.row.unrecognized">
           Not recognized. Pick a product above before accepting this row.
         </p>
 
@@ -78,9 +78,9 @@
         <p class="review-row__error" data-role="row-error" role="alert" hidden></p>
       </div>
       <div class="review-row__actions">
-        <button type="button" class="btn btn--ghost" data-action="accept">Accept</button>
-        <button type="button" class="btn btn--ghost" data-action="correct">Correct</button>
-        <button type="button" class="btn btn--ghost" data-action="reject">Reject</button>
+        <button type="button" class="btn btn--ghost" data-action="accept" data-i18n="consumeReview.row.accept">Accept</button>
+        <button type="button" class="btn btn--ghost" data-action="correct" data-i18n="consumeReview.row.correct">Correct</button>
+        <button type="button" class="btn btn--ghost" data-action="reject" data-i18n="consumeReview.row.reject">Reject</button>
       </div>
     </div>
   </template>

@@ -1,4 +1,5 @@
 import "../register-sw.js";
+import { t, tCount, formatDate, apiErrorMessage } from "../i18n.js";
 
 // Page module for products.html — the product list plus the detail/edit view
 // docs/specs/16-product-maintenance.md defines, and the screen
@@ -39,9 +40,9 @@ const MAX_SHELF_LIFE_DAYS = 36500;
 // The three values of docs/specs/02-data-model.md, in the order spec 08 walks
 // them when no rule applies.
 const ITEM_TYPES = [
-  ["perishable", "Perishable"],
-  ["long_shelf_life", "Long shelf life"],
-  ["non_perishable", "Non-perishable"],
+  ["perishable", "products.itemType.perishable"],
+  ["long_shelf_life", "products.itemType.longShelfLife"],
+  ["non_perishable", "products.itemType.nonPerishable"],
 ];
 
 const listContainer = document.querySelector("#list");
@@ -134,13 +135,13 @@ function renderList() {
   if (products.length === 0) {
     listContainer.append(
       el("p", { class: "empty-state" }, [
-        text("No products yet. Scan a shelf or a receipt to add some."),
+        text(t("products.list.empty")),
       ]),
     );
     return;
   }
   if (shown.length === 0) {
-    listContainer.append(el("p", { class: "empty-state" }, [text("No product matches that.")]));
+    listContainer.append(el("p", { class: "empty-state" }, [text(t("products.list.noMatch"))]));
     return;
   }
 
@@ -216,10 +217,10 @@ function renderBarcodeCard(product) {
   function fail(err) {
     errorLine.textContent =
       err instanceof ApiError && err.code === "conflict"
-        ? "That barcode already belongs to another product here."
+        ? t("products.barcode.conflict")
         : err instanceof ApiError
-          ? err.message
-          : "Could not reach the server. Try again.";
+          ? apiErrorMessage(err)
+          : t("products.error.network");
     errorLine.hidden = false;
   }
 
@@ -234,7 +235,7 @@ function renderBarcodeCard(product) {
       return;
     }
     if (items.length === 0) {
-      list.append(el("li", { class: "empty-state" }, [text("No barcode yet.")]));
+      list.append(el("li", { class: "empty-state" }, [text(t("products.barcode.empty"))]));
       return;
     }
     for (const item of items) {
@@ -248,7 +249,7 @@ function renderBarcodeCard(product) {
               class: "btn btn--ghost",
               onclick: () => remove(item.barcode),
             },
-            [text("Remove")],
+            [text(t("products.barcode.remove"))],
           ),
         ]),
       );
@@ -278,18 +279,18 @@ function renderBarcodeCard(product) {
 
   const form = el("form", { class: "row" }, [
     typed,
-    el("button", { type: "submit", class: "btn" }, [text("Add")]),
+    el("button", { type: "submit", class: "btn" }, [text(t("products.barcode.add"))]),
     el(
       "button",
       {
         type: "button",
         class: "btn",
         onclick: async () => {
-          const code = await openScanSheet(storageId, { title: "Scan a barcode" });
+          const code = await openScanSheet(storageId, { title: t("products.barcode.scanTitle") });
           if (code) await add(code);
         },
       },
-      [text("Scan")],
+      [text(t("products.barcode.scan"))],
     ),
   ]);
   form.addEventListener("submit", (event) => {
@@ -301,13 +302,13 @@ function renderBarcodeCard(product) {
   reload();
 
   return el("div", { class: "card stack" }, [
-    el("h3", {}, [text("Barcodes")]),
+    el("h3", {}, [text(t("products.barcode.title"))]),
     el("p", { class: "muted" }, [
-      text("Scanning one of these finds this product instantly, with no photo and no AI call."),
+      text(t("products.barcode.hint")),
     ]),
     errorLine,
     list,
-    el("label", { for: "p-barcode" }, [text("Add a barcode")]),
+    el("label", { for: "p-barcode" }, [text(t("products.barcode.addLabel"))]),
     form,
   ]);
 }
@@ -316,14 +317,14 @@ function renderPicture(product) {
   if (product.image_url) {
     return el("img", {
       src: product.image_url,
-      alt: `Picture of ${product.name}`,
+      alt: t("products.picture.alt", { name: product.name }),
       style: "max-width: 8rem; border-radius: var(--radius, 6px);",
     });
   }
   if (product.icon_name) {
-    return el("p", { class: "muted" }, [text(`Icon: ${product.icon_name}`)]);
+    return el("p", { class: "muted" }, [text(t("products.picture.icon", { icon: product.icon_name }))]);
   }
-  return el("p", { class: "empty-state" }, [text("No picture yet.")]);
+  return el("p", { class: "empty-state" }, [text(t("products.picture.none"))]);
 }
 
 function renderEditForm(product) {
@@ -336,8 +337,8 @@ function renderEditForm(product) {
   category.value = product.category_id ?? "";
 
   const itemType = el("select", { id: "p-item-type" });
-  for (const [value, label] of ITEM_TYPES) {
-    const option = el("option", { value }, [text(label)]);
+  for (const [value, labelKey] of ITEM_TYPES) {
+    const option = el("option", { value }, [text(t(labelKey))]);
     if (value === product.item_type) option.selected = true;
     itemType.append(option);
   }
@@ -352,7 +353,7 @@ function renderEditForm(product) {
     min: "0",
     max: String(MAX_SHELF_LIFE_DAYS),
     step: "1",
-    placeholder: "Inherit",
+    placeholder: t("products.edit.shelfLife.placeholder"),
     value: product.default_shelf_life_days == null ? "" : String(product.default_shelf_life_days),
   });
 
@@ -371,14 +372,14 @@ function renderEditForm(product) {
       },
     },
     [
-      field("Name", name),
-      field("Category", category),
-      field("Item type", itemType),
-      field("Minimum stock", minStock),
-      field("Shelf life (days)", shelfLife, "Leave empty to inherit from the category, the catalog, or the item type."),
-      field("Icon name", icon, "Leave empty for no icon."),
+      field(t("products.edit.name"), name),
+      field(t("products.edit.category"), category),
+      field(t("products.edit.itemTypeLabel"), itemType),
+      field(t("products.edit.minStock"), minStock),
+      field(t("products.edit.shelfLife"), shelfLife, t("products.edit.shelfLife.hint")),
+      field(t("products.edit.icon"), icon, t("products.edit.icon.hint")),
       el("div", { class: "row" }, [
-        el("button", { type: "submit", class: "btn btn--primary" }, [text("Save")]),
+        el("button", { type: "submit", class: "btn btn--primary" }, [text(t("common.save"))]),
       ]),
     ],
   );
@@ -415,7 +416,7 @@ async function save(product, inputs) {
   if (icon !== (product.icon_name ?? null)) body.icon_name = icon;
 
   if (Object.keys(body).length === 0) {
-    showStatus("Nothing changed.");
+    showStatus(t("products.save.nothingChanged"));
     return;
   }
 
@@ -424,7 +425,7 @@ async function save(product, inputs) {
   // rename over similarity (docs/specs/16-product-maintenance.md).
   if (body.name) {
     const twin = closestOtherProduct(body.name, product.id);
-    if (twin && !confirm(`“${twin.name}” already exists. Save this rename anyway?\n\nCancel to merge them instead.`)) {
+    if (twin && !confirm(t("products.save.confirmRenameOverMerge", { name: twin.name }))) {
       await offerMerge(product, twin);
       return;
     }
@@ -434,13 +435,9 @@ async function save(product, inputs) {
     const updated = await patch(`${basePath()}/${product.id}`, body);
     clearError();
     if (typeof updated.recomputed_batches === "number") {
-      showStatus(
-        updated.recomputed_batches === 1
-          ? "Shelf life saved; 1 expiry date was recalculated."
-          : `Shelf life saved; ${updated.recomputed_batches} expiry dates were recalculated.`,
-      );
+      showStatus(tCount("products.save.shelfLifeRecalculated", updated.recomputed_batches));
     } else {
-      showStatus("Saved.");
+      showStatus(t("products.save.saved"));
     }
     await reload();
   } catch (err) {
@@ -473,15 +470,17 @@ function closestOtherProduct(name, ownId) {
 }
 
 async function offerMerge(survivor, source) {
-  if (!confirm(`Merge “${source.name}” into “${survivor.name}”?\n\nAll of its stock and history moves across, and “${source.name}” disappears.`)) {
+  if (!confirm(t("products.merge.confirm", { source: source.name, survivor: survivor.name }))) {
     return;
   }
   try {
     const result = await post(`${basePath()}/${survivor.id}/merge`, { source_product_id: source.id });
     clearError();
     showStatus(
-      `Merged. ${countLabel(result.moved_batches, "batch", "batches")} moved, ` +
-        `${countLabel(result.recomputed_batches, "expiry date", "expiry dates")} recalculated.`,
+      t("products.merge.result", {
+        batches: tCount("products.merge.movedBatches", result.moved_batches),
+        dates: tCount("products.merge.recomputedDates", result.recomputed_batches),
+      }),
     );
     selectedId = survivor.id;
     await reload();
@@ -498,15 +497,16 @@ function renderStockCard(product) {
   const locationSelects = [];
   const rows = product.batches.map((batch) => renderBatchRow(batch, locationSelects));
 
+  const [hintBefore, hintAfter] = t("products.stock.hint").split("{link}");
   return el("div", { class: "card stack" }, [
-    el("h3", {}, [text(`In stock: ${product.current_stock}`)]),
+    el("h3", {}, [text(t("products.stock.title", { count: product.current_stock }))]),
     rows.length
       ? el("ul", { class: "stack" }, rows)
-      : el("p", { class: "empty-state" }, [text("Nothing on the shelf.")]),
+      : el("p", { class: "empty-state" }, [text(t("products.stock.empty"))]),
     el("p", { class: "muted" }, [
-      text("Quantity corrections and expiry edits happen on the "),
-      el("a", { href: withStorageParam(storageId, "/stocktake.html") }, [text("stocktake screen")]),
-      text("."),
+      text(hintBefore),
+      el("a", { href: withStorageParam(storageId, "/stocktake.html") }, [text(t("products.stock.linkText"))]),
+      text(hintAfter),
     ]),
   ]);
 }
@@ -536,11 +536,11 @@ function renderBatchRow(batch, locationSelects) {
   }
 
   function fail(err) {
-    showFieldError(err instanceof ApiError ? err.message : "Could not reach the server. Try again.");
+    showFieldError(err instanceof ApiError ? apiErrorMessage(err) : t("products.error.network"));
   }
 
   function locationOptionsWithPlaceholder(select) {
-    select.append(el("option", { value: "" }, [text("Choose a location…")]));
+    select.append(el("option", { value: "" }, [text(t("products.batch.chooseLocation"))]));
     appendLocationOptions(select, locations);
   }
 
@@ -552,16 +552,16 @@ function renderBatchRow(batch, locationSelects) {
     type: "number",
     min: "1",
     step: "1",
-    "aria-label": "Quantity to split off",
-    placeholder: "Quantity",
+    "aria-label": t("products.batch.splitQuantityAriaLabel"),
+    placeholder: t("products.batch.quantityPlaceholder"),
   });
-  const splitTarget = el("select", { "aria-label": "Split target location", "data-field": "location" });
+  const splitTarget = el("select", { "aria-label": t("products.batch.splitTargetAriaLabel"), "data-field": "location" });
   locationOptionsWithPlaceholder(splitTarget);
   locationSelects.push(splitTarget);
   const splitLocationAdd = el(
     "button",
     { type: "button", class: "btn btn--ghost", "data-role": "location-add" },
-    [text("+ New location")],
+    [text(t("products.batch.newLocation"))],
   );
   splitLocationAdd.addEventListener("click", () =>
     openLocationField({
@@ -579,11 +579,11 @@ function renderBatchRow(batch, locationSelects) {
       splitQuantity,
       splitTarget,
       splitLocationAdd,
-      el("button", { type: "submit", class: "btn btn--primary" }, [text("Split")]),
+      el("button", { type: "submit", class: "btn btn--primary" }, [text(t("products.batch.split"))]),
       el(
         "button",
         { type: "button", class: "btn btn--ghost", onclick: () => closeForms() },
-        [text("Cancel")],
+        [text(t("common.cancel"))],
       ),
     ],
   );
@@ -605,13 +605,13 @@ function renderBatchRow(batch, locationSelects) {
 
   // Move: the whole batch, same id, new location_id — a different endpoint
   // from split, not a split of the full quantity.
-  const moveTarget = el("select", { "aria-label": "Move target location", "data-field": "location" });
+  const moveTarget = el("select", { "aria-label": t("products.batch.moveTargetAriaLabel"), "data-field": "location" });
   locationOptionsWithPlaceholder(moveTarget);
   locationSelects.push(moveTarget);
   const moveLocationAdd = el(
     "button",
     { type: "button", class: "btn btn--ghost", "data-role": "location-add" },
-    [text("+ New location")],
+    [text(t("products.batch.newLocation"))],
   );
   moveLocationAdd.addEventListener("click", () =>
     openLocationField({
@@ -628,11 +628,11 @@ function renderBatchRow(batch, locationSelects) {
     [
       moveTarget,
       moveLocationAdd,
-      el("button", { type: "submit", class: "btn btn--primary" }, [text("Move")]),
+      el("button", { type: "submit", class: "btn btn--primary" }, [text(t("products.batch.move"))]),
       el(
         "button",
         { type: "button", class: "btn btn--ghost", onclick: () => closeForms() },
-        [text("Cancel")],
+        [text(t("common.cancel"))],
       ),
     ],
   );
@@ -656,9 +656,18 @@ function renderBatchRow(batch, locationSelects) {
 
   const summary = el("div", { class: "row row--between" }, [
     el("span", {}, [
-      text(`${batch.quantity} × ${locationName}`),
-      text(batch.expiration_date ? ` — expires ${batch.expiration_date}` : " — no expiry"),
-      text(batch.expiration_source === "user" ? " (you set this)" : ""),
+      text(t("products.batch.summary", { quantity: batch.quantity, location: locationName })),
+      text(
+        batch.expiration_date
+          ? // expiration_date is a bare DATE (migrations/00002_core_schema.sql),
+            // parsed as UTC midnight — timeZone: "UTC" renders the calendar
+            // date the server sent, not one day early for a viewer west of UTC.
+            t("products.batch.expiresOn", {
+              date: formatDate(new Date(batch.expiration_date), { dateStyle: "medium", timeZone: "UTC" }),
+            })
+          : t("products.batch.noExpiry"),
+      ),
+      text(batch.expiration_source === "user" ? t("products.batch.userSet") : ""),
     ]),
     el("div", { class: "row" }, [
       el(
@@ -673,7 +682,7 @@ function renderBatchRow(batch, locationSelects) {
             splitForm.hidden = !opening;
           },
         },
-        [text("Split")],
+        [text(t("products.batch.split"))],
       ),
       el(
         "button",
@@ -687,7 +696,7 @@ function renderBatchRow(batch, locationSelects) {
             moveForm.hidden = !opening;
           },
         },
-        [text("Move")],
+        [text(t("products.batch.move"))],
       ),
     ]),
   ]);
@@ -708,40 +717,46 @@ function renderBatchRow(batch, locationSelects) {
  */
 function locationNameFor(locationId) {
   const match = locations.find((loc) => loc.id === locationId);
-  return match ? match.name : "Unknown location";
+  return match ? match.name : t("products.batch.locationUnknown");
 }
 
 function renderHistoryCard(product) {
-  const rows = product.logs.map((entry) =>
-    el("li", {}, [
-      text(
-        `${entry.timestamp.slice(0, 10)} · ${entry.change_qty > 0 ? "+" : ""}${entry.change_qty} · ${entry.reason}` +
-          (entry.created_by ? ` · ${entry.created_by}` : ""),
-      ),
-    ]),
-  );
+  const rows = product.logs.map((entry) => {
+    // entry.reason and entry.created_by are server-supplied text
+    // (docs/specs/19-localization.md: the API stays English) — only the
+    // structure and the date around them is localized.
+    let line = t("products.history.entry", {
+      date: formatDate(new Date(entry.timestamp), { dateStyle: "medium" }),
+      qty: `${entry.change_qty > 0 ? "+" : ""}${entry.change_qty}`,
+      reason: entry.reason,
+    });
+    if (entry.created_by) {
+      line += t("products.history.entryCreatedBy", { createdBy: entry.created_by });
+    }
+    return el("li", {}, [text(line)]);
+  });
 
   return el("div", { class: "card stack" }, [
-    el("h3", {}, [text("Recent history")]),
+    el("h3", {}, [text(t("products.history.title"))]),
     rows.length
       ? el("ul", {}, rows)
-      : el("p", { class: "empty-state" }, [text("Nothing recorded yet.")]),
+      : el("p", { class: "empty-state" }, [text(t("products.history.empty"))]),
   ]);
 }
 
 function renderDangerCard(product) {
   const others = products.filter((p) => p.id !== product.id);
   const picker = el("select", { id: "p-merge-source" }, [
-    el("option", { value: "" }, [text("— Pick the duplicate —")]),
+    el("option", { value: "" }, [text(t("products.danger.pickDuplicate"))]),
   ]);
   for (const other of others) {
     picker.append(el("option", { value: other.id }, [text(other.name)]));
   }
 
   return el("div", { class: "card stack" }, [
-    el("h3", {}, [text("Clean-up")]),
+    el("h3", {}, [text(t("products.danger.title"))]),
     el("p", { class: "muted" }, [
-      text(`Merging keeps “${product.name}” exactly as it is and folds the other product's stock and history into it.`),
+      text(t("products.danger.mergeHint", { name: product.name })),
     ]),
     el("div", { class: "row" }, [
       picker,
@@ -753,13 +768,13 @@ function renderDangerCard(product) {
           onclick: () => {
             const source = others.find((p) => p.id === picker.value);
             if (!source) {
-              showStatus("Pick the duplicate to merge in first.");
+              showStatus(t("products.danger.pickFirst"));
               return;
             }
             offerMerge(product, source);
           },
         },
-        [text("Merge in")],
+        [text(t("products.danger.mergeIn"))],
       ),
     ]),
     el(
@@ -769,7 +784,7 @@ function renderDangerCard(product) {
         class: "btn btn--danger",
         onclick: () => removeProduct(product),
       },
-      [text("Delete this product")],
+      [text(t("products.danger.delete"))],
     ),
   ]);
 }
@@ -779,26 +794,22 @@ async function removeProduct(product) {
   // docs/specs/16-product-maintenance.md requires of the frontend: deleting is
   // allowed even with stock on hand, so the person has to be told what they
   // are erasing.
-  const warning =
-    `Delete “${product.name}”?\n\n` +
-    `${countLabel(product.current_stock, "item", "items")} currently on the shelf and ` +
-    `its entire history will be erased. This cannot be undone.`;
+  const warning = t("products.delete.confirm", {
+    name: product.name,
+    items: tCount("products.delete.items", product.current_stock),
+  });
   if (!confirm(warning)) return;
 
   try {
     await del(`${basePath()}/${product.id}`);
     clearError();
-    showStatus(`“${product.name}” deleted.`);
+    showStatus(t("products.delete.done", { name: product.name }));
     selectedId = null;
     clearChildren(detailContainer);
     await reload();
   } catch (err) {
     showError(err);
   }
-}
-
-function countLabel(n, singular, plural) {
-  return `${n} ${n === 1 ? singular : plural}`;
 }
 
 /** normalize lowercases and collapses whitespace, for the filter and the
@@ -819,8 +830,7 @@ function clearStatus() {
 }
 
 function showError(err) {
-  errorBox.textContent =
-    err instanceof ApiError ? err.message : "Something went wrong. Check your connection and try again.";
+  errorBox.textContent = err instanceof ApiError ? apiErrorMessage(err) : t("products.error.network.full");
   errorBox.hidden = false;
 }
 

@@ -22,6 +22,7 @@ import { fetchProducts } from "../product-options.js";
 import { formatAudited } from "../audited.js";
 import { get, post, ApiError } from "../api.js";
 import { clearChildren, el, text, qs } from "../dom.js";
+import { t, tCount, apiErrorMessage, formatDate } from "../i18n.js";
 
 const switcherContainer = qs("#storage-switcher");
 const heading = qs("#heading");
@@ -57,7 +58,7 @@ async function init() {
   if (!locationId) {
     // Without a location there is no shelf to walk, and guessing one would be
     // worse than saying so.
-    statusLine.textContent = "No location given. Pick one from the locations tree.";
+    statusLine.textContent = t("stocktake.noLocation");
     return;
   }
 
@@ -107,7 +108,7 @@ async function loadProducts() {
   }
   clearChildren(foundProduct);
   foundProduct.append(
-    el("option", { value: "" }, [text("Pick a product…")]),
+    el("option", { value: "" }, [text(t("stocktake.pickProduct"))]),
     ...products.map((product) => el("option", { value: product.id }, [text(product.name)])),
   );
 }
@@ -119,15 +120,15 @@ async function reload() {
     render(sheet);
   } catch (err) {
     statusLine.hidden = false;
-    statusLine.textContent = "This sheet could not be loaded.";
+    statusLine.textContent = t("stocktake.loadFailed");
     sheetSection.hidden = true;
     showError(err);
   }
 }
 
 function render(sheet) {
-  heading.textContent = `Stocktake · ${sheet.location.name}`;
-  document.title = `Stocktake · ${sheet.location.name} · Inventory`;
+  heading.textContent = t("stocktake.titleWithLocation", { location: sheet.location.name });
+  document.title = t("stocktake.documentTitle", { location: sheet.location.name });
   auditedLine.textContent = formatAudited(sheet.location.last_audited_at);
 
   counts.clear();
@@ -149,13 +150,20 @@ function renderRow(batch) {
     min: "0",
     step: "1",
     value: String(batch.quantity),
-    "aria-label": `Counted quantity of ${batch.product_name}`,
+    "aria-label": t("stocktake.countedAriaLabel", { product: batch.product_name }),
   });
   counts.set(batch.id, { batch, input });
 
   const details = [text(batch.product_name)];
   if (batch.expiration_date) {
-    details.push(el("span", { class: "badge" }, [text(`expires ${batch.expiration_date}`)]));
+    details.push(
+      el("span", { class: "badge" }, [
+        // expiration_date is a bare DATE (migrations/00002_core_schema.sql),
+        // parsed as UTC midnight — timeZone: "UTC" renders the calendar date
+        // the server sent, not one day early for a viewer west of UTC.
+        text(t("stocktake.expiresBadge", { date: formatDate(new Date(batch.expiration_date), { timeZone: "UTC" }) })),
+      ]),
+    );
   }
 
   const thumb = batch.image_url
@@ -166,21 +174,21 @@ function renderRow(batch) {
     ...thumb,
     el("div", { class: "review-row__fields" }, [
       el("div", { class: "row row--between" }, [el("strong", {}, details)]),
-      el("p", { class: "muted" }, [text(`Recorded: ${batch.quantity}`)]),
+      el("p", { class: "muted" }, [text(t("stocktake.recorded", { quantity: batch.quantity }))]),
     ]),
     el("div", { class: "review-row__actions" }, [
       // The input is wrapped by its label rather than pointed at by a for=,
       // so no generated id has to stay unique across a re-rendered sheet. The
       // aria-label names which product is being counted, which "Counted"
       // alone does not once a screen reader is on the third row.
-      el("label", { class: "field" }, [text("Counted"), input]),
+      el("label", { class: "field" }, [text(t("stocktake.countedLabel")), input]),
       el("button", {
         type: "button",
         class: "btn btn--ghost",
         onclick: () => {
           input.value = "0";
         },
-      }, [text("None left")]),
+      }, [text(t("stocktake.noneLeft"))]),
     ]),
   ]);
 }
@@ -195,7 +203,7 @@ function addFound(event) {
   const productId = foundProduct.value;
   const quantity = Number.parseInt(foundQuantity.value, 10);
   if (!productId || !Number.isInteger(quantity) || quantity < 1) {
-    showMessage("Pick a product and a quantity of at least 1.");
+    showMessage(t("stocktake.pickProductAndQuantity"));
     return;
   }
 
@@ -218,13 +226,19 @@ function renderFound() {
   if (found.length === 0) return;
 
   foundContainer.append(
-    el("strong", {}, [text("Found on the shelf")]),
+    el("strong", {}, [text(t("stocktake.foundOnShelf"))]),
     ...found.map((item, index) =>
       el("div", { class: "row row--between" }, [
         el("span", {}, [
           text(
-            `${item.quantity} × ${item.product_name}` +
-              (item.expiration_date ? ` · expires ${item.expiration_date}` : ""),
+            item.expiration_date
+              ? t("stocktake.foundItemWithExpiry", {
+                  quantity: item.quantity,
+                  product: item.product_name,
+                  // Same bare-DATE/UTC reasoning as the badge above.
+                  date: formatDate(new Date(item.expiration_date), { timeZone: "UTC" }),
+                })
+              : t("stocktake.foundItem", { quantity: item.quantity, product: item.product_name }),
           ),
         ]),
         el("button", {
@@ -234,7 +248,7 @@ function renderFound() {
             found.splice(index, 1);
             renderFound();
           },
-        }, [text("Remove")]),
+        }, [text(t("stocktake.remove"))]),
       ]),
     ),
   );
@@ -249,7 +263,7 @@ async function confirm() {
     const quantity = Number.parseInt(input.value, 10);
     if (!Number.isInteger(quantity) || quantity < 0) {
       confirmButton.disabled = false;
-      showMessage("Every count has to be a whole number of zero or more.");
+      showMessage(t("stocktake.invalidCount"));
       input.focus();
       return;
     }
@@ -288,10 +302,10 @@ async function confirm() {
 }
 
 function summarize(result) {
-  const corrected = result.corrected === 1 ? "1 count corrected" : `${result.corrected} counts corrected`;
+  const corrected = tCount("stocktake.correctedCount", result.corrected);
   const added = result.created_batch_ids.length;
-  const foundPart = added === 0 ? "" : `, ${added === 1 ? "1 item" : `${added} items`} added`;
-  return `Stocktake recorded — ${corrected}${foundPart}.`;
+  const foundPart = added === 0 ? "" : `, ${tCount("stocktake.addedCount", added)}`;
+  return t("stocktake.summary", { corrected, found: foundPart });
 }
 
 // reloadKeepingError re-reads the sheet without clearing the message that
@@ -312,13 +326,15 @@ function showMessage(message) {
 
 function showError(err) {
   if (!(err instanceof ApiError)) {
-    showMessage("Could not reach the server. Check your connection and try again.");
+    showMessage(t("stocktake.networkError"));
     return;
   }
   // A 422's per-field text is the specific sentence — "this shelf changed
   // since the sheet was fetched" — while the envelope's own message is the
   // generic one every validation failure shares. Prefer the specific one.
-  showMessage(firstFieldMessage(err) || err.message);
+  // The server's own field text stays untranslated (docs/specs/19-localization.md:
+  // the API is always English), same as apiErrorMessage's own fallback.
+  showMessage(firstFieldMessage(err) || apiErrorMessage(err));
 }
 
 function firstFieldMessage(err) {

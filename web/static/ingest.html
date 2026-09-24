@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#2563eb">
-  <title>Scan photos · Inventory</title>
+  <title data-i18n="ingest.pageTitle">Scan photos · Inventory</title>
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" href="/icons/icon-192.png">
   <link rel="apple-touch-icon" href="/icons/icon-192.png">
@@ -15,17 +15,17 @@
 </head>
 <body>
   <header class="shell row row--between">
-    <strong>Inventory</strong>
+    <strong data-i18n="common.appName">Inventory</strong>
     <div class="row">
       <div id="storage-switcher" hidden></div>
       <div id="gamification-ring" hidden></div>
       <div id="inbox-link" hidden></div>
-      <a href="/storages.html" class="btn btn--ghost">Back</a>
+      <a href="/storages.html" class="btn btn--ghost" data-i18n="common.back">Back</a>
     </div>
   </header>
 
   <main id="main" class="shell stack" aria-live="polite">
-    <h2>Scan photos</h2>
+    <h2 data-i18n="ingest.title">Scan photos</h2>
 
     <div id="error" class="alert" role="alert" hidden></div>
 
@@ -34,16 +34,16 @@
            photos, pages and sessions (docs/specs/09-consumption-logging.md):
            a run of many photos in one direction asks zero questions. -->
       <fieldset class="stack">
-        <legend>What are you doing?</legend>
-        <label class="row"><input type="radio" name="mode" value="stocking_up"> Stocking up — I'm adding this (+)</label>
-        <label class="row"><input type="radio" name="mode" value="using_up"> Using up — I'm removing this (−)</label>
-        <label class="row"><input type="radio" name="mode" value="shelf_scan"> Shelf scan — index everything visible (+)</label>
+        <legend data-i18n="ingest.mode.legend">What are you doing?</legend>
+        <label class="row"><input type="radio" name="mode" value="stocking_up"> <span data-i18n="ingest.mode.stockingUp">Stocking up — I'm adding this (+)</span></label>
+        <label class="row"><input type="radio" name="mode" value="using_up"> <span data-i18n="ingest.mode.usingUp">Using up — I'm removing this (−)</span></label>
+        <label class="row"><input type="radio" name="mode" value="shelf_scan"> <span data-i18n="ingest.mode.shelfScan">Shelf scan — index everything visible (+)</span></label>
       </fieldset>
 
       <div id="location-field" class="field">
-        <label for="location">Where was it taken? (optional)</label>
+        <label for="location" data-i18n="ingest.location.label">Where was it taken? (optional)</label>
         <select id="location">
-          <option value="">Let the photo tell</option>
+          <option value="" data-i18n="ingest.location.auto">Let the photo tell</option>
         </select>
       </div>
 
@@ -52,28 +52,28 @@
            one product at a time; shelf scan has none, because a shelf is not a
            barcode. -->
       <div id="scan-field" class="field" hidden>
-        <button id="scan-barcode" type="button" class="btn">Scan a barcode</button>
-        <p class="muted">
+        <button id="scan-barcode" type="button" class="btn" data-i18n="ingest.scanBarcode">Scan a barcode</button>
+        <p class="muted" data-i18n="ingest.scanBarcodeHint">
           Faster than a photo for anything already scanned once here. Nothing is
           logged until you confirm.
         </p>
       </div>
 
       <div class="field">
-        <label for="photos">Photos</label>
+        <label for="photos" data-i18n="ingest.photos.label">Photos</label>
         <!-- capture opens the rear camera on a phone and still allows a
              gallery pick (docs/specs/05-frontend-pwa-foundations.md). -->
         <input id="photos" type="file" accept="image/*" capture="environment" multiple required>
       </div>
 
-      <button id="submit" type="submit" class="btn btn--primary">Upload</button>
-      <p class="muted">
+      <button id="submit" type="submit" class="btn btn--primary" data-i18n="ingest.upload">Upload</button>
+      <p class="muted" data-i18n="ingest.uploadHint">
         Photos are analysed in the background. You can leave this page as soon
         as they are uploaded — the results wait in your inbox.
       </p>
     </form>
 
-    <section id="uploads" class="stack" aria-label="Uploads"></section>
+    <section id="uploads" class="stack" aria-label="Uploads" data-i18n-aria-label="ingest.uploadsSection"></section>
   </main>
 
   <template id="upload-template">

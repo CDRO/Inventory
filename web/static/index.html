@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#2563eb">
-  <title>Inventory</title>
+  <title data-i18n="common.appName">Inventory</title>
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" href="/icons/icon-192.png">
   <link rel="apple-touch-icon" href="/icons/icon-192.png">
@@ -14,25 +14,25 @@
 </head>
 <body>
   <main class="shell">
-    <h1>Inventory</h1>
+    <h1 data-i18n="common.appName">Inventory</h1>
 
     <form id="login-form" class="card stack" autocomplete="on">
       <div id="login-error" class="alert" role="alert" hidden></div>
 
       <div class="field">
-        <label for="username">Username</label>
+        <label for="username" data-i18n="index.username">Username</label>
         <input id="username" name="username" type="text" autocomplete="username" required autofocus>
       </div>
 
       <div class="field">
-        <label for="password">Password</label>
+        <label for="password" data-i18n="index.password">Password</label>
         <input id="password" name="password" type="password" autocomplete="current-password" required>
       </div>
 
-      <button type="submit" class="btn btn--primary btn--block">Sign in</button>
+      <button type="submit" class="btn btn--primary btn--block" data-i18n="index.signIn">Sign in</button>
     </form>
 
-    <p class="empty-state">
+    <p class="empty-state" data-i18n="index.noAccount">
       No account? There is no self-service sign-up — ask an admin to create
       one for you.
     </p>

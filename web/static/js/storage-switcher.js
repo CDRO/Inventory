@@ -7,6 +7,7 @@
 
 import { el, clearChildren } from "./dom.js";
 import { rememberStorageId, withStorageParam } from "./session.js";
+import { t } from "./i18n.js";
 
 /**
  * renderStorageSwitcher renders (or hides) the switcher into `container`.
@@ -34,7 +35,7 @@ export function renderStorageSwitcher(container, { storages, currentId }) {
   const select = el(
     "select",
     {
-      "aria-label": "Switch storage",
+      "aria-label": t("storageSwitcher.ariaLabel"),
       onchange: (event) => {
         const id = event.target.value;
         rememberStorageId(id);

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#2563eb">
-  <title>Shopping list · Inventory</title>
+  <title data-i18n="shoppingList.pageTitle">Shopping list · Inventory</title>
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" href="/icons/icon-192.png">
   <link rel="apple-touch-icon" href="/icons/icon-192.png">
@@ -15,31 +15,31 @@
 </head>
 <body>
   <header class="shell row row--between">
-    <strong>Inventory</strong>
+    <strong data-i18n="common.appName">Inventory</strong>
     <div class="row">
       <div id="storage-switcher" hidden></div>
       <div id="gamification-ring" hidden></div>
       <div id="inbox-link" hidden></div>
-      <a href="/storages.html" class="btn btn--ghost">Back</a>
+      <a href="/storages.html" class="btn btn--ghost" data-i18n="common.back">Back</a>
     </div>
   </header>
 
   <main id="main" class="shell" aria-live="polite">
-    <h2>Shopping list</h2>
+    <h2 data-i18n="shoppingList.title">Shopping list</h2>
 
     <div id="error" class="alert" role="alert" hidden></div>
 
     <section id="compose" class="card stack">
-      <label for="raw-text">One item per line</label>
-      <textarea id="raw-text" rows="8" placeholder="milk&#10;eggs x2&#10;cherry tomatoes"></textarea>
-      <p class="empty-state">
+      <label for="raw-text" data-i18n="shoppingList.compose.label">One item per line</label>
+      <textarea id="raw-text" rows="8" placeholder="milk&#10;eggs x2&#10;cherry tomatoes" data-i18n-placeholder="shoppingList.compose.placeholder"></textarea>
+      <p class="empty-state" data-i18n="shoppingList.compose.note">
         A photographed list is not available yet. Typing or pasting works today.
       </p>
-      <button id="submit" type="button" class="btn">Match this list</button>
+      <button id="submit" type="button" class="btn" data-i18n="shoppingList.compose.submit">Match this list</button>
     </section>
 
     <section id="results" class="stack" hidden>
-      <h3>Resolve each line</h3>
+      <h3 data-i18n="shoppingList.results.title">Resolve each line</h3>
       <div id="items" class="stack"></div>
     </section>
   </main>
@@ -62,24 +62,24 @@
            catalog description, or when the reviewer steps away from what
            matching offered. -->
       <div data-field="new-product" class="stack" hidden>
-        <label>Name
+        <label><span data-i18n="shoppingList.item.nameLabel">Name</span>
           <input type="text" data-field="name" maxlength="255">
         </label>
         <div class="row">
-          <label>Kind
+          <label><span data-i18n="shoppingList.item.kindLabel">Kind</span>
             <select data-field="item_type">
-              <option value="long_shelf_life">Keeps a long time</option>
-              <option value="perishable">Perishable</option>
-              <option value="non_perishable">Does not expire</option>
+              <option value="long_shelf_life" data-i18n="shoppingList.item.kind.longShelfLife">Keeps a long time</option>
+              <option value="perishable" data-i18n="shoppingList.item.kind.perishable">Perishable</option>
+              <option value="non_perishable" data-i18n="shoppingList.item.kind.nonPerishable">Does not expire</option>
             </select>
           </label>
           <div class="field">
-            <label>Category
+            <label><span data-i18n="shoppingList.item.categoryLabel">Category</span>
               <select data-field="category"></select>
             </label>
-            <button type="button" class="btn btn--ghost" data-field="category-add">+ New category</button>
+            <button type="button" class="btn btn--ghost" data-field="category-add" data-i18n="shoppingList.item.addCategory">+ New category</button>
           </div>
-          <label>Keep at least
+          <label><span data-i18n="shoppingList.item.minStockLabel">Keep at least</span>
             <input type="number" data-field="min_stock" min="0" step="1" value="0">
           </label>
         </div>
@@ -88,18 +88,18 @@
 
       <div class="row" data-field="apply">
         <label>
-          Quantity
+          <span data-i18n="shoppingList.item.quantityLabel">Quantity</span>
           <input type="number" data-field="quantity" min="0" step="1" value="1">
         </label>
         <div class="field">
           <label>
-            Put it in
+            <span data-i18n="shoppingList.item.locationLabel">Put it in</span>
             <select data-field="location"></select>
           </label>
-          <button type="button" class="btn btn--ghost" data-field="location-add">+ New location</button>
+          <button type="button" class="btn btn--ghost" data-field="location-add" data-i18n="shoppingList.item.addLocation">+ New location</button>
         </div>
-        <button type="button" class="btn" data-action="resolve">Confirm</button>
-        <button type="button" class="btn btn--ghost" data-action="dismiss">Not bought</button>
+        <button type="button" class="btn" data-action="resolve" data-i18n="shoppingList.item.confirm">Confirm</button>
+        <button type="button" class="btn btn--ghost" data-action="dismiss" data-i18n="shoppingList.item.dismiss">Not bought</button>
       </div>
     </div>
   </template>

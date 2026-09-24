@@ -38,7 +38,9 @@ test("a consumption proposal is reviewed, corrected and confirmed into a decreme
   const batchRows = yogurt.locator('[data-role="batches"] label');
   await expect(batchRows).toHaveCount(2);
   await expect(batchRows.nth(0)).toContainText("Fridge");
-  await expect(batchRows.nth(0)).toContainText("expires 2030-01-01");
+  // Rendered via Intl.DateTimeFormat (docs/specs/19-localization.md), not the
+  // raw "2030-01-01" the API returns.
+  await expect(batchRows.nth(0)).toContainText("expires Jan 1, 2030");
   await expect(batchRows.nth(1)).toContainText("Pantry");
   await expect(batchRows.nth(1)).toContainText("no expiry date");
 

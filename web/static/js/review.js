@@ -12,6 +12,7 @@
 // 07-shopping-list-reconciliation.md, 09-consumption-logging.md).
 
 import { fromTemplate, clearChildren } from "./dom.js";
+import { applyI18n } from "./i18n.js";
 
 // Row decisions, mirroring the confirm payload shape in
 // docs/specs/09-consumption-logging.md: every row states exactly one of
@@ -64,6 +65,12 @@ export class ReviewList {
 
   _addRow(item) {
     const rowEl = fromTemplate(this.template);
+    // The template's own static labels ("Product", "Accept"/"Correct"/
+    // "Reject", etc.) are not part of the live document until this clone
+    // exists, so the page-load translation pass never reaches them —
+    // apply it here, before bindFields overwrites the row's data-field
+    // values with the (untranslated) item data.
+    applyI18n(rowEl);
     rowEl.dataset.rowId = item.row_id;
     bindFields(rowEl, item);
 

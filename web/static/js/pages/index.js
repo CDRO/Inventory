@@ -10,6 +10,7 @@ import "../register-sw.js";
 // is the login submission.
 
 import { post, ApiError } from "../api.js";
+import { t, apiErrorMessage } from "../i18n.js";
 
 const form = document.querySelector("#login-form");
 const errorBox = document.querySelector("#login-error");
@@ -35,13 +36,9 @@ async function handleSubmit(event) {
   } catch (err) {
     setBusy(false);
     if (err instanceof ApiError) {
-      showError(
-        err.status === 401
-          ? "Incorrect username or password."
-          : err.message || "Something went wrong. Try again.",
-      );
+      showError(err.status === 401 ? t("index.wrongCredentials") : apiErrorMessage(err));
     } else {
-      showError("Could not reach the server. Check your connection and try again.");
+      showError(t("index.unreachable"));
     }
   }
 }
@@ -58,5 +55,5 @@ function hideError() {
 
 function setBusy(busy) {
   submitButton.disabled = busy;
-  submitButton.textContent = busy ? "Signing in…" : "Sign in";
+  submitButton.textContent = busy ? t("index.signingIn") : t("index.signIn");
 }
