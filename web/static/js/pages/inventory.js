@@ -107,15 +107,19 @@ async function init() {
   allRows = rows;
   loadingLine.hidden = true;
 
+  if (incomplete && allRows.length === 0) {
+    // Nothing at all could be confirmed loaded — this is a failure, not a
+    // partial table. Showing "this table is incomplete" here would describe
+    // a fetch that never produced a first row as though it had gone some of
+    // the way, and showing the empty-storage state would claim a fact the
+    // page does not actually know.
+    if (error) showError(error);
+    return;
+  }
+
   if (incomplete) {
     incompleteBanner.hidden = false;
     if (error) showError(error);
-  }
-
-  if (incomplete && allRows.length === 0) {
-    // Nothing at all could be confirmed loaded — showing an empty-storage
-    // state here would claim a fact the page does not actually know.
-    return;
   }
 
   contentSection.hidden = false;
