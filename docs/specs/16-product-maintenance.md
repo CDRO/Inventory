@@ -31,8 +31,10 @@ type, `min_stock`, the storage-local shelf-life override, current stock
 with its batches (location, quantity, expiry, and — per `06`'s "One batch,
 one location — and how to split one" — an inline split/move picker calling
 `06`'s split and move endpoints directly), and this product's recent
-`inventory_logs`. Quantity corrections and expiry edits are a separate
-surface, the stocktake screen (`13`).
+`inventory_logs`. Quantity corrections are a separate surface, the
+stocktake sheet (`13`), which this screen links to per batch (`35`);
+moving a batch is this screen's own split/move picker (`06`), and editing
+a batch's expiry is `08`'s job — neither happens on the stocktake sheet.
 
 `PATCH /api/storages/{storage_id}/products/{id}` accepts, individually
 or together:

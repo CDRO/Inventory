@@ -15,12 +15,14 @@
 </head>
 <body>
   <header class="shell row row--between">
-    <strong data-i18n="common.appName">Inventory</strong>
+    <a id="wordmark" class="wordmark" href="/storages.html" data-i18n="common.appName">Inventory</a>
     <div class="row">
       <div id="storage-switcher" hidden></div>
-      <a href="/dashboard.html" class="btn btn--ghost" data-i18n="common.back">Back</a>
+      <a id="back" href="/dashboard.html" class="btn btn--ghost" data-i18n="common.back">Back</a>
     </div>
   </header>
+
+  <nav id="nav" class="shell nav" aria-label="Main" data-i18n-aria-label="nav.label" hidden></nav>
 
   <main id="main" class="shell stack" aria-live="polite">
     <h2 data-i18n="settings.title">Settings</h2>
@@ -177,6 +179,27 @@
       report about the food, off by default, to an endpoint the household runs
       itself.
     -->
+    <!-- The per-storage start page (docs/specs/34-navigation-and-start-page.md).
+         In the storage-scoped part of this page, beside the notification
+         settings, and hidden until a storage is resolved — the preference
+         belongs to one person in one storage, and the label below names which
+         one. The options are built by js/pages/settings.js from js/nav.js's
+         closed list rather than written out here, so the list of choosable
+         pages lives in one place in the frontend. -->
+    <section id="start-page-section" class="card stack" hidden>
+      <h3 data-i18n="settings.startPage.title">Start page</h3>
+      <p class="empty-state" data-i18n="settings.startPage.hint">
+        Where this household opens. Each member of a household chooses their
+        own, and you can choose differently for each household you belong to.
+      </p>
+
+      <div class="field">
+        <label id="start-page-label" for="start-page">Start page</label>
+        <select id="start-page"></select>
+        <span id="start-page-status" class="empty-state" hidden></span>
+      </div>
+    </section>
+
     <section id="notifications-section" class="card stack" hidden>
       <h3 data-i18n="settings.notify.title">Expiry notifications</h3>
       <p class="empty-state" data-i18n="settings.notify.hint1">

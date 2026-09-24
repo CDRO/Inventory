@@ -330,3 +330,103 @@ func TestRecoverFatalReraisesOtherPanics(t *testing.T) {
 		panic("unrelated panic")
 	}()
 }
+
+// TestRunDownRollsBackTheRepositorysOwnMigrations is the rollback half of
+// check_test.go's TestCheckAcceptsTheRepositorysOwnMigrations, and the only
+// place any real `-- +goose Down` block under migrations/ is ever executed.
+//
+// Every other test in this package writes its own migration files, and both
+// internal/store's test-database helper and that end-to-end guard stop at
+// `up`. So without this test a typo in a down block — a misspelled column, the
+// wrong table, a DROP naming something the up block never created — ships
+// green and is never contradicted by anything.
+//
+// Where that surfaces is *not* a production rollback:
+// docs/specs/18-operations-and-observability.md forecloses `migrate down` in
+// production outright — the backup taken before an upgrade is the rollback,
+// "because down-migrations against real data are tested never and trusted
+// always". This test narrows that "tested never" by one migration. What it
+// protects is the dev and staging use of `migrate down`, and the maintainer who
+// reads a down block and assumes it works.
+//
+// The assertion is on storage_members.start_page, the column
+// migrations/00013_storage_member_start_page.sql adds, whose acceptance
+// criterion in docs/specs/34-navigation-and-start-page.md is "its down
+// migration drops the column". `migrate up` afterwards must put it back: a
+// rollback that cannot be undone is not a rollback.
+//
+// The rollback walks the shipped migration list from the newest version down to
+// startPageVersion rather than naming a fixed number of steps, so it keeps
+// covering the newest down block as the schema grows. **Today 00013 *is* the
+// newest, so that walk is a single step** — the loop is written for the schema
+// this test will live in, not for the one it has now, and there is currently no
+// version above 13 at which to observe the column still present.
+func TestRunDownRollsBackTheRepositorysOwnMigrations(t *testing.T) {
+	// Not parallel: chdir mutates process state.
+	ctx := context.Background()
+	dsn := newTestDatabase(t)
+	chdir(t, filepath.Join("..", ".."))
+
+	// The version that introduced the column asserted below. Raise this
+	// together with the column when a later migration replaces it.
+	const startPageVersion int64 = 13
+
+	versions, err := shippedVersions("migrations")
+	require.NoError(t, err)
+	require.NotEmpty(t, versions, "the repository ships migrations")
+	newest := versions[len(versions)-1]
+	require.GreaterOrEqual(t, newest, startPageVersion,
+		"migration %d is shipped, so the newest version cannot be below it", startPageVersion)
+
+	require.NoError(t, Run(ctx, dsn, "up", io.Discard))
+	require.True(t, columnExists(t, dsn, "storage_members", "start_page"),
+		"migrate up must add the column migration %d declares", startPageVersion)
+
+	// One call per *shipped migration* from the newest down to
+	// startPageVersion inclusive — iterating the versions slice rather than
+	// counting integers down from newest. Run's "down" rolls back exactly one
+	// applied migration, so an integer range would fire the wrong number of
+	// calls the moment migration numbering has a gap in it: the assertion
+	// below would still pass, having rolled back past the migration under
+	// test, and the diagnostic would name a version that was never the target
+	// of that call.
+	for i := len(versions) - 1; i >= 0 && versions[i] >= startPageVersion; i-- {
+		require.NoError(t, Run(ctx, dsn, "down", io.Discard),
+			"rolling back migration %d", versions[i])
+	}
+
+	assert.False(t, columnExists(t, dsn, "storage_members", "start_page"),
+		"migration %d's down block must drop start_page", startPageVersion)
+
+	require.NoError(t, Run(ctx, dsn, "up", io.Discard))
+	assert.True(t, columnExists(t, dsn, "storage_members", "start_page"),
+		"re-applying must restore the column")
+	assert.NoError(t, Check(ctx, dsn),
+		"a database rolled back and migrated up again must satisfy the shipped binary")
+}
+
+// columnExists asks the database's own catalogue whether public.table.column
+// is there.
+//
+// Reading the catalogue rather than goose_db_version is the whole point: the
+// bookkeeping table records that goose *ran* a down block, not that the block
+// did what it claims. Only information_schema can tell an ALTER that took
+// effect from one that was recorded and did nothing.
+func columnExists(t *testing.T, dsn, table, column string) bool {
+	t.Helper()
+
+	db, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	var exists bool
+	require.NoError(t, db.QueryRow(`
+		SELECT EXISTS (
+		       SELECT 1
+		         FROM information_schema.columns
+		        WHERE table_schema = 'public'
+		          AND table_name   = $1
+		          AND column_name  = $2)`,
+		table, column).Scan(&exists))
+	return exists
+}

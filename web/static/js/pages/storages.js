@@ -1,24 +1,27 @@
 import "../register-sw.js";
 
-// Page module for storages.html.
+// Page module for storages.html — the one place that decides where a signed-in
+// user lands (docs/specs/34-navigation-and-start-page.md).
 //
-// docs/specs/05-frontend-pwa-foundations.md scopes this page to the storage
-// picker ("only if >1 membership"). dashboard.html now ships the reorder
-// dashboard from docs/specs/10-reorder-and-shopping-export.md; until
-// docs/specs/11-reporting-and-analytics.md's turnover/waste charts land on
-// it too, this page also serves as the landing shell once a storage is
-// resolved — a header with the switcher, and an honest placeholder rather
-// than a fabricated one. That scope note is recorded on the PR for issue #10.
+// The page renders exactly two states now: the storage picker, for someone
+// with more than one membership and nothing remembered, and the zero-storage
+// empty state of docs/specs/29-first-run-admin-guidance.md. Once a storage is
+// resolved it forwards to that storage's start page and renders nothing at
+// all. The landing card of buttons it used to show is gone — every page has
+// the navigation bar now, so a card that duplicated it would be a second
+// navigation to keep in step.
+//
+// It is also the PWA's `start_url`. A signed-in user opening the installed app
+// lands here and is forwarded on; a signed-out one gets a 401 from
+// `GET /api/auth/me`, which js/api.js already redirects to the login page. The
+// login form therefore appears exactly when it is needed and not before.
 
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam, renderEmptyState } from "../session.js";
-import { renderStorageSwitcher } from "../storage-switcher.js";
-import { renderInboxLink } from "../inbox-badge.js";
-import { initGamification } from "../gamification.js";
+import { startPagePath, startPageFor } from "../nav.js";
 import { el, text, clearChildren } from "../dom.js";
 import { post, ApiError } from "../api.js";
 import { t, apiErrorMessage } from "../i18n.js";
 
-const switcherContainer = document.querySelector("#storage-switcher");
 const mainContainer = document.querySelector("#main");
 const logoutButton = document.querySelector("#logout");
 
@@ -54,7 +57,6 @@ async function init() {
       location.replace("/no-storages");
       return;
     }
-    switcherContainer.hidden = true;
     renderEmptyState(mainContainer);
     return;
   }
@@ -64,23 +66,28 @@ async function init() {
     // More than one membership and nothing selected yet: ask, per
     // docs/specs/05-frontend-pwa-foundations.md — never guess which
     // household the user meant.
-    switcherContainer.hidden = true;
     renderPicker(me.storages);
     return;
   }
 
-  rememberStorageId(resolved);
-  // Canonicalise the URL so a bookmark or reload lands on the same storage
-  // without asking again — "a link is always sufficient to describe where
-  // the user is" only holds if the link actually carries the id.
-  if (new URLSearchParams(location.search).get("storage") !== resolved) {
-    history.replaceState(null, "", withStorageParam(resolved));
-  }
+  forwardToStartPage(me.storages, resolved);
+}
 
-  renderStorageSwitcher(switcherContainer, { storages: me.storages, currentId: resolved });
-  renderInboxLink(document.querySelector("#inbox-link"), resolved);
-  initGamification(resolved);
-  renderLanding(me, me.storages.find((s) => s.id === resolved));
+/**
+ * forwardToStartPage sends the browser to this member's chosen start page for
+ * the resolved storage, carrying `?storage=`.
+ *
+ * `location.replace` rather than `assign`, and for the same reason as the
+ * zero-storage redirect above: this page is a forwarder, so leaving it in the
+ * history would make Back from the start page bounce straight through it and
+ * land where it started. With `replace`, Back leaves the app.
+ *
+ * @param {Array<{id: string, start_page?: string}>} storages - `me.storages`.
+ * @param {string} storageId
+ */
+function forwardToStartPage(storages, storageId) {
+  rememberStorageId(storageId);
+  location.replace(withStorageParam(storageId, startPagePath(startPageFor(storages, storageId))));
 }
 
 function renderPicker(storages) {
@@ -96,45 +103,14 @@ function renderPicker(storages) {
           {
             type: "button",
             class: "btn btn--block card",
-            onclick: () => {
-              rememberStorageId(storage.id);
-              location.assign(withStorageParam(storage.id));
-            },
+            // Picking a storage lands on that storage's own start page, like
+            // every other way of resolving one.
+            onclick: () => forwardToStartPage(storages, storage.id),
           },
           [text(storage.name)],
         ),
       ),
     ),
-  );
-}
-
-function renderLanding(me, storage) {
-  clearChildren(mainContainer);
-  mainContainer.append(
-    el("div", { class: "card stack" }, [
-      el("h2", {}, [storage.name]),
-      el("p", {}, [t("storages.signedInAs", { name: me.display_name })]),
-      el("div", { class: "row" }, [
-        el("a", { class: "btn", href: withStorageParam(storage.id, "/dashboard.html") }, [
-          text(t("storages.navDashboard")),
-        ]),
-        el("a", { class: "btn", href: withStorageParam(storage.id, "/locations.html") }, [
-          text(t("storages.navLocations")),
-        ]),
-        el("a", { class: "btn", href: withStorageParam(storage.id, "/categories.html") }, [
-          text(t("storages.navCategories")),
-        ]),
-        el("a", { class: "btn", href: withStorageParam(storage.id, "/products.html") }, [
-          text(t("storages.navProducts")),
-        ]),
-        el("a", { class: "btn", href: withStorageParam(storage.id, "/shopping-list.html") }, [
-          text(t("storages.navShoppingList")),
-        ]),
-        el("a", { class: "btn", href: withStorageParam(storage.id, "/ingest.html") }, [
-          text(t("storages.navScanPhotos")),
-        ]),
-      ]),
-    ]),
   );
 }
 
@@ -148,6 +124,12 @@ function renderLoadError(err) {
   );
 }
 
+// handleLogout stays on this page as well as in js/nav.js, and deliberately.
+// The bar is what carries Log out everywhere else, but this page renders no
+// bar in either of its two states — there is no resolved storage to build one
+// around — and a user who belongs to no storage at all must still be able to
+// sign out. The bar's copy is the one that moved; this is the one that was
+// always here.
 async function handleLogout() {
   logoutButton.disabled = true;
   try {

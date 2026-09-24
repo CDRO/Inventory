@@ -15,13 +15,15 @@
 </head>
 <body>
   <header class="shell row row--between">
-    <strong data-i18n="common.appName">Inventory</strong>
+    <a id="wordmark" class="wordmark" href="/storages.html" data-i18n="common.appName">Inventory</a>
     <div class="row">
       <div id="storage-switcher" hidden></div>
       <div id="gamification-ring" hidden></div>
       <a id="back" href="/locations.html" class="btn btn--ghost" data-i18n="stocktake.backToLocations">Locations</a>
     </div>
   </header>
+
+  <nav id="nav" class="shell nav" aria-label="Main" data-i18n-aria-label="nav.label" hidden></nav>
 
   <main id="main" class="shell stack" aria-live="polite">
     <h2 id="heading" data-i18n="stocktake.title">Stocktake</h2>
@@ -33,6 +35,20 @@
     <div id="error" class="alert" role="alert" hidden></div>
     <div id="notice" class="alert alert--success" role="status" hidden></div>
     <p id="status" class="empty-state" data-i18n="common.loading">Loading…</p>
+
+    <!-- The location chooser (docs/specs/35-stocktake-entry-points.md): shown
+         whenever there is no location to walk, either because none was given
+         or because the given one resolved to nothing. The two cases render
+         identically below the error box above, which is what tells them
+         apart. -->
+    <section id="chooser" class="stack" hidden>
+      <div id="stalest" class="stack"></div>
+      <div id="chooser-tree"></div>
+      <p id="chooser-empty" class="empty-state" hidden>
+        <span data-i18n="stocktake.chooser.empty">This storage has no locations yet.</span>
+        <a id="chooser-empty-link" data-i18n="stocktake.chooser.emptyLink">Add one on the locations page.</a>
+      </p>
+    </section>
 
     <section id="sheet" class="stack" hidden>
       <p class="muted" data-i18n="stocktake.instructions">

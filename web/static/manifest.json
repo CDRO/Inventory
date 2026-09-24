@@ -2,7 +2,7 @@
   "name": "Inventory",
   "short_name": "Inventory",
   "description": "Self-hosted household inventory system",
-  "start_url": "/index.html",
+  "start_url": "/storages.html",
   "display": "standalone",
   "background_color": "#f8fafc",
   "theme_color": "#2563eb",

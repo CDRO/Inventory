@@ -100,7 +100,9 @@ test("an admin creates a user and grants them a storage from the admin page", as
   await newcomer.fill("#username", username);
   await newcomer.fill("#password", "a-fine-password");
   await newcomer.click('button[type="submit"]');
-  await expect(newcomer.locator("#main")).toContainText("Signed in as Newcomer.");
-  await expect(newcomer.locator("#main")).toContainText("E2E Household");
+  // Straight into the storage they were just added to: storages.html
+  // forwards to their start page, which for a brand-new membership is the
+  // dashboard (docs/specs/34-navigation-and-start-page.md).
+  await expect(newcomer.locator("#main h2").first()).toHaveText("Dashboard");
   await context.close();
 });

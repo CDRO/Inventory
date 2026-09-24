@@ -120,6 +120,10 @@ type fakePhotoStore struct {
 	// skipped, a broken volume is an error, and without a fake that can
 	// produce the second there is no way to tell them apart in a test.
 	readErr error
+	// removeErr makes every Remove fail — a file that cannot be cleaned up
+	// from a discarded job's storage, which must be logged and never turned
+	// into an error response (docs/specs/32-inbox-discard-all.md).
+	removeErr error
 }
 
 func (f *fakePhotoStore) Save(name string, data []byte) error {
@@ -144,6 +148,9 @@ func (f *fakePhotoStore) Read(name string) ([]byte, error) {
 func (f *fakePhotoStore) Remove(name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.removeErr != nil {
+		return f.removeErr
+	}
 	delete(f.files, name)
 	return nil
 }

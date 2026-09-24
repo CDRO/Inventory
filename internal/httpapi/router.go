@@ -110,6 +110,8 @@ type APIStore interface {
 	ExportStore
 	BarcodeStore
 	BarcodePromptStore
+	InventoryStore
+	MembershipStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -467,6 +469,9 @@ func NewRouter(d Deps) http.Handler {
 			// "Analyze again" (docs/specs/09-consumption-logging.md), for
 			// every kind of job whose service is wired.
 			sr.Post("/jobs/{id}/reanalyze", jobsAPI.Reanalyze)
+			// "Discard all" (docs/specs/32-inbox-discard-all.md): the whole
+			// inbox up to a server timestamp, in one request.
+			sr.Delete("/jobs", jobsAPI.DiscardAll)
 
 			// Photo ingestion (docs/specs/06-vision-shelf-ingestion.md).
 			ingestAPI := NewIngestHandler(d.Ingester, d.Store, d.Photos, d.ProductImages, cutouts, backgrounds, errs)
@@ -606,6 +611,23 @@ func NewRouter(d Deps) http.Handler {
 			sr.Get("/barcodes/{code}", barcodes.Lookup)
 			sr.Post("/barcodes/{code}/log", barcodes.Log)
 			sr.Post("/barcodes/{code}/product", barcodes.AcceptCatalog)
+
+			// The whole-inventory table (docs/specs/33-inventory-overview-table.md),
+			// the read partner of the stocktake group's POST above on the same
+			// collection.
+			inventory := NewInventoryHandler(d.Store, errs)
+			sr.Get("/inventory-batches", inventory.List)
+
+			// The caller's own membership of this storage
+			// (docs/specs/34-navigation-and-start-page.md): one personal,
+			// per-storage display preference. On this sub-router like
+			// everything else, which is the whole of its access control — a
+			// non-member gets the identical 404 an unknown storage gets — and
+			// with no user id in the path, so the only row it can reach is the
+			// session's own. Distinct from PUT /api/me/preferences, which is
+			// per user rather than per storage.
+			membership := NewMembershipHandler(d.Store, errs)
+			sr.Patch("/membership", membership.Patch)
 		})
 
 		// First-run guidance (docs/specs/29-first-run-admin-guidance.md): the

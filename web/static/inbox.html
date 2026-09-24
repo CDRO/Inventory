@@ -15,18 +15,22 @@
 </head>
 <body>
   <header class="shell row row--between">
-    <strong data-i18n="common.appName">Inventory</strong>
+    <a id="wordmark" class="wordmark" href="/storages.html" data-i18n="common.appName">Inventory</a>
     <div class="row">
       <div id="storage-switcher" hidden></div>
       <div id="gamification-ring" hidden></div>
-      <a href="/storages.html" class="btn btn--ghost" data-i18n="common.back">Back</a>
     </div>
   </header>
+
+  <nav id="nav" class="shell nav" aria-label="Main" data-i18n-aria-label="nav.label" hidden></nav>
 
   <main id="main" class="shell stack" aria-live="polite">
     <div class="row row--between">
       <h2 data-i18n="inbox.title">Inbox</h2>
-      <a id="scan-link" class="btn" href="/ingest.html" data-i18n="inbox.scanPhotos">Scan photos</a>
+      <div class="row">
+        <button id="discard-all" type="button" class="btn btn--ghost" hidden data-i18n="inbox.discardAll">Discard all</button>
+        <a id="scan-link" class="btn" href="/ingest.html" data-i18n="inbox.scanPhotos">Scan photos</a>
+      </div>
     </div>
 
     <div id="notice" class="alert alert--success" role="status" hidden></div>

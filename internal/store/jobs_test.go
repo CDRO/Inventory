@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -157,6 +158,60 @@ func TestListJobsPagesNewestFirstWithoutDrift(t *testing.T) {
 			assert.NotEqual(t, consumed.ID, j.ID, "a status filter excludes consumed jobs")
 		}
 	}
+}
+
+// TestDiscardJobsDeletesTheStatusAndTimeWindow — "Discard all"
+// (docs/specs/32-inbox-discard-all.md): pending, done and failed jobs at or
+// before the boundary go, a job just after it survives, a consumed job is
+// never touched regardless of its age, and another storage's jobs are
+// untouched even when they are otherwise in scope.
+func TestDiscardJobsDeletesTheStatusAndTimeWindow(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	other := newStorage(t, ctx)
+
+	boundary := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
+	before := boundary.Add(-time.Hour)
+	after := boundary.Add(time.Hour)
+
+	newJobAt := func(storage uuid.UUID, status store.JobStatus, at time.Time) uuid.UUID {
+		job, err := s.CreateJob(ctx, store.NewJob{StorageID: storage, Kind: store.JobShelfIngestion})
+		require.NoError(t, err)
+		_, err = execTest(ctx, `UPDATE jobs SET status = $2, created_at = $3 WHERE id = $1`, job.ID, status, at)
+		require.NoError(t, err)
+		return job.ID
+	}
+
+	pending := newJobAt(storageID, store.JobPending, before)
+	done := newJobAt(storageID, store.JobDone, boundary) // exactly at the boundary: included
+	failed := newJobAt(storageID, store.JobFailed, before)
+	tooNew := newJobAt(storageID, store.JobDone, after)
+	consumed := newJobAt(storageID, store.JobConsumed, before)
+	foreign := newJobAt(other, store.JobPending, before)
+
+	discarded, err := s.DiscardJobs(ctx, storageID, boundary)
+	require.NoError(t, err)
+
+	var got []uuid.UUID
+	for _, d := range discarded {
+		got = append(got, d.ID)
+	}
+	assert.ElementsMatch(t, []uuid.UUID{pending, done, failed}, got)
+
+	assert.Equal(t, "done", jobStatus(t, ctx, tooNew), "created after the boundary must survive")
+	assert.Equal(t, "consumed", jobStatus(t, ctx, consumed), "a consumed job is never touched")
+	assert.Equal(t, "pending", jobStatus(t, ctx, foreign), "another storage's job must survive")
+
+	for _, id := range []uuid.UUID{pending, done, failed} {
+		_, err := s.Job(ctx, storageID, id)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	}
+
+	// Nothing left to discard a second time.
+	again, err := s.DiscardJobs(ctx, storageID, boundary)
+	require.NoError(t, err)
+	assert.Empty(t, again)
 }
 
 // TestConsumeJobAppliesAProposalOnce — the second confirm of the same job is a

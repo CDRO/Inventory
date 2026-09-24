@@ -9,7 +9,10 @@ action), [`34-navigation-and-start-page.md`](34-navigation-and-start-page.md)
 
 Amends: `13`, "Confirming the sheet", last paragraph. `stocktake.html`
 without `?location=` becomes a location chooser instead of an error. The
-sheet itself and both endpoints are unchanged.
+sheet itself and both endpoints are unchanged. Also amends `16`, "The
+product edit surface", which repeated the same stale claim that expiry
+edits happen on the stocktake screen — corrected there to match this
+spec's "Why this spec exists" section below.
 
 ## Why this spec exists
 

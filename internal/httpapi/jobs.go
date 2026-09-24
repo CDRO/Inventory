@@ -19,6 +19,7 @@ type JobStore interface {
 	Job(ctx context.Context, storageID, id uuid.UUID) (*store.Job, error)
 	ListJobs(ctx context.Context, storageID uuid.UUID, statuses []store.JobStatus, after *uuid.UUID, limit int) ([]store.Job, error)
 	DeleteJob(ctx context.Context, storageID, id uuid.UUID) (imageFilename *string, err error)
+	DiscardJobs(ctx context.Context, storageID uuid.UUID, upTo time.Time) ([]store.DiscardedJob, error)
 }
 
 // PhotoStore holds the photos behind review jobs. *uploads.Dir satisfies it.
@@ -281,14 +282,64 @@ func (h *JobHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		h.errors.WriteError(w, r, FromStoreError(err, "job not found in storage"))
 		return
 	}
-	// The photo goes with the proposal. The row is already gone, so a failure
-	// here leaves an unreferenced file, not a broken job — logged, and not a
-	// reason to tell the user their discard failed.
-	if image != nil && h.photos != nil {
-		if err := h.photos.Remove(*image); err != nil {
-			h.errors.Log(r.Context(), "removing a discarded job's photo failed", err)
-		}
-	}
+	h.removeJobPhoto(r.Context(), image)
 	removeJobCutouts(r.Context(), h.cutouts, h.errors, id)
 	writeJSON(w, http.StatusNoContent, nil)
+}
+
+// removeJobPhoto is best effort, exactly like removeJobCutouts: the job's row
+// is already gone, so a failure here leaves an unreferenced file on disk
+// rather than a broken job — logged, and not a reason to tell the user their
+// discard failed. Shared by Delete and DiscardAll so the one rule lives once.
+func (h *JobHandler) removeJobPhoto(ctx context.Context, image *string) {
+	if image == nil || h.photos == nil {
+		return
+	}
+	if err := h.photos.Remove(*image); err != nil {
+		h.errors.Log(ctx, "removing a discarded job's photo failed", err)
+	}
+}
+
+// discardAllUpToParam names the query parameter DiscardAll requires
+// (docs/specs/32-inbox-discard-all.md).
+const discardAllUpToParam = "up_to"
+
+// discardAllResponse carries only the count. The rows are already gone by the
+// time this is written, so there are no ids left to report.
+type discardAllResponse struct {
+	Discarded int `json:"discarded"`
+}
+
+// DiscardAll serves DELETE /api/storages/{storage_id}/jobs?up_to=<RFC3339>:
+// "Discard all" (docs/specs/32-inbox-discard-all.md).
+//
+// up_to is required, unlike readDeltaSince's optional updated_since — a bare
+// DELETE that wiped a storage's whole inbox would be too easy to send by
+// accident, so a missing or unparseable value is 422 and deletes nothing.
+func (h *JobHandler) DiscardAll(w http.ResponseWriter, r *http.Request) {
+	storageID, ok := StorageIDFrom(r.Context())
+	if !ok {
+		h.errors.WriteError(w, r, Internal(errNoStorageInContext))
+		return
+	}
+
+	raw := r.URL.Query().Get(discardAllUpToParam)
+	upTo, err := time.Parse(time.RFC3339, raw)
+	if raw == "" || err != nil {
+		h.errors.WriteError(w, r, ValidationFailed(map[string][]string{
+			discardAllUpToParam: {"Required. Must be an RFC 3339 timestamp, e.g. 2026-09-21T14:30:00Z."},
+		}, err))
+		return
+	}
+
+	jobs, err := h.store.DiscardJobs(r.Context(), storageID, upTo)
+	if err != nil {
+		h.errors.WriteError(w, r, FromStoreError(err, "discard jobs"))
+		return
+	}
+	for _, job := range jobs {
+		h.removeJobPhoto(r.Context(), job.ImageFilename)
+		removeJobCutouts(r.Context(), h.cutouts, h.errors, job.ID)
+	}
+	writeJSON(w, http.StatusOK, discardAllResponse{Discarded: len(jobs)})
 }

@@ -2,9 +2,12 @@ import "../register-sw.js";
 
 // Page module for settings.html — the one user-facing settings surface.
 //
-// Two specs share it. Account self-service
+// Three specs share it. Account self-service
 // (docs/specs/14-account-self-service.md): display name, password change,
-// and the list of signed-in devices. Gamification
+// and the list of signed-in devices. The start page
+// (docs/specs/34-navigation-and-start-page.md): one per-storage, per-person
+// choice, in the storage-scoped part of the page beside the notification
+// settings. Gamification
 // (docs/specs/52-gamification-quests-and-ui.md's fourth UI integration
 // point): the user's own gamification_enabled toggle and holiday weeks, plus
 // the currently selected storage's flat toggles.
@@ -17,6 +20,7 @@ import "../register-sw.js";
 
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
+import { renderNav, startPageFor, startPageOptions, startPagePath } from "../nav.js";
 import { get, put, post, patch, del, ApiError } from "../api.js";
 import { el, text, clearChildren, qs } from "../dom.js";
 import { t, apiErrorMessage, formatDate, getLanguageOverride, setLanguage } from "../i18n.js";
@@ -44,6 +48,11 @@ const newPasswordInput = qs("#new-password");
 const repeatPasswordInput = qs("#repeat-password");
 const passwordError = qs("#password-error");
 const passwordStatus = qs("#password-status");
+const startPageSection = qs("#start-page-section");
+const startPageLabel = qs("#start-page-label");
+const startPageSelect = qs("#start-page");
+const startPageStatus = qs("#start-page-status");
+const backLink = qs("#back");
 const notificationsSection = qs("#notifications-section");
 const notifyEnabled = qs("#notify-enabled");
 const notifyKind = qs("#notify-kind");
@@ -93,6 +102,16 @@ async function init() {
   storageId = resolved;
   rememberStorageId(storageId);
   renderStorageSwitcher(switcherContainer, { storages: me.storages, currentId: storageId });
+  renderNav(qs("#nav"), {
+    storageId,
+    current: "settings",
+    startPage: startPageFor(me.storages, storageId),
+  });
+
+  // Back goes to the start page, which is what the dashboard used to be for
+  // everyone (docs/specs/34-navigation-and-start-page.md).
+  backLink.setAttribute("href", withStorageParam(storageId, startPagePath(startPageFor(me.storages, storageId))));
+  initStartPage(me.storages.find((s) => s.id === storageId));
 
   gamificationEnabled.addEventListener("change", updateGamificationEnabled);
   holidayAddButton.addEventListener("click", addHolidayWeek);
@@ -199,6 +218,63 @@ async function removeHolidayWeek(week) {
     renderHolidayWeeks();
   } catch (err) {
     showError(err);
+  }
+}
+
+// --- The start page (docs/specs/34-navigation-and-start-page.md) ---
+//
+// Per person, per storage: "when I open *this* household, show me *this*".
+// The value the select starts on comes from GET /api/auth/me, which returns
+// the caller's own and nobody else's, so nothing here has to pick between
+// members. Changing it saves at once, the same pattern as the display-name
+// field above.
+
+/**
+ * initStartPage fills the select from the closed list, names the storage it
+ * concerns, and wires the save.
+ *
+ * The label names the storage on purpose: someone in two households has to
+ * be able to see which one they are changing, and the switcher in the header
+ * is the only other thing on the page that says.
+ *
+ * @param {{id: string, name: string, start_page?: string}|undefined} storage
+ */
+function initStartPage(storage) {
+  if (!storage) return;
+
+  startPageLabel.textContent = t("settings.startPage.label", { storage: storage.name });
+  for (const option of startPageOptions()) {
+    startPageSelect.append(el("option", { value: option.value }, [text(option.label)]));
+  }
+  startPageSelect.value = startPageFor([storage], storage.id);
+  // What the server last confirmed, so a failed save can put the select back
+  // rather than leaving it showing a choice that was never stored.
+  startPageSelect.dataset.saved = startPageSelect.value;
+
+  startPageSelect.addEventListener("change", saveStartPage);
+  startPageSection.hidden = false;
+}
+
+async function saveStartPage() {
+  clearError();
+  startPageStatus.hidden = true;
+  startPageSelect.disabled = true;
+  const previous = startPageSelect.dataset.saved;
+  try {
+    const saved = await patch(`/api/storages/${storageId}/membership`, {
+      start_page: startPageSelect.value,
+    });
+    startPageSelect.value = saved.start_page;
+    startPageSelect.dataset.saved = saved.start_page;
+    startPageStatus.textContent = t("common.saved");
+    startPageStatus.hidden = false;
+  } catch (err) {
+    // Put the select back where the server still has it, so the screen never
+    // claims a start page that was not stored.
+    startPageSelect.value = previous;
+    showError(err);
+  } finally {
+    startPageSelect.disabled = false;
   }
 }
 

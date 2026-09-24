@@ -13,8 +13,8 @@ import { t, tCount, formatDate, apiErrorMessage } from "../i18n.js";
 // how to split one"). The target-location field of both actions is built
 // through js/location-options.js so docs/specs/28-batch-move-quick-create.md
 // only has to attach its "+ New location" trigger. What it deliberately does
-// not own: quantity correction and expiry edits, which stay on the stocktake
-// screen (docs/specs/13-stocktake-and-audit.md).
+// not own: quantity correction, which stays on the stocktake sheet
+// (docs/specs/13-stocktake-and-audit.md).
 //
 // The "merge instead?" affordance on a rename is a **courtesy, not a server
 // rule** (spec 16 says so in as many words): the server never blocks a rename
@@ -24,7 +24,7 @@ import { t, tCount, formatDate, apiErrorMessage } from "../i18n.js";
 
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
-import { renderInboxLink } from "../inbox-badge.js";
+import { renderNav, startPageFor } from "../nav.js";
 import { initGamification } from "../gamification.js";
 import { get, patch, post, del, ApiError } from "../api.js";
 import { fetchCategories, appendCategoryOptions } from "../category-options.js";
@@ -88,10 +88,20 @@ async function init() {
   }
 
   renderStorageSwitcher(switcherContainer, { storages: me.storages, currentId: storageId });
-  renderInboxLink(document.querySelector("#inbox-link"), storageId);
+  renderNav(document.querySelector("#nav"), {
+    storageId,
+    current: "products",
+    startPage: startPageFor(me.storages, storageId),
+  });
   initGamification(storageId);
 
   filterInput.addEventListener("input", renderList);
+
+  // A deep link from inventory.html's "Product" column
+  // (docs/specs/33-inventory-overview-table.md) names the product to open
+  // immediately, the same way stocktake.html?location= does for a location.
+  const linkedProduct = new URLSearchParams(location.search).get("product");
+  if (linkedProduct) selectedId = linkedProduct;
 
   await reload();
 }
@@ -527,7 +537,7 @@ function renderStockCard(product) {
  *   (docs/specs/28-batch-move-quick-create.md).
  */
 function renderBatchRow(batch, locationSelects) {
-  const locationName = locationNameFor(batch.location_id);
+  const locationPath = locationPathFor(batch.location_id);
   const errorLine = el("div", { class: "alert", role: "alert", hidden: true });
 
   function showFieldError(message) {
@@ -656,7 +666,7 @@ function renderBatchRow(batch, locationSelects) {
 
   const summary = el("div", { class: "row row--between" }, [
     el("span", {}, [
-      text(t("products.batch.summary", { quantity: batch.quantity, location: locationName })),
+      text(t("products.batch.summary", { quantity: batch.quantity, location: locationPath })),
       text(
         batch.expiration_date
           ? // expiration_date is a bare DATE (migrations/00002_core_schema.sql),
@@ -670,6 +680,9 @@ function renderBatchRow(batch, locationSelects) {
       text(batch.expiration_source === "user" ? t("products.batch.userSet") : ""),
     ]),
     el("div", { class: "row" }, [
+      el("a", { class: "btn btn--ghost", href: stocktakeHref(batch.location_id) }, [
+        text(t("products.batch.countThisShelf")),
+      ]),
       el(
         "button",
         {
@@ -710,14 +723,24 @@ function renderBatchRow(batch, locationSelects) {
 }
 
 /**
- * locationNameFor looks up a batch's current location by id against the
- * flat tree this page already fetched. Falls back to "Unknown location"
+ * locationPathFor looks up a batch's current location by id against the flat
+ * tree this page already fetched, root first ("Cellar › Shelf A") — the same
+ * shape js/pages/consume-review.js and js/pages/inventory.js render
+ * (docs/specs/35-stocktake-entry-points.md). Falls back to "Unknown location"
  * rather than throwing — a batch can briefly point at a location deleted by
  * another member between this page's two loads.
  */
-function locationNameFor(locationId) {
+function locationPathFor(locationId) {
   const match = locations.find((loc) => loc.id === locationId);
-  return match ? match.name : t("products.batch.locationUnknown");
+  return match ? match.path.join(" › ") : t("products.batch.locationUnknown");
+}
+
+// stocktakeHref links a batch's location to its stocktake sheet, the same
+// plain-template shape js/pages/inventory.js's own stocktakeHref gives — not
+// withStorageParam, which would carry this page's own ?product= into a page
+// that has no use for it.
+function stocktakeHref(locationId) {
+  return `/stocktake.html?location=${encodeURIComponent(locationId)}&storage=${encodeURIComponent(storageId)}`;
 }
 
 function renderHistoryCard(product) {

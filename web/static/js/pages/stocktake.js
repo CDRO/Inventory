@@ -2,7 +2,10 @@ import "../register-sw.js";
 
 // Page module for stocktake.html — the guided walk of one location
 // (docs/specs/13-stocktake-and-audit.md), deep-linked as
-// stocktake.html?location=…&storage=….
+// stocktake.html?location=…&storage=…. With no `?location=`, or one that
+// resolves to nothing, this module renders a location chooser instead
+// (docs/specs/35-stocktake-entry-points.md): the read-only tree plus a
+// "Stalest first" shortlist — see renderChooser below.
 //
 // There is no server-side stocktake session, draft or partial state. Like a
 // review job, the sheet is either confirmed whole or abandoned by leaving the
@@ -17,12 +20,19 @@ import "../register-sw.js";
 
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
+import { renderNav, startPageFor } from "../nav.js";
 import { initGamification } from "../gamification.js";
 import { fetchProducts } from "../product-options.js";
+import { TreeView } from "../tree.js";
 import { formatAudited } from "../audited.js";
 import { get, post, ApiError } from "../api.js";
 import { clearChildren, el, text, qs } from "../dom.js";
 import { t, tCount, apiErrorMessage, formatDate } from "../i18n.js";
+
+// Locations shown in the "Stalest first" list, at most
+// (docs/specs/35-stocktake-entry-points.md): enough to answer "where should I
+// count next?" without turning into a second copy of the tree below it.
+const STALEST_LIMIT = 5;
 
 const switcherContainer = qs("#storage-switcher");
 const heading = qs("#heading");
@@ -30,6 +40,11 @@ const auditedLine = qs("#audited");
 const errorBox = qs("#error");
 const noticeBox = qs("#notice");
 const statusLine = qs("#status");
+const chooserSection = qs("#chooser");
+const stalestContainer = qs("#stalest");
+const chooserTreeContainer = qs("#chooser-tree");
+const chooserEmpty = qs("#chooser-empty");
+const chooserEmptyLink = qs("#chooser-empty-link");
 const sheetSection = qs("#sheet");
 const rowsContainer = qs("#rows");
 const emptyNote = qs("#empty");
@@ -44,6 +59,9 @@ const cancelLink = qs("#cancel");
 
 let storageId = null;
 let locationId = null;
+/** @type {TreeView|null} built lazily — only a page that actually renders the
+ * chooser needs one. */
+let chooserTree = null;
 /** @type {Map<string, {batch: Object, input: HTMLInputElement}>} */
 const counts = new Map();
 /** @type {{product_id: string, product_name: string, quantity: number, expiration_date: string|null}[]} */
@@ -55,12 +73,13 @@ init();
 
 async function init() {
   locationId = new URLSearchParams(location.search).get("location");
-  if (!locationId) {
-    // Without a location there is no shelf to walk, and guessing one would be
-    // worse than saying so.
-    statusLine.textContent = t("stocktake.noLocation");
-    return;
-  }
+
+  // The missing-location case is handled below rather than here, after the
+  // session and storage have been resolved. Returning before that left this
+  // page with no navigation bar at all
+  // (docs/specs/34-navigation-and-start-page.md) — and it is the page the
+  // bar's own Stocktake entry links to, so a user who took that entry landed
+  // somewhere with no way onward but the browser's Back button.
 
   let me;
   try {
@@ -84,19 +103,57 @@ async function init() {
   }
 
   renderStorageSwitcher(switcherContainer, { storages: me.storages, currentId: storageId });
+  renderNav(qs("#nav"), {
+    storageId,
+    current: "stocktake",
+    startPage: startPageFor(me.storages, storageId),
+  });
   initGamification(storageId);
 
   // Built by hand rather than through withStorageParam, which starts from the
   // current URL and would carry this page's ?location= over to a page that has
   // no use for it.
   const locationsHref = `/locations.html?storage=${encodeURIComponent(storageId)}`;
-  backLink.href = locationsHref;
-  cancelLink.href = locationsHref;
+  chooserEmptyLink.href = locationsHref;
+  // Back and Cancel return to wherever the user came from, same-origin, and
+  // fall back to the locations tree otherwise — someone who started from the
+  // inventory table or the chooser returns there, not to a page they never
+  // visited (docs/specs/35-stocktake-entry-points.md).
+  const returnTo = sameOriginReferrer() || locationsHref;
+  backLink.href = returnTo;
+  cancelLink.href = returnTo;
+
+  if (!locationId) {
+    // Without a location there is no shelf to walk. Rather than a dead end,
+    // this renders the chooser: the tree in read-only mode, plus the
+    // "Stalest first" shortlist (docs/specs/35-stocktake-entry-points.md).
+    statusLine.hidden = true;
+    await renderChooser();
+    return;
+  }
 
   foundForm.addEventListener("submit", addFound);
   confirmButton.addEventListener("click", confirm);
 
   await Promise.all([loadProducts(), reload()]);
+}
+
+/**
+ * sameOriginReferrer returns document.referrer as a same-origin path, or null
+ * when there is no referrer, it names another origin, or it fails to parse.
+ * document.referrer is empty for a direct URL visit (a bookmark, a typed
+ * address) and for any cross-origin one — both cases this app treats the same
+ * way, by falling back to the locations tree.
+ */
+function sameOriginReferrer() {
+  if (!document.referrer) return null;
+  try {
+    const ref = new URL(document.referrer);
+    if (ref.origin !== location.origin) return null;
+    return ref.pathname + ref.search;
+  } catch {
+    return null;
+  }
 }
 
 async function loadProducts() {
@@ -117,13 +174,122 @@ async function reload() {
   clearError();
   try {
     const sheet = await get(`/api/storages/${storageId}/locations/${locationId}/stocktake`);
+    chooserSection.hidden = true;
     render(sheet);
   } catch (err) {
+    sheetSection.hidden = true;
+    if (err instanceof ApiError && err.status === 404) {
+      // A foreign or deleted location answers 404, identically
+      // (docs/specs/03-auth-and-multi-tenancy.md's 404-not-403 rule; 13's
+      // sheet fetch). Rather than leaving a broken bookmark to fend for
+      // itself, the chooser renders right below the message — one click, not
+      // a trip to another page (docs/specs/35-stocktake-entry-points.md).
+      statusLine.hidden = true;
+      showMessage(t("stocktake.notFound"));
+      await renderChooser();
+      return;
+    }
     statusLine.hidden = false;
     statusLine.textContent = t("stocktake.loadFailed");
-    sheetSection.hidden = true;
     showError(err);
   }
+}
+
+/**
+ * renderChooser draws the location chooser: the existing tree component in
+ * read-only mode, plus the "Stalest first" shortlist above it
+ * (docs/specs/35-stocktake-entry-points.md). Called both when the page has no
+ * `?location=` at all and when the one given resolved to nothing — the two
+ * cases render identically, which is the point.
+ */
+async function renderChooser() {
+  let nodes;
+  try {
+    const body = await get(`/api/storages/${storageId}/locations`);
+    nodes = body.items;
+  } catch (err) {
+    chooserSection.hidden = true;
+    showError(err);
+    return;
+  }
+
+  chooserSection.hidden = false;
+  renderStalest(nodes);
+
+  chooserEmpty.hidden = nodes.length > 0;
+  if (nodes.length === 0) {
+    clearChildren(chooserTreeContainer);
+    return;
+  }
+
+  if (!chooserTree) {
+    chooserTree = new TreeView(chooserTreeContainer, { editable: false, renderDetail: renderChooserDetail });
+  }
+  chooserTree.render(nodes);
+}
+
+// renderChooserDetail is the read-only tree's renderDetail hook: how long ago
+// a node was walked, and the link that walks it — the same information
+// js/pages/locations.js shows, so "audited 3 weeks ago" reads identically in
+// both places.
+function renderChooserDetail(node) {
+  return el("span", { class: "tree-detail" }, [
+    el("span", { class: "muted" }, [text(formatAudited(node.last_audited_at))]),
+    el("a", { class: "btn btn--ghost", href: countHref(node.id) }, [text(t("stocktake.chooser.count"))]),
+  ]);
+}
+
+/**
+ * renderStalest draws the "Stalest first" list: at most STALEST_LIMIT
+ * locations, never-audited ones first (in tree order among themselves), then
+ * the oldest `last_audited_at` first (docs/specs/35-stocktake-entry-points.md).
+ */
+function renderStalest(nodes) {
+  const items = stalestFirst(nodes);
+  clearChildren(stalestContainer);
+  if (items.length === 0) return;
+
+  stalestContainer.append(
+    el("strong", {}, [text(t("stocktake.chooser.stalestHeading"))]),
+    el(
+      "ul",
+      { class: "stack" },
+      items.map((node) =>
+        el("li", { class: "row row--between" }, [
+          el("span", {}, [text(node.name)]),
+          el("span", { class: "muted" }, [text(formatAudited(node.last_audited_at))]),
+          el("a", { class: "btn btn--ghost", href: countHref(node.id) }, [text(t("stocktake.chooser.count"))]),
+        ]),
+      ),
+    ),
+  );
+}
+
+function stalestFirst(nodes) {
+  const flat = flattenLocations(nodes);
+  const never = flat.filter((node) => !node.last_audited_at);
+  const audited = flat
+    .filter((node) => node.last_audited_at)
+    .sort((a, b) => new Date(a.last_audited_at) - new Date(b.last_audited_at));
+  return [...never, ...audited].slice(0, STALEST_LIMIT);
+}
+
+// flattenLocations walks the tree depth-first, root before children, which is
+// what "tree order" means for the never-audited tie-break above.
+function flattenLocations(nodes) {
+  const out = [];
+  const walk = (list) => {
+    for (const node of list) {
+      out.push(node);
+      if (node.children && node.children.length > 0) walk(node.children);
+    }
+  };
+  walk(nodes);
+  return out;
+}
+
+function countHref(nodeId) {
+  return `/stocktake.html?location=${encodeURIComponent(nodeId)}&storage=${encodeURIComponent(storageId)}`;
 }
 
 function render(sheet) {
@@ -286,8 +452,13 @@ async function confirm() {
     const result = await post(`/api/storages/${storageId}/locations/${locationId}/stocktake`, body);
     found = [];
     renderFound();
-    showNotice(summarize(result));
+    // reload() first, notice second: reload()'s own clearError() would
+    // otherwise hide this notice in the same tick it was shown in, since
+    // nothing here yields to the browser between the two calls — confirmed
+    // live, this was a pre-existing bug that left every successful confirm
+    // with no visible feedback at all.
     await reload();
+    showNotice(summarize(result));
   } catch (err) {
     showError(err);
     if (err instanceof ApiError && err.status === 422) {

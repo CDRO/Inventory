@@ -29,6 +29,7 @@ import "../register-sw.js";
 import { t, apiErrorMessage, formatDate } from "../i18n.js";
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
+import { renderNav, startPageFor } from "../nav.js";
 import { initGamification } from "../gamification.js";
 import { ReviewList } from "../review.js";
 import { fetchProducts, fetchProductBatches } from "../product-options.js";
@@ -77,6 +78,10 @@ async function init() {
   storageId = resolved;
   rememberStorageId(storageId);
   renderStorageSwitcher(qs("#storage-switcher"), { storages: me.storages, currentId: storageId });
+  renderNav(qs("#nav"), {
+    storageId,
+    startPage: startPageFor(me.storages, storageId),
+  });
   initGamification(storageId);
   qs("#back").setAttribute("href", inboxHref());
 

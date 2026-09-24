@@ -20,11 +20,22 @@ async function logIn(page, username) {
 
 test("a member of one storage logs in and lands directly in it", async ({ page }) => {
   // Bob belongs to exactly one storage, so there is nothing to choose.
+  //
+  // Since docs/specs/34-navigation-and-start-page.md, storages.html resolves
+  // the storage and forwards to that member's start page rather than
+  // rendering a landing card. Bob has never changed his, so it is the
+  // default: the dashboard, carrying the storage he was resolved to.
   await logIn(page, "e2e-bob");
 
-  await expect(page).toHaveURL(/\/storages\.html\?storage=00000000-0000-7000-8000-000000000010$/);
-  await expect(page.locator("#main")).toContainText("E2E Household");
-  await expect(page.locator("#main")).toContainText("Signed in as Bob.");
+  await expect(page).toHaveURL(/\/dashboard[.]html[?]storage=00000000-0000-7000-8000-000000000010$/);
+  await expect(page.locator("#main h2").first()).toHaveText("Dashboard");
+
+  // The forward used location.replace, so storages.html is not in the
+  // history: Back leaves the app instead of bouncing through the forwarder
+  // and landing here again.
+  await page.goBack();
+  await expect(page).not.toHaveURL(/\/dashboard\.html/);
+  await expect(page).not.toHaveURL(/\/storages\.html/);
 });
 
 test("a member of two storages is asked which one", async ({ page }) => {
@@ -49,14 +60,17 @@ test("a wrong password is refused with the generic message and no session", asyn
 
 test("logging out returns to the login page and the session is dead", async ({ page }) => {
   await logIn(page, "e2e-bob");
-  await expect(page.locator("#main")).toContainText("Signed in as Bob.");
+  // Log out now lives in the navigation bar, on every storage-scoped page
+  // (docs/specs/34-navigation-and-start-page.md). Waiting for it is also what
+  // proves the bar rendered at all before the click below.
+  await expect(page.locator("#nav #logout")).toBeVisible();
 
   const cookie = (await page.context().cookies()).find((c) => c.name === "inventory_session");
   expect(cookie, "login sets the session cookie").toBeDefined();
   expect(cookie.httpOnly).toBe(true);
   expect(cookie.secure).toBe(true);
 
-  await page.click("#logout");
+  await page.click("#nav #logout");
   await expect(page).toHaveURL(/\/$/); // index.html, canonicalised to "/" by the file server
 
   // Replaying the old session id must not work: logout deleted the row, it
