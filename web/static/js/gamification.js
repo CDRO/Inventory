@@ -24,6 +24,7 @@
 import { get } from "./api.js";
 import { el, text, clearChildren } from "./dom.js";
 import { withStorageParam } from "./session.js";
+import { t, tCount } from "./i18n.js";
 
 const RING_SIZE = 40;
 const RING_STROKE = 4;
@@ -73,14 +74,18 @@ function renderRing(container, storageId, progress) {
 
   const link = el(
     "a",
-    { class: "gami-ring", href: withStorageParam(storageId, "/dashboard.html"), "aria-label": `Level ${progress.level}` },
+    {
+      class: "gami-ring",
+      href: withStorageParam(storageId, "/dashboard.html"),
+      "aria-label": t("gamification.levelLabel", { level: progress.level }),
+    },
     [ringSvg(progressPercent(progress)), el("span", { class: "gami-ring__level" }, [text(String(progress.level))])],
   );
 
   const inLevel = progress.xp - progress.xp_for_level;
   const levelSpan = progress.xp_for_next_level - progress.xp_for_level;
   const popover = el("div", { class: "gami-popover", role: "status", hidden: true }, [
-    text(`Progress to level ${progress.level + 1}: ${inLevel}/${levelSpan} XP`),
+    text(t("gamification.popoverProgress", { level: progress.level + 1, inLevel, levelSpan })),
   ]);
 
   wirePopover(link, popover);
@@ -176,7 +181,7 @@ async function renderCard(container, storageId, progress) {
   } catch {
     // The ring above already rendered from the progress call that did
     // succeed; the richer card is a best-effort widget on top of it.
-    container.append(el("p", { class: "empty-state" }, [text("Progress is unavailable right now.")]));
+    container.append(el("p", { class: "empty-state" }, [text(t("gamification.unavailable"))]));
     return;
   }
 
@@ -184,18 +189,18 @@ async function renderCard(container, storageId, progress) {
     el("div", { class: "gami-card__header" }, [
       ringSvg(progressPercent(progress)),
       el("div", {}, [
-        el("strong", {}, [text(`Level ${progress.level}`)]),
-        el("p", { class: "muted" }, [text(`${progress.xp} XP total`)]),
+        el("strong", {}, [text(t("gamification.levelLabel", { level: progress.level }))]),
+        el("p", { class: "muted" }, [text(t("gamification.xpTotal", { xp: progress.xp }))]),
       ]),
     ]),
-    barRow("Storage health", `${Math.round(progress.health_score)}%`, progress.health_score / 100),
+    barRow(t("gamification.storageHealth"), `${Math.round(progress.health_score)}%`, progress.health_score / 100),
   ];
 
   if (quests) {
     sections.push(
       barRow(
-        "This week's goal",
-        `${quests.weekly_goal.current} of ${quests.weekly_goal.target}`,
+        t("gamification.weeklyGoal"),
+        t("gamification.goalProgress", { current: quests.weekly_goal.current, target: quests.weekly_goal.target }),
         quests.weekly_goal.target > 0 ? quests.weekly_goal.current / quests.weekly_goal.target : 0,
       ),
     );
@@ -219,7 +224,7 @@ function barRow(label, valueText, fraction) {
 }
 
 function streakLine(streakWeeks) {
-  const message = streakWeeks > 0 ? `${streakWeeks}-week streak` : "No active streak yet";
+  const message = streakWeeks > 0 ? tCount("gamification.streak", streakWeeks) : t("gamification.noStreak");
   return el("p", { class: "muted" }, [text(message)]);
 }
 
@@ -230,10 +235,10 @@ function streakLine(streakWeeks) {
 function renderQuestsSection(quests) {
   if (quests.all_clear) {
     const streakText =
-      quests.clean_streak_days > 0 ? ` ${Math.floor(quests.clean_streak_days / 7)} weeks running.` : "";
+      quests.clean_streak_days > 0 ? tCount("gamification.cleanStreakWeeks", Math.floor(quests.clean_streak_days / 7)) : "";
     return el("div", { class: "card stack" }, [
-      el("strong", {}, [text("Everything's in order.")]),
-      el("p", { class: "muted" }, [text(streakText.trim())]),
+      el("strong", {}, [text(t("gamification.allClear"))]),
+      el("p", { class: "muted" }, [text(streakText)]),
     ]);
   }
 
@@ -241,7 +246,9 @@ function renderQuestsSection(quests) {
     const done = quest.completed_at != null;
     return el("div", { class: "row row--between" }, [
       el("span", { class: done ? "muted" : "" }, [text(questText(quest))]),
-      el("span", { class: "muted" }, [text(done ? "Done" : `${quest.progress}/${quest.target_count}`)]),
+      el("span", { class: "muted" }, [
+        text(done ? t("gamification.questDone") : t("gamification.questProgress", { progress: quest.progress, target: quest.target_count })),
+      ]),
     ]);
   });
   return el("div", { class: "stack" }, rows);
@@ -253,24 +260,24 @@ function renderQuestsSection(quests) {
 function questText(quest) {
   const params = quest.params || {};
   switch (quest.generator) {
-    case "stale_location": {
-      const since = params.since_month ? ` — untouched since ${params.since_month}` : "";
-      return `Re-scan ${params.location_name}${since}`;
-    }
+    case "stale_location":
+      return params.since_month
+        ? t("gamification.quest.staleLocationSince", { location: params.location_name, sinceMonth: params.since_month })
+        : t("gamification.quest.staleLocation", { location: params.location_name });
     case "missing_expiry":
-      return `Add expiry dates to ${quest.target_count} fresh items`;
+      return tCount("gamification.quest.missingExpiry", quest.target_count);
     case "uncategorized":
-      return `Sort ${quest.target_count} products into categories`;
+      return tCount("gamification.quest.uncategorized", quest.target_count);
     case "imageless":
-      return `Give ${quest.target_count} products a picture`;
+      return tCount("gamification.quest.imageless", quest.target_count);
     case "untracked_reorder":
-      return `Set minimum stock for ${quest.target_count} staples`;
+      return tCount("gamification.quest.untrackedReorder", quest.target_count);
     case "expiring_soon":
-      return `Use up or discard ${quest.target_count} items expiring this week`;
+      return tCount("gamification.quest.expiringSoon", quest.target_count);
     case "consumption_hygiene":
-      return "Log something you've used up";
+      return t("gamification.quest.consumptionHygiene");
     case "first_mile":
-      return "Map your first shelf";
+      return t("gamification.quest.firstMile");
     default:
       return "";
   }
@@ -287,7 +294,7 @@ function renderRecentAchievements(items) {
   if (recent.length === 0) return el("div", {});
 
   return el("div", { class: "stack" }, [
-    el("strong", {}, [text("Recently unlocked")]),
+    el("strong", {}, [text(t("gamification.recentlyUnlocked"))]),
     el(
       "div",
       { class: "row" },
@@ -296,8 +303,13 @@ function renderRecentAchievements(items) {
   ]);
 }
 
-// achievementLabel turns a snake_case key into the display label — plain
-// text substitution, not a lookup into anything user-supplied.
+// achievementLabel prefers a catalog entry for the achievement's stable key
+// (gamification.achievement.<key>, none of which exist yet — see this
+// module's localization report) and otherwise falls back to the same plain
+// text substitution this always did, so an untranslated key still degrades
+// to something readable rather than the raw dotted catalog key.
 function achievementLabel(key) {
-  return key.replace(/_/g, " ");
+  const catalogKey = `gamification.achievement.${key}`;
+  const translated = t(catalogKey);
+  return translated === catalogKey ? key.replace(/_/g, " ") : translated;
 }

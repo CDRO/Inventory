@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#2563eb">
-  <title>Review · Inventory</title>
+  <title data-i18n="review.pageTitle">Review · Inventory</title>
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" href="/icons/icon-192.png">
   <link rel="apple-touch-icon" href="/icons/icon-192.png">
@@ -15,30 +15,30 @@
 </head>
 <body>
   <header class="shell row row--between">
-    <strong>Inventory</strong>
+    <strong data-i18n="common.appName">Inventory</strong>
     <div class="row">
       <div id="storage-switcher" hidden></div>
       <div id="gamification-ring" hidden></div>
-      <a id="back" href="/inbox.html" class="btn btn--ghost">Inbox</a>
+      <a id="back" href="/inbox.html" class="btn btn--ghost" data-i18n="review.backToInbox">Inbox</a>
     </div>
   </header>
 
   <main id="main" class="shell stack" aria-live="polite">
-    <h2>Review</h2>
+    <h2 data-i18n="review.title">Review</h2>
 
     <div id="error" class="alert" role="alert" hidden></div>
-    <p id="status" class="empty-state">Loading…</p>
+    <p id="status" class="empty-state" data-i18n="common.loading">Loading…</p>
 
     <section id="proposal" class="stack" hidden>
-      <p class="muted">
+      <p class="muted" data-i18n="review.hint">
         Nothing is added to your inventory until you confirm. Reject anything
         that is not really there; correct anything the photo got wrong.
       </p>
       <div id="rows" class="review-list"></div>
       <div class="row">
-        <button id="confirm" type="button" class="btn btn--primary">Confirm</button>
-        <button id="reanalyze" type="button" class="btn btn--ghost" hidden>Analyze again</button>
-        <button id="discard" type="button" class="btn btn--ghost">Discard</button>
+        <button id="confirm" type="button" class="btn btn--primary" data-i18n="review.confirm">Confirm</button>
+        <button id="reanalyze" type="button" class="btn btn--ghost" hidden data-i18n="review.reanalyze">Analyze again</button>
+        <button id="discard" type="button" class="btn btn--ghost" data-i18n="review.discard">Discard</button>
       </div>
     </section>
   </main>
@@ -55,48 +55,48 @@
         </div>
 
         <div class="field">
-          <label>Product
+          <label><span data-i18n="review.row.product">Product</span>
             <select data-role="product"></select>
           </label>
         </div>
         <div class="field" data-role="new-product" hidden>
-          <label>New product name
+          <label><span data-i18n="review.row.newProductName">New product name</span>
             <input type="text" data-role="new-product-name" maxlength="255">
           </label>
-          <label>Kind
+          <label><span data-i18n="review.row.kind">Kind</span>
             <select data-role="item-type">
-              <option value="long_shelf_life">Keeps a long time</option>
-              <option value="perishable">Perishable</option>
-              <option value="non_perishable">Does not expire</option>
+              <option value="long_shelf_life" data-i18n="review.row.kind.longShelfLife">Keeps a long time</option>
+              <option value="perishable" data-i18n="review.row.kind.perishable">Perishable</option>
+              <option value="non_perishable" data-i18n="review.row.kind.nonPerishable">Does not expire</option>
             </select>
           </label>
-          <label>Category
+          <label><span data-i18n="review.row.category">Category</span>
             <select data-role="new-product-category"></select>
           </label>
-          <button type="button" class="btn btn--ghost" data-role="new-product-category-add">+ New category</button>
+          <button type="button" class="btn btn--ghost" data-role="new-product-category-add" data-i18n="review.row.newCategory">+ New category</button>
           <!-- Offered, never preselected: a picture of someone's shelf only
                becomes a product picture when they choose it. -->
-          <label data-role="new-product-image-field">Picture
+          <label data-role="new-product-image-field"><span data-i18n="review.row.picture">Picture</span>
             <select data-role="new-product-image">
-              <option value="">No picture</option>
-              <option value="crop">This item, cut from the photo</option>
-              <option value="photo">The whole photo</option>
+              <option value="" data-i18n="review.row.picture.none">No picture</option>
+              <option value="crop" data-i18n="review.row.picture.crop">This item, cut from the photo</option>
+              <option value="photo" data-i18n="review.row.picture.wholePhoto">The whole photo</option>
             </select>
           </label>
           <!-- Background removal: offered only once a picture from the photo
                is chosen, and only when the server says it can be done. The
                original stays chosen until the other one is picked. -->
           <div class="stack" data-role="cutout" hidden>
-            <button type="button" class="btn btn--ghost" data-role="cutout-request">Remove background</button>
+            <button type="button" class="btn btn--ghost" data-role="cutout-request" data-i18n="review.row.removeBackground">Remove background</button>
             <p class="muted" data-role="cutout-status" role="status" hidden></p>
             <div class="cutout-compare" data-role="cutout-compare" hidden>
               <label class="cutout-choice">
-                <span class="review-crop" data-role="cutout-original" role="img" aria-label="Original picture"></span>
-                <span><input type="radio" data-role="cutout-keep" value="original" checked> Original</span>
+                <span class="review-crop" data-role="cutout-original" role="img" data-i18n-aria-label="review.row.originalPictureAlt" aria-label="Original picture"></span>
+                <span><input type="radio" data-role="cutout-keep" value="original" checked> <span data-i18n="review.row.original">Original</span></span>
               </label>
               <label class="cutout-choice">
                 <img class="review-crop cutout-image" data-role="cutout-image" alt="The picture without its background">
-                <span><input type="radio" data-role="cutout-keep" value="cutout"> Without background</span>
+                <span><input type="radio" data-role="cutout-keep" value="cutout"> <span data-i18n="review.row.withoutBackground">Without background</span></span>
               </label>
             </div>
           </div>
@@ -104,34 +104,34 @@
 
         <div class="row">
           <div class="field">
-            <label>Quantity
+            <label><span data-i18n="review.row.quantity">Quantity</span>
               <input type="number" data-role="quantity" min="1" step="1" inputmode="numeric">
             </label>
           </div>
           <div class="field">
-            <label>Location
+            <label><span data-i18n="review.row.location">Location</span>
               <select data-role="location"></select>
             </label>
-            <button type="button" class="btn btn--ghost" data-role="location-add">+ New location</button>
+            <button type="button" class="btn btn--ghost" data-role="location-add" data-i18n="review.row.newLocation">+ New location</button>
           </div>
         </div>
 
         <div class="row">
           <div class="field">
-            <label>Expires
+            <label><span data-i18n="review.row.expires">Expires</span>
               <input type="date" data-role="expiry">
             </label>
           </div>
-          <label class="row"><input type="checkbox" data-role="no-expiry"> Does not expire</label>
+          <label class="row"><input type="checkbox" data-role="no-expiry"> <span data-i18n="review.row.noExpiryCheckbox">Does not expire</span></label>
         </div>
-        <p class="muted" data-role="expiry-hint">Leave the date empty to use the usual shelf life for this product.</p>
+        <p class="muted" data-role="expiry-hint" data-i18n="review.row.expiryHint">Leave the date empty to use the usual shelf life for this product.</p>
 
         <p class="review-row__error" data-role="row-error" role="alert" hidden></p>
       </div>
       <div class="review-row__actions">
-        <button type="button" class="btn btn--ghost" data-action="accept">Accept</button>
-        <button type="button" class="btn btn--ghost" data-action="correct">Correct</button>
-        <button type="button" class="btn btn--ghost" data-action="reject">Reject</button>
+        <button type="button" class="btn btn--ghost" data-action="accept" data-i18n="review.row.accept">Accept</button>
+        <button type="button" class="btn btn--ghost" data-action="correct" data-i18n="review.row.correct">Correct</button>
+        <button type="button" class="btn btn--ghost" data-action="reject" data-i18n="review.row.reject">Reject</button>
       </div>
     </div>
   </template>

@@ -21,6 +21,7 @@ import { TreeView } from "./tree.js";
 import { get, post, patch, ApiError } from "./api.js";
 import { el, text, clearChildren } from "./dom.js";
 import { createShelfLifeDetail, resolveInheritance } from "./category-shelf-life.js";
+import { t, apiErrorMessage } from "./i18n.js";
 
 // The locations kind's DOM ids keep their pre-rename "location-modal-*"
 // spelling on purpose: e2e/specs/ingestion.spec.js and
@@ -33,25 +34,25 @@ import { createShelfLifeDetail, resolveInheritance } from "./category-shelf-life
 const KINDS = {
   locations: {
     endpoint: "locations",
-    title: "Locations",
+    get title() { return t("locations.title"); },
     titleId: "location-modal-title",
     addRootFormId: "location-modal-add-root-form",
-    hint: "Drag a location onto another to move it, or use its “Move to…” button.",
-    addRootLabel: "Add top-level location",
-    rootNameLabel: "Name of the new top-level location",
-    rootNamePlaceholder: "Kitchen",
-    emptyMessage: "No locations yet. Add a top-level one below.",
+    get hint() { return t("locations.hint"); },
+    get addRootLabel() { return t("locations.addRoot"); },
+    get rootNameLabel() { return t("locations.addRootNameLabel"); },
+    get rootNamePlaceholder() { return t("locations.addRootNamePlaceholder"); },
+    get emptyMessage() { return t("treeModal.locations.empty"); },
   },
   categories: {
     endpoint: "categories",
-    title: "Categories",
+    get title() { return t("categories.title"); },
     titleId: "category-modal-title",
     addRootFormId: "category-modal-add-root-form",
-    hint: "Drag a category onto another to move it, or use its “Move to…” button.",
-    addRootLabel: "Add top-level category",
-    rootNameLabel: "Name of the new top-level category",
-    rootNamePlaceholder: "Food",
-    emptyMessage: "No categories yet. Add a top-level one below.",
+    get hint() { return t("categories.hint"); },
+    get addRootLabel() { return t("categories.addRoot"); },
+    get rootNameLabel() { return t("categories.addRootNameLabel"); },
+    get rootNamePlaceholder() { return t("categories.addRootNamePlaceholder"); },
+    get emptyMessage() { return t("treeModal.categories.empty"); },
   },
 };
 
@@ -78,7 +79,7 @@ export function openTreeManager(storageId, { kind }) {
   const hint = el("p", { class: "empty-state" }, [text(config.hint)]);
   const addRootButton = el("button", { type: "button", class: "btn" }, [text(config.addRootLabel)]);
   const treeContainer = el("div");
-  const doneButton = el("button", { type: "button", class: "btn btn--primary" }, [text("Done")]);
+  const doneButton = el("button", { type: "button", class: "btn btn--primary" }, [text(t("treeModal.done"))]);
 
   const dialog = el("dialog", { class: "card stack", "aria-labelledby": config.titleId }, [
     el("h2", { id: config.titleId }, [text(config.title)]),
@@ -149,8 +150,7 @@ export function openTreeManager(storageId, { kind }) {
   }
 
   function showError(err) {
-    errorBox.textContent =
-      err instanceof ApiError ? err.message : "Could not reach the server. Check your connection and try again.";
+    errorBox.textContent = err instanceof ApiError ? apiErrorMessage(err) : t("treeModal.networkError");
     errorBox.hidden = false;
   }
 
@@ -196,8 +196,8 @@ export function openTreeManager(storageId, { kind }) {
       },
       [
         input,
-        el("button", { type: "submit", class: "btn" }, [text("Add")]),
-        el("button", { type: "button", class: "btn btn--ghost", onclick: () => form.remove() }, [text("Cancel")]),
+        el("button", { type: "submit", class: "btn" }, [text(t("tree.add"))]),
+        el("button", { type: "button", class: "btn btn--ghost", onclick: () => form.remove() }, [text(t("common.cancel"))]),
       ],
     );
 

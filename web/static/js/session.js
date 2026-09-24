@@ -9,6 +9,7 @@
 
 import { el, clearChildren } from "./dom.js";
 import { get } from "./api.js";
+import { t } from "./i18n.js";
 
 const STORAGE_KEY = "inventory:lastStorageId";
 
@@ -156,9 +157,9 @@ export function renderEmptyState(container) {
   clearChildren(container);
   container.append(
     el("div", { class: "empty-state" }, [
-      el("h2", {}, ["No storage yet"]),
+      el("h2", {}, [t("session.emptyStateTitle")]),
       el("p", {}, [
-        "Ask an admin to add you to a storage to get started.",
+        t("session.emptyStateBody"),
       ]),
     ]),
   );

@@ -21,6 +21,7 @@
 
 import { postForm, ApiError } from "./api.js";
 import { el, text } from "./dom.js";
+import { t, apiErrorMessage } from "./i18n.js";
 
 // The formats docs/specs/20-barcode-recall.md names. The same list the server
 // decoder tries, so the two paths agree about what counts as a barcode.
@@ -64,12 +65,12 @@ export function supportsLiveScan() {
  * @param {{title?: string, hint?: string}} [options]
  * @returns {Promise<string|null>}
  */
-export function openScanSheet(storageId, { title = "Scan a barcode", hint = "" } = {}) {
+export function openScanSheet(storageId, { title = t("barcode.defaultTitle"), hint = "" } = {}) {
   const titleId = "barcode-sheet-title";
   const errorBox = el("div", { class: "alert", role: "alert", hidden: true });
   const statusBox = el("p", { class: "empty-state", role: "status", hidden: true });
 
-  const video = el("video", { playsinline: true, muted: true, "aria-label": "Camera preview" });
+  const video = el("video", { playsinline: true, muted: true, "aria-label": t("barcode.cameraPreview") });
   const videoWrap = el("div", { class: "stack", hidden: true }, [video]);
 
   const manualInput = el("input", {
@@ -80,10 +81,10 @@ export function openScanSheet(storageId, { title = "Scan a barcode", hint = "" }
     placeholder: "4006381333931",
   });
   const manualForm = el("form", { class: "stack" }, [
-    el("label", { for: "barcode-sheet-manual" }, [text("Or type the number under the bars")]),
+    el("label", { for: "barcode-sheet-manual" }, [text(t("barcode.typeNumberLabel"))]),
     el("div", { class: "row" }, [
       manualInput,
-      el("button", { type: "submit", class: "btn btn--primary" }, [text("Use this")]),
+      el("button", { type: "submit", class: "btn btn--primary" }, [text(t("barcode.useThis"))]),
     ]),
   ]);
 
@@ -94,14 +95,14 @@ export function openScanSheet(storageId, { title = "Scan a barcode", hint = "" }
     id: "barcode-sheet-photo",
   });
   const photoField = el("div", { class: "field" }, [
-    el("label", { for: "barcode-sheet-photo" }, [text("Or photograph the barcode")]),
+    el("label", { for: "barcode-sheet-photo" }, [text(t("barcode.photographLabel"))]),
     photoInput,
     el("p", { class: "muted" }, [
-      text("The photo is read and discarded — it is never stored."),
+      text(t("barcode.photoDiscarded")),
     ]),
   ]);
 
-  const cancelButton = el("button", { type: "button", class: "btn btn--ghost" }, [text("Cancel")]);
+  const cancelButton = el("button", { type: "button", class: "btn btn--ghost" }, [text(t("common.cancel"))]);
 
   const children = [el("h2", { id: titleId }, [text(title)]), errorBox, statusBox];
   if (hint) children.push(el("p", { class: "muted" }, [text(hint)]));
@@ -120,12 +121,9 @@ export function openScanSheet(storageId, { title = "Scan a barcode", hint = "" }
   });
 
   function showError(err) {
-    let message = "Something went wrong. Type the number instead.";
+    let message = t("barcode.genericError");
     if (err instanceof ApiError) {
-      message =
-        err.code === "validation_failed"
-          ? "No barcode could be read from that photo. Try again, or type the number."
-          : err.message || message;
+      message = err.code === "validation_failed" ? t("barcode.noBarcodeFound") : apiErrorMessage(err) || message;
     }
     errorBox.textContent = message;
     errorBox.hidden = false;
@@ -172,7 +170,7 @@ export function openScanSheet(storageId, { title = "Scan a barcode", hint = "" }
     const file = photoInput.files && photoInput.files[0];
     if (!file) return;
     errorBox.hidden = true;
-    showStatus("Reading the photo…");
+    showStatus(t("barcode.readingPhoto"));
     const body = new FormData();
     body.append("image", file);
     try {
@@ -226,7 +224,7 @@ export function openScanSheet(storageId, { title = "Scan a barcode", hint = "" }
     } catch {
       // Permission refused, or no camera. Not an error worth shouting
       // about — the other two paths are right there.
-      showStatus("No camera available. Type the number or photograph the barcode.");
+      showStatus(t("barcode.noCameraAvailable"));
       return;
     }
     if (settled) {
@@ -238,7 +236,7 @@ export function openScanSheet(storageId, { title = "Scan a barcode", hint = "" }
     video.srcObject = stream;
     video.muted = true;
     videoWrap.hidden = false;
-    showStatus("Point the camera at the barcode.");
+    showStatus(t("barcode.pointCamera"));
     try {
       await video.play();
     } catch {
@@ -271,7 +269,7 @@ export function openScanSheet(storageId, { title = "Scan a barcode", hint = "" }
  * @param {{label?: string, title?: string, onCode: (code: string) => void}} options
  * @returns {HTMLElement}
  */
-export function scanButton(storageId, { label = "Scan", title, onCode }) {
+export function scanButton(storageId, { label = t("barcode.scanButton"), title, onCode }) {
   return el(
     "button",
     {

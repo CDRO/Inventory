@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#2563eb">
-  <title>Dashboard · Inventory</title>
+  <title data-i18n="dashboard.pageTitle">Dashboard · Inventory</title>
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" href="/icons/icon-192.png">
   <link rel="apple-touch-icon" href="/icons/icon-192.png">
@@ -16,90 +16,90 @@
 </head>
 <body>
   <header class="shell row row--between">
-    <strong>Inventory</strong>
+    <strong data-i18n="common.appName">Inventory</strong>
     <div class="row">
       <div id="storage-switcher" hidden></div>
       <div id="inbox-link" hidden></div>
       <div id="gamification-ring" hidden></div>
-      <a href="/settings.html" class="btn btn--ghost">Settings</a>
-      <a href="/storages.html" class="btn btn--ghost">Back</a>
+      <a href="/settings.html" class="btn btn--ghost" data-i18n="common.settings">Settings</a>
+      <a href="/storages.html" class="btn btn--ghost" data-i18n="common.back">Back</a>
     </div>
   </header>
 
   <main id="main" class="shell stack" aria-live="polite">
-    <h2>Dashboard</h2>
+    <h2 data-i18n="dashboard.title">Dashboard</h2>
 
     <div id="error" class="alert" role="alert" hidden></div>
 
     <section class="card stack">
-      <h3>Add a missing item</h3>
-      <p class="empty-state">
+      <h3 data-i18n="dashboard.addItem.title">Add a missing item</h3>
+      <p class="empty-state" data-i18n="dashboard.addItem.hint">
         You are out of something precisely because it was never inventoried —
         type its name to track it for reorder.
       </p>
       <div class="row">
         <div class="field" style="flex: 1;">
-          <label for="add-item-name">Product name</label>
-          <input type="text" id="add-item-name" placeholder="butter">
+          <label for="add-item-name" data-i18n="dashboard.addItem.nameLabel">Product name</label>
+          <input type="text" id="add-item-name" data-i18n-placeholder="dashboard.addItem.namePlaceholder" placeholder="butter">
         </div>
-        <button id="add-item-check" type="button" class="btn">Check</button>
+        <button id="add-item-check" type="button" class="btn" data-i18n="dashboard.addItem.check">Check</button>
       </div>
       <div id="add-item-result" class="stack" hidden></div>
     </section>
 
     <section class="stack">
       <div class="row row--between">
-        <h3 class="urgency urgency--expired">Out of stock</h3>
+        <h3 class="urgency urgency--expired" data-i18n="dashboard.outOfStock.title">Out of stock</h3>
         <span id="out-of-stock-count" class="badge"></span>
       </div>
       <div id="out-of-stock-list" class="stack">
-        <p class="empty-state">Loading…</p>
+        <p class="empty-state" data-i18n="common.loading">Loading…</p>
       </div>
     </section>
 
     <section class="stack">
       <div class="row row--between">
-        <h3 class="urgency urgency--soon">Low stock</h3>
+        <h3 class="urgency urgency--soon" data-i18n="dashboard.lowStock.title">Low stock</h3>
         <span id="low-stock-count" class="badge"></span>
       </div>
       <div id="low-stock-list" class="stack"></div>
     </section>
 
     <section class="card row row--between">
-      <p class="empty-state" style="padding: 0; text-align: left;">
+      <p class="empty-state" style="padding: 0; text-align: left;" data-i18n="dashboard.export.hint">
         A snapshot of the lists above, for taking to a store.
       </p>
       <div class="row">
-        <a id="export-csv" class="btn" href="#">Download CSV</a>
-        <button id="export-pdf" type="button" class="btn">Download PDF</button>
+        <a id="export-csv" class="btn" href="#" data-i18n="dashboard.export.csv">Download CSV</a>
+        <button id="export-pdf" type="button" class="btn" data-i18n="dashboard.export.pdf">Download PDF</button>
       </div>
     </section>
 
-    <h2>Analytics</h2>
+    <h2 data-i18n="dashboard.analytics.title">Analytics</h2>
 
     <section class="card stat-tile">
       <span id="analytics-total-items" class="stat-tile__value">—</span>
-      <span class="stat-tile__label">Total items stored</span>
+      <span class="stat-tile__label" data-i18n="dashboard.analytics.totalItems">Total items stored</span>
     </section>
 
     <section class="stack">
-      <h3>Where things are</h3>
+      <h3 data-i18n="dashboard.analytics.whereThings">Where things are</h3>
       <div id="location-distribution" class="bar-chart card">
-        <p class="empty-state">Loading…</p>
+        <p class="empty-state" data-i18n="common.loading">Loading…</p>
       </div>
     </section>
 
     <section class="stack">
       <div class="row row--between">
-        <h3>Turnover</h3>
+        <h3 data-i18n="dashboard.analytics.turnover">Turnover</h3>
         <select id="turnover-granularity">
-          <option value="month">By month</option>
-          <option value="week">By week</option>
+          <option value="month" data-i18n="dashboard.analytics.byMonth">By month</option>
+          <option value="week" data-i18n="dashboard.analytics.byWeek">By week</option>
         </select>
       </div>
       <div class="card">
         <div id="turnover-chart" class="turnover-chart"></div>
-        <p id="turnover-empty" class="empty-state" hidden>No purchases or consumption recorded yet.</p>
+        <p id="turnover-empty" class="empty-state" hidden data-i18n="dashboard.analytics.turnoverEmpty">No purchases or consumption recorded yet.</p>
       </div>
     </section>
 

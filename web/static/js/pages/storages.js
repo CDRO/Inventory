@@ -16,6 +16,7 @@ import { renderInboxLink } from "../inbox-badge.js";
 import { initGamification } from "../gamification.js";
 import { el, text, clearChildren } from "../dom.js";
 import { post, ApiError } from "../api.js";
+import { t, apiErrorMessage } from "../i18n.js";
 
 const switcherContainer = document.querySelector("#storage-switcher");
 const mainContainer = document.querySelector("#main");
@@ -85,7 +86,7 @@ async function init() {
 function renderPicker(storages) {
   clearChildren(mainContainer);
   mainContainer.append(
-    el("h2", {}, ["Choose a storage"]),
+    el("h2", {}, [t("storages.choose")]),
     el(
       "div",
       { class: "stack" },
@@ -112,25 +113,25 @@ function renderLanding(me, storage) {
   mainContainer.append(
     el("div", { class: "card stack" }, [
       el("h2", {}, [storage.name]),
-      el("p", {}, [`Signed in as ${me.display_name}.`]),
+      el("p", {}, [t("storages.signedInAs", { name: me.display_name })]),
       el("div", { class: "row" }, [
         el("a", { class: "btn", href: withStorageParam(storage.id, "/dashboard.html") }, [
-          text("Dashboard"),
+          text(t("storages.navDashboard")),
         ]),
         el("a", { class: "btn", href: withStorageParam(storage.id, "/locations.html") }, [
-          text("Locations"),
+          text(t("storages.navLocations")),
         ]),
         el("a", { class: "btn", href: withStorageParam(storage.id, "/categories.html") }, [
-          text("Categories"),
+          text(t("storages.navCategories")),
         ]),
         el("a", { class: "btn", href: withStorageParam(storage.id, "/products.html") }, [
-          text("Products"),
+          text(t("storages.navProducts")),
         ]),
         el("a", { class: "btn", href: withStorageParam(storage.id, "/shopping-list.html") }, [
-          text("Shopping list"),
+          text(t("storages.navShoppingList")),
         ]),
         el("a", { class: "btn", href: withStorageParam(storage.id, "/ingest.html") }, [
-          text("Scan photos"),
+          text(t("storages.navScanPhotos")),
         ]),
       ]),
     ]),
@@ -141,8 +142,8 @@ function renderLoadError(err) {
   clearChildren(mainContainer);
   mainContainer.append(
     el("div", { class: "alert", role: "alert" }, [
-      "Could not load your account. ",
-      err instanceof ApiError ? err.message : "Check your connection and try again.",
+      t("storages.loadFailedPrefix") + " ",
+      err instanceof ApiError ? apiErrorMessage(err) : t("storages.networkError"),
     ]),
   );
 }

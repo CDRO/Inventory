@@ -11,6 +11,7 @@
 
 import { get } from "./api.js";
 import { openTreeManager } from "./tree-modal.js";
+import { t } from "./i18n.js";
 
 const NBSP = String.fromCharCode(0xa0);
 
@@ -51,7 +52,7 @@ export async function fetchCategories(storageId) {
 export function appendCategoryOptions(select, categories) {
   const none = document.createElement("option");
   none.value = "";
-  none.textContent = "No category";
+  none.textContent = t("categoryOptions.none");
   select.append(none);
 
   for (const cat of categories) {
@@ -129,8 +130,8 @@ export async function openCategoryField({ storageId, trigger, openedSelect, getO
   } catch {
     onError(
       createdIds.length > 0
-        ? "A category was created, but the list could not be refreshed. Reload the page to see it."
-        : "Could not reach the server. Check your connection and try again.",
+        ? t("categoryOptions.createdButRefreshFailed")
+        : t("categoryOptions.networkError"),
     );
     return;
   }

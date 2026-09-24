@@ -24,6 +24,7 @@ import { initGamification } from "../gamification.js";
 import { get, post, ApiError } from "../api.js";
 import { el, text, clearChildren, qs, fromTemplate } from "../dom.js";
 import { offerBarcodeCapture } from "../barcode-offer.js";
+import { t, apiErrorMessage } from "../i18n.js";
 
 const switcherContainer = qs("#storage-switcher");
 const errorBox = qs("#error");
@@ -97,10 +98,10 @@ async function loadDashboard() {
     const dashboard = await get(basePath());
     lastDashboard = dashboard;
     renderBucket(outOfStockList, outOfStockCount, dashboard.out_of_stock, (item) =>
-      `Out of stock — needs at least ${item.min_stock}`,
+      t("dashboard.outOfStock.needsAtLeast", { min: item.min_stock }),
     );
     renderBucket(lowStockList, lowStockCount, dashboard.low_stock, (item) =>
-      `${item.current_stock} of ${item.min_stock}`,
+      t("dashboard.lowStock.ofMin", { current: item.current_stock, min: item.min_stock }),
     );
   } catch (err) {
     showError(err);
@@ -112,7 +113,7 @@ function renderBucket(container, countBadge, items, describe) {
   countBadge.textContent = String(items.length);
 
   if (items.length === 0) {
-    container.append(el("p", { class: "empty-state" }, [text("Nothing here.")]));
+    container.append(el("p", { class: "empty-state" }, [text(t("dashboard.nothingHere"))]));
     return;
   }
 
@@ -162,7 +163,7 @@ function renderLocationDistribution(rows) {
   clearChildren(locationDistribution);
 
   if (rows.length === 0) {
-    locationDistribution.append(el("p", { class: "empty-state" }, [text("No stock recorded yet.")]));
+    locationDistribution.append(el("p", { class: "empty-state" }, [text(t("dashboard.noStockRecorded"))]));
     return;
   }
 
@@ -212,8 +213,8 @@ function renderTurnoverChart(rows) {
       height: 256,
       series: [
         {},
-        { label: "Purchased", stroke: "#2563eb", fill: "rgba(37, 99, 235, 0.15)" },
-        { label: "Consumed", stroke: "#b91c1c", fill: "rgba(185, 28, 28, 0.15)" },
+        { label: t("dashboard.analytics.purchased"), stroke: "#2563eb", fill: "rgba(37, 99, 235, 0.15)" },
+        { label: t("dashboard.analytics.consumed"), stroke: "#b91c1c", fill: "rgba(185, 28, 28, 0.15)" },
       ],
       axes: [
         // x is a period index, not a timestamp, so ticks are forced to whole
@@ -236,7 +237,7 @@ function renderTurnoverChart(rows) {
 async function checkItem() {
   const name = nameInput.value.trim();
   if (!name) {
-    showError(new Error("Type a product name first."));
+    showError(new Error(t("dashboard.addItem.typeNameFirst")));
     return;
   }
 
@@ -280,9 +281,9 @@ function renderMatch(name, match) {
   if (match.status === "exact_match" && match.matched_product) {
     chosenProductId = match.matched_product.id;
     minStockInput.value = String(match.matched_product.min_stock || 1);
-    addItemResult.append(el("p", {}, [text(`Matches ${match.matched_product.name}.`)]));
+    addItemResult.append(el("p", {}, [text(t("dashboard.addItem.matches", { name: match.matched_product.name }))]));
   } else if (match.status === "ambiguous") {
-    addItemResult.append(el("p", {}, [text("Which one did you mean?")]));
+    addItemResult.append(el("p", {}, [text(t("dashboard.addItem.whichOne"))]));
     const buttons = match.candidates.map((candidate) =>
       el(
         "button",
@@ -316,7 +317,7 @@ function renderMatch(name, match) {
     addItemResult.append(renderCatalogCard(match.catalog));
   } else {
     addItemResult.append(
-      el("p", { class: "empty-state" }, [text("Nothing known about this yet.")]),
+      el("p", { class: "empty-state" }, [text(t("dashboard.addItem.nothingKnown"))]),
     );
     if (match.needs_image_search) {
       renderImageSuggestions(addItemResult, name);
@@ -330,12 +331,12 @@ function renderMatch(name, match) {
       class: "btn btn--primary",
       onclick: () => confirmAddItem(name, chosenProductId, Number(minStockInput.value), prefill),
     },
-    [text(chosenProductId ? "Update threshold" : "Add to reorder list")],
+    [text(chosenProductId ? t("dashboard.addItem.updateThreshold") : t("dashboard.addItem.addToReorderList"))],
   );
 
   addItemResult.append(
     el("div", { class: "row" }, [
-      el("label", { class: "field" }, [text("Minimum stock"), minStockInput]),
+      el("label", { class: "field" }, [text(t("dashboard.addItem.minimumStock")), minStockInput]),
       confirmButton,
     ]),
   );
@@ -348,7 +349,7 @@ function renderCatalogCard(catalog) {
   }
   if (catalog.default_shelf_life_days != null) {
     lines.push(
-      el("p", { class: "empty-state" }, [text(`Keeps about ${catalog.default_shelf_life_days} days.`)]),
+      el("p", { class: "empty-state" }, [text(t("dashboard.addItem.keepsAbout", { days: catalog.default_shelf_life_days }))]),
     );
   }
   return el("div", { class: "card stack" }, lines);
@@ -356,7 +357,7 @@ function renderCatalogCard(catalog) {
 
 async function renderImageSuggestions(container, query) {
   const box = el("div", { class: "row" }, [
-    el("span", { class: "empty-state" }, [text("Looking for pictures…")]),
+    el("span", { class: "empty-state" }, [text(t("dashboard.addItem.lookingForPictures"))]),
   ]);
   container.append(box);
 
@@ -365,15 +366,15 @@ async function renderImageSuggestions(container, query) {
     clearChildren(box);
     for (const suggestion of body.suggestions || []) {
       box.append(
-        el("img", { src: suggestion.url, alt: `${suggestion.type} suggestion for ${query}`, width: 96, height: 96, loading: "lazy" }),
+        el("img", { src: suggestion.url, alt: t("dashboard.addItem.suggestionAlt", { type: suggestion.type, query }), width: 96, height: 96, loading: "lazy" }),
       );
     }
     if (!body.suggestions || body.suggestions.length === 0) {
-      box.append(el("span", { class: "empty-state" }, [text("No pictures found. You can add one later.")]));
+      box.append(el("span", { class: "empty-state" }, [text(t("dashboard.addItem.noPicturesFound"))]));
     }
   } catch {
     clearChildren(box);
-    box.append(el("span", { class: "empty-state" }, [text("Picture search is unavailable right now.")]));
+    box.append(el("span", { class: "empty-state" }, [text(t("dashboard.addItem.pictureSearchUnavailable"))]));
   }
 }
 
@@ -418,10 +419,10 @@ function downloadPdf() {
     ...lastDashboard.low_stock.map((item) => [item.name, String(item.current_stock), String(item.min_stock), String(suggestedQty(item.current_stock, item.min_stock))]),
   ];
 
-  doc.text("Reorder list", 14, 16);
+  doc.text(t("dashboard.pdf.title"), 14, 16);
   doc.autoTable({
     startY: 22,
-    head: [["Name", "Current stock", "Min stock", "Suggested reorder qty"]],
+    head: [[t("dashboard.pdf.name"), t("dashboard.pdf.currentStock"), t("dashboard.pdf.minStock"), t("dashboard.pdf.suggestedQty")]],
     body: rows,
   });
 
@@ -434,7 +435,7 @@ function suggestedQty(current, min) {
 }
 
 function showError(err) {
-  errorBox.textContent = err instanceof ApiError ? err.message : err.message || "Something went wrong.";
+  errorBox.textContent = err instanceof ApiError ? apiErrorMessage(err) : err.message || t("common.unexpectedError");
   errorBox.hidden = false;
 }
 

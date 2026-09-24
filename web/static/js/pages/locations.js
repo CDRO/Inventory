@@ -24,6 +24,7 @@ import { TreeView } from "../tree.js";
 import { formatAudited } from "../audited.js";
 import { get, post, patch, ApiError } from "../api.js";
 import { clearChildren, el, text } from "../dom.js";
+import { t, apiErrorMessage } from "../i18n.js";
 
 const switcherContainer = document.querySelector("#storage-switcher");
 const treeContainer = document.querySelector("#tree");
@@ -89,8 +90,8 @@ function showAddRootForm() {
   const input = el("input", {
     type: "text",
     id: "add-root-name",
-    "aria-label": "Name of the new top-level location",
-    placeholder: "Kitchen",
+    "aria-label": t("locations.addRootNameLabel"),
+    placeholder: t("locations.addRootNamePlaceholder"),
     required: true,
   });
 
@@ -109,11 +110,11 @@ function showAddRootForm() {
     },
     [
       input,
-      el("button", { type: "submit", class: "btn" }, [text("Add")]),
+      el("button", { type: "submit", class: "btn" }, [text(t("locations.add"))]),
       el(
         "button",
         { type: "button", class: "btn btn--ghost", onclick: () => form.remove() },
-        [text("Cancel")],
+        [text(t("common.cancel"))],
       ),
     ],
   );
@@ -139,7 +140,7 @@ function renderAuditState(node) {
         class: "btn btn--ghost",
         href: `/stocktake.html?location=${encodeURIComponent(node.id)}&storage=${encodeURIComponent(storageId)}`,
       },
-      [text("Stocktake")],
+      [text(t("locations.stocktakeLink"))],
     ),
   ]);
 }
@@ -200,7 +201,7 @@ function renderEmptyTree() {
   clearChildren(treeContainer);
   treeContainer.append(
     el("p", { class: "empty-state" }, [
-      text("No locations yet. Add a top-level one to describe where things live — a room, a cupboard, a shelf."),
+      text(t("locations.empty")),
     ]),
   );
 }
@@ -208,8 +209,7 @@ function renderEmptyTree() {
 function showError(err) {
   // ApiError.message is the server's human-readable text: a cycle and a
   // location that still holds stock each say what actually went wrong.
-  errorBox.textContent =
-    err instanceof ApiError ? err.message : "Could not reach the server. Check your connection and try again.";
+  errorBox.textContent = err instanceof ApiError ? apiErrorMessage(err) : t("locations.networkError");
   errorBox.hidden = false;
 }
 

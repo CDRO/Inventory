@@ -19,9 +19,11 @@ import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "..
 import { renderStorageSwitcher } from "../storage-switcher.js";
 import { get, put, post, patch, del, ApiError } from "../api.js";
 import { el, text, clearChildren, qs } from "../dom.js";
+import { t, apiErrorMessage, formatDate, getLanguageOverride, setLanguage } from "../i18n.js";
 
 const switcherContainer = qs("#storage-switcher");
 const errorBox = qs("#error");
+const languageSelect = qs("#language-select");
 const gamificationEnabled = qs("#gamification-enabled");
 const holidayWeeksList = qs("#holiday-weeks");
 const holidayWeekInput = qs("#holiday-week-input");
@@ -73,6 +75,8 @@ async function init() {
     return;
   }
 
+  initLanguageSelect();
+
   // The account section works whether or not the caller has a storage yet,
   // so it is filled before the storage resolution below can navigate away.
   displayNameInput.value = me.display_name;
@@ -118,7 +122,7 @@ async function loadPreferences() {
 function renderHolidayWeeks() {
   clearChildren(holidayWeeksList);
   if (currentHolidayWeeks.length === 0) {
-    holidayWeeksList.append(el("p", { class: "empty-state" }, [text("No holiday weeks marked.")]));
+    holidayWeeksList.append(el("p", { class: "empty-state" }, [text(t("settings.holiday.empty"))]));
     return;
   }
 
@@ -129,11 +133,11 @@ function renderHolidayWeeks() {
     if (isFuture) {
       row.append(
         el("button", { type: "button", class: "btn btn--ghost", onclick: () => removeHolidayWeek(week) }, [
-          text("Un-mark"),
+          text(t("settings.holiday.unmark")),
         ]),
       );
     } else {
-      row.append(el("span", { class: "muted" }, [text("Already in effect")]));
+      row.append(el("span", { class: "muted" }, [text(t("settings.holiday.alreadyInEffect"))]));
     }
     holidayWeeksList.append(row);
   }
@@ -165,7 +169,7 @@ async function addHolidayWeek() {
   clearError();
   const week = holidayWeekInput.value;
   if (!week) {
-    showError(new Error("Pick a week first."));
+    showError(new Error(t("settings.holiday.pickWeekFirst")));
     return;
   }
 
@@ -225,7 +229,7 @@ async function saveBarcodePrompt() {
   try {
     const state = await patch("/api/auth/barcode-prompt", { enabled: barcodePromptEnabled.checked });
     barcodePromptEnabled.checked = Boolean(state.enabled);
-    barcodePromptStatus.textContent = "Saved.";
+    barcodePromptStatus.textContent = t("common.saved");
     barcodePromptStatus.hidden = false;
   } catch (err) {
     // Put the checkbox back where the server still has it, so the screen never
@@ -237,6 +241,20 @@ async function saveBarcodePrompt() {
   }
 }
 
+// --- Language (docs/specs/19-localization.md) ---
+
+// initLanguageSelect writes the raw override (not the resolved language) so
+// "Match my browser" shows correctly for someone who has never set one, then
+// persists a change and reloads — the new catalog has to be fetched from
+// scratch, and a reload is the simplest correct way to do that.
+function initLanguageSelect() {
+  languageSelect.value = getLanguageOverride() || "";
+  languageSelect.addEventListener("change", () => {
+    setLanguage(languageSelect.value || null);
+    location.reload();
+  });
+}
+
 // --- Account (docs/specs/14-account-self-service.md) ---
 
 async function saveDisplayName() {
@@ -246,7 +264,7 @@ async function saveDisplayName() {
   try {
     const me = await patch("/api/auth/me", { display_name: displayNameInput.value });
     displayNameInput.value = me.display_name;
-    displayNameStatus.textContent = "Saved.";
+    displayNameStatus.textContent = t("common.saved");
     displayNameStatus.hidden = false;
   } catch (err) {
     showError(err);
@@ -269,7 +287,7 @@ async function changePassword(event) {
   passwordStatus.hidden = true;
 
   if (newPasswordInput.value !== repeatPasswordInput.value) {
-    passwordError.textContent = "The two new passwords do not match.";
+    passwordError.textContent = t("settings.password.mismatch");
     passwordError.hidden = false;
     return;
   }
@@ -282,8 +300,7 @@ async function changePassword(event) {
       new_password: newPasswordInput.value,
     });
     passwordForm.reset();
-    passwordStatus.textContent =
-      "Password changed. Every other browser and paired device has been signed out.";
+    passwordStatus.textContent = t("settings.password.changed");
     passwordStatus.hidden = false;
     // The device list just lost every row but this one.
     await loadDevices();
@@ -303,10 +320,10 @@ async function changePassword(event) {
 // (docs/specs/14-account-self-service.md).
 function passwordMessage(err) {
   if (!(err instanceof ApiError)) {
-    return err.message || "Something went wrong.";
+    return err.message || t("common.unexpectedError");
   }
   const details = Object.values(err.fields || {}).flat();
-  return details.length ? details.join(" ") : err.message;
+  return details.length ? details.join(" ") : apiErrorMessage(err);
 }
 
 async function loadDevices() {
@@ -321,7 +338,7 @@ async function loadDevices() {
 function renderDevices(devices) {
   clearChildren(devicesList);
   if (devices.length === 0) {
-    devicesList.append(el("p", { class: "empty-state" }, [text("No signed-in devices.")]));
+    devicesList.append(el("p", { class: "empty-state" }, [text(t("settings.devices.empty"))]));
     return;
   }
 
@@ -330,11 +347,11 @@ function renderDevices(devices) {
       el("span", {}, [text(describeDevice(device))]),
     ]);
     if (device.current) {
-      row.append(el("span", { class: "muted" }, [text("This device")]));
+      row.append(el("span", { class: "muted" }, [text(t("settings.devices.thisDevice"))]));
     } else {
       row.append(
         el("button", { type: "button", class: "btn btn--ghost", onclick: () => revokeDevice(device.id) }, [
-          text("Sign out"),
+          text(t("settings.devices.signOut")),
         ]),
       );
     }
@@ -343,9 +360,9 @@ function renderDevices(devices) {
 }
 
 function describeDevice(device) {
-  const name = device.label || (device.kind === "device" ? "Paired device" : "Browser");
-  const seen = device.last_seen_at ? device.last_seen_at.slice(0, 10) : "not since signing in";
-  return `${name} — last active ${seen}`;
+  const name = device.label || (device.kind === "device" ? t("settings.devices.pairedDevice") : t("settings.devices.browser"));
+  const seen = device.last_seen_at ? device.last_seen_at.slice(0, 10) : t("settings.devices.notSinceSignIn");
+  return t("settings.devices.lastActive", { name, seen });
 }
 
 async function revokeDevice(id) {
@@ -419,7 +436,7 @@ function renderNotificationSettings(settings) {
   notifyToken.value = "";
   notifyTokenRemove.checked = false;
   notifyTokenRemoveRow.hidden = !settings.has_token;
-  notifyToken.placeholder = settings.has_token ? "A token is saved" : "";
+  notifyToken.placeholder = settings.has_token ? t("settings.notify.tokenSaved") : "";
   renderNotifyUrlHint();
   renderLastResult(settings);
 }
@@ -433,22 +450,26 @@ function renderLastResult(settings) {
     notifyLastResult.hidden = true;
     return;
   }
-  const when = settings.last_run_at ? new Date(settings.last_run_at).toLocaleString() : "";
+  const when = settings.last_run_at
+    ? formatDate(new Date(settings.last_run_at), { dateStyle: "medium", timeStyle: "short" })
+    : "";
   const outcome =
     settings.last_result === "sent"
-      ? "Last digest sent"
+      ? t("settings.notify.result.sent")
       : settings.last_result === "empty"
-        ? "Nothing to report on the last run"
-        : `Last run failed: ${settings.last_result}`;
-  notifyLastResult.textContent = when ? `${outcome} (${when}).` : `${outcome}.`;
+        ? t("settings.notify.result.empty")
+        : t("settings.notify.result.failed", { reason: settings.last_result });
+  notifyLastResult.textContent = when
+    ? t("settings.notify.result.withTime", { outcome, when })
+    : t("settings.notify.result.withoutTime", { outcome });
   notifyLastResult.hidden = false;
 }
 
 function renderNotifyUrlHint() {
   const hints = {
-    ntfy: "The full topic URL, e.g. https://ntfy.example/inventory.",
-    gotify: "The Gotify server's base URL; /message is appended for you.",
-    webhook: "Any URL that accepts a JSON POST.",
+    ntfy: t("settings.notify.hint.ntfy"),
+    gotify: t("settings.notify.hint.gotify"),
+    webhook: t("settings.notify.hint.webhook"),
   };
   notifyUrlHint.textContent = hints[notifyKind.value] ?? "";
 }
@@ -489,10 +510,12 @@ async function sendTestNotification() {
   clearError();
   notifyTestButton.disabled = true;
   notifyTestStatus.hidden = false;
-  notifyTestStatus.textContent = "Sending…";
+  notifyTestStatus.textContent = t("settings.notify.sending");
   try {
     const outcome = await post(`${notificationsPath()}/test`, {});
-    notifyTestStatus.textContent = outcome.ok ? "Sent. Check your notifications." : `Failed: ${outcome.result}`;
+    notifyTestStatus.textContent = outcome.ok
+      ? t("settings.notify.testSent")
+      : t("settings.notify.testFailed", { reason: outcome.result });
     await loadNotificationSettings();
   } catch (err) {
     notifyTestStatus.hidden = true;
@@ -512,7 +535,7 @@ async function sendTestNotification() {
 async function resetLocalAppData() {
   resetLocalDataButton.disabled = true;
   resetStatus.hidden = false;
-  resetStatus.textContent = "Clearing local data…";
+  resetStatus.textContent = t("settings.reset.clearing");
   try {
     if ("serviceWorker" in navigator) {
       const registrations = await navigator.serviceWorker.getRegistrations();
@@ -522,17 +545,17 @@ async function resetLocalAppData() {
       const names = await caches.keys();
       await Promise.all(names.map((n) => caches.delete(n)));
     }
-    resetStatus.textContent = "Cleared. Reloading…";
+    resetStatus.textContent = t("settings.reset.reloading");
     location.reload();
   } catch (err) {
     resetLocalDataButton.disabled = false;
     resetStatus.hidden = true;
-    showError(err instanceof Error ? err : new Error("Could not clear local data."));
+    showError(err instanceof Error ? err : new Error(t("settings.reset.failed")));
   }
 }
 
 function showError(err) {
-  errorBox.textContent = err instanceof ApiError ? err.message : err.message || "Something went wrong.";
+  errorBox.textContent = err instanceof ApiError ? apiErrorMessage(err) : err.message || t("common.unexpectedError");
   errorBox.hidden = false;
 }
 

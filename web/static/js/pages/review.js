@@ -17,6 +17,7 @@ import "../register-sw.js";
 // photo (docs/specs/09-consumption-logging.md), and a new product's picture
 // can have its background removed when the deployment offers that.
 
+import { t, apiErrorMessage } from "../i18n.js";
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
 import { initGamification } from "../gamification.js";
@@ -79,7 +80,7 @@ async function init() {
 
   jobId = new URLSearchParams(location.search).get("job");
   if (!jobId) {
-    setStatus("No proposal was named. Open one from your inbox.");
+    setStatus(t("review.noProposal"));
     return;
   }
 
@@ -95,7 +96,7 @@ async function load() {
     job = await get(`/api/storages/${storageId}/jobs/${jobId}`);
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) {
-      setStatus("This proposal no longer exists. It may have been confirmed or discarded by someone else.");
+      setStatus(t("review.proposalGone"));
       return;
     }
     showError(err);
@@ -104,7 +105,7 @@ async function load() {
 
   switch (job.status) {
     case "pending":
-      setStatus("This photo is still being analysed…");
+      setStatus(t("review.analyzing"));
       try {
         await pollJob(storageId, jobId);
       } catch (err) {
@@ -116,14 +117,16 @@ async function load() {
       await load();
       return;
     case "failed":
-      setStatus(job.error || "This photo could not be analysed.");
+      // job.error is server-authored text (docs/specs/19-localization.md:
+      // the API stays English) — only the fallback default is translated.
+      setStatus(job.error || t("review.analysisFailed"));
       proposalSection.hidden = false;
       confirmButton.hidden = true;
       // A failed analysis is exactly what analysing again is for.
       reanalyzeButton.hidden = !job.has_image;
       return;
     case "consumed":
-      setStatus("This proposal has already been added to your inventory.");
+      setStatus(t("review.alreadyAdded"));
       return;
     case "done":
       confirmButton.hidden = false;
@@ -131,7 +134,7 @@ async function load() {
       await render(job);
       return;
     default:
-      setStatus("This proposal cannot be reviewed.");
+      setStatus(t("review.cannotReview"));
   }
 }
 
@@ -162,7 +165,7 @@ async function render(job) {
   }
 
   if (proposal.rows.length === 0) {
-    setStatus("Nothing was found in this photo. Confirm to clear it from your inbox, or discard it.");
+    setStatus(t("review.nothingFound"));
   } else {
     statusLine.hidden = true;
   }
@@ -175,7 +178,7 @@ function setupRow(el, row, proposal, locations, categories, products, hasImage) 
   const crop = qs('[data-role="crop"]', el);
   if (hasImage) {
     paintCrop(crop, row.bounding_box);
-    crop.setAttribute("aria-label", `Photo of ${row.label}`);
+    crop.setAttribute("aria-label", t("review.photoOfAriaLabel", { label: row.label }));
   }
   // Without a photo the crop stays an empty placeholder, keeping every row's
   // columns aligned.
@@ -246,6 +249,12 @@ function setupCutout(el, row) {
   keepOriginal.name = keepCutout.name = `cutout-${row.row_id}`;
   const entry = rows.get(row.row_id);
 
+  // The <img alt> for the without-background picture: static in the
+  // template's markup, but img `alt` has no data-i18n-* hook in i18n.js
+  // (only textContent/placeholder/title/aria-label do) — set directly here
+  // instead of adding one more attribute kind to that shared file.
+  qs('[data-role="cutout-image"]', el).alt = t("review.row.withoutBackgroundAlt");
+
   // A cutout belongs to the picture it was cut from: choosing another one
   // starts over.
   function reset() {
@@ -263,7 +272,7 @@ function setupCutout(el, row) {
     const source = picture.value;
     if (!source) return;
     request.disabled = true;
-    status.textContent = "Removing the background…";
+    status.textContent = t("review.removingBackground");
     status.hidden = false;
 
     let result;
@@ -271,7 +280,7 @@ function setupCutout(el, row) {
       result = await post(`/api/storages/${storageId}/ingest/${jobId}/cutouts`, { row_id: row.row_id, source });
     } catch {
       if (picture.value !== source) return;
-      status.textContent = "The background could not be removed. The original picture is kept.";
+      status.textContent = t("review.backgroundRemovalFailed");
       request.disabled = false;
       return;
     }
@@ -303,13 +312,13 @@ function setupProduct(el, row, products) {
   if (match.product) alreadyListed.add(match.product.id);
   for (const candidate of match.candidates || []) alreadyListed.add(candidate.id);
 
-  if (match.product) add(`product:${match.product.id}`, `${match.product.name} (in your inventory)`);
+  if (match.product) add(`product:${match.product.id}`, t("review.productOption.existing", { name: match.product.name }));
   for (const candidate of match.candidates || []) {
-    add(`product:${candidate.id}`, `${candidate.name} (in your inventory)`);
+    add(`product:${candidate.id}`, t("review.productOption.existing", { name: candidate.name }));
   }
-  if (match.catalog) add("catalog", `New product: ${match.catalog.display_name}`);
-  if (!match.catalog || match.catalog.display_name !== row.label) add("label", `New product: ${row.label}`);
-  add("custom", "Something else…");
+  if (match.catalog) add("catalog", t("review.productOption.new", { name: match.catalog.display_name }));
+  if (!match.catalog || match.catalog.display_name !== row.label) add("label", t("review.productOption.new", { name: row.label }));
+  add("custom", t("review.productOption.somethingElse"));
 
   // The rest of the storage's products, alphabetical (as ListProducts
   // returns them) — so a product the model didn't propose, or proposed with
@@ -319,7 +328,7 @@ function setupProduct(el, row, products) {
   const rest = (products || []).filter((p) => !alreadyListed.has(p.id));
   if (rest.length > 0) {
     const group = document.createElement("optgroup");
-    group.label = "All products";
+    group.label = t("review.productOption.allProductsGroup");
     for (const p of rest) {
       const option = document.createElement("option");
       option.value = `product:${p.id}`;
@@ -395,7 +404,7 @@ function setupLocation(el, row, proposal, locations) {
   const select = qs('[data-role="location"]', el);
   const placeholder = document.createElement("option");
   placeholder.value = "";
-  placeholder.textContent = "Choose a location…";
+  placeholder.textContent = t("review.chooseLocation");
   select.append(placeholder);
 
   const path = row.location?.path || [];
@@ -403,7 +412,7 @@ function setupLocation(el, row, proposal, locations) {
   if (proposed.length > 0) {
     const option = document.createElement("option");
     option.value = "new";
-    option.textContent = `Create: ${path.map((segment) => segment.name).join(" › ")}`;
+    option.textContent = t("review.createLocationPath", { path: path.map((segment) => segment.name).join(" › ") });
     select.append(option);
   }
   appendLocationOptions(select, locations);
@@ -451,7 +460,7 @@ function buildItems() {
       item.product_id = choice.slice("product:".length);
     } else {
       const name = qs('[data-role="new-product-name"]', el).value.trim();
-      if (!name) problems.push("Name the product.");
+      if (!name) problems.push(t("review.problems.nameProduct"));
       item.new_product = { name, item_type: qs('[data-role="item-type"]', el).value };
       const categoryId = qs('[data-role="new-product-category"]', el).value;
       if (categoryId) item.new_product.category_id = categoryId;
@@ -466,12 +475,12 @@ function buildItems() {
     }
 
     const quantity = Number.parseInt(qs('[data-role="quantity"]', el).value, 10);
-    if (!Number.isInteger(quantity) || quantity < 1) problems.push("Quantity must be at least 1.");
+    if (!Number.isInteger(quantity) || quantity < 1) problems.push(t("review.problems.quantityMin"));
     item.quantity = quantity;
 
     const where = qs('[data-role="location"]', el).value;
     if (where === "") {
-      problems.push("Choose a location.");
+      problems.push(t("review.problems.chooseLocation"));
     } else if (where === "new") {
       item.new_location = newLocationFor(row);
     } else {
@@ -509,7 +518,7 @@ async function onConfirm() {
   clearError();
   const items = buildItems();
   if (items == null) {
-    showMessage("Some rows need attention before they can be added.");
+    showMessage(t("review.someRowsNeedAttention"));
     return;
   }
 
@@ -534,9 +543,9 @@ async function onConfirm() {
   } catch (err) {
     setBusy(false);
     if (err instanceof ApiError && err.status === 409) {
-      showMessage("This proposal has already been added to your inventory, or is no longer waiting for review.");
+      showMessage(t("review.alreadyAddedConflict"));
     } else if (err instanceof ApiError && err.status === 404) {
-      showMessage("Something this review refers to no longer exists — a product or location may have been deleted. Reload and try again.");
+      showMessage(t("review.referencedGone"));
     } else {
       showError(err);
     }
@@ -585,7 +594,7 @@ function takePendingBarcode() {
 // everything on this screen, corrections included, so it asks first — and it
 // is the only way the model ever sees this photo twice.
 async function onReanalyze() {
-  if (!window.confirm("Analyze this photo again? The current proposal, and any changes made to it here, will be replaced.")) {
+  if (!window.confirm(t("review.reanalyzeConfirm"))) {
     return;
   }
   clearError();
@@ -609,7 +618,7 @@ async function onReanalyze() {
 }
 
 async function onDiscard() {
-  if (!window.confirm("Discard this photo and its proposal? Nothing will be added to your inventory.")) {
+  if (!window.confirm(t("review.discardConfirm"))) {
     return;
   }
   clearError();
@@ -646,7 +655,7 @@ function showMessage(message) {
 }
 
 function showError(err) {
-  showMessage(err instanceof ApiError ? err.message : "Could not reach the server. Check your connection and try again.");
+  showMessage(err instanceof ApiError ? apiErrorMessage(err) : t("review.networkError"));
 }
 
 function clearError() {

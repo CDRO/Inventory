@@ -8,6 +8,7 @@
 import { get } from "./api.js";
 import { clearChildren, el, text } from "./dom.js";
 import { withStorageParam } from "./session.js";
+import { t } from "./i18n.js";
 
 // Past this many, the badge says "200+" rather than paging through an inbox
 // just to print a number.
@@ -28,7 +29,7 @@ export async function renderInboxLink(container, storageId) {
   const badge = el("span", { class: "badge", hidden: true });
   container.append(
     el("a", { class: "btn btn--ghost inbox-link", href: withStorageParam(storageId, "/inbox.html") }, [
-      text("Inbox"),
+      text(t("inboxBadge.inbox")),
       badge,
     ]),
   );
@@ -39,7 +40,7 @@ export async function renderInboxLink(container, storageId) {
     const count = page.items.length;
     if (count > 0) {
       badge.textContent = page.next_cursor ? `${COUNT_LIMIT}+` : String(count);
-      badge.setAttribute("aria-label", `${badge.textContent} waiting for review`);
+      badge.setAttribute("aria-label", t("inboxBadge.waitingForReview", { count: badge.textContent }));
       badge.hidden = false;
     }
   } catch {

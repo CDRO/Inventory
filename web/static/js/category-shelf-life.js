@@ -9,6 +9,7 @@
 
 import { el, text, clearChildren } from "./dom.js";
 import { patch } from "./api.js";
+import { t, tCount } from "./i18n.js";
 
 // The server's bound (maxShelfLifeDays in internal/httpapi/expiry.go). The
 // input carries it so a browser flags an out-of-range number before a round
@@ -37,7 +38,7 @@ export function resolveInheritance(roots) {
 }
 
 function days(n) {
-  return n === 1 ? "1 day" : `${n} days`;
+  return tCount("categoryShelfLife.days", n);
 }
 
 function shelfLifeLabel(node, inherited) {
@@ -46,11 +47,11 @@ function shelfLifeLabel(node, inherited) {
   }
   const rule = inherited.get(node.id);
   if (rule) {
-    return `${days(rule.days)} (from ${rule.from})`;
+    return t("categoryShelfLife.inheritedFrom", { days: days(rule.days), from: rule.from });
   }
   // Nothing above sets a rule: the product's item type decides
   // (docs/specs/08-expiration-and-classification.md, step 5).
-  return "By item type";
+  return t("categoryShelfLife.byItemType");
 }
 
 /**
@@ -79,7 +80,7 @@ export function createShelfLifeDetail({ basePath, runMutation, showStatus, getIn
         {
           type: "button",
           class: "btn btn--ghost tree-shelf-life",
-          title: `Edit the shelf life of ${node.name}`,
+          title: t("categoryShelfLife.editTitle", { name: node.name }),
           onclick: () => openShelfLifeEditor(node, wrapper),
         },
         [text(shelfLifeLabel(node, getInherited()))],
@@ -95,8 +96,8 @@ export function createShelfLifeDetail({ basePath, runMutation, showStatus, getIn
       step: "1",
       inputmode: "numeric",
       class: "tree-shelf-life-input",
-      "aria-label": `Shelf life of ${node.name} in days; leave empty to inherit`,
-      placeholder: "Inherit",
+      "aria-label": t("categoryShelfLife.inputAriaLabel", { name: node.name }),
+      placeholder: t("categoryShelfLife.inheritPlaceholder"),
       value: node.default_shelf_life_days == null ? "" : String(node.default_shelf_life_days),
     });
 
@@ -114,9 +115,9 @@ export function createShelfLifeDetail({ basePath, runMutation, showStatus, getIn
       },
       [
         input,
-        el("button", { type: "submit", class: "btn btn--primary" }, [text("Save")]),
+        el("button", { type: "submit", class: "btn btn--primary" }, [text(t("common.save"))]),
         el("button", { type: "button", class: "btn btn--ghost", onclick: () => showLabel(node, wrapper) }, [
-          text("Cancel"),
+          text(t("common.cancel")),
         ]),
       ],
     );
@@ -134,8 +135,8 @@ export function createShelfLifeDetail({ basePath, runMutation, showStatus, getIn
       const moved = body.recomputed_batches;
       showStatus(
         moved === 0
-          ? `Saved the shelf life for ${node.name}. No existing expiry dates needed to change.`
-          : `Saved the shelf life for ${node.name}. ${moved} existing expiry ${moved === 1 ? "date was" : "dates were"} updated.`,
+          ? t("categoryShelfLife.savedNoChange", { name: node.name })
+          : tCount("categoryShelfLife.savedRecalculated", moved, { name: node.name }),
       );
     });
   }
