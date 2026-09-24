@@ -53,7 +53,12 @@ INSERT INTO users (id, username, password_hash, display_name, is_admin) VALUES
   -- that suite turns the offer off and back on again. A user shared with any
   -- other suite would have those flips land under playwright.config.js's
   -- fullyParallel, so Dana belongs to nothing but the storage below.
-  ('00000000-0000-7000-8000-000000000007', 'e2e-dana',    '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Dana',      false)
+  ('00000000-0000-7000-8000-000000000007', 'e2e-dana',    '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Dana',      false),
+  -- e2e-inbox belongs only to "E2E Inbox" (docs/specs/32-inbox-discard-all.md).
+  -- "Discard all" deletes jobs outright, so its fixture cannot share a
+  -- storage with ingestion.spec.js or consumption.spec.js, which depend on
+  -- their own seeded jobs in "E2E Household" and run under fullyParallel.
+  ('00000000-0000-7000-8000-000000000008', 'e2e-inbox',   '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Inbox User', false)
 ON CONFLICT DO NOTHING;
 
 -- Two storages, so the "member of storage A gets 404 for storage B"
@@ -93,7 +98,12 @@ INSERT INTO storages (id, name) VALUES
   -- primary key, and the suite associates, deletes and re-associates the same
   -- code; doing that in a shared storage would collide with any other suite
   -- that later wanted one.
-  ('00000000-0000-7000-8000-000000000014', 'E2E Barcode Household')
+  ('00000000-0000-7000-8000-000000000014', 'E2E Barcode Household'),
+  -- "E2E Inbox" (...015), e2e-inbox's alone, for
+  -- docs/specs/32-inbox-discard-all.md's bulk discard journey. That journey
+  -- deletes jobs outright rather than reading them, so it needs a storage no
+  -- other suite's seeded jobs live in.
+  ('00000000-0000-7000-8000-000000000015', 'E2E Inbox')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO storage_members (storage_id, user_id) VALUES
@@ -102,7 +112,8 @@ INSERT INTO storage_members (storage_id, user_id) VALUES
   ('00000000-0000-7000-8000-000000000011', '00000000-0000-7000-8000-000000000002'), -- Alice: other household too, for the switcher journey
   ('00000000-0000-7000-8000-000000000012', '00000000-0000-7000-8000-000000000005'), -- Second admin: their own, so an admin with a storage is not a special case of someone else's
   ('00000000-0000-7000-8000-000000000013', '00000000-0000-7000-8000-000000000006'), -- Casey: zero-locations household, and nothing else
-  ('00000000-0000-7000-8000-000000000014', '00000000-0000-7000-8000-000000000007')  -- Dana: barcode household, and nothing else
+  ('00000000-0000-7000-8000-000000000014', '00000000-0000-7000-8000-000000000007'), -- Dana: barcode household, and nothing else
+  ('00000000-0000-7000-8000-000000000015', '00000000-0000-7000-8000-000000000008')  -- e2e-inbox: E2E Inbox, and nothing else
 ON CONFLICT DO NOTHING;
 
 INSERT INTO locations (id, storage_id, name, description) VALUES
@@ -365,6 +376,55 @@ INSERT INTO jobs (id, storage_id, kind, status, payload, created_by) VALUES
        "match":{"status":"new_item","product":null,"candidates":[]}}
    ]}',
    '00000000-0000-7000-8000-000000000003')
+ON CONFLICT (id) DO NOTHING;
+
+-- "E2E Inbox" (...015), dedicated to docs/specs/32-inbox-discard-all.md's
+-- "Discard all" journey, which deletes jobs outright — never reused by any
+-- other suite's fixtures.
+--
+-- One consumed job's proposal was applied earlier, leaving behind the
+-- product and batch below; the journey asserts that batch survives a
+-- "Discard all" untouched, since the endpoint only ever deletes rows from
+-- jobs. The three other jobs — pending, done and failed — are what "Discard
+-- all" actually removes. created_at values are fixed and spread an hour
+-- apart, newest last, so the inbox's default listing (newest id first, and
+-- these ids sort the same way) puts the done job first on the page: its
+-- created_at is the up_to boundary the client is required to send, and the
+-- E2E test's route interception checks that value against the server's own
+-- timestamp rather than the device clock.
+INSERT INTO locations (id, storage_id, name, description) VALUES
+  ('00000000-0000-7000-8000-0000000000a0', '00000000-0000-7000-8000-000000000015', 'Inbox Shelf', 'The only shelf in E2E Inbox')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
+  ('00000000-0000-7000-8000-0000000000a1', '00000000-0000-7000-8000-000000000015', 'E2E Inbox Consumed Product', NULL, 'non_perishable', 0)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_source) VALUES
+  ('00000000-0000-7000-8000-0000000000a2', '00000000-0000-7000-8000-0000000000a1', '00000000-0000-7000-8000-0000000000a0', 2, 'derived')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
+  ('00000000-0000-7000-8000-0000000000a3', '00000000-0000-7000-8000-0000000000a1', '00000000-0000-7000-8000-0000000000a2', 2, 'purchase', '00000000-0000-7000-8000-000000000008')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO jobs (id, storage_id, kind, status, payload, error, created_by, created_at) VALUES
+  ('00000000-0000-7000-8000-0000000000a4', '00000000-0000-7000-8000-000000000015', 'shelf_ingestion', 'pending', NULL, NULL,
+   '00000000-0000-7000-8000-000000000008', '2025-06-01T08:00:00Z'),
+  ('00000000-0000-7000-8000-0000000000a5', '00000000-0000-7000-8000-000000000015', 'shelf_ingestion', 'failed', NULL, 'The photo could not be analysed.',
+   '00000000-0000-7000-8000-000000000008', '2025-06-01T09:00:00Z'),
+  ('00000000-0000-7000-8000-0000000000a6', '00000000-0000-7000-8000-000000000015', 'shelf_ingestion', 'done',
+   '{"mode":"shelf","location_hint_id":null,"rows":[
+      {"row_id":"0","label":"Discardable Item","confidence":0.8,"quantity":1,"bounding_box":null,
+       "match":{"status":"new_item","product":null,"candidates":[],"catalog":null},
+       "location":{"path":[],"location_id":null}}
+   ]}', NULL, '00000000-0000-7000-8000-000000000008', '2025-06-01T10:00:00Z'),
+  ('00000000-0000-7000-8000-0000000000a7', '00000000-0000-7000-8000-000000000015', 'shelf_ingestion', 'consumed',
+   '{"mode":"shelf","location_hint_id":null,"rows":[
+      {"row_id":"0","label":"E2E Inbox Consumed Product","confidence":0.9,"quantity":2,"bounding_box":null,
+       "match":{"status":"exact_match","product":{"id":"00000000-0000-7000-8000-0000000000a1","name":"E2E Inbox Consumed Product"},"candidates":[],"catalog":null},
+       "location":{"path":[{"name":"Inbox Shelf","location_id":"00000000-0000-7000-8000-0000000000a0","proposed":false}],"location_id":"00000000-0000-7000-8000-0000000000a0"}}
+   ]}', NULL, '00000000-0000-7000-8000-000000000008', '2025-06-01T07:00:00Z')
 ON CONFLICT (id) DO NOTHING;
 
 COMMIT;

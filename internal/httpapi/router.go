@@ -467,6 +467,9 @@ func NewRouter(d Deps) http.Handler {
 			// "Analyze again" (docs/specs/09-consumption-logging.md), for
 			// every kind of job whose service is wired.
 			sr.Post("/jobs/{id}/reanalyze", jobsAPI.Reanalyze)
+			// "Discard all" (docs/specs/32-inbox-discard-all.md): the whole
+			// inbox up to a server timestamp, in one request.
+			sr.Delete("/jobs", jobsAPI.DiscardAll)
 
 			// Photo ingestion (docs/specs/06-vision-shelf-ingestion.md).
 			ingestAPI := NewIngestHandler(d.Ingester, d.Store, d.Photos, d.ProductImages, cutouts, backgrounds, errs)

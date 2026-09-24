@@ -18,6 +18,7 @@ import { t, tCount, apiErrorMessage } from "../i18n.js";
 
 const jobsList = qs("#jobs");
 const moreButton = qs("#more");
+const discardAllButton = qs("#discard-all");
 const template = qs("#job-template");
 const errorBox = qs("#error");
 const notice = qs("#notice");
@@ -37,6 +38,13 @@ const STATUS_KEYS = {
 
 let storageId = null;
 let cursor = null;
+// The created_at of the newest job on the first page, remembered once on
+// first load and never overwritten by "Show older" — the up_to boundary
+// "Discard all" sends, so a photo uploaded after this page was drawn is
+// never in scope (docs/specs/32-inbox-discard-all.md). A full re-fetch of
+// the first page (after a discard-all) is a fresh first load and recomputes
+// it from what actually remains.
+let firstJobCreatedAt = null;
 
 init();
 
@@ -80,21 +88,27 @@ async function init() {
   }
 
   moreButton.addEventListener("click", loadPage);
+  discardAllButton.addEventListener("click", discardAll);
   await loadPage();
 }
 
 async function loadPage() {
   clearError();
   moreButton.disabled = true;
+  const firstPage = cursor == null;
   try {
     const query = new URLSearchParams({ limit: "20" });
     if (cursor) query.set("cursor", cursor);
     const page = await get(`/api/storages/${storageId}/jobs?${query}`);
 
-    if (!cursor && page.items.length === 0) {
-      jobsList.replaceChildren(
-        el("p", { class: "empty-state" }, [text(t("inbox.emptyState"))]),
-      );
+    if (firstPage) {
+      jobsList.replaceChildren();
+      if (page.items.length === 0) {
+        jobsList.append(el("p", { class: "empty-state" }, [text(t("inbox.emptyState"))]));
+      } else {
+        firstJobCreatedAt = page.items[0].created_at;
+      }
+      discardAllButton.hidden = page.items.length === 0;
     }
     for (const job of page.items) {
       jobsList.append(renderJob(job));
@@ -106,6 +120,34 @@ async function loadPage() {
     showError(err);
   } finally {
     moreButton.disabled = false;
+  }
+}
+
+// discardAll empties the whole inbox up to the boundary remembered from the
+// first page (docs/specs/32-inbox-discard-all.md) — never the device clock,
+// which is why the value sent is the server's own created_at rather than
+// anything computed from Date.now().
+async function discardAll() {
+  if (firstJobCreatedAt == null) return;
+  if (!window.confirm(t("inbox.discardAllConfirm"))) {
+    return;
+  }
+  clearError();
+  discardAllButton.disabled = true;
+  try {
+    const query = new URLSearchParams({ up_to: firstJobCreatedAt });
+    const result = await del(`/api/storages/${storageId}/jobs?${query}`);
+    notice.textContent = tCount("inbox.discardedCount", result.discarded);
+    notice.hidden = false;
+    // Re-fetch rather than clear locally: a job that arrived after the list
+    // was drawn was never in scope and is still there to show.
+    cursor = null;
+    firstJobCreatedAt = null;
+    await loadPage();
+  } catch (err) {
+    showError(err);
+  } finally {
+    discardAllButton.disabled = false;
   }
 }
 

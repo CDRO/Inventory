@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sort"
 	"strconv"
@@ -90,6 +91,29 @@ func (f *fakeJobs) DeleteJob(_ context.Context, storageID, id uuid.UUID) (*strin
 	}
 	delete(f.jobs, id)
 	return j.ImageFilename, nil
+}
+
+// DiscardJobs mirrors the store's status filter and up_to boundary — see
+// TestDiscardJobsDeletesTheStatusAndTimeWindow (internal/store/jobs_test.go)
+// for that logic against the real database.
+func (f *fakeJobs) DiscardJobs(_ context.Context, storageID uuid.UUID, upTo time.Time) ([]store.DiscardedJob, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []store.DiscardedJob
+	for id, j := range f.jobs {
+		if j.StorageID != storageID {
+			continue
+		}
+		if j.Status != store.JobPending && j.Status != store.JobDone && j.Status != store.JobFailed {
+			continue
+		}
+		if j.CreatedAt.After(upTo) {
+			continue
+		}
+		out = append(out, store.DiscardedJob{ID: j.ID, ImageFilename: j.ImageFilename})
+		delete(f.jobs, id)
+	}
+	return out, nil
 }
 
 type jobsPage struct {
@@ -283,4 +307,43 @@ func TestDiscardingAJob(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, f.do(http.MethodDelete, f.base()+"/jobs/"+job.ID.String(), "").Code)
 	assert.Equal(t, http.StatusNotFound, f.do(http.MethodGet, f.base()+"/jobs/"+job.ID.String(), "").Code)
 	assert.Equal(t, http.StatusNotFound, f.do(http.MethodDelete, f.base()+"/jobs/"+job.ID.String(), "").Code)
+}
+
+// TestDiscardAllRequiresUpTo — a bare DELETE …/jobs, or one with a value that
+// does not parse, must delete nothing (docs/specs/32-inbox-discard-all.md).
+func TestDiscardAllRequiresUpTo(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	job := f.jobs.add(t, f.storageID, store.JobDone, `{}`)
+
+	for _, bad := range []string{"/jobs", "/jobs?up_to=", "/jobs?up_to=not-a-time", "/jobs?up_to=2026-01-01"} {
+		rec := f.do(http.MethodDelete, f.base()+bad, "")
+		assert.Equal(t, http.StatusUnprocessableEntity, rec.Code, bad)
+		assert.Contains(t, rec.Body.String(), `"up_to"`, bad)
+	}
+
+	_, err := f.jobs.Job(context.Background(), f.storageID, job.ID)
+	assert.NoError(t, err, "a refused discard-all must not discard")
+}
+
+// TestDiscardAllIsBestEffortOnFileRemoval — a photo that fails to delete from
+// disk is logged, not surfaced: the rows are already gone either way
+// (docs/specs/32-inbox-discard-all.md).
+func TestDiscardAllIsBestEffortOnFileRemoval(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	job := f.jobs.add(t, f.storageID, store.JobDone, `{}`)
+	photo := "0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b.jpg"
+	job.ImageFilename = &photo
+	f.photos.removeErr = errors.New("disk is unavailable")
+
+	upTo := job.CreatedAt.Add(time.Minute).UTC().Format(time.RFC3339)
+	rec := f.do(http.MethodDelete, f.base()+"/jobs?up_to="+upTo, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.JSONEq(t, `{"discarded":1}`, rec.Body.String())
+
+	_, err := f.jobs.Job(context.Background(), f.storageID, job.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the row is gone even though the file removal failed")
 }
