@@ -93,6 +93,12 @@ async function init() {
 
   filterInput.addEventListener("input", renderList);
 
+  // A deep link from inventory.html's "Product" column
+  // (docs/specs/33-inventory-overview-table.md) names the product to open
+  // immediately, the same way stocktake.html?location= does for a location.
+  const linkedProduct = new URLSearchParams(location.search).get("product");
+  if (linkedProduct) selectedId = linkedProduct;
+
   await reload();
 }
 

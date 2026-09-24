@@ -239,6 +239,26 @@ func (f *fakeExportStore) ExportStorage(_ context.Context, storageID uuid.UUID) 
 	return &store.StorageExport{Storage: store.Storage{ID: storageID, Name: "Kitchen"}}, nil
 }
 
+// fakeInventoryStore is an in-memory InventoryStore
+// (docs/specs/33-inventory-overview-table.md), recording the same way.
+type fakeInventoryStore struct {
+	rows []store.InventoryBatchRow
+	err  error
+
+	lastStorageID uuid.UUID
+	lastFilter    store.InventoryBatchFilter
+	lastAfter     *uuid.UUID
+	lastLimit     int
+}
+
+func (f *fakeInventoryStore) ListInventoryBatches(_ context.Context, storageID uuid.UUID, filter store.InventoryBatchFilter, after *uuid.UUID, limit int) ([]store.InventoryBatchRow, error) {
+	f.lastStorageID, f.lastFilter, f.lastAfter, f.lastLimit = storageID, filter, after, limit
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.rows, nil
+}
+
 // fakeAPI is the whole APIStore: the authorization lookups and the two
 // resources behind them.
 type fakeAPI struct {
@@ -261,6 +281,7 @@ type fakeAPI struct {
 	*fakeExportStore
 	*fakeBarcodes
 	*fakeBarcodePrompt
+	*fakeInventoryStore
 }
 
 // newFakeAPI builds the whole fake store around an auth fake, with every other
@@ -277,6 +298,7 @@ func newFakeAPI(auth *fakeAuth) fakeAPI {
 		fakeExportStore:   &fakeExportStore{},
 		fakeBarcodes:      newFakeBarcodes(),
 		fakeBarcodePrompt: newFakeBarcodePrompt(),
+		fakeInventoryStore: &fakeInventoryStore{},
 	}
 }
 
@@ -312,6 +334,7 @@ type apiFixture struct {
 	adminVision   *fakeAdminVision
 	barcodes      *fakeBarcodes
 	barcodePrompt *fakeBarcodePrompt
+	inventory     *fakeInventoryStore
 	storageID     uuid.UUID
 	user          *store.User
 	session       *store.Session
@@ -339,6 +362,7 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 	exports := &fakeExportStore{}
 	barcodes := newFakeBarcodes()
 	barcodePrompt := newFakeBarcodePrompt()
+	inventory := &fakeInventoryStore{}
 	user, session := auth.addUser(t, false)
 	storageID := uuid.New()
 	auth.addMember(storageID, user.ID)
@@ -371,6 +395,7 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 			fakeExportStore:   exports,
 			fakeBarcodes:      barcodes,
 			fakeBarcodePrompt: barcodePrompt,
+			fakeInventoryStore: inventory,
 		},
 		Matcher:       matcher,
 		Images:        images,
@@ -404,6 +429,7 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 		adminVision:   adminVision,
 		barcodes:      barcodes,
 		barcodePrompt: barcodePrompt,
+		inventory:     inventory,
 		storageID:     storageID, user: user, session: session,
 	}
 }
@@ -493,6 +519,8 @@ func storageRoutes(base string) []struct {
 		{http.MethodPost, base + "/inventory-batches", `{"product_id":"` + id + `","location_id":"` + id + `","quantity":1}`},
 		{http.MethodGet, base + "/locations/" + id + "/stocktake", ""},
 		{http.MethodPost, base + "/locations/" + id + "/stocktake", `{"batches":[]}`},
+		// The whole-inventory table (docs/specs/33-inventory-overview-table.md).
+		{http.MethodGet, base + "/inventory-batches", ""},
 		// Member export (docs/specs/15-backup-restore-and-export.md).
 		{http.MethodGet, base + "/export", ""},
 		// Barcode recall (docs/specs/20-barcode-recall.md).
