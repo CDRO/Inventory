@@ -77,7 +77,13 @@ INSERT INTO users (id, username, password_hash, display_name, is_admin) VALUES
   --
   -- The 01–09 user range is full, so these two continue in hex.
   ('00000000-0000-7000-8000-00000000000a', 'e2e-start',       '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Start',       false),
-  ('00000000-0000-7000-8000-00000000000b', 'e2e-start-multi', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Start Multi', false)
+  ('00000000-0000-7000-8000-00000000000b', 'e2e-start-multi', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Start Multi', false),
+  -- e2e-stocktake belongs only to "E2E Stocktake"
+  -- (docs/specs/35-stocktake-entry-points.md). That journey confirms
+  -- stocktakes, which writes quantities and last_audited_at — the same
+  -- write-vs-read-only reasoning e2e-inventory's fixture comment gives, in
+  -- reverse: this one is dedicated because it writes, not because it reads.
+  ('00000000-0000-7000-8000-00000000000c', 'e2e-stocktake', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Stocktake User', false)
 ON CONFLICT DO NOTHING;
 
 -- Two storages, so the "member of storage A gets 404 for storage B"
@@ -138,7 +144,12 @@ INSERT INTO storages (id, name) VALUES
   -- member to a shared storage would change what its member lists show.
   ('00000000-0000-7000-8000-000000000017', 'E2E Start'),
   ('00000000-0000-7000-8000-000000000018', 'E2E Start One'),
-  ('00000000-0000-7000-8000-000000000019', 'E2E Start Two')
+  ('00000000-0000-7000-8000-000000000019', 'E2E Start Two'),
+  -- "E2E Stocktake" (...01a), e2e-stocktake's alone, for
+  -- docs/specs/35-stocktake-entry-points.md. Confirming a stocktake writes
+  -- last_audited_at, so this storage cannot be shared with e2e-inventory's
+  -- read-only fixture or with any other suite's seeded quantities.
+  ('00000000-0000-7000-8000-00000000001a', 'E2E Stocktake')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO storage_members (storage_id, user_id) VALUES
@@ -149,7 +160,8 @@ INSERT INTO storage_members (storage_id, user_id) VALUES
   ('00000000-0000-7000-8000-000000000013', '00000000-0000-7000-8000-000000000006'), -- Casey: zero-locations household, and nothing else
   ('00000000-0000-7000-8000-000000000014', '00000000-0000-7000-8000-000000000007'), -- Dana: barcode household, and nothing else
   ('00000000-0000-7000-8000-000000000015', '00000000-0000-7000-8000-000000000008'), -- e2e-inbox: E2E Inbox, and nothing else
-  ('00000000-0000-7000-8000-000000000016', '00000000-0000-7000-8000-000000000009')  -- e2e-inventory: E2E Inventory, and nothing else
+  ('00000000-0000-7000-8000-000000000016', '00000000-0000-7000-8000-000000000009'), -- e2e-inventory: E2E Inventory, and nothing else
+  ('00000000-0000-7000-8000-00000000001a', '00000000-0000-7000-8000-00000000000c')  -- e2e-stocktake: E2E Stocktake, and nothing else
 ON CONFLICT DO NOTHING;
 
 -- The start-page memberships (docs/specs/34-navigation-and-start-page.md),
@@ -529,6 +541,51 @@ INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, create
   ('00000000-0000-7000-8000-0000000000e2', '00000000-0000-7000-8000-0000000000c2', '00000000-0000-7000-8000-0000000000d2', 4, 'purchase', '00000000-0000-7000-8000-000000000009'),
   ('00000000-0000-7000-8000-0000000000e3', '00000000-0000-7000-8000-0000000000c3', '00000000-0000-7000-8000-0000000000d3', 3, 'purchase', '00000000-0000-7000-8000-000000000009'),
   ('00000000-0000-7000-8000-0000000000e4', '00000000-0000-7000-8000-0000000000c3', '00000000-0000-7000-8000-0000000000d4', 2, 'purchase', '00000000-0000-7000-8000-000000000009')
+ON CONFLICT (id) DO NOTHING;
+
+-- "E2E Stocktake" (...01a), dedicated to
+-- docs/specs/35-stocktake-entry-points.md's entry-point journeys, e2e-
+-- stocktake's alone: confirming a walk writes last_audited_at, so a fixture
+-- another suite reads under fullyParallel cannot hold it.
+--
+-- Seven locations at the root (no tree needed to exercise the chooser's flat
+-- "Stalest first" ranking): "Pantry" has never been audited, and the other
+-- six carry last_audited_at spread from one day to 200 days ago, computed
+-- relative to now() rather than hardcoded so the fixture never goes stale.
+-- The chooser's top five are therefore, in order: Pantry (never), Shed
+-- (200 days), Attic (120 days), Cellar (60 days) and Garage (30 days) — Fridge
+-- (1 day) and Freezer (10 days) are deliberately the two freshest, so they
+-- fall just outside the five-entry limit and prove the truncation rather than
+-- vacuously satisfying it.
+--
+-- "Fridge" is the one location that holds a batch, and it is one of the two
+-- excluded from the top five on purpose: the product-page journey confirms a
+-- stocktake there, which sets its last_audited_at to now() and would
+-- otherwise perturb the nav-based chooser journey's assertions about which
+-- five locations show and in what order, however the suite happens to
+-- schedule the two tests. This file runs serially regardless
+-- (test.describe.configure below), but the fixture is built to not depend on
+-- that ordering either.
+INSERT INTO locations (id, storage_id, parent_id, name, description, last_audited_at) VALUES
+  ('00000000-0000-7000-8000-0000000000f0', '00000000-0000-7000-8000-00000000001a', NULL, 'Pantry',  'Never audited',        NULL),
+  ('00000000-0000-7000-8000-0000000000f1', '00000000-0000-7000-8000-00000000001a', NULL, 'Fridge',  'Holds the one batch',  now() - interval '1 day'),
+  ('00000000-0000-7000-8000-0000000000f2', '00000000-0000-7000-8000-00000000001a', NULL, 'Freezer', 'Second-freshest',      now() - interval '10 days'),
+  ('00000000-0000-7000-8000-0000000000f3', '00000000-0000-7000-8000-00000000001a', NULL, 'Garage',  'Fourth-stalest',       now() - interval '30 days'),
+  ('00000000-0000-7000-8000-0000000000f4', '00000000-0000-7000-8000-00000000001a', NULL, 'Cellar',  'Third-stalest',        now() - interval '60 days'),
+  ('00000000-0000-7000-8000-0000000000f5', '00000000-0000-7000-8000-00000000001a', NULL, 'Attic',   'Second-stalest',       now() - interval '120 days'),
+  ('00000000-0000-7000-8000-0000000000f6', '00000000-0000-7000-8000-00000000001a', NULL, 'Shed',    'Stalest audited one',  now() - interval '200 days')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
+  ('00000000-0000-7000-8000-0000000000f7', '00000000-0000-7000-8000-00000000001a', 'E2E Stocktake Widget', NULL, 'non_perishable', 0)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_source) VALUES
+  ('00000000-0000-7000-8000-0000000000f8', '00000000-0000-7000-8000-0000000000f7', '00000000-0000-7000-8000-0000000000f1', 3, 'derived')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
+  ('00000000-0000-7000-8000-0000000000f9', '00000000-0000-7000-8000-0000000000f7', '00000000-0000-7000-8000-0000000000f8', 3, 'purchase', '00000000-0000-7000-8000-00000000000c')
 ON CONFLICT (id) DO NOTHING;
 
 COMMIT;

@@ -129,11 +129,10 @@ export function startPageFor(storages, storageId) {
 // start_page value list — Categories and Stocktake are reachable but cannot be
 // chosen as a start page, and Settings sits in the end group below.
 //
-// Stocktake points at stocktake.html with no `?location=`. Until
-// docs/specs/35-stocktake-entry-points.md turns that into a location chooser —
-// the next package of this wave — the page says it needs a location and
-// offers no way to pick one. The entry is here rather than held back because
-// this spec's own bar lists it, and 35 lands behind it.
+// Stocktake points at stocktake.html with no `?location=`, which
+// docs/specs/35-stocktake-entry-points.md renders as a location chooser: the
+// tree in read-only mode plus a "Stalest first" shortlist, rather than a page
+// that needs a location and offers no way to pick one.
 const NAV_ITEMS = [
   { key: "dashboard", path: "/dashboard.html", label: "nav.dashboard" },
   { key: "inventory", path: "/inventory.html", label: "nav.inventory" },

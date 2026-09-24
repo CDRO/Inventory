@@ -36,6 +36,20 @@
     <div id="notice" class="alert alert--success" role="status" hidden></div>
     <p id="status" class="empty-state" data-i18n="common.loading">Loading…</p>
 
+    <!-- The location chooser (docs/specs/35-stocktake-entry-points.md): shown
+         whenever there is no location to walk, either because none was given
+         or because the given one resolved to nothing. The two cases render
+         identically below the error box above, which is what tells them
+         apart. -->
+    <section id="chooser" class="stack" hidden>
+      <div id="stalest" class="stack"></div>
+      <div id="chooser-tree"></div>
+      <p id="chooser-empty" class="empty-state" hidden>
+        <span data-i18n="stocktake.chooser.empty">This storage has no locations yet.</span>
+        <a id="chooser-empty-link" data-i18n="stocktake.chooser.emptyLink">Add one on the locations page.</a>
+      </p>
+    </section>
+
     <section id="sheet" class="stack" hidden>
       <p class="muted" data-i18n="stocktake.instructions">
         Count what is actually on this shelf and correct anything that

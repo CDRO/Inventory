@@ -60,13 +60,21 @@ export class TreeView {
    *   render, including the ones expand/collapse triggers internally, so
    *   whatever it draws always matches the node beside it. Omitted, nothing
    *   extra is drawn — the locations tree does not pass it.
+   * @param {boolean} [callbacks.editable] - default true. false renders
+   *   expand/collapse and renderDetail only: no rename, add-child or "move
+   *   to…" button, and no drag-and-drop. This is the read-only mode
+   *   docs/specs/35-stocktake-entry-points.md adds for stocktake.html's
+   *   location chooser, which shows the same tree without offering to change
+   *   it. onAddChild/onRename/onMove are never called in this mode and may be
+   *   omitted.
    */
-  constructor(container, { onAddChild, onRename, onMove, renderDetail = null }) {
+  constructor(container, { onAddChild, onRename, onMove, renderDetail = null, editable = true }) {
     this.container = container;
     this.onAddChild = onAddChild;
     this.onRename = onRename;
     this.onMove = onMove;
     this.renderDetail = renderDetail;
+    this.editable = editable;
     /** @type {TreeNode[]} */
     this.nodes = [];
     /** @type {Set<string>} ids of nodes currently expanded. */
@@ -110,28 +118,32 @@ export class TreeView {
       "div",
       {
         class: "tree-node",
-        draggable: "true",
+        draggable: this.editable ? "true" : undefined,
         "data-id": node.id,
       },
       [
         toggle,
         nameSpan,
         ...(detail ? [detail] : []),
-        el("div", { class: "row" }, [
-          el("button", { type: "button", class: "btn btn--ghost", onclick: () => this._startRename(node, nameSpan) }, [
-            text(t("tree.rename")),
-          ]),
-          el("button", { type: "button", class: "btn btn--ghost", onclick: () => this._startAddChild(node.id, li) }, [
-            text(t("tree.add")),
-          ]),
-          el("button", { type: "button", class: "btn btn--ghost", onclick: () => this._openMovePicker(node.id) }, [
-            text(t("tree.moveTo")),
-          ]),
-        ]),
+        ...(this.editable
+          ? [
+              el("div", { class: "row" }, [
+                el("button", { type: "button", class: "btn btn--ghost", onclick: () => this._startRename(node, nameSpan) }, [
+                  text(t("tree.rename")),
+                ]),
+                el("button", { type: "button", class: "btn btn--ghost", onclick: () => this._startAddChild(node.id, li) }, [
+                  text(t("tree.add")),
+                ]),
+                el("button", { type: "button", class: "btn btn--ghost", onclick: () => this._openMovePicker(node.id) }, [
+                  text(t("tree.moveTo")),
+                ]),
+              ]),
+            ]
+          : []),
       ],
     );
 
-    this._wireDragAndDrop(nodeEl, node.id);
+    if (this.editable) this._wireDragAndDrop(nodeEl, node.id);
 
     const li = el("li", {}, [nodeEl]);
 
