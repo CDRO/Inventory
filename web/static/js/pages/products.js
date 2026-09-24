@@ -659,7 +659,12 @@ function renderBatchRow(batch, locationSelects) {
       text(t("products.batch.summary", { quantity: batch.quantity, location: locationName })),
       text(
         batch.expiration_date
-          ? t("products.batch.expiresOn", { date: formatDate(new Date(batch.expiration_date), { dateStyle: "medium" }) })
+          ? // expiration_date is a bare DATE (migrations/00002_core_schema.sql),
+            // parsed as UTC midnight — timeZone: "UTC" renders the calendar
+            // date the server sent, not one day early for a viewer west of UTC.
+            t("products.batch.expiresOn", {
+              date: formatDate(new Date(batch.expiration_date), { dateStyle: "medium", timeZone: "UTC" }),
+            })
           : t("products.batch.noExpiry"),
       ),
       text(batch.expiration_source === "user" ? t("products.batch.userSet") : ""),

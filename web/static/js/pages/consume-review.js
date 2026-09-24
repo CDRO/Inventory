@@ -317,7 +317,14 @@ async function renderBatches(rowEl, productId, suggestedQty) {
 
     const where = locationNames.get(batch.location_id) || t("consumeReview.unknownLocation");
     const when = batch.expiration_date
-      ? t("consumeReview.expiresOn", { date: formatDate(new Date(batch.expiration_date), { dateStyle: "medium" }) })
+      ? t("consumeReview.expiresOn", {
+          // expiration_date is a bare DATE (migrations/00002_core_schema.sql),
+          // parsed here as UTC midnight — timeZone: "UTC" renders exactly the
+          // calendar date the server sent, regardless of the viewer's own
+          // timezone. Without it, anyone west of UTC would see every expiry
+          // one day early.
+          date: formatDate(new Date(batch.expiration_date), { dateStyle: "medium", timeZone: "UTC" }),
+        })
       : t("consumeReview.noExpiryDate");
     container.append(
       buildEl("label", { class: "row row--between" }, [

@@ -158,7 +158,10 @@ function renderRow(batch) {
   if (batch.expiration_date) {
     details.push(
       el("span", { class: "badge" }, [
-        text(t("stocktake.expiresBadge", { date: formatDate(new Date(batch.expiration_date)) })),
+        // expiration_date is a bare DATE (migrations/00002_core_schema.sql),
+        // parsed as UTC midnight — timeZone: "UTC" renders the calendar date
+        // the server sent, not one day early for a viewer west of UTC.
+        text(t("stocktake.expiresBadge", { date: formatDate(new Date(batch.expiration_date), { timeZone: "UTC" }) })),
       ]),
     );
   }
@@ -232,7 +235,8 @@ function renderFound() {
               ? t("stocktake.foundItemWithExpiry", {
                   quantity: item.quantity,
                   product: item.product_name,
-                  date: formatDate(new Date(item.expiration_date)),
+                  // Same bare-DATE/UTC reasoning as the badge above.
+                  date: formatDate(new Date(item.expiration_date), { timeZone: "UTC" }),
                 })
               : t("stocktake.foundItem", { quantity: item.quantity, product: item.product_name }),
           ),

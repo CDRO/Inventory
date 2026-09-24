@@ -161,3 +161,34 @@ test("the admin area stays English regardless of the PWA language override", asy
   await expect(page.locator("h1")).toHaveText("Admin");
   await expect(page.locator("#users-heading")).toHaveText("Users");
 });
+
+// expiration_date is a bare DATE (migrations/00002_core_schema.sql), not a
+// timestamp — round 2 review caught that formatDate() call sites for it
+// omitted `timeZone: "UTC"`, so parsing "2030-01-01" as UTC midnight and then
+// formatting in the *viewer's* zone rendered every expiry one calendar day
+// early for anyone west of UTC. This test only means something under a
+// non-UTC zone, which is exactly why the bug shipped once already: this
+// suite's other tests all run under the container's default (UTC) timezone.
+test.describe("a batch expiry date under a non-UTC browser timezone", () => {
+  test.use({ timezoneId: "America/New_York" });
+
+  const HOUSEHOLD_STORAGE = "00000000-0000-7000-8000-000000000010";
+  // Greek Yogurt's Fridge batch (e2e/fixtures/seed.sql), expiration_date
+  // 2030-01-01 — read-only here, so sharing it with consumption.spec.js's
+  // parallel run is safe.
+  const YOGURT_FRIDGE_BATCH = "00000000-0000-7000-8000-000000000053";
+
+  test("still renders the calendar date the server sent, not one day early", async ({ page }) => {
+    const login = await page.request.post("/api/auth/login", {
+      data: { username: "e2e-alice", password: PASSWORD },
+    });
+    expect(login.status()).toBe(200);
+
+    await page.goto(`/products.html?storage=${HOUSEHOLD_STORAGE}`);
+    await page.getByRole("button", { name: "Greek Yogurt", exact: true }).click();
+
+    const row = page.locator('[data-role="batch-row"][data-batch-id="' + YOGURT_FRIDGE_BATCH + '"]');
+    await expect(row).toContainText("Jan 1, 2030");
+    await expect(row).not.toContainText("Dec 31, 2029");
+  });
+});
