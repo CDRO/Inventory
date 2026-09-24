@@ -110,6 +110,7 @@ type APIStore interface {
 	ExportStore
 	BarcodeStore
 	BarcodePromptStore
+	InventoryStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -609,6 +610,12 @@ func NewRouter(d Deps) http.Handler {
 			sr.Get("/barcodes/{code}", barcodes.Lookup)
 			sr.Post("/barcodes/{code}/log", barcodes.Log)
 			sr.Post("/barcodes/{code}/product", barcodes.AcceptCatalog)
+
+			// The whole-inventory table (docs/specs/33-inventory-overview-table.md),
+			// the read partner of the stocktake group's POST above on the same
+			// collection.
+			inventory := NewInventoryHandler(d.Store, errs)
+			sr.Get("/inventory-batches", inventory.List)
 		})
 
 		// First-run guidance (docs/specs/29-first-run-admin-guidance.md): the

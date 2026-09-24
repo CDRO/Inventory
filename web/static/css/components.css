@@ -331,6 +331,125 @@ th {
   font-weight: 600;
 }
 
+/* --- Inventory table (docs/specs/33-inventory-overview-table.md) --- */
+
+/* A sortable column header is a full-width button so the whole cell is a
+   click/tap target and the current state is announced through aria-sort on
+   the <th> itself, not repeated in the button's own text. */
+.sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.sort-button::after {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 0.3em solid transparent;
+  border-right: 0.3em solid transparent;
+  opacity: 0.35;
+}
+
+th[aria-sort="ascending"] .sort-button::after {
+  border-bottom: 0.35em solid currentColor;
+  opacity: 1;
+}
+
+th[aria-sort="descending"] .sort-button::after {
+  border-top: 0.35em solid currentColor;
+  opacity: 1;
+}
+
+.inventory-table__thumb {
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+  background: var(--color-bg);
+  vertical-align: middle;
+  margin-right: var(--space-2);
+}
+
+.inventory-table__product {
+  display: inline-flex;
+  align-items: center;
+}
+
+.inventory-table__qty {
+  text-align: right;
+}
+
+.inventory-table__user-marker {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.inventory-table__group-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font: inherit;
+  padding: 0 var(--space-1) 0 0;
+}
+
+/* Below the shared 36rem breakpoint the table stops scrolling sideways and
+   becomes a column of stacked cards, CSS only — no second template. The
+   header row is visually hidden rather than removed, so the sort <select>
+   below (js/pages/inventory.js swaps the clickable headers for it at the
+   same breakpoint) is what a screen reader and a phone both actually use. */
+@media (max-width: 36rem) {
+  .inventory-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  .inventory-table,
+  .inventory-table tbody,
+  .inventory-table tr {
+    display: block;
+    width: 100%;
+  }
+
+  .inventory-table tr {
+    margin-bottom: var(--space-3);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+  }
+
+  .inventory-table td {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-3);
+    border-bottom: none;
+    padding: var(--space-1) 0;
+  }
+
+  .inventory-table td::before {
+    content: attr(data-label);
+    color: var(--color-text-muted);
+    font-weight: 600;
+    flex: none;
+  }
+
+  .inventory-table td[data-label=""]::before {
+    content: none;
+  }
+}
+
 /* --- Loading --- */
 
 .spinner {

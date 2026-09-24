@@ -127,6 +127,12 @@ function renderLanding(me, storage) {
         el("a", { class: "btn", href: withStorageParam(storage.id, "/products.html") }, [
           text(t("storages.navProducts")),
         ]),
+        // docs/specs/33-inventory-overview-table.md adds this button as the
+        // only way to reach inventory.html until docs/specs/34's navigation
+        // bar lands on every page and this landing card is removed.
+        el("a", { class: "btn", href: withStorageParam(storage.id, "/inventory.html") }, [
+          text(t("storages.navInventory")),
+        ]),
         el("a", { class: "btn", href: withStorageParam(storage.id, "/shopping-list.html") }, [
           text(t("storages.navShoppingList")),
         ]),

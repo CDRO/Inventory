@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#2563eb">
+  <title data-i18n="inventory.pageTitle">Inventory · Inventory</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/css/tokens.css">
+  <link rel="stylesheet" href="/css/base.css">
+  <link rel="stylesheet" href="/css/components.css">
+  <link rel="stylesheet" href="/css/gamification.css">
+</head>
+<body>
+  <header class="shell shell--wide row row--between">
+    <strong data-i18n="common.appName">Inventory</strong>
+    <div class="row">
+      <div id="storage-switcher" hidden></div>
+      <div id="gamification-ring" hidden></div>
+      <div id="inbox-link" hidden></div>
+      <a href="/storages.html" class="btn btn--ghost" data-i18n="common.back">Back</a>
+    </div>
+  </header>
+
+  <main id="main" class="shell shell--wide stack" aria-live="polite">
+    <h2 data-i18n="inventory.title">Inventory</h2>
+
+    <div id="error" class="alert" role="alert" hidden></div>
+    <p id="loading" class="empty-state" role="status"></p>
+    <div id="incomplete" class="alert" role="alert" hidden data-i18n="inventory.incomplete">
+      A later page failed to load. This table is incomplete.
+    </div>
+
+    <section id="content" class="stack" hidden>
+      <div class="row" id="filters">
+        <div class="field">
+          <label for="filter-text" data-i18n="inventory.filters.textLabel">Find a product</label>
+          <input id="filter-text" type="search" data-i18n-placeholder="inventory.filters.textPlaceholder" placeholder="Type to filter">
+        </div>
+        <div class="field">
+          <label for="filter-location" data-i18n="inventory.filters.locationLabel">Location</label>
+          <select id="filter-location"></select>
+        </div>
+        <div class="field">
+          <label for="filter-category" data-i18n="inventory.filters.categoryLabel">Category</label>
+          <select id="filter-category"></select>
+        </div>
+        <div class="field">
+          <label for="sort-select" data-i18n="inventory.sort.label">Sort by</label>
+          <select id="sort-select">
+            <option value="expiry" data-i18n="inventory.sort.expiryAsc">Expiry (soonest first)</option>
+            <option value="-expiry" data-i18n="inventory.sort.expiryDesc">Expiry (latest first)</option>
+            <option value="product" data-i18n="inventory.sort.productAsc">Product (A–Z)</option>
+            <option value="-product" data-i18n="inventory.sort.productDesc">Product (Z–A)</option>
+            <option value="location" data-i18n="inventory.sort.locationAsc">Location (A–Z)</option>
+            <option value="-location" data-i18n="inventory.sort.locationDesc">Location (Z–A)</option>
+            <option value="quantity" data-i18n="inventory.sort.quantityAsc">Quantity (low to high)</option>
+            <option value="-quantity" data-i18n="inventory.sort.quantityDesc">Quantity (high to low)</option>
+          </select>
+        </div>
+      </div>
+
+      <fieldset id="urgency-filters" class="row">
+        <legend data-i18n="inventory.filters.urgencyLegend">Show</legend>
+        <label class="row"><input type="checkbox" id="urgency-expired" checked><span data-i18n="inventory.urgency.expired">Expired</span></label>
+        <label class="row"><input type="checkbox" id="urgency-critical" checked><span data-i18n="inventory.urgency.critical">Critical</span></label>
+        <label class="row"><input type="checkbox" id="urgency-soon" checked><span data-i18n="inventory.urgency.soon">Soon</span></label>
+        <label class="row"><input type="checkbox" id="urgency-ok" checked><span data-i18n="inventory.urgency.ok">OK</span></label>
+        <label class="row"><input type="checkbox" id="urgency-none" checked><span data-i18n="inventory.urgency.none">No expiry</span></label>
+      </fieldset>
+
+      <label class="row">
+        <input type="checkbox" id="group-toggle">
+        <span data-i18n="inventory.groupByProduct">Group by product</span>
+      </label>
+
+      <p id="summary" class="muted"></p>
+
+      <p id="empty-storage" class="empty-state" hidden>
+        <span data-i18n="inventory.emptyStorage.title">Nothing recorded yet.</span>
+        <br>
+        <a href="/ingest.html" data-i18n="inventory.emptyStorage.action">Scan a shelf to get started.</a>
+      </p>
+
+      <div id="empty-filtered" class="empty-state" hidden>
+        <span data-i18n="inventory.emptyFiltered.title">No rows match these filters.</span>
+        <button type="button" id="clear-filters" class="btn btn--ghost" data-i18n="inventory.emptyFiltered.clear">Clear filters</button>
+      </div>
+
+      <div id="table-wrap">
+        <table class="inventory-table" id="table" hidden>
+          <thead>
+            <tr>
+              <th scope="col">
+                <button type="button" class="sort-button" data-sort="product" data-i18n="inventory.columns.product">Product</button>
+              </th>
+              <th scope="col" data-i18n="inventory.columns.category">Category</th>
+              <th scope="col">
+                <button type="button" class="sort-button" data-sort="location" data-i18n="inventory.columns.location">Location</button>
+              </th>
+              <th scope="col">
+                <button type="button" class="sort-button" data-sort="quantity" data-i18n="inventory.columns.quantity">Qty</button>
+              </th>
+              <th scope="col" aria-sort="ascending">
+                <button type="button" class="sort-button" data-sort="expiry" data-i18n="inventory.columns.expires">Expires</button>
+              </th>
+              <th scope="col" aria-label="Actions" data-i18n-aria-label="inventory.columns.actions"></th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="/js/pages/inventory.js"></script>
+</body>
+</html>

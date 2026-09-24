@@ -30,6 +30,14 @@ body {
   padding: 2rem 1rem;
 }
 
+/* A wide layout modifier for the one page that needs more than 40rem to be
+   readable: a six-column table (docs/specs/33-inventory-overview-table.md).
+   Applied to both a page's <header> and its <main> so the header stays
+   aligned with the content beneath it. No other page uses this. */
+.shell--wide {
+  max-width: 80rem;
+}
+
 code {
   font-family: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace;
   font-size: 0.9em;

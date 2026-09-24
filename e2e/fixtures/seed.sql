@@ -58,7 +58,13 @@ INSERT INTO users (id, username, password_hash, display_name, is_admin) VALUES
   -- "Discard all" deletes jobs outright, so its fixture cannot share a
   -- storage with ingestion.spec.js or consumption.spec.js, which depend on
   -- their own seeded jobs in "E2E Household" and run under fullyParallel.
-  ('00000000-0000-7000-8000-000000000008', 'e2e-inbox',   '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Inbox User', false)
+  ('00000000-0000-7000-8000-000000000008', 'e2e-inbox',   '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Inbox User', false),
+  -- e2e-inventory belongs only to "E2E Inventory" (docs/specs/33-inventory-overview-table.md).
+  -- The inventory table is read-only, but its E2E suite still needs a fixture
+  -- no other spec writes to: a stocktake confirm or a consume/ingest confirm
+  -- from a parallel suite would change a quantity or an expiry underneath it,
+  -- and the default-order and grouping assertions depend on exact values.
+  ('00000000-0000-7000-8000-000000000009', 'e2e-inventory', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Inventory User', false)
 ON CONFLICT DO NOTHING;
 
 -- Two storages, so the "member of storage A gets 404 for storage B"
@@ -103,7 +109,13 @@ INSERT INTO storages (id, name) VALUES
   -- docs/specs/32-inbox-discard-all.md's bulk discard journey. That journey
   -- deletes jobs outright rather than reading them, so it needs a storage no
   -- other suite's seeded jobs live in.
-  ('00000000-0000-7000-8000-000000000015', 'E2E Inbox')
+  ('00000000-0000-7000-8000-000000000015', 'E2E Inbox'),
+  -- "E2E Inventory" (...016), e2e-inventory's alone, for
+  -- docs/specs/33-inventory-overview-table.md's whole-inventory table. A
+  -- dedicated, read-only storage: nothing here is ever written by the app
+  -- under test, only read, so its rows stay exactly as seeded across the
+  -- whole suite run.
+  ('00000000-0000-7000-8000-000000000016', 'E2E Inventory')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO storage_members (storage_id, user_id) VALUES
@@ -113,7 +125,8 @@ INSERT INTO storage_members (storage_id, user_id) VALUES
   ('00000000-0000-7000-8000-000000000012', '00000000-0000-7000-8000-000000000005'), -- Second admin: their own, so an admin with a storage is not a special case of someone else's
   ('00000000-0000-7000-8000-000000000013', '00000000-0000-7000-8000-000000000006'), -- Casey: zero-locations household, and nothing else
   ('00000000-0000-7000-8000-000000000014', '00000000-0000-7000-8000-000000000007'), -- Dana: barcode household, and nothing else
-  ('00000000-0000-7000-8000-000000000015', '00000000-0000-7000-8000-000000000008')  -- e2e-inbox: E2E Inbox, and nothing else
+  ('00000000-0000-7000-8000-000000000015', '00000000-0000-7000-8000-000000000008'), -- e2e-inbox: E2E Inbox, and nothing else
+  ('00000000-0000-7000-8000-000000000016', '00000000-0000-7000-8000-000000000009')  -- e2e-inventory: E2E Inventory, and nothing else
 ON CONFLICT DO NOTHING;
 
 INSERT INTO locations (id, storage_id, name, description) VALUES
@@ -425,6 +438,53 @@ INSERT INTO jobs (id, storage_id, kind, status, payload, error, created_by, crea
        "match":{"status":"exact_match","product":{"id":"00000000-0000-7000-8000-0000000000a1","name":"E2E Inbox Consumed Product"},"candidates":[],"catalog":null},
        "location":{"path":[{"name":"Inbox Shelf","location_id":"00000000-0000-7000-8000-0000000000a0","proposed":false}],"location_id":"00000000-0000-7000-8000-0000000000a0"}}
    ]}', NULL, '00000000-0000-7000-8000-000000000008', '2025-06-01T07:00:00Z')
+ON CONFLICT (id) DO NOTHING;
+
+-- "E2E Inventory" (...016), dedicated to
+-- docs/specs/33-inventory-overview-table.md's whole-inventory table, e2e-
+-- inventory's alone and never written to by the app under test — only read.
+--
+-- "Cellar" (...0b0) and "Shelf A" (...0b1, its child) give the location
+-- column a reversed path to render ("Cellar > Shelf A", root first) and a
+-- descendant to filter by. "Freezer" (...0b2) is a second, unrelated
+-- top-level location: the grouped product's second batch lives there so that
+-- filtering by Cellar demonstrably excludes something rather than vacuously
+-- matching everything in the storage.
+--
+-- Expiry dates are computed relative to now() rather than hardcoded, so this
+-- fixture never goes stale: a hardcoded date, however far out, eventually
+-- becomes "expired" or drifts out of the "more than 14 days" band as the
+-- calendar moves past it.
+INSERT INTO locations (id, storage_id, parent_id, name, description) VALUES
+  ('00000000-0000-7000-8000-0000000000b0', '00000000-0000-7000-8000-000000000016', NULL,                                     'Cellar',  'The only root in E2E Inventory besides Freezer'),
+  ('00000000-0000-7000-8000-0000000000b1', '00000000-0000-7000-8000-000000000016', '00000000-0000-7000-8000-0000000000b0', 'Shelf A', 'A shelf in the cellar'),
+  ('00000000-0000-7000-8000-0000000000b2', '00000000-0000-7000-8000-000000000016', NULL,                                     'Freezer', 'A second, unrelated top-level location')
+ON CONFLICT (id) DO NOTHING;
+
+-- One product per urgency band the default sort must tell apart (expired,
+-- no expiry, more than 14 days out), plus a fourth product with two batches
+-- at different locations for the "group by product" fold.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
+  ('00000000-0000-7000-8000-0000000000c0', '00000000-0000-7000-8000-000000000016', 'E2E Inventory Expired Item',  NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-0000000000c1', '00000000-0000-7000-8000-000000000016', 'E2E Inventory No-Expiry Item', NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-0000000000c2', '00000000-0000-7000-8000-000000000016', 'E2E Inventory Future Item',   NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-0000000000c3', '00000000-0000-7000-8000-000000000016', 'E2E Inventory Grouped Item',  NULL, 'non_perishable', 0)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_date, expiration_source) VALUES
+  ('00000000-0000-7000-8000-0000000000d0', '00000000-0000-7000-8000-0000000000c0', '00000000-0000-7000-8000-0000000000b1', 2, CURRENT_DATE - 3,  'derived'),
+  ('00000000-0000-7000-8000-0000000000d1', '00000000-0000-7000-8000-0000000000c1', '00000000-0000-7000-8000-0000000000b1', 1, NULL,               'user'),
+  ('00000000-0000-7000-8000-0000000000d2', '00000000-0000-7000-8000-0000000000c2', '00000000-0000-7000-8000-0000000000b1', 4, CURRENT_DATE + 20, 'derived'),
+  ('00000000-0000-7000-8000-0000000000d3', '00000000-0000-7000-8000-0000000000c3', '00000000-0000-7000-8000-0000000000b1', 3, CURRENT_DATE + 5,  'derived'),
+  ('00000000-0000-7000-8000-0000000000d4', '00000000-0000-7000-8000-0000000000c3', '00000000-0000-7000-8000-0000000000b2', 2, CURRENT_DATE + 5,  'derived')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
+  ('00000000-0000-7000-8000-0000000000e0', '00000000-0000-7000-8000-0000000000c0', '00000000-0000-7000-8000-0000000000d0', 2, 'purchase', '00000000-0000-7000-8000-000000000009'),
+  ('00000000-0000-7000-8000-0000000000e1', '00000000-0000-7000-8000-0000000000c1', '00000000-0000-7000-8000-0000000000d1', 1, 'purchase', '00000000-0000-7000-8000-000000000009'),
+  ('00000000-0000-7000-8000-0000000000e2', '00000000-0000-7000-8000-0000000000c2', '00000000-0000-7000-8000-0000000000d2', 4, 'purchase', '00000000-0000-7000-8000-000000000009'),
+  ('00000000-0000-7000-8000-0000000000e3', '00000000-0000-7000-8000-0000000000c3', '00000000-0000-7000-8000-0000000000d3', 3, 'purchase', '00000000-0000-7000-8000-000000000009'),
+  ('00000000-0000-7000-8000-0000000000e4', '00000000-0000-7000-8000-0000000000c3', '00000000-0000-7000-8000-0000000000d4', 2, 'purchase', '00000000-0000-7000-8000-000000000009')
 ON CONFLICT (id) DO NOTHING;
 
 COMMIT;
