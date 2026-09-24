@@ -19,7 +19,7 @@ import "../register-sw.js";
 
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
-import { renderInboxLink } from "../inbox-badge.js";
+import { renderNav, startPageFor } from "../nav.js";
 import { initGamification } from "../gamification.js";
 import { get, post, ApiError } from "../api.js";
 import { el, text, clearChildren, qs, fromTemplate } from "../dom.js";
@@ -78,7 +78,11 @@ async function init() {
   }
 
   renderStorageSwitcher(switcherContainer, { storages: me.storages, currentId: storageId });
-  renderInboxLink(document.querySelector("#inbox-link"), storageId);
+  renderNav(qs("#nav"), {
+    storageId,
+    current: "dashboard",
+    startPage: startPageFor(me.storages, storageId),
+  });
   exportCsvLink.href = `${basePath()}/export?format=csv`;
 
   checkButton.addEventListener("click", checkItem);

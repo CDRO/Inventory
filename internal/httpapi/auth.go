@@ -36,6 +36,12 @@ type AuthStoreFull interface {
 	DeleteSession(ctx context.Context, id string) error
 	UserSessions(ctx context.Context, userID uuid.UUID) ([]store.Session, error)
 	StoragesForUser(ctx context.Context, userID uuid.UUID) ([]store.Storage, error)
+
+	// StorageMembershipsForUser is what writeMe below renders: the same
+	// storages as StoragesForUser, plus the caller's own start page for each
+	// (docs/specs/34-navigation-and-start-page.md). Filtered by the caller's
+	// user id, so no other member's preference is reachable through it.
+	StorageMembershipsForUser(ctx context.Context, userID uuid.UUID) ([]store.StorageMembership, error)
 	UserByUsername(ctx context.Context, username string) (*store.User, error)
 	CreatePairingCode(ctx context.Context, userID uuid.UUID) (string, error)
 	RedeemPairingCode(ctx context.Context, code string) (uuid.UUID, error)
@@ -98,9 +104,16 @@ type meResponse struct {
 	Storages    []storageRef `json:"storages"`
 }
 
+// storageRef is one of the caller's storages.
+//
+// StartPage is an additive field (docs/specs/12-client-api-contract.md) and is
+// the caller's own value for that storage — never another member's. It is a
+// display preference: it decides where a browser lands and grants nothing
+// (docs/specs/34-navigation-and-start-page.md).
 type storageRef struct {
-	ID   uuid.UUID `json:"id"`
-	Name string    `json:"name"`
+	ID        uuid.UUID `json:"id"`
+	Name      string    `json:"name"`
+	StartPage string    `json:"start_page"`
 }
 
 // Login serves POST /api/auth/login.
@@ -206,8 +219,14 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 // account.go (docs/specs/14-account-self-service.md). One renderer means the
 // no-is_admin guarantee on meResponse cannot be true of one of them and not
 // the other.
+//
+// The storages come from StorageMembershipsForUser rather than
+// StoragesForUser, so each entry carries the caller's own start page
+// (docs/specs/34-navigation-and-start-page.md). The query is filtered by the
+// caller's user id; there is no join here that could pick up a second
+// member's row.
 func writeMe(w http.ResponseWriter, r *http.Request, s AuthStoreFull, errs *ErrorWriter, user *store.User) {
-	storages, err := s.StoragesForUser(r.Context(), user.ID)
+	storages, err := s.StorageMembershipsForUser(r.Context(), user.ID)
 	if err != nil {
 		errs.WriteError(w, r, Internal(err))
 		return
@@ -215,7 +234,7 @@ func writeMe(w http.ResponseWriter, r *http.Request, s AuthStoreFull, errs *Erro
 
 	refs := make([]storageRef, 0, len(storages))
 	for _, s := range storages {
-		refs = append(refs, storageRef{ID: s.ID, Name: s.Name})
+		refs = append(refs, storageRef{ID: s.ID, Name: s.Name, StartPage: s.StartPage})
 	}
 
 	writeJSON(w, http.StatusOK, meResponse{

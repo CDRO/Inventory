@@ -111,6 +111,7 @@ type APIStore interface {
 	BarcodeStore
 	BarcodePromptStore
 	InventoryStore
+	MembershipStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -616,6 +617,17 @@ func NewRouter(d Deps) http.Handler {
 			// collection.
 			inventory := NewInventoryHandler(d.Store, errs)
 			sr.Get("/inventory-batches", inventory.List)
+
+			// The caller's own membership of this storage
+			// (docs/specs/34-navigation-and-start-page.md): one personal,
+			// per-storage display preference. On this sub-router like
+			// everything else, which is the whole of its access control — a
+			// non-member gets the identical 404 an unknown storage gets — and
+			// with no user id in the path, so the only row it can reach is the
+			// session's own. Distinct from PUT /api/me/preferences, which is
+			// per user rather than per storage.
+			membership := NewMembershipHandler(d.Store, errs)
+			sr.Patch("/membership", membership.Patch)
 		})
 
 		// First-run guidance (docs/specs/29-first-run-admin-guidance.md): the

@@ -1,5 +1,12 @@
-// The review-inbox link and its waiting count, shown next to the storage
-// switcher (docs/specs/06-vision-shelf-ingestion.md).
+// The review-inbox link and its waiting count
+// (docs/specs/06-vision-shelf-ingestion.md).
+//
+// It used to sit next to the storage switcher on whichever pages remembered
+// to place it. Since docs/specs/34-navigation-and-start-page.md it is one
+// entry of the navigation bar, rendered by js/nav.js on every storage-scoped
+// page — which is also the module's only caller. The count logic stays here
+// rather than moving into the bar so that there is still one implementation
+// of "how many proposals are waiting".
 //
 // The count is the only nudge the system gives: no notifications, no emails.
 // It counts proposals that are ready to review — done jobs — because those are
@@ -21,17 +28,25 @@ const COUNT_LIMIT = 200;
  *
  * @param {Element} container
  * @param {string} storageId
+ * @param {Object} [options]
+ * @param {boolean} [options.current] - true on inbox.html itself, so this
+ *   entry carries `aria-current="page"` like every other entry of the bar.
  */
-export async function renderInboxLink(container, storageId) {
+export async function renderInboxLink(container, storageId, { current = false } = {}) {
   if (!container) return;
   clearChildren(container);
 
   const badge = el("span", { class: "badge", hidden: true });
   container.append(
-    el("a", { class: "btn btn--ghost inbox-link", href: withStorageParam(storageId, "/inbox.html") }, [
-      text(t("inboxBadge.inbox")),
-      badge,
-    ]),
+    el(
+      "a",
+      {
+        class: current ? "nav__link nav__link--current inbox-link" : "nav__link inbox-link",
+        href: withStorageParam(storageId, "/inbox.html"),
+        "aria-current": current ? "page" : null,
+      },
+      [text(t("inboxBadge.inbox")), badge],
+    ),
   );
   container.hidden = false;
 

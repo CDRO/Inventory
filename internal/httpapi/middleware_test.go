@@ -50,6 +50,13 @@ type fakeAuth struct {
 	admins   map[uuid.UUID]bool
 	members  map[string]bool // storageID+userID
 
+	// startPages is storage_members.start_page, keyed like members above
+	// (docs/specs/34-navigation-and-start-page.md). A second map rather than a
+	// value on members so that "is a member" and "what did they choose" stay
+	// separable — the whole point of the column is that it carries no rights,
+	// and a fake where membership *is* the preference could not show that.
+	startPages map[string]string
+
 	// pairing holds outstanding pairing codes, code → user.
 	pairing map[string]uuid.UUID
 
@@ -157,6 +164,8 @@ func newFakeAuth() *fakeAuth {
 		members:  map[string]bool{},
 		settings: map[string]string{},
 
+		startPages: map[string]string{},
+
 		catalogBarcodes: map[string]string{},
 	}
 }
@@ -207,12 +216,17 @@ func (f *fakeAuth) addMember(storageID, userID uuid.UUID) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.members[storageID.String()+userID.String()] = true
+	// The column default: a new membership starts on the dashboard.
+	f.startPages[storageID.String()+userID.String()] = httpapi.DefaultStartPage
 }
 
 func (f *fakeAuth) removeMember(storageID, userID uuid.UUID) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.members, storageID.String()+userID.String())
+	// The row goes, and the preference with it — there is nothing left to
+	// start on (docs/specs/34-navigation-and-start-page.md).
+	delete(f.startPages, storageID.String()+userID.String())
 }
 
 func (f *fakeAuth) adminCallCount() int {

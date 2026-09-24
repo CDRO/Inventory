@@ -17,6 +17,7 @@ import "../register-sw.js";
 
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
+import { renderNav, startPageFor } from "../nav.js";
 import { initGamification } from "../gamification.js";
 import { fetchProducts } from "../product-options.js";
 import { formatAudited } from "../audited.js";
@@ -84,6 +85,11 @@ async function init() {
   }
 
   renderStorageSwitcher(switcherContainer, { storages: me.storages, currentId: storageId });
+  renderNav(qs("#nav"), {
+    storageId,
+    current: "stocktake",
+    startPage: startPageFor(me.storages, storageId),
+  });
   initGamification(storageId);
 
   // Built by hand rather than through withStorageParam, which starts from the

@@ -24,7 +24,7 @@ import { t, tCount, formatDate, apiErrorMessage } from "../i18n.js";
 
 import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
-import { renderInboxLink } from "../inbox-badge.js";
+import { renderNav, startPageFor } from "../nav.js";
 import { initGamification } from "../gamification.js";
 import { get, patch, post, del, ApiError } from "../api.js";
 import { fetchCategories, appendCategoryOptions } from "../category-options.js";
@@ -88,7 +88,11 @@ async function init() {
   }
 
   renderStorageSwitcher(switcherContainer, { storages: me.storages, currentId: storageId });
-  renderInboxLink(document.querySelector("#inbox-link"), storageId);
+  renderNav(document.querySelector("#nav"), {
+    storageId,
+    current: "products",
+    startPage: startPageFor(me.storages, storageId),
+  });
   initGamification(storageId);
 
   filterInput.addEventListener("input", renderList);
