@@ -26,7 +26,10 @@
   <main id="main" class="shell stack" aria-live="polite">
     <div class="row row--between">
       <h2 data-i18n="inbox.title">Inbox</h2>
-      <a id="scan-link" class="btn" href="/ingest.html" data-i18n="inbox.scanPhotos">Scan photos</a>
+      <div class="row">
+        <button id="discard-all" type="button" class="btn btn--ghost" hidden data-i18n="inbox.discardAll">Discard all</button>
+        <a id="scan-link" class="btn" href="/ingest.html" data-i18n="inbox.scanPhotos">Scan photos</a>
+      </div>
     </div>
 
     <div id="notice" class="alert alert--success" role="status" hidden></div>

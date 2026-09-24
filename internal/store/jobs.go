@@ -281,6 +281,50 @@ func (s *Store) DeleteJob(ctx context.Context, storageID, id uuid.UUID) (*string
 	return image, nil
 }
 
+// DiscardedJob is one row DiscardJobs deleted, holding what the caller needs
+// for file clean-up afterwards.
+type DiscardedJob struct {
+	ID            uuid.UUID
+	ImageFilename *string
+}
+
+// DiscardJobs deletes every job of storageID whose status is pending, done or
+// failed and whose created_at is at or before upTo, in one statement — "the
+// whole inbox" (docs/specs/32-inbox-discard-all.md). Consumed jobs are never
+// touched; the retention sweep owns them.
+//
+// upTo is a server timestamp the caller captured earlier, never the device
+// clock: it is what closes the race where another member uploads a photo
+// between the inbox being rendered and the bulk discard being confirmed. The
+// returned rows' image filenames are what the caller needs to remove the
+// photos; cutout clean-up goes by job id alone, so no more of the row is
+// returned than that.
+func (s *Store) DiscardJobs(ctx context.Context, storageID uuid.UUID, upTo time.Time) ([]DiscardedJob, error) {
+	rows, err := s.pool.Query(ctx, `
+		DELETE FROM jobs
+		 WHERE storage_id = $1
+		   AND status IN ('pending', 'done', 'failed')
+		   AND created_at <= $2
+		RETURNING id, image_filename`, storageID, upTo)
+	if err != nil {
+		return nil, fmt.Errorf("store: discard jobs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []DiscardedJob
+	for rows.Next() {
+		var d DiscardedJob
+		if err := rows.Scan(&d.ID, &d.ImageFilename); err != nil {
+			return nil, fmt.Errorf("store: scan discarded job: %w", err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: discard jobs: %w", err)
+	}
+	return out, nil
+}
+
 // RequeueJob moves a done or failed job back to pending, dropping its proposal
 // and its error, so its photo can be analysed again — "Analyze again"
 // (docs/specs/09-consumption-logging.md).
