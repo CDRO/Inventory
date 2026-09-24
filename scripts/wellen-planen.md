@@ -16,6 +16,16 @@ and reviewers" below.
 `scripts/wellen-orchestrator.ps1` reads a wave plan from a JSON file
 (default: `scripts/wellen.json`) and works through it wave by wave:
 
+> **There is more than one plan file now.** `scripts/wellen.json` is the
+> Extended-core plan (#97, complete — kept as its record, not extended);
+> `scripts/wellen-followups.json` is the deferred-follow-ups plan (#176). A
+> finished plan's file stays where it is rather than being emptied, so **every
+> command that names a wave or a slug needs `-WaveFile` unless it means
+> `wellen.json`** — that default is silent, and a bare `-Wave 2` against the
+> wrong plan asks about a different wave entirely. Plans do not run
+> concurrently: one orchestrator, one plan, or two runs fight over the same
+> main checkout and the same Docker daemon.
+
 1. Per wave, it waits until the integration branch exists on origin.
 2. Per package, it creates a worktree and starts a visible, interactive
    Claude session with prompt, model, effort, and advisor as CLI arguments
@@ -52,8 +62,11 @@ several volumes and images per package, per wave.
 
 A wave with `"dockerCleanup": true` gets it removed **after its consolidation
 has finished** (the wave issue is closed, so no session is using any of it),
-by `scripts/wellen-docker-cleanup.ps1`. In this plan the field is set on waves
-3 to 7. It must be `true` or `false`; anything else fails `-Validate`.
+by `scripts/wellen-docker-cleanup.ps1`. It must be `true` or `false`; anything
+else fails `-Validate`. Which waves carry it is per plan: `wellen.json` sets it
+on waves 3 to 7, `wellen-followups.json` on waves 2 to 8 — wave 1 there is
+deliberately `false`, because the package that *rewrites the cleanup script*
+runs in it and the script is re-read at every call.
 
 - **What is removed:** the containers (with their anonymous volumes), networks,
   named volumes and image tags of every Compose project that belongs to the
@@ -90,12 +103,18 @@ by `scripts/wellen-docker-cleanup.ps1`. In this plan the field is set on waves
 - **The consolidation session is told not to clean Docker up itself** and never
   to run a prune.
 
-By hand (look first, then remove):
+By hand (look first, then remove). **Pass `-WaveFile` whenever the wave is not
+from `scripts/wellen.json`** — the default resolves to that file, so a bare
+`-Wave 3` against a different plan silently asks about the wrong plan's wave 3:
 
 ```powershell
 .\scripts\wellen-docker-cleanup.ps1 -Wave 3 -DryRun
 .\scripts\wellen-docker-cleanup.ps1 -Wave 3
 .\scripts\wellen-docker-cleanup.ps1 -Slug w3-operations,w3-product-maintenance -Force
+
+# A wave of another plan — note -WaveFile on every call, -DryRun included:
+.\scripts\wellen-docker-cleanup.ps1 -Wave 1 -DryRun -WaveFile scripts\wellen-followups.json
+.\scripts\wellen-docker-cleanup.ps1 -Wave 1 -WaveFile scripts\wellen-followups.json
 ```
 
 `-Wave` only works once that wave's issue is closed. `-Slug ... -Force` is for
