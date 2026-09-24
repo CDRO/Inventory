@@ -11,16 +11,16 @@
   <link rel="stylesheet" href="/css/tokens.css">
   <link rel="stylesheet" href="/css/base.css">
   <link rel="stylesheet" href="/css/components.css">
-  <link rel="stylesheet" href="/css/gamification.css">
 </head>
 <body>
   <header class="shell row row--between">
     <strong data-i18n="common.appName">Inventory</strong>
+    <!-- No storage switcher, inbox badge or progress ring here: this page
+         renders only the storage picker and the zero-storage empty state
+         (docs/specs/34-navigation-and-start-page.md), and neither has a
+         resolved storage to show any of them for. Log out stays, because it
+         is the only one on a page that renders no navigation bar. -->
     <div class="row">
-      <div id="storage-switcher" hidden></div>
-      <div id="gamification-ring" hidden></div>
-      <div id="inbox-link" hidden></div>
-      <a href="/settings.html" class="btn btn--ghost" data-i18n="common.settings">Settings</a>
       <button id="logout" type="button" class="btn btn--ghost" data-i18n="common.logout">Log out</button>
     </div>
   </header>

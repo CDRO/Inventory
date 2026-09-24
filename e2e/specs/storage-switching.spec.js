@@ -1,6 +1,13 @@
 // Required journey 2 of docs/specs/05-frontend-pwa-foundations.md: "A user
 // with two storages switches between them and sees each storage's own data."
 //
+// Since docs/specs/34-navigation-and-start-page.md the picker forwards to the
+// chosen storage's start page instead of staying here, so the assertions
+// below are made on the dashboard rather than on a landing card. The header
+// switcher is unchanged and still keeps the current page: a user on the
+// inventory table who switches household wants the other household's
+// inventory table.
+//
 // The switch itself is only half the claim. A switcher that changed the URL
 // while the page kept showing the previous household's shelves would satisfy
 // every assertion about the control and none about the guarantee, so each
@@ -35,8 +42,12 @@ test("a two-storage user picks one, switches to the other, and each shows its ow
   await expect(page.locator("#main")).toContainText("Choose a storage");
   await page.getByRole("button", { name: "E2E Household", exact: true }).click();
 
-  await expect(page).toHaveURL(new RegExp(`storage=${HOUSEHOLD}$`));
-  await expect(page.locator("#main")).toContainText("E2E Household");
+  // Picking a storage in the picker forwards to that storage's start page
+  // rather than staying on storages.html
+  // (docs/specs/34-navigation-and-start-page.md). Alice has never changed
+  // hers, so it is the default: the dashboard, carrying the id she picked.
+  await expect(page).toHaveURL(new RegExp(`/dashboard[.]html[?]storage=${HOUSEHOLD}$`));
+  await expect(page.locator("#main h2").first()).toHaveText("Dashboard");
 
   // The locations page is where the two storages actually differ, so the
   // switch is judged on data rather than on the header's own label.
@@ -68,7 +79,7 @@ test("the switched-to storage is what a later page load resolves to", async ({ p
   await logIn(page, "e2e-alice");
   await expect(page.locator("#main")).toContainText("Choose a storage");
   await page.getByRole("button", { name: "E2E Other Household" }).click();
-  await expect(page).toHaveURL(new RegExp(`storage=${OTHER_HOUSEHOLD}$`));
+  await expect(page).toHaveURL(new RegExp(`/dashboard[.]html[?]storage=${OTHER_HOUSEHOLD}$`));
 
   // A page opened with no `?storage=` must not re-ask: the choice was already
   // made and remembered, and asking again on every navigation would make the
@@ -83,7 +94,7 @@ test("a one-storage user never sees the switcher at all", async ({ page }) => {
   // the switcher entirely" (docs/specs/05-frontend-pwa-foundations.md). Hidden
   // rather than rendered-but-empty, which is why this checks the container.
   await logIn(page, "e2e-bob");
-  await expect(page).toHaveURL(new RegExp(`storage=${HOUSEHOLD}$`));
+  await expect(page).toHaveURL(new RegExp(`/dashboard[.]html[?]storage=${HOUSEHOLD}$`));
 
   await expect(page.locator("#storage-switcher")).toBeHidden();
   await expect(page.locator("#storage-switcher select")).toHaveCount(0);

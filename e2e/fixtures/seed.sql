@@ -64,7 +64,20 @@ INSERT INTO users (id, username, password_hash, display_name, is_admin) VALUES
   -- no other spec writes to: a stocktake confirm or a consume/ingest confirm
   -- from a parallel suite would change a quantity or an expiry underneath it,
   -- and the default-order and grouping assertions depend on exact values.
-  ('00000000-0000-7000-8000-000000000009', 'e2e-inventory', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Inventory User', false)
+  ('00000000-0000-7000-8000-000000000009', 'e2e-inventory', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Inventory User', false),
+  -- e2e-start and e2e-start-multi exist only for
+  -- docs/specs/34-navigation-and-start-page.md, and the reason is that
+  -- storage_members.start_page is *durable*. A journey that changes it leaves
+  -- it changed — for every later test in the same run and for every other
+  -- spec file that logs in as that user. e2e-alice and e2e-bob are shared by
+  -- auth-journeys, storage-switching, categories and ingestion, all of which
+  -- assert on where a login lands, so neither may ever have their start page
+  -- written. These two users are the only ones start-page.spec.js touches:
+  -- e2e-start changes one, and e2e-start-multi only reads two.
+  --
+  -- The 01–09 user range is full, so these two continue in hex.
+  ('00000000-0000-7000-8000-00000000000a', 'e2e-start',       '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Start',       false),
+  ('00000000-0000-7000-8000-00000000000b', 'e2e-start-multi', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'Start Multi', false)
 ON CONFLICT DO NOTHING;
 
 -- Two storages, so the "member of storage A gets 404 for storage B"
@@ -115,7 +128,17 @@ INSERT INTO storages (id, name) VALUES
   -- dedicated, read-only storage: nothing here is ever written by the app
   -- under test, only read, so its rows stay exactly as seeded across the
   -- whole suite run.
-  ('00000000-0000-7000-8000-000000000016', 'E2E Inventory')
+  ('00000000-0000-7000-8000-000000000016', 'E2E Inventory'),
+  -- Three storages for the start-page journeys
+  -- (docs/specs/34-navigation-and-start-page.md). They hold no inventory:
+  -- what those journeys assert is which page a login lands on, and an empty
+  -- storage renders every candidate start page perfectly well. Dedicated
+  -- rather than reusing "E2E Household" because the multi-storage user must
+  -- appear in the picker with exactly two entries, and adding a standing
+  -- member to a shared storage would change what its member lists show.
+  ('00000000-0000-7000-8000-000000000017', 'E2E Start'),
+  ('00000000-0000-7000-8000-000000000018', 'E2E Start One'),
+  ('00000000-0000-7000-8000-000000000019', 'E2E Start Two')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO storage_members (storage_id, user_id) VALUES
@@ -128,6 +151,27 @@ INSERT INTO storage_members (storage_id, user_id) VALUES
   ('00000000-0000-7000-8000-000000000015', '00000000-0000-7000-8000-000000000008'), -- e2e-inbox: E2E Inbox, and nothing else
   ('00000000-0000-7000-8000-000000000016', '00000000-0000-7000-8000-000000000009')  -- e2e-inventory: E2E Inventory, and nothing else
 ON CONFLICT DO NOTHING;
+
+-- The start-page memberships (docs/specs/34-navigation-and-start-page.md),
+-- kept in their own statement because they are the only ones that set
+-- start_page.
+--
+-- DO UPDATE rather than DO NOTHING, and only here: e2e-start's journey
+-- *writes* this column, so re-seeding a database that has already run the
+-- suite has to put it back to 'dashboard' or the journey's first assertion —
+-- "logging in lands on the dashboard by default" — fails on the second run.
+-- CI tears its database down with `down -v` every time, so this matters for a
+-- local re-run rather than for the gate. Every other fixture row is
+-- DO NOTHING and stays that way.
+--
+-- e2e-start-multi's two rows differ on purpose: the value is per membership,
+-- not per user, and a journey that read the same page for both storages would
+-- pass against an implementation that had dropped half the key.
+INSERT INTO storage_members (storage_id, user_id, start_page) VALUES
+  ('00000000-0000-7000-8000-000000000017', '00000000-0000-7000-8000-00000000000a', 'dashboard'), -- e2e-start: one storage, opens on the default
+  ('00000000-0000-7000-8000-000000000018', '00000000-0000-7000-8000-00000000000b', 'inventory'), -- e2e-start-multi: E2E Start One
+  ('00000000-0000-7000-8000-000000000019', '00000000-0000-7000-8000-00000000000b', 'locations')  -- e2e-start-multi: E2E Start Two
+ON CONFLICT (storage_id, user_id) DO UPDATE SET start_page = EXCLUDED.start_page;
 
 INSERT INTO locations (id, storage_id, name, description) VALUES
   ('00000000-0000-7000-8000-000000000020', '00000000-0000-7000-8000-000000000010', 'Pantry', 'Kitchen pantry shelf'),

@@ -628,3 +628,94 @@ th[aria-sort="descending"] .sort-button::after {
     grid-template-columns: minmax(4rem, 8rem) 1fr auto;
   }
 }
+
+/* --- Navigation bar (docs/specs/34-navigation-and-start-page.md) --- */
+
+/* One row on a phone, scrolling sideways; wrapping normally from 36rem up.
+   Deliberately not a hamburger menu: every destination stays one tap away
+   and visible, which is what one-handed use on a phone needs
+   (docs/specs/05-frontend-pwa-foundations.md).
+
+   `overflow-x: auto` is on the bar and nothing else, so the bar is what
+   scrolls and the page body is not — at 375px the document must not move
+   sideways at all. The `.shell` ancestor caps the width; `min-width: 0`
+   stops a flex parent letting this grow to its content instead of
+   scrolling. */
+.nav {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-top: 0;
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  scrollbar-width: thin;
+}
+
+@media (min-width: 36rem) {
+  .nav {
+    flex-wrap: wrap;
+    overflow-x: visible;
+  }
+}
+
+/* Entries never wrap mid-label: a half-word is unreadable, and a bar that is
+   one row exactly is what the horizontal scroll above assumes. */
+.nav__link,
+.nav__item {
+  flex: none;
+  white-space: nowrap;
+}
+
+.nav__link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  text-decoration: none;
+  font: inherit;
+}
+
+.nav__link:hover {
+  background: var(--color-bg);
+}
+
+/* The current entry. The class is for the eye and `aria-current="page"` is
+   for everything else; js/nav.js never sets one without the other. */
+.nav__link--current {
+  font-weight: 600;
+  color: var(--color-accent);
+  box-shadow: inset 0 -2px 0 var(--color-accent);
+}
+
+/* Log out is a button because it performs a request, not a navigation. It is
+   styled as an entry so the bar reads as one row of destinations. */
+.nav__link--button {
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+/* Settings and Log out are separated by a rule rather than by being pushed to
+   the end: in a horizontally scrolling row there is no end to push them to. */
+.nav__separator {
+  flex: none;
+  align-self: stretch;
+  width: 1px;
+  margin: 0 var(--space-2);
+  background: var(--color-border);
+}
+
+/* The wordmark is the home link and goes to the chosen start page. It is a
+   link now, so the browser's default underline and link colour have to be
+   turned off to keep the header looking as it did. */
+.wordmark {
+  font-weight: 700;
+  color: inherit;
+  text-decoration: none;
+}

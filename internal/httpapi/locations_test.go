@@ -531,6 +531,12 @@ func storageRoutes(base string) []struct {
 		{http.MethodPost, base + "/barcodes/4006381333931/log", `{"direction":"out","quantity":1}`},
 		{http.MethodPost, base + "/barcodes/4006381333931/product", ""},
 		{http.MethodPost, base + "/barcodes/decode", ""},
+		// The caller's own membership row
+		// (docs/specs/34-navigation-and-start-page.md). Listed here rather
+		// than only in membership_test.go so that the 401 and the identical
+		// 404 for a non-member are pinned by the same two tests that pin them
+		// for every other storage-scoped route.
+		{http.MethodPatch, base + "/membership", `{"start_page":"inventory"}`},
 	}
 }
 

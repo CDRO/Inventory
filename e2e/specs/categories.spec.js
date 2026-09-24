@@ -39,14 +39,21 @@ test("categories.html loads a member's tree with no console errors", async ({ pa
   expect(consoleErrors, `unexpected console errors: ${consoleErrors.join("; ")}`).toEqual([]);
 });
 
-test("the storage landing page links to the category tree", async ({ page }) => {
+test("the navigation bar links to the category tree", async ({ page }) => {
+  // This used to check the landing card on storages.html. That card is gone
+  // (docs/specs/34-navigation-and-start-page.md): storages.html forwards to
+  // the start page, and the way to the category tree is the navigation bar
+  // that every storage-scoped page now renders. The claim is the same one —
+  // a user can reach categories without typing a URL — made against what
+  // actually carries it.
   const login = await page.request.post("/api/auth/login", {
     data: { username: "e2e-bob", password: "e2e-fixture-password" },
   });
   expect(login.status()).toBe(200);
 
   await page.goto("/storages.html");
-  await page.getByRole("link", { name: "Categories" }).click();
+  await expect(page).toHaveURL(/\/dashboard\.html\?storage=/);
+  await page.locator("#nav").getByRole("link", { name: "Categories" }).click();
 
   await expect(page).toHaveURL(/\/categories\.html\?storage=/);
   await expect(page.locator("#tree")).toContainText("Canned Goods");

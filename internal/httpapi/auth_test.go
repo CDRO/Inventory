@@ -72,6 +72,32 @@ func (f *fakeAuth) StoragesForUser(_ context.Context, userID uuid.UUID) ([]store
 	return out, nil
 }
 
+// StorageMembershipsForUser mirrors StoragesForUser above and adds the
+// caller's own start page (docs/specs/34-navigation-and-start-page.md). It
+// reads f.startPages with the *caller's* key, so a fake that leaked another
+// member's value would have to be written to do so deliberately — which is
+// what TestMeReturnsOnlyTheCallersOwnStartPage checks the real query does not.
+func (f *fakeAuth) StorageMembershipsForUser(_ context.Context, userID uuid.UUID) ([]store.StorageMembership, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []store.StorageMembership
+	for key := range f.members {
+		if strings.HasSuffix(key, userID.String()) {
+			id, err := uuid.Parse(strings.TrimSuffix(key, userID.String()))
+			if err == nil {
+				startPage := f.startPages[key]
+				if startPage == "" {
+					startPage = httpapi.DefaultStartPage
+				}
+				out = append(out, store.StorageMembership{
+					ID: id, Name: "Storage " + id.String()[:4], StartPage: startPage,
+				})
+			}
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeAuth) UserByUsername(_ context.Context, username string) (*store.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

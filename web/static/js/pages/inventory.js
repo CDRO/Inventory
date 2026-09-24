@@ -13,7 +13,7 @@ import "../register-sw.js";
 
 import { fetchMe, resolveStorage, rememberStorageId } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
-import { renderInboxLink } from "../inbox-badge.js";
+import { renderNav, startPageFor } from "../nav.js";
 import { initGamification } from "../gamification.js";
 import { get } from "../api.js";
 import { el, text, clearChildren, qs } from "../dom.js";
@@ -81,7 +81,11 @@ async function init() {
   syncURL();
 
   renderStorageSwitcher(switcherContainer, { storages: me.storages, currentId: storageId });
-  renderInboxLink(qs("#inbox-link"), storageId);
+  renderNav(qs("#nav"), {
+    storageId,
+    current: "inventory",
+    startPage: startPageFor(me.storages, storageId),
+  });
   initGamification(storageId);
 
   wireControls();

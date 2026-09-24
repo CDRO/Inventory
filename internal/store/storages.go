@@ -381,3 +381,84 @@ func scanStorage(row rowScanner) (*Storage, error) {
 	}
 	return &s, nil
 }
+
+// StorageMembership is one storage as seen through the caller's own
+// membership row: the storage's identity, plus the part of storage_members
+// that belongs to that one person.
+//
+// Deliberately not a field on Storage. Storage is also what ListStorages and
+// CreateStorage return, where there is no membership row and so no answer to
+// "whose start page?" — a nullable field there would be a question mark in
+// every admin response. Keeping the two types apart means a start_page can
+// only ever be read from a query that was already filtered by a user id.
+type StorageMembership struct {
+	ID        uuid.UUID
+	Name      string
+	StartPage string
+}
+
+// StorageMembershipsForUser returns the caller's storages together with their
+// own start page for each (docs/specs/34-navigation-and-start-page.md).
+//
+// This is what GET /api/auth/me is built from. The join is filtered by
+// user_id, so the start_page that comes back is the caller's own row and no
+// other member's — two people in one storage read two different values from
+// the same endpoint, and neither can see the other's.
+//
+// StoragesForUser above is left alone: the navigation routes of
+// docs/specs/29-first-run-admin-guidance.md and the gamification storage
+// lookup only ever need identity, and widening their shared method would put
+// a personal preference in front of callers that have no business with one.
+// The ordering matches it exactly, so the switcher lists storages the same
+// way whichever method filled it.
+func (s *Store) StorageMembershipsForUser(ctx context.Context, userID uuid.UUID) ([]StorageMembership, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT s.id, s.name, m.start_page
+		  FROM storages s
+		  JOIN storage_members m ON m.storage_id = s.id
+		 WHERE m.user_id = $1
+		 ORDER BY s.created_at, s.id`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list storage memberships for user: %w", err)
+	}
+	defer rows.Close()
+
+	var out []StorageMembership
+	for rows.Next() {
+		var m StorageMembership
+		if err := rows.Scan(&m.ID, &m.Name, &m.StartPage); err != nil {
+			return nil, fmt.Errorf("store: scan storage membership: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list storage memberships for user: %w", err)
+	}
+	return out, nil
+}
+
+// SetStartPage writes one member's start page for one storage
+// (docs/specs/34-navigation-and-start-page.md).
+//
+// Both halves of the primary key are in the WHERE clause, and the user id is
+// a parameter the handler takes from the session rather than from anything a
+// client sent. There is no shape of request that reaches another member's row.
+//
+// The value is validated before it gets here; the column's CHECK is the
+// backstop. ErrNotFound when no row matched: the membership gate already
+// proved the caller was a member when the request arrived, so a miss means it
+// was revoked in between, and the answer to that is the same 404 a non-member
+// would have received — not a 500 about a race nobody can act on.
+func (s *Store) SetStartPage(ctx context.Context, storageID, userID uuid.UUID, startPage string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE storage_members
+		   SET start_page = $3
+		 WHERE storage_id = $1 AND user_id = $2`, storageID, userID, startPage)
+	if err != nil {
+		return fmt.Errorf("store: set start page: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}

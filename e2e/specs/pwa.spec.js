@@ -10,7 +10,12 @@ test("manifest.json is valid and carries both required icon sizes", async ({ req
 
   const manifest = await response.json();
   expect(manifest.display).toBe("standalone");
-  expect(manifest.start_url).toBe("/index.html");
+  // /storages.html, not /index.html: the login form deliberately never
+  // checks for a session, so an installed app starting there showed a
+  // signed-in user the login screen on every launch. storages.html resolves
+  // the storage and forwards; a signed-out visitor gets a 401 that js/api.js
+  // redirects to the login form (docs/specs/34-navigation-and-start-page.md).
+  expect(manifest.start_url).toBe("/storages.html");
 
   const sizes = manifest.icons.map((icon) => icon.sizes);
   expect(sizes).toContain("192x192");

@@ -86,9 +86,12 @@ test("a non-admin with no storage lands on the empty state and stays on it", asy
 test("an admin who belongs to a storage lands in it, not in the admin area", async ({ page }) => {
   await logIn(page, "e2e-admin-2");
 
-  await expect(page).toHaveURL(new RegExp(`/storages\\.html\\?storage=${ADMIN_HOUSEHOLD}$`));
-  await expect(page.locator("#main")).toContainText("E2E Admin Household");
-  await expect(page.locator("#main")).toContainText("Signed in as Second Admin.");
+  // Forwarded to their storage's start page rather than shown a landing
+  // card (docs/specs/34-navigation-and-start-page.md); the default is the
+  // dashboard. The claim under test is unchanged — they were not sent to
+  // the admin area — and is now made against where they *did* land.
+  await expect(page).toHaveURL(new RegExp(`/dashboard[.]html[?]storage=${ADMIN_HOUSEHOLD}$`));
+  await expect(page.locator("#main h2").first()).toHaveText("Dashboard");
 
   // Still an admin — the redirect is about memberships, not about rights —
   // which is what makes this test a boundary rather than a second non-admin.
