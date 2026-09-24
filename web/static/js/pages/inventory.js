@@ -11,7 +11,7 @@ import "../register-sw.js";
 // stocktake sheet (13), and a product through products.html (16); this page
 // only reads and links out to those screens.
 
-import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "../session.js";
+import { fetchMe, resolveStorage, rememberStorageId } from "../session.js";
 import { renderStorageSwitcher } from "../storage-switcher.js";
 import { renderInboxLink } from "../inbox-badge.js";
 import { initGamification } from "../gamification.js";
@@ -447,7 +447,7 @@ function renderBatchRow(row) {
     el("td", { "data-label": t("inventory.columns.quantity"), class: "inventory-table__qty" }, [text(String(row.quantity))]),
     el("td", { "data-label": t("inventory.columns.expires") }, [expiryCell(row.expiration_date, row.expiration_source)]),
     el("td", { "data-label": "" }, [
-      el("a", { class: "btn btn--ghost", href: withStorageParam(storageId, "/stocktake.html") + `&location=${encodeURIComponent(row.location_id)}` }, [
+      el("a", { class: "btn btn--ghost", href: stocktakeHref(row.location_id) }, [
         text(t("inventory.countThisShelf")),
       ]),
     ]),
@@ -485,7 +485,7 @@ function renderGroupRow(group) {
           quantity: batch.quantity,
           location: batch.location_path.join(" › "),
         })),
-        el("a", { class: "btn btn--ghost", href: withStorageParam(storageId, "/stocktake.html") + `&location=${encodeURIComponent(batch.location_id)}` }, [
+        el("a", { class: "btn btn--ghost", href: stocktakeHref(batch.location_id) }, [
           text(t("inventory.countThisShelf")),
         ]),
       ]))),
@@ -501,8 +501,16 @@ function productCell(imageUrl, name, productId) {
   const thumb = imageUrl ? [el("img", { class: "inventory-table__thumb", src: imageUrl, alt: "" })] : [];
   return el("span", { class: "inventory-table__product" }, [
     ...thumb,
-    el("a", { href: withStorageParam(storageId, "/products.html") + `&product=${encodeURIComponent(productId)}` }, [text(name)]),
+    el("a", { href: `/products.html?storage=${encodeURIComponent(storageId)}&product=${encodeURIComponent(productId)}` }, [text(name)]),
   ]);
+}
+
+// stocktakeHref links a row's location to its stocktake sheet, the same
+// plain-template shape js/pages/locations.js uses — not withStorageParam,
+// which would carry this page's own filter/sort query params along into a
+// page that has no use for them.
+function stocktakeHref(locationId) {
+  return `/stocktake.html?location=${encodeURIComponent(locationId)}&storage=${encodeURIComponent(storageId)}`;
 }
 
 function expiryCell(dateStr, source) {

@@ -53,6 +53,34 @@ test.describe("Inventory overview table", () => {
     await expect(page.locator("th", { has: page.locator('[data-sort="expiry"]') })).toHaveAttribute("aria-sort", "ascending");
   });
 
+  test("clicking a sortable header sets aria-sort and toggles direction, and only one column is ever active", async ({ page }) => {
+    await page.goto(`/inventory.html?storage=${E2E_INVENTORY}`);
+    await expect(page.locator("#table")).toBeVisible();
+
+    const expiryHeader = page.locator("th", { has: page.locator('[data-sort="expiry"]') });
+    const productHeader = page.locator("th", { has: page.locator('[data-sort="product"]') });
+    const locationHeader = page.locator("th", { has: page.locator('[data-sort="location"]') });
+    const quantityHeader = page.locator("th", { has: page.locator('[data-sort="quantity"]') });
+
+    // Only the default column carries a real state; every other sortable
+    // column starts at "none".
+    await expect(productHeader).toHaveAttribute("aria-sort", "none");
+    await expect(locationHeader).toHaveAttribute("aria-sort", "none");
+    await expect(quantityHeader).toHaveAttribute("aria-sort", "none");
+
+    await page.locator('[data-sort="product"]').click();
+    await expect(productHeader).toHaveAttribute("aria-sort", "ascending");
+    // Activating one column clears the previously active one.
+    await expect(expiryHeader).toHaveAttribute("aria-sort", "none");
+
+    await page.locator('[data-sort="product"]').click();
+    await expect(productHeader).toHaveAttribute("aria-sort", "descending");
+
+    await page.locator('[data-sort="quantity"]').click();
+    await expect(quantityHeader).toHaveAttribute("aria-sort", "ascending");
+    await expect(productHeader).toHaveAttribute("aria-sort", "none");
+  });
+
   test("filtering by a location includes its descendants and the summary line counts only the shown rows", async ({ page }) => {
     await page.goto(`/inventory.html?storage=${E2E_INVENTORY}`);
     await expect(page.locator("#table")).toBeVisible();
@@ -69,8 +97,10 @@ test.describe("Inventory overview table", () => {
       expect(text).toContain("Shelf A");
     }
 
-    await expect(page.locator("#summary")).toContainText("10");
-    await expect(page.locator("#summary")).toContainText("4");
+    // Exact text, not a bare-number substring check: 2 (expired) + 1
+    // (no-expiry) + 4 (future) + 3 (grouped's Shelf A batch) = 10 items in
+    // the 4 rows shown, with the Freezer batch excluded from both numbers.
+    await expect(page.locator("#summary")).toHaveText("10 items in 4 batches");
   });
 
   test("grouping by product folds the two batches into one row with the summed quantity", async ({ page }) => {
@@ -83,8 +113,8 @@ test.describe("Inventory overview table", () => {
     await expect(page.locator("#rows > tr:visible")).toHaveCount(4);
 
     const groupedRow = page.locator("#rows > tr:visible", { hasText: GROUPED_PRODUCT });
-    await expect(groupedRow).toContainText("5"); // 3 + 2 summed
-    await expect(groupedRow).toContainText("2"); // two distinct locations
+    await expect(groupedRow.locator('td[data-label="Qty"]')).toHaveText("5"); // 3 + 2 summed
+    await expect(groupedRow.locator('td[data-label="Location"]')).toHaveText("2 locations");
   });
 
   test("a filter matching nothing shows the no-rows-match state with Clear filters, distinct from the empty-storage message", async ({ page }) => {
@@ -100,6 +130,53 @@ test.describe("Inventory overview table", () => {
 
     await page.getByRole("button", { name: "Clear filters" }).click();
     await expect(page.locator("#rows > tr")).toHaveCount(5);
+  });
+
+  test("filter and sort state round-trips through the query string across a reload", async ({ page }) => {
+    await page.goto(`/inventory.html?storage=${E2E_INVENTORY}`);
+    await expect(page.locator("#table")).toBeVisible();
+
+    await page.locator("#filter-location").selectOption(CELLAR);
+    await page.locator("#sort-select").selectOption("-quantity");
+    await page.locator("#group-toggle").check();
+    await page.locator("#filter-text").fill("Item");
+
+    const params = new URL(page.url()).searchParams;
+    expect(params.get("loc")).toBe(CELLAR);
+    expect(params.get("sort")).toBe("-quantity");
+    expect(params.get("group")).toBe("1");
+    expect(params.get("q")).toBe("Item");
+    const urlBeforeReload = page.url();
+
+    await page.reload();
+    await expect(page.locator("#table")).toBeVisible();
+
+    // Every control reflects what the URL says, not just the URL itself —
+    // a link that round-trips the query string but renders the default
+    // filters would still be a page that lied about what it was showing.
+    expect(page.url()).toBe(urlBeforeReload);
+    await expect(page.locator("#filter-location")).toHaveValue(CELLAR);
+    await expect(page.locator("#sort-select")).toHaveValue("-quantity");
+    await expect(page.locator("#group-toggle")).toBeChecked();
+    await expect(page.locator("#filter-text")).toHaveValue("Item");
+    await expect(page.locator("th", { has: page.locator('[data-sort="quantity"]') })).toHaveAttribute("aria-sort", "descending");
+  });
+
+  test("the table is wide enough to be readable at 1440px, and never scrolls sideways at 375px", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`/inventory.html?storage=${E2E_INVENTORY}`);
+    await expect(page.locator("#table")).toBeVisible();
+
+    const tableWidth = await page.locator("#table").evaluate((el) => el.getBoundingClientRect().width);
+    expect(tableWidth).toBeGreaterThan(800);
+
+    await page.setViewportSize({ width: 375, height: 700 });
+    // A vertical scrollbar is expected; a horizontal one is the bug this
+    // page's stacked-card breakpoint (components.css) exists to prevent.
+    const scrollsSideways = await page.evaluate(
+      () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
+    );
+    expect(scrollsSideways).toBe(false);
   });
 
   test("Count this shelf opens that location's stocktake sheet", async ({ page }) => {
