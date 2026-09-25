@@ -175,6 +175,7 @@ func TestPutNotificationSettingsRejectsUnusableTargets(t *testing.T) {
 		{"no host at all", `{"kind":"ntfy","url":"notaurl","send_hour":8}`, "url"},
 		{"an unknown kind", `{"kind":"telegram","url":"https://ntfy.example/x","send_hour":8}`, "kind"},
 		{"an hour outside the day", `{"kind":"ntfy","url":"https://ntfy.example/x","send_hour":24}`, "send_hour"},
+		{"a negative hour", `{"kind":"ntfy","url":"https://ntfy.example/x","send_hour":-1}`, "send_hour"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
