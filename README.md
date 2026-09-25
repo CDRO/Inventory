@@ -249,7 +249,10 @@ push to `main`: it seeds a stack, takes a backup, destroys the stack
 *including its volumes*, restores the archive into a database it first proves
 is empty, and then compares per-table row counts and the field values of named
 rows in more than one storage against what was there beforehand — plus a file
-in the uploads tree, since the archive is the database *and* the images. A
+in the uploads tree, since the archive is the database *and* the images, and
+plus the session table, which must come back *empty*: that is the one thing a
+restore does beyond replaying the dump, and the bullet about everyone logging
+in again is now a claim CI checks rather than one the runbook merely makes. A
 restore that came back lossy therefore fails the deployment gate instead of
 being discovered during a real recovery. That is worth the runtime because
 restoring this backup is the *only* rollback an upgrade has: migrations are

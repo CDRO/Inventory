@@ -15,7 +15,7 @@
 --
 -- What it emits, one `key|value` line per fact, ordered by key:
 --
---   count.<table>      a row count, for the ten tables issue #133 names.
+--   count.<table>      a row count, for each of the ten tables below.
 --   spot.<table>.<id>  the field values of one named row.
 --
 -- Both halves are needed and neither is sufficient. A `/healthz` 200 alone
@@ -40,10 +40,12 @@
 --     one NULL column would make the whole expression NULL, and the row would
 --     report itself missing when it is merely holding a null.
 --
--- `sessions` is deliberately not counted. The restore clears that table on
--- purpose (docs/specs/15-backup-restore-and-export.md: every session from the
--- backed-up instance is invalidated), so equal counts either side would be
--- the wrong assertion to make.
+-- `sessions` is deliberately not counted *here*. The restore clears that
+-- table on purpose (docs/specs/15-backup-restore-and-export.md: every session
+-- from the backed-up instance is invalidated), so equal counts either side
+-- would be exactly the wrong assertion to make. It is asserted instead by two
+-- dedicated steps of the job, which require the opposite: seeded sessions
+-- before the backup, none after the restore.
 --
 -- A spot check whose row is absent reports `<MISSING>` rather than vanishing
 -- from the output, so a mistyped id here surfaces as a bad *before* snapshot
@@ -59,7 +61,13 @@
 
 SELECT key, value FROM (
 
-    -- Row counts, for the ten tables issue #133 names.
+    -- Row counts. Which ten tables is this file's own choice, not a list
+    -- issue #133 hands down — it asks only that "the seeded data is present
+    -- and correct". These are the ten that carry the seeded fixture: the
+    -- tenancy spine (users, storages, storage_members), the inventory it
+    -- holds (locations, categories, products, inventory_batches), and the
+    -- three append-only trails a lossy restore would strip in silence
+    -- (inventory_logs, jobs, admin_audit_log).
     SELECT 'count.admin_audit_log'  AS key, count(*)::text AS value FROM admin_audit_log
     UNION ALL SELECT 'count.categories',        count(*)::text FROM categories
     UNION ALL SELECT 'count.inventory_batches', count(*)::text FROM inventory_batches
@@ -129,6 +137,12 @@ SELECT key, value FROM (
              || ', category=' || coalesce(p.category_id::text, '<null>')
              || ', item_type=' || coalesce(p.item_type, '<null>')
              || ', min_stock=' || coalesce(p.min_stock::text, '<null>')
+             -- image_url is the column that ties a product row to a file in
+             -- the archived uploads tree. Both seeded products leave it null
+             -- today, so this reads `<null>` on both sides — it is here so the
+             -- day a fixture does set one, the link is covered rather than
+             -- quietly outside the check.
+             || ', image_url=' || coalesce(p.image_url, '<null>')
            END
       FROM (VALUES ('00000000-0000-7000-8000-000000000040'::uuid),
                    ('00000000-0000-7000-8000-0000000000c3'::uuid)) AS e(id)
@@ -189,11 +203,19 @@ SELECT key, value FROM (
     -- is_admin is included because it is the one column in this system that is
     -- always re-read from the database (CLAUDE.md) — a restore that lost it
     -- would silently demote or promote somebody.
+    --
+    -- password_hash is digested rather than printed. Not because the fixture
+    -- hash is a secret — it is a real argon2id digest of the string
+    -- e2e/fixtures/seed.sql names in plain sight — but because a restore that
+    -- corrupted every hash in the database would otherwise pass this job
+    -- completely green, and the symptom would be nobody being able to log in,
+    -- discovered during an actual recovery. The md5 makes that a diff instead.
     UNION ALL
     SELECT 'spot.users.' || e.username,
            CASE WHEN u.username IS NULL THEN '<MISSING>' ELSE
                 'display_name=' || coalesce(u.display_name, '<null>')
              || ', is_admin=' || coalesce(u.is_admin::text, '<null>')
+             || ', password_hash_md5=' || coalesce(md5(u.password_hash), '<null>')
            END
       FROM (VALUES ('e2e-admin'), ('e2e-alice'), ('e2e-bob'), ('e2e-inventory')) AS e(username)
       LEFT JOIN users u ON u.username = e.username

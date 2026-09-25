@@ -61,4 +61,35 @@ INSERT INTO admin_audit_log (id, actor_id, action, target, details, created_at) 
    '{"value":"on"}', '2025-06-01T11:10:00Z')
 ON CONFLICT (id) DO NOTHING;
 
+-- Two live sessions, for the half of spec 15's restore criterion that the
+-- before/after snapshot cannot express: "all prior sessions are invalid".
+--
+-- Everything else about a restore is a claim that a row came back, and the
+-- snapshot asserts those by requiring the two sides to be identical. This one
+-- is the opposite claim — that these rows are gone — so it cannot live in the
+-- same comparison, and it gets two steps of the job to itself instead: these
+-- rows must exist before the backup, and the table must be empty after the
+-- restore. Without them the "after" check would be 0 = 0 against a table that
+-- was never populated, which is the vacuous assertion this whole package
+-- exists to avoid.
+--
+-- It is worth having because the session wipe is the one thing a restore does
+-- that is not simply replaying the dump: scripts/backup runs a DELETE of its
+-- own after loading db.sql. A session id is an opaque random string looked up
+-- in this table rather than a signed token
+-- (docs/specs/03-auth-and-multi-tenancy.md), so a restore that skipped that
+-- DELETE would hand back working cookies from before the disaster, including
+-- any stolen along the way. Nothing else in the repository executes that path.
+--
+-- Both kinds, because a paired device is the same table and the same kind of
+-- credential, and the spec retires both. expires_at is far future so the
+-- app's own expired-session sweep (cmd/inventory/main.go) cannot remove them
+-- before the backup is taken and quietly make the "before" check vacuous
+-- again. No user of these is ever logged in — the job asserts on the rows,
+-- not through the browser.
+INSERT INTO sessions (id, user_id, kind, label, expires_at) VALUES
+  ('e2e-restore-roundtrip-browser-session', '00000000-0000-7000-8000-000000000002', 'browser', NULL,      '2099-01-01T00:00:00Z'),
+  ('e2e-restore-roundtrip-device-session',  '00000000-0000-7000-8000-000000000003', 'device',  'E2E Pixel','2099-01-01T00:00:00Z')
+ON CONFLICT (id) DO NOTHING;
+
 COMMIT;

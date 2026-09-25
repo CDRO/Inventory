@@ -194,6 +194,21 @@ jobs:
           docker compose -f docker-compose.e2e.yml exec -T db \
             psql -U e2e -d e2e -v ON_ERROR_STOP=1 -f /fixtures/restore-roundtrip.sql
 
+      # The setup half of spec 15's "all prior sessions are invalid". Asserted
+      # here rather than in the snapshot because it is the one claim of the
+      # restore that requires the two sides to *differ*: these rows must exist
+      # now and be gone afterwards. Checked rather than assumed, so that a
+      # fixture that silently stopped inserting them cannot turn the
+      # after-check into 0 = 0 against a table nothing ever filled.
+      - name: The instance carries sessions the restore must invalidate
+        run: |
+          before=$(docker compose -f docker-compose.e2e.yml exec -T db \
+            psql -U e2e -d e2e -tAX -c "SELECT count(*) FROM sessions" | tr -d '[:space:]')
+          if [ "$before" -lt 2 ]; then
+            echo "expected the seeded browser and device sessions, found $before" >&2
+            exit 1
+          fi
+
       # An archive is db.sql *plus* the uploads tree, and a round trip that
       # checks only the database leaves half the contract untested — the half
       # holding the photos of the household's own shelves, which is the
@@ -329,6 +344,20 @@ jobs:
             < e2e/restore/snapshot.sql > e2e/test-results/after.txt
           cat e2e/test-results/after.txt
           diff -u e2e/test-results/before.txt e2e/test-results/after.txt
+
+      # The other half. scripts/backup deletes these after loading db.sql —
+      # the one thing a restore does that is not replaying the dump — and a
+      # restore that skipped it would hand back working cookies from before
+      # the disaster. The dump demonstrably carried the rows, because the step
+      # before the backup counted them.
+      - name: Every session from the backed-up instance is gone
+        run: |
+          after=$(docker compose -f docker-compose.e2e.yml exec -T db \
+            psql -U e2e -d e2e -tAX -c "SELECT count(*) FROM sessions" | tr -d '[:space:]')
+          if [ "$after" != "0" ]; then
+            echo "the restore left $after session(s) from the backed-up instance alive" >&2
+            exit 1
+          fi
 
       - name: The uploads tree came back too
         run: |
