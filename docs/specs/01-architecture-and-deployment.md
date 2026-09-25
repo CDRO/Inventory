@@ -363,15 +363,15 @@ Setup must run **before** the stack starts, because Docker Compose reads
 written afterwards without being recreated. The system therefore fails
 fast and says so, rather than starting half-configured:
 
-```console
-$ docker compose run --rm setup      # writes ./.env interactively
-$ docker compose up -d
-```
-
 This is the plain-clone sequence. On the operator's own NAS, `docker compose
 up -d` is the wrong command (it loads the dev override and starts Traefik on
 DSM's own port 80) — use `$DC up -d` instead; see "Synology NAS variant"
 below.
+
+```console
+$ docker compose run --rm setup      # writes ./.env interactively
+$ docker compose up -d
+```
 
 **If `docker compose up` is run first (no `.env` yet):** the `app` container
 starts and validates its configuration, then exits non-zero with an actionable

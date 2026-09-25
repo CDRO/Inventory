@@ -20,10 +20,10 @@ check with `docker compose version` before deploying.
 
 ## First run
 
-> **On the operator's own Synology NAS, use "Deploying to a plain clone"
-> below instead.** Every command in this section — including the ones the app
-> itself suggests when `.env` is missing or changed — is wrong on that NAS: it
-> starts Traefik on DSM's own port 80. Use `$DC` there instead.
+> **On the operator's own Synology NAS, use the two-file command in
+> "Deploying to a plain clone" below instead.** Every command in this
+> section — including the ones the app itself suggests when `.env` is missing
+> or changed — is wrong on that NAS: it starts Traefik on DSM's own port 80.
 
 ```bash
 docker compose run --rm setup                                   # writes ./.env
