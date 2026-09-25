@@ -86,6 +86,11 @@ func TestSaveNotificationSettingsRejectsNonsense(t *testing.T) {
 			in.SendHour = 24
 			return in
 		}()},
+		{"a negative hour", func() store.NotificationSettingsInput {
+			in := ntfySettings()
+			in.SendHour = -1
+			return in
+		}()},
 		{"an unknown kind", func() store.NotificationSettingsInput {
 			in := ntfySettings()
 			in.Kind = "telegram"
