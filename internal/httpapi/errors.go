@@ -251,6 +251,9 @@ func Unauthorized(reason string) *Failure {
 }
 
 // Conflict is a legal resource in a state that forbids the action.
+//
+// It carries Err and no Reason, for the reason set out on Internal(): Reason
+// names a check, Err is a cause. The message is the disclosure here.
 func Conflict(message string, err error) *Failure {
 	if message == "" {
 		message = "That action conflicts with the current state."
@@ -281,6 +284,9 @@ func ResyncRequired(reason string) *Failure {
 }
 
 // ValidationFailed carries the per-field messages a form needs.
+//
+// It carries Err and no Reason, for the reason set out on Internal(): Reason
+// names a check, Err is a cause. The field map is the disclosure here.
 func ValidationFailed(fields map[string][]string, err error) *Failure {
 	return &Failure{
 		Status:  http.StatusUnprocessableEntity,
@@ -333,18 +339,38 @@ func UpstreamFailed(err error) *Failure {
 // and the omission is deliberate rather than an oversight — it was raised as a
 // finding once (#128) and decided repo-wide here so it need not be re-argued.
 //
-// There is no check to name. Reason is a fixed identifier for a decision this
-// package made on purpose: docs/specs/03-auth-and-multi-tenancy.md enumerates
-// the whole vocabulary — session_missing, session_expired, not_storage_member,
-// storage_not_found, not_admin, admin_area_hidden — and every one of them is an
-// authorization outcome a developer needs spelled out because the response is
-// deliberately opaque. A 500 is the opposite case: nothing decided it. The only
-// text available is whatever the failing layer happened to produce, which
-// across this function's call sites is raw store and database-driver output —
-// table and column names, constraint names, connection strings. Copying that
-// into Reason would put it in the response body in dev and change debug_reason
-// from a closed set of six audited strings into arbitrary text from any layer
-// the request touched.
+// There is no check to name, and that is the whole of it. Every Reason this
+// package sets is text it composed itself, for a reader, about a decision it
+// took on purpose. What is disclosed today, in full, so this claim can be
+// checked rather than trusted:
+//
+//   - the six authorization identifiers in
+//     docs/specs/03-auth-and-multi-tenancy.md — session_missing,
+//     session_expired, not_storage_member, storage_not_found, not_admin,
+//     admin_area_hidden;
+//   - ReasonNoRouteMatch and ReasonMethodNotAllowed, the router's own two
+//     refusals, which are fixed strings for the reason recorded above them;
+//   - ModelUnavailable's "configured model not offered by the provider: …",
+//     which interpolates a model name this deployment configured;
+//   - the sentence ResyncRequired carries, which FromStoreError passes from
+//     err.Error() — safe only because the single store path that returns
+//     store.ErrResyncRequired never wraps it, so the text is always that one
+//     sentinel. That is the closest thing here to serializing a layer's own
+//     output, and it is worth knowing about rather than being surprised by.
+//
+// So Reason is not a closed set of six, and a comment claiming so would send
+// the next maintainer to audit the wrong things. The property that actually
+// holds is narrower and more useful: no Reason carries text that a database
+// driver or a third party handed us.
+//
+// A 500 is where that property would break. Nothing decided it, so the only
+// text available is whatever the failing layer produced — and this one function
+// cannot tell what that will be. Of its 147 call sites, 71 pass a fixed string
+// this package wrote (66 of them the sentinel errNoStorageInContext), whose
+// disclosure would be harmless. The other 76 pass a store error through, plain
+// or wrapped with %w: raw driver output, carrying table, column and constraint
+// names, and on a connection failure a DSN. One function serves both halves, so
+// populating Reason here would disclose the second in order to help the first.
 //
 // So the cause travels in Err, under the contract on that field, and the place
 // to read it is the error-level log line WriteError always emits for a 5xx
