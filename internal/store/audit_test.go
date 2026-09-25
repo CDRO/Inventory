@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -204,6 +205,135 @@ func TestAFailedAdminMutationWritesNoAuditRow(t *testing.T) {
 		require.ErrorIs(t, s.AddMember(ctx, actor, missing, newUser(t, ctx)), store.ErrNotFound)
 
 		assert.Equal(t, before, countRows(t, ctx, `SELECT count(*) FROM admin_audit_log`))
+	})
+}
+
+// TestConcurrentDeleteLosesTheAuditRace pins the RowsAffected() == 0 branch
+// in DeleteUser, DeleteStorage and DeleteCatalogProduct (internal/store#139).
+//
+// Each of those functions reads a name, deletes the row, and only then
+// re-checks that the delete actually affected a row before writing the audit
+// entry — because the earlier SELECT is not proof the row was still there by
+// the time the DELETE ran. The existing "delete a missing X" tests all reach
+// the SELECT's own pgx.ErrNoRows branch instead, since the row is absent from
+// the start; nothing exercised the case where it vanishes mid-request. This
+// forces that case with a second connection: hold the target row locked with
+// SELECT ... FOR UPDATE, start the delete under test in a goroutine so it
+// blocks behind that lock on its own DELETE statement, then delete-and-commit
+// the row out from under it. The unblocked DELETE then affects zero rows
+// under Postgres's standard READ COMMITTED re-check, exactly the interleaving
+// the RowsAffected() == 0 branch exists to catch.
+func TestConcurrentDeleteLosesTheAuditRace(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	actor := newUser(t, ctx)
+
+	t.Run("user", func(t *testing.T) {
+		target := newUser(t, ctx)
+
+		lockConn, err := testPool.Acquire(ctx)
+		require.NoError(t, err)
+		defer lockConn.Release()
+		lockTx, err := lockConn.Begin(ctx)
+		require.NoError(t, err)
+		// Rollback after a successful commit is a no-op (see inTx in tx.go); on
+		// any failure before that commit it releases the row lock, so a
+		// t.Fatalf or a failed require above cannot leave the goroutine's
+		// DELETE blocked forever on a pool connection nobody will ever free.
+		defer func() { _ = lockTx.Rollback(ctx) }()
+		_, err = lockTx.Exec(ctx, `SELECT id FROM users WHERE id = $1 FOR UPDATE`, target)
+		require.NoError(t, err)
+
+		var deleteErr error
+		done := make(chan struct{})
+		go func() {
+			deleteErr = s.DeleteUser(ctx, actor, target)
+			close(done)
+		}()
+
+		waitForBackendBlockedOn(t, ctx, "DELETE FROM users", 2*time.Second)
+
+		_, err = lockTx.Exec(ctx, `DELETE FROM users WHERE id = $1`, target)
+		require.NoError(t, err)
+		require.NoError(t, lockTx.Commit(ctx))
+		<-done
+
+		require.ErrorIs(t, deleteErr, store.ErrNotFound,
+			"the losing side must report not-found, not success for a deletion it did not perform")
+		assert.Empty(t, auditRowsFor(t, ctx, target.String()),
+			"and must not record an audit row for that deletion")
+	})
+
+	t.Run("storage", func(t *testing.T) {
+		target := newStorage(t, ctx)
+
+		lockConn, err := testPool.Acquire(ctx)
+		require.NoError(t, err)
+		defer lockConn.Release()
+		lockTx, err := lockConn.Begin(ctx)
+		require.NoError(t, err)
+		// See the "user" subtest above: this releases the row lock on any path
+		// that doesn't reach the commit below.
+		defer func() { _ = lockTx.Rollback(ctx) }()
+		_, err = lockTx.Exec(ctx, `SELECT id FROM storages WHERE id = $1 FOR UPDATE`, target)
+		require.NoError(t, err)
+
+		var deleteErr error
+		done := make(chan struct{})
+		go func() {
+			deleteErr = s.DeleteStorage(ctx, actor, target)
+			close(done)
+		}()
+
+		waitForBackendBlockedOn(t, ctx, "DELETE FROM storages", 2*time.Second)
+
+		_, err = lockTx.Exec(ctx, `DELETE FROM storages WHERE id = $1`, target)
+		require.NoError(t, err)
+		require.NoError(t, lockTx.Commit(ctx))
+		<-done
+
+		require.ErrorIs(t, deleteErr, store.ErrNotFound,
+			"the losing side must report not-found, not success for a deletion it did not perform")
+		assert.Empty(t, auditRowsFor(t, ctx, target.String()),
+			"and must not record an audit row for that deletion")
+	})
+
+	t.Run("catalog product", func(t *testing.T) {
+		entry, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{
+			DisplayName: "Race Condition Oat Milk " + uuid.NewString()[:8],
+		})
+		require.NoError(t, err)
+		target := entry.ID
+
+		lockConn, err := testPool.Acquire(ctx)
+		require.NoError(t, err)
+		defer lockConn.Release()
+		lockTx, err := lockConn.Begin(ctx)
+		require.NoError(t, err)
+		// See the "user" subtest above: this releases the row lock on any path
+		// that doesn't reach the commit below.
+		defer func() { _ = lockTx.Rollback(ctx) }()
+		_, err = lockTx.Exec(ctx, `SELECT id FROM catalog_products WHERE id = $1 FOR UPDATE`, target)
+		require.NoError(t, err)
+
+		var deleteErr error
+		done := make(chan struct{})
+		go func() {
+			deleteErr = s.DeleteCatalogProduct(ctx, actor, target)
+			close(done)
+		}()
+
+		waitForBackendBlockedOn(t, ctx, "DELETE FROM catalog_products", 2*time.Second)
+
+		_, err = lockTx.Exec(ctx, `DELETE FROM catalog_products WHERE id = $1`, target)
+		require.NoError(t, err)
+		require.NoError(t, lockTx.Commit(ctx))
+		<-done
+
+		require.ErrorIs(t, deleteErr, store.ErrNotFound,
+			"the losing side must report not-found, not success for a deletion it did not perform")
+		assert.Empty(t, auditRowsFor(t, ctx, target.String()),
+			"and must not record an audit row for that deletion")
 	})
 }
 

@@ -55,15 +55,18 @@ Two details in that command are load-bearing:
 | `00011_barcodes.sql` | `product_barcodes`, `catalog_barcodes`, and the two `users` columns behind the capture-time offer in [`docs/specs/20-barcode-recall.md`](../docs/specs/20-barcode-recall.md) |
 | `00012_barcode_hot_cache.sql` | `catalog_barcodes.scan_count` — the instance-wide scan popularity counter behind the client's hot-cache preview in [`docs/specs/24-barcode-hot-cache.md`](../docs/specs/24-barcode-hot-cache.md) |
 | `00013_storage_member_start_page.sql` | `storage_members.start_page` — the per-person, per-storage start page of [`docs/specs/34-navigation-and-start-page.md`](../docs/specs/34-navigation-and-start-page.md). Grants nothing: `storage_members` still carries no role and no rights |
+| `00014_job_lease.sql` | `jobs.lease_owner` and `jobs.lease_expires_at` — which process is working a pending job, and until when, so recovery fails only the jobs whose owner is gone instead of every pending row (issue #121). Also backfills a short grace claim onto rows that are already pending, so the update that applies it does not fail the old instance's work |
 
-Every file carries both `-- +goose Up` and `-- +goose Down`. **Only one of those
-down blocks is covered by a test**, and it is the newest:
+Every file carries both `-- +goose Up` and `-- +goose Down`. **Only the two
+newest of those down blocks are covered by a test**:
 `TestRunDownRollsBackTheRepositorysOwnMigrations`
 (`internal/migrate/migrate_test.go`) rolls the shipped migrations back from the
-top down to `00013`, checks against `information_schema` that the column that
-migration adds is gone, then migrates up again. Nothing exercises the down block
-of `00001`–`00012`, and no script, workflow or deployment step in this
-repository runs `migrate down` at all.
+top down to `00013`, checks against `information_schema` that the columns
+`00013` and `00014` add are gone, then migrates up again. It walks the shipped
+version list rather than counting steps, so the newest down block stays covered
+as the schema grows. Nothing exercises the down block of `00001`–`00012`, and no
+script, workflow or deployment step in this repository runs `migrate down` at
+all.
 
 So if you edit an older down block, no test will contradict you. That is a
 deliberate consequence of the policy in

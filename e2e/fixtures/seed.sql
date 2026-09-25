@@ -477,23 +477,41 @@ INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, create
   ('00000000-0000-7000-8000-0000000000a3', '00000000-0000-7000-8000-0000000000a1', '00000000-0000-7000-8000-0000000000a2', 2, 'purchase', '00000000-0000-7000-8000-000000000008')
 ON CONFLICT (id) DO NOTHING;
 
-INSERT INTO jobs (id, storage_id, kind, status, payload, error, created_by, created_at) VALUES
+-- The pending job carries a lease that does not expire
+-- (migrations/00014_job_lease.sql, issue #121).
+--
+-- A pending row is now owned by the process working it, and the running app
+-- fails the pending rows nobody keeps claiming — every few seconds, not only at
+-- start-up, which is what recovers an instance that was killed while another
+-- kept serving. This fixture is applied while the app is already up, so without
+-- a claim its pending job would be failed within about a minute of being seeded,
+-- and e2e/specs/inbox-discard-all.spec.js would be asserting against a failed
+-- job instead of a pending one.
+--
+-- The owner is a placeholder like every other id here: no process will ever
+-- renew this claim, and none has to, because the expiry is far enough out that
+-- the suite cannot outlast it. Any later fixture that needs a job to *stay*
+-- pending needs the same two columns; one that wants a job the sweep will fail
+-- leaves them NULL.
+INSERT INTO jobs (id, storage_id, kind, status, payload, error, created_by, created_at,
+                  lease_owner, lease_expires_at) VALUES
   ('00000000-0000-7000-8000-0000000000a4', '00000000-0000-7000-8000-000000000015', 'shelf_ingestion', 'pending', NULL, NULL,
-   '00000000-0000-7000-8000-000000000008', '2025-06-01T08:00:00Z'),
+   '00000000-0000-7000-8000-000000000008', '2025-06-01T08:00:00Z',
+   '00000000-0000-7000-8000-0000000000af', '2999-01-01T00:00:00Z'),
   ('00000000-0000-7000-8000-0000000000a5', '00000000-0000-7000-8000-000000000015', 'shelf_ingestion', 'failed', NULL, 'The photo could not be analysed.',
-   '00000000-0000-7000-8000-000000000008', '2025-06-01T09:00:00Z'),
+   '00000000-0000-7000-8000-000000000008', '2025-06-01T09:00:00Z', NULL, NULL),
   ('00000000-0000-7000-8000-0000000000a6', '00000000-0000-7000-8000-000000000015', 'shelf_ingestion', 'done',
    '{"mode":"shelf","location_hint_id":null,"rows":[
       {"row_id":"0","label":"Discardable Item","confidence":0.8,"quantity":1,"bounding_box":null,
        "match":{"status":"new_item","product":null,"candidates":[],"catalog":null},
        "location":{"path":[],"location_id":null}}
-   ]}', NULL, '00000000-0000-7000-8000-000000000008', '2025-06-01T10:00:00Z'),
+   ]}', NULL, '00000000-0000-7000-8000-000000000008', '2025-06-01T10:00:00Z', NULL, NULL),
   ('00000000-0000-7000-8000-0000000000a7', '00000000-0000-7000-8000-000000000015', 'shelf_ingestion', 'consumed',
    '{"mode":"shelf","location_hint_id":null,"rows":[
       {"row_id":"0","label":"E2E Inbox Consumed Product","confidence":0.9,"quantity":2,"bounding_box":null,
        "match":{"status":"exact_match","product":{"id":"00000000-0000-7000-8000-0000000000a1","name":"E2E Inbox Consumed Product"},"candidates":[],"catalog":null},
        "location":{"path":[{"name":"Inbox Shelf","location_id":"00000000-0000-7000-8000-0000000000a0","proposed":false}],"location_id":"00000000-0000-7000-8000-0000000000a0"}}
-   ]}', NULL, '00000000-0000-7000-8000-000000000008', '2025-06-01T07:00:00Z')
+   ]}', NULL, '00000000-0000-7000-8000-000000000008', '2025-06-01T07:00:00Z', NULL, NULL)
 ON CONFLICT (id) DO NOTHING;
 
 -- "E2E Inventory" (...016), dedicated to
