@@ -633,6 +633,24 @@ func TestResubmitAnalysesAFinishedJobAgain(t *testing.T) {
 	assert.Equal(t, store.JobPending, pending.Status, "Resubmit returns before the work finishes")
 	assert.Nil(t, pending.Error, "the old failure is gone while the new analysis runs")
 
+	// The claim matters as much as the status. A re-analysis makes the row
+	// pending again, and one this process left unclaimed would be failed by this
+	// process's *own* next lease sweep while the work it just started is still
+	// running — after which the result lands on a row that is no longer pending
+	// and is dropped. That is issue #121's effect on the reanalyze path, so the
+	// sweep is run here rather than only the claim inspected.
+	held := s.claimOf(job.ID)
+	assert.True(t, held.held, "Resubmit claims the job it made pending")
+	assert.Equal(t, r.owner, held.owner)
+	assert.False(t, held.lapsed())
+
+	swept, err := s.FailOrphanedJobs(context.Background(), r.owner)
+	require.NoError(t, err)
+	assert.Zero(t, swept, "a re-analysis this process is running is not an orphan")
+	running, ok := s.get(job.ID)
+	require.True(t, ok)
+	assert.Equal(t, store.JobPending, running.Status)
+
 	// A second request while the first re-analysis is running is refused, and
 	// its work never runs.
 	ran := make(chan struct{}, 1)
