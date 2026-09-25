@@ -259,11 +259,11 @@ func (s *Store) finishJob(ctx context.Context, id uuid.UUID, status JobStatus, p
 // process, does fail those rows; that is what makes the work of an instance
 // killed outright recoverable at all (issue #124, item 4).
 //
-// This is what the previous FailInterruptedJobs did unconditionally, and the
-// unconditional version was wrong: it ran at start-up on the assumption that
-// nothing else could be working a pending row, which the rolling update on the
-// NAS breaks on purpose by running a second instance next to the first
-// (deploy/synology/update, issue #121).
+// It replaces FailInterruptedJobs, which did this unconditionally and was
+// wrong to: it ran at start-up on the assumption that nothing else could be
+// working a pending row, which the rolling update on the NAS breaks on purpose
+// by running a second instance next to the first (deploy/synology/update,
+// issue #121).
 //
 // It runs both before the listener and on a timer while the process lives, so
 // it must stay one indexed statement.
