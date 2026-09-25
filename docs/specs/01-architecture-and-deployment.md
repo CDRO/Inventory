@@ -368,6 +368,11 @@ $ docker compose run --rm setup      # writes ./.env interactively
 $ docker compose up -d
 ```
 
+This is the plain-clone sequence. On the operator's own NAS, `docker compose
+up -d` is the wrong command (it loads the dev override and starts Traefik on
+DSM's own port 80) — use `$DC up -d` instead; see "Synology NAS variant"
+below.
+
 **If `docker compose up` is run first (no `.env` yet):** the `app` container
 starts and validates its configuration, then exits non-zero with an actionable
 message naming the variables and the fix:

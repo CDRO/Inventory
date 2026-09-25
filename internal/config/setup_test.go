@@ -359,6 +359,7 @@ func TestWizardOverwritesOnConfirmationAndExplainsRecreate(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Contains(t, transcript, "recreating the app container")
+	assert.Contains(t, transcript, "README.md", "the hint must point somewhere for the actual command, not just decline to name one")
 	assert.NotContains(t, transcript, "docker compose", "the hint must not name a compose invocation: it is wrong on the Synology NAS variant")
 	assert.Equal(t, "gemini-key", readEnv(t, dir)["GEMINI_API_KEY"])
 }
@@ -473,6 +474,7 @@ func TestWizardFirstRunPrintsStartHint(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Contains(t, transcript, "Start the stack")
+	assert.Contains(t, transcript, "README.md", "the hint must point somewhere for the actual command, not just decline to name one")
 	assert.NotContains(t, transcript, "recreat", "nothing is running yet on a first run")
 	assert.NotContains(t, transcript, "docker compose", "the hint must not name a compose invocation: it is wrong on the Synology NAS variant")
 }
