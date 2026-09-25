@@ -18,11 +18,13 @@ import (
 // other attempting a statement that needs the same lock, this lets the test
 // wait for the second to actually block before it lets the first proceed —
 // see TestConcurrentDeleteLosesTheAuditRace in audit_test.go. What it does
-// not give: isolation from unrelated activity in the same database (the
-// query filters by substr for that reason, but a large enough test suite
-// running in parallel could still coincide), and it only detects
-// lock waits (wait_event_type = 'Lock') — a synchronization point that
-// isn't backed by a real row/table lock won't show up here at all.
+// not give: isolation from unrelated lock waits in the *same* throwaway
+// database (the substr filter plus the current_database() scope below rule
+// out every other package, each of which gets its own database in TestMain,
+// but not a coincidental lock wait from another test in this package running
+// in parallel), and it only detects lock waits (wait_event_type = 'Lock') —
+// a synchronization point that isn't backed by a real row/table lock won't
+// show up here at all.
 func waitForBackendBlockedOn(t *testing.T, ctx context.Context, substr string, timeout time.Duration) {
 	t.Helper()
 
@@ -30,7 +32,8 @@ func waitForBackendBlockedOn(t *testing.T, ctx context.Context, substr string, t
 	for {
 		n := countRows(t, ctx, `
 			SELECT count(*) FROM pg_stat_activity
-			 WHERE wait_event_type = 'Lock' AND query ILIKE $1`, "%"+substr+"%")
+			 WHERE datname = current_database()
+			   AND wait_event_type = 'Lock' AND query ILIKE $1`, "%"+substr+"%")
 		if n > 0 {
 			return
 		}

@@ -236,6 +236,11 @@ func TestConcurrentDeleteLosesTheAuditRace(t *testing.T) {
 		defer lockConn.Release()
 		lockTx, err := lockConn.Begin(ctx)
 		require.NoError(t, err)
+		// Rollback after a successful commit is a no-op (see inTx in tx.go); on
+		// any failure before that commit it releases the row lock, so a
+		// t.Fatalf or a failed require above cannot leave the goroutine's
+		// DELETE blocked forever on a pool connection nobody will ever free.
+		defer func() { _ = lockTx.Rollback(ctx) }()
 		_, err = lockTx.Exec(ctx, `SELECT id FROM users WHERE id = $1 FOR UPDATE`, target)
 		require.NoError(t, err)
 
@@ -267,6 +272,9 @@ func TestConcurrentDeleteLosesTheAuditRace(t *testing.T) {
 		defer lockConn.Release()
 		lockTx, err := lockConn.Begin(ctx)
 		require.NoError(t, err)
+		// See the "user" subtest above: this releases the row lock on any path
+		// that doesn't reach the commit below.
+		defer func() { _ = lockTx.Rollback(ctx) }()
 		_, err = lockTx.Exec(ctx, `SELECT id FROM storages WHERE id = $1 FOR UPDATE`, target)
 		require.NoError(t, err)
 
@@ -302,6 +310,9 @@ func TestConcurrentDeleteLosesTheAuditRace(t *testing.T) {
 		defer lockConn.Release()
 		lockTx, err := lockConn.Begin(ctx)
 		require.NoError(t, err)
+		// See the "user" subtest above: this releases the row lock on any path
+		// that doesn't reach the commit below.
+		defer func() { _ = lockTx.Rollback(ctx) }()
 		_, err = lockTx.Exec(ctx, `SELECT id FROM catalog_products WHERE id = $1 FOR UPDATE`, target)
 		require.NoError(t, err)
 
