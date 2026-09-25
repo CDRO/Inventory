@@ -83,8 +83,10 @@ no `-f`, so it only ever selects the default files — never
 `COMPOSE_FILE`. That file pins its own project name, but a worktree's own
 `COMPOSE_PROJECT_NAME` overrides a file's `name:` (confirmed live), so what
 that stack actually runs as, and whether it is even shared across worktrees
-in practice, is genuinely unclear — real isolation for it is #140's job
-(item 2), not answered here.
+in practice, is genuinely unclear — real isolation for it is #190's job, not
+answered here. (#190 was split out of #140 item 2 when that closed: #140 gave
+the per-wave cleanup a veto that makes it safe whatever the E2E project ends up
+being called, but it did not settle what the name actually is.)
 
 **Per wave**, a wave with `"dockerCleanup": true` additionally gets what the
 per-package step cannot reach removed **after its consolidation has
@@ -109,23 +111,49 @@ the cleanup script* runs in it and the script is re-read at every call.
   with that plus a hyphen (which finds a project whose containers are already
   gone). The name rule never lets a slug claim a longer sibling: with the
   slugs `w5-barcode` and `w5-barcode-hot-cache` in the wave file, cleaning the
-  first never touches the second's project, and a project with a container
-  outside the requested worktrees is not claimed by name at all.
+  first never touches the second's project. That protection comes from the wave
+  file, so **pass `-WaveFile` when the plan is not `wellen.json`** — without the
+  file only the slugs on the command line are known, the longer sibling cannot
+  be recognized, and the script says so with a `WARNING` rather than failing.
+- **A container outside the worktrees vetoes the whole project**, under either
+  rule: one container inside a worktree is not enough when another container of
+  the same project lives in a directory that is no worktree of this wave. That
+  is what keeps a wave from sweeping a Compose project whose name is pinned in
+  a file rather than derived per worktree — `docker-compose.e2e.yml` pins one
+  for every worktree. A container carrying the project label but no
+  `working_dir` label at all vetoes the same way, since it cannot be placed.
+  A container-less project has no directory to check, so for it the name rule
+  stands alone: one left behind by another clone of this same repository under
+  the same `<repo>-<slug>` name is indistinguishable from this wave's own and
+  is removed.
 - **What is never removed:** the main checkout's own stack; the shared
   `inventory-app-dev` image (the dev override gives it one fixed name, so the
   main checkout uses it too) and every other image without a worktree project's
   label and tag (`postgres`, `traefik`, `tailscale`, the Playwright image); the
-  build cache; anything of another repository. Something that merely mentions a
-  slug but cannot be attributed is printed as "kept".
+  build cache; and anything whose name merely mentions a slug without being a
+  Compose project the wave can claim — that is printed as "kept". Note this is
+  a weaker promise than "anything of another repository": what protects another
+  checkout's resources is a *container* tying them to a directory, so a
+  container-less project sharing the `<repo>-<slug>` name is not protected, as
+  the bullet above says.
 - **The worktrees themselves and their branches stay.** Only Docker state goes,
   and a package worktree recreates what it needs the next time someone runs
   `docker compose` in it.
 - **It refuses rather than guesses.** A real run with `-Wave` checks with `gh`
   that the wave issue is closed and refuses otherwise, including when `gh`
   cannot say; a run that cannot list or inspect Docker stops before removing
-  anything. `-Slug` without `-Wave` cannot know whether the sessions are done and
-  needs `-Force`. `-DryRun` never removes anything and says whether a real run
-  would be allowed.
+  anything — a *failed* listing is never read as "nothing to do". `-Slug`
+  without `-Wave` cannot know whether the sessions are done and needs `-Force`.
+  A `-Slug` given *alongside* `-Wave` that belongs to no package of that wave
+  needs `-Force` too: the wave issue vouches for its own packages and for
+  nothing else, so `-Wave 3 -Slug w5-barcode` would otherwise let wave 3's
+  closed issue authorize removing wave 5's live stack. `-DryRun` never removes
+  anything and says whether a real run would be allowed.
+- **`-Force` switches off that whole layer**, not just the part about `-Slug`:
+  with `-Force` the wave issue is not read at all, even when `-Wave` is given,
+  and the cross-wave check on `-Slug` is skipped as well. Ownership by label is
+  *not* affected — `-Force` never widens what counts as the wave's. Use it only
+  for worktrees you know are finished, and look with `-DryRun` first.
 - **A failure only logs.** Cleanup is housekeeping: the orchestrator runs it as a
   background job with a 15-minute limit and writes its output into its own log
   (lines starting `WARNING:` as warnings). If it fails, is refused or times out,
@@ -156,19 +184,32 @@ another checkout or repository.
 **When a change to this takes effect.** The orchestrator reads its own script
 and the wave file once, when it starts (the cleanup script is read afresh at
 every call). A run that was already going keeps the behavior it started with: a
-wave that finished under it is not cleaned, and the consolidation prompt it
-builds for the current wave does not carry the note. The new files reach the
-main checkout only when a consolidation merges `main` into the integration
-branch, so for a run that is already inside wave 3, the first opportunity is
-after wave 3's consolidation. Then restart the orchestrator (it is restart-safe):
-it finds wave 3 complete, cleans it, and applies the cleanup to waves 4 to 6.
-Starting with `-StartWave n` skips the waves before `n` without cleaning them, so
-after `-StartWave 4` clean wave 3 by hand with `-Wave 3`.
+wave that finishes under it is not cleaned, and the consolidation prompt it
+builds for the wave it is already inside does not carry the note. The new files
+reach the main checkout only when a consolidation merges `main` into the
+integration branch, so the first opportunity is after the consolidation of the
+wave that is running when the change lands. Restarting the orchestrator then is
+safe and is what picks the change up: it finds the finished waves complete,
+cleans the ones that carry `"dockerCleanup": true`, and applies the cleanup to
+the waves still to come. `-StartWave n` skips the waves before `n` *without*
+cleaning them — clean those by hand with `-Wave`.
 
-The script has a test that runs it against real Docker in a scratch environment
-with an invented repository name and touches nothing of this repository:
-`powershell -NoProfile -File scripts\tests\wellen-docker-cleanup.test.ps1`
-(about a minute; needs Docker and the busybox image).
+Both layers have a test, each running against real Docker in a scratch
+environment with an invented repository name, touching nothing of this
+repository. Both need Docker and the busybox image:
+
+```powershell
+powershell -NoProfile -File scripts\tests\wellen-docker-cleanup.test.ps1   # ~2 min
+powershell -NoProfile -File scripts\tests\wellen-orchestrator.test.ps1     # ~1 min
+```
+
+The first covers the cleanup script's ownership rules and every guard, driving
+`docker` and `gh` through PATH shims for the cases a real daemon cannot be asked
+for (a listing that fails after `docker info` succeeded; a wave issue that reads
+CLOSED). The second covers the orchestrator's own Docker-facing functions —
+`Get-SanitizedProjectName`/`Set-WorktreeEnvOverrides`, `Stop-PackageStack`, the
+`"dockerCleanup"` validation, and the `Invoke-WaveDockerCleanup` job wrapper
+against a stub cleanup script that returns, refuses or hangs on demand.
 
 ## GitHub prerequisites a wave needs
 

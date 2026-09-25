@@ -60,7 +60,9 @@
     (from its .env, which Compose auto-loads regardless of -f) overrides a
     file's `name:` - confirmed live - so what that stack is actually named,
     and whether it is safe to blindly tear down at all, is genuinely unclear
-    and is #140's question (item 2), not answered here.
+    and is #190's question, not answered here. (#190 was split out of #140
+    item 2, which is closed: #140 gave the wave cleanup a veto that makes it
+    safe whatever the project is called, but did not settle the naming.)
 
     Per wave, for a wave with "dockerCleanup": true, the script also runs
     wellen-docker-cleanup.ps1 once the wave's consolidation is done (its wave
@@ -139,8 +141,12 @@ param(
     [string]$WaveFile = '',
 
     # Wave number the script starts orchestrating from. Waves before it are
-    # skipped (assumed complete). 0 = all waves in the file; already-closed
-    # wave issues are recognized and skipped regardless.
+    # skipped entirely, Docker cleanup included - clean those by hand.
+    # 0 = all waves in the file. A wave whose issue is already closed has its
+    # packages and its consolidation skipped, but is still Docker-cleaned when
+    # it carries "dockerCleanup": true, since that is idempotent and the wave
+    # may have finished under an orchestrator that did not clean (.DOCKER
+    # CLEANUP).
     [int]$StartWave = 0,
 
     # How often (seconds) GitHub state is polled. 120s is plenty for a
@@ -797,8 +803,8 @@ function Invoke-Wave {
 # not control: docker-compose.e2e.yml pins `name: inventory-e2e`, but a
 # worktree's own COMPOSE_PROJECT_NAME overrides a file's `name:` - confirmed
 # live - so whether an E2E run from inside this worktree ends up isolated or
-# shares this project is genuinely unclear. Real isolation for it is #140's
-# job (item 2), not answered here. Best-effort and non-fatal: a package that
+# shares this project is genuinely unclear. Real isolation for it is #190's
+# job, not answered here. Best-effort and non-fatal: a package that
 # never brought anything up simply has nothing to remove.
 function Stop-PackageStack {
     param([string]$WorktreePath, [string]$Slug)
