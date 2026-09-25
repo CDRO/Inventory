@@ -275,7 +275,10 @@ For a browser without `BarcodeDetector` support, manual entry above is
 always available — but typing a 13-digit EAN correctly on a phone
 keyboard is exactly the friction this whole spec exists to remove. A
 second fallback closes that gap: photograph the barcode, let the server
-decode it.
+decode it. *(Amended by [`36-photo-source-picker.md`](36-photo-source-picker.md):
+the sheet's photo input is that spec's picker in single-photo mode — a
+"Photos" and a "Camera" control — so a barcode photographed earlier can be
+used too. Everything below about what happens to the photo is unchanged.)*
 
 `POST /api/storages/{storage_id}/barcodes/decode` — multipart upload of
 one image. The server decodes it with a pure-Go barcode-reading library

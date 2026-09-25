@@ -226,10 +226,16 @@ main element. The first such page is the inventory table,
   escape hatch for whatever the version-bump cleanup above does not
   anticipate — a real in-app recovery path rather than an instruction to open
   DevTools.
-- Camera capture uses
-  `<input type="file" accept="image/*" capture="environment">` so mobile
-  browsers open the rear camera directly while still allowing a gallery
-  pick.
+- Photo capture offers **two explicit controls**, one for the photo
+  library and one for the camera — see
+  [`36-photo-source-picker.md`](36-photo-source-picker.md). *(Amended: this
+  bullet used to prescribe a single
+  `<input type="file" accept="image/*" capture="environment">` on the
+  claim that it "still allows a gallery pick". On iOS Safari and Android
+  Chrome it does not — `capture` forces the camera and drops `multiple` —
+  so a photo already on the phone could not be uploaded at all.)* An
+  in-page viewfinder that avoids leaving the page for the OS camera is
+  [`37-in-page-camera.md`](37-in-page-camera.md); it falls back to `36`.
 
 ## Testing
 
