@@ -282,3 +282,56 @@ func countRowsIn(t *testing.T, ctx context.Context, dsn, sql string, args ...any
 	require.NoError(t, pool.QueryRow(ctx, sql, args...).Scan(&n))
 	return n
 }
+
+// isolatedStore gives a test its own fully migrated throwaway database and a
+// Store opened against it, plus a raw pool for setting up fixtures.
+//
+// Unlike testStore/testPool, nothing else ever connects here — no other test
+// in this package, and no other package running concurrently under `go test
+// ./...` on the same Postgres server. That matters for deltaWatermark
+// (internal/store/delta.go): it reads `min(xact_start) ... WHERE datname =
+// current_database()`, so any transaction left open anywhere in the shared
+// package database can drag a delta test's watermark backward. See #136.
+func isolatedStore(t *testing.T, ctx context.Context) (*store.Store, *pgxpool.Pool) {
+	t.Helper()
+
+	adminDSN := requireAdminDSN(t)
+	dbName := "inventory_test_iso_" + randomSuffix()
+
+	cleanup, dsn, err := createTestDatabase(adminDSN, dbName)
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+
+	require.NoError(t, migrateTestDatabase(dsn))
+
+	s, err := store.Open(ctx, dsn)
+	require.NoError(t, err)
+	t.Cleanup(s.Close)
+
+	pool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	return s, pool
+}
+
+// newStorageIn is newStorage against a database other than the package one.
+func newStorageIn(t *testing.T, ctx context.Context, pool *pgxpool.Pool) uuid.UUID {
+	t.Helper()
+
+	id, err := uuid.NewV7()
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx, `INSERT INTO storages (id, name) VALUES ($1, $2)`, id, "test-"+id.String()[:8])
+	require.NoError(t, err)
+	return id
+}
+
+// timeNowIn is timeNow against a database other than the package one.
+func timeNowIn(t *testing.T, ctx context.Context, pool *pgxpool.Pool) time.Time {
+	t.Helper()
+
+	var now time.Time
+	require.NoError(t, pool.QueryRow(ctx, `SELECT now()`).Scan(&now))
+	return now
+}
