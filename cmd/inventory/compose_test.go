@@ -149,6 +149,85 @@ func TestNASVariantGivesBackupTheBindMountedUploads(t *testing.T) {
 		"a restore on the NAS must write into the same bind mount")
 }
 
+// TestE2EBackupServiceMatchesTheProductionOne guards a copy.
+//
+// The restore round trip (.github/workflows/e2e.yml, issue #133) needs a
+// `backup` service in the E2E stack, and docker-compose.e2e.yml carries its
+// own rather than reusing the base file's, because that stack has no .env to
+// read credentials from. Two declarations of one service is a thing that
+// drifts, and the drift would be invisible: the round trip would keep passing
+// against whatever the E2E copy had become, while the service it is meant to
+// stand in for went on being something else.
+//
+// The mount list is the part worth pinning, for the reason
+// TestBackupServiceMountsOnlyWhatMayTravel gives above — "nothing from
+// imagecache, no .env" holds because those bytes are unreachable from inside
+// the container, not because the script declines to read them.
+func TestE2EBackupServiceMatchesTheProductionOne(t *testing.T) {
+	t.Parallel()
+
+	block := composeService(t, "docker-compose.e2e.yml", "backup")
+
+	assert.Contains(t, block, "image: postgres:16-alpine",
+		"the same image as db, so pg_dump and BusyBox tar arrive with it")
+	assert.Contains(t, block, `entrypoint: ["/bin/sh", "/usr/local/bin/inventory-backup"]`,
+		"the same entrypoint as the base file's copy, so the round trip exercises the real script")
+	assert.Contains(t, block, `profiles: ["tools"]`,
+		"a backup runs when it is invoked, never as part of `up`")
+
+	assert.Contains(t, block, "- uploads:/data/uploads:ro",
+		"the uploads tree is what a backup reads, and it reads it read-only")
+	assert.Contains(t, block, "- uploads:/restore/uploads",
+		"a restore needs one writable path into the same volume")
+	assert.Contains(t, block, "- ./backups:/backups",
+		"archives land in ./backups, which survives the round trip's `down -v` because it is a bind mount")
+	assert.Contains(t, block, "- ./scripts/backup:/usr/local/bin/inventory-backup:ro",
+		"the round trip must run the repository's real script, not a copy of it")
+
+	// The one intended difference from the base file's copy: no .env exists in
+	// the E2E stack, so the credentials are inline — and they have to be the
+	// ones `db` is started with, or the backup cannot authenticate at all.
+	assert.Contains(t, block, "POSTGRES_USER: e2e",
+		"the E2E stack has no .env, so the credentials are inline and must match db's")
+	assert.Contains(t, block, "POSTGRES_DB: e2e",
+		"the E2E stack has no .env, so the database name is inline and must match db's")
+	assert.NotContains(t, block, "env_file",
+		"there is no .env in the E2E stack to read; an env_file here would only ever be a missing file")
+
+	// The same negative half as the production service, and it fails just as
+	// silently here.
+	assert.NotContains(t, block, "imagecache",
+		"the suggestion cache is re-fetchable by definition and must not be reachable from the backup container")
+	assert.NotContains(t, block, "/data/cache",
+		"the suggestion cache must not be reachable under its container path either")
+	assert.NotContains(t, block, "- .:/work",
+		"mounting the project directory would put .env next to the archive source")
+	assert.NotContains(t, block, "/var/run/docker.sock",
+		"a backup container has no business holding the Docker socket")
+	assert.NotContains(t, block, "depends_on",
+		"`run` starts a service's dependencies, and the restore has to be able to report an unreachable database")
+}
+
+// TestE2EAppMountsTheUploadsTheRoundTripDestroys is the other half of that
+// arrangement.
+//
+// The round trip's whole claim is that a `down -v` destroys the data and the
+// archive brings it back. An uploads tree living in the app container's own
+// writable layer would be recreated empty by the restart either way, so the
+// round trip would "prove" the images came back without the archive having
+// contributed anything. Only a named volume can actually be destroyed and
+// actually be repopulated.
+func TestE2EAppMountsTheUploadsTheRoundTripDestroys(t *testing.T) {
+	t.Parallel()
+
+	block := composeService(t, "docker-compose.e2e.yml", "app")
+
+	assert.Contains(t, block, "- uploads:/data/uploads",
+		"the uploads tree must be a named volume, or `down -v` destroys nothing and the restore proves nothing")
+	assert.NotContains(t, block, "imagecache",
+		"imagecache is not in a backup archive, so the E2E stack has no reason to hold one")
+}
+
 // TestBackupArchivesAreNotCommittable — an archive holds the whole database
 // and every photo in it. The service writes them into the clone, so the only
 // thing standing between a backup and the repository is this line.

@@ -243,6 +243,19 @@ Notes on the steps, in the order you will wonder about them:
   a restore cannot destroy images belonging to an instance you are still
   salvaging.
 
+This procedure is not only written down. The `restore-round-trip` job in
+[`.github/workflows/e2e.yml`](.github/workflows/e2e.yml) executes it on every
+push to `main`: it seeds a stack, takes a backup, destroys the stack
+*including its volumes*, restores the archive into a database it first proves
+is empty, and then compares per-table row counts and the field values of named
+rows in more than one storage against what was there beforehand — plus a file
+in the uploads tree, since the archive is the database *and* the images. A
+restore that came back lossy therefore fails the deployment gate instead of
+being discovered during a real recovery. That is worth the runtime because
+restoring this backup is the *only* rollback an upgrade has: migrations are
+forward-only and there is no `migrate down` in production
+([`docs/specs/18-operations-and-observability.md`](docs/specs/18-operations-and-observability.md)).
+
 ### Exporting one storage
 
 Separately from all of the above, any member of a storage can download that

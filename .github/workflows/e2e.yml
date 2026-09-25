@@ -37,6 +37,24 @@
 # through `docker compose`. The Playwright browser runtime lives only in the
 # `e2e` service's pulled image, exactly as docker-compose.e2e.yml documents —
 # nothing is installed on the runner directly.
+#
+# Two jobs, and the second one is the odd one out. `restore-round-trip`
+# (issue #133) executes the disaster-recovery path of
+# docs/specs/15-backup-restore-and-export.md end to end: back up, destroy the
+# stack *including its volumes*, restore, and prove the data came back. It
+# belongs in this workflow rather than on a PR for the same reason the suite
+# does — it is slow, it needs a live stack, and it is the deployment gate, not
+# a merge gate — and it matters here rather than somewhere cheaper because
+# docs/specs/18-operations-and-observability.md names restoring the
+# pre-upgrade backup as the *only* rollback: migrations are forward-only, and
+# there is no `migrate down` in production.
+#
+# It is a separate job rather than more steps on the one above, and that is
+# load bearing: each GitHub job gets its own runner, so its `down -v` cannot
+# reach the suite's stack. Both jobs use docker-compose.e2e.yml, which pins a
+# single Compose project name for the whole machine — so locally the two must
+# never run at the same time, and neither may run beside another worktree's
+# E2E stack. On CI the separate runners make that automatic.
 name: e2e
 
 on:
@@ -108,6 +126,227 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: playwright-report
+          path: e2e/test-results
+          retention-days: 7
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.e2e.yml down -v
+
+  # The backup/restore round trip (docs/specs/15-backup-restore-and-export.md,
+  # issue #133): the first time that spec's restore procedure — and therefore
+  # spec 18's only rollback — is executed end to end rather than read.
+  #
+  # The sequence mirrors the documented one: take a backup from a live stack,
+  # destroy everything including the volumes, bring the database back empty,
+  # restore the archive, migrate, start, and only then assert. The archive
+  # survives the teardown because ./backups is a bind mount on the runner, not
+  # a volume — which is exactly how it survives a dead NAS disk.
+  #
+  # What it deliberately does NOT assert is anything about `imagecache` or
+  # `.env`: spec 15 excludes both from the archive on purpose, so a round trip
+  # that expected either back would be testing a contract that was never made.
+  restore-round-trip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Created ahead of the first `docker compose run` that mounts them, so
+      # they belong to the runner's own user rather than to root: Docker
+      # creates a missing bind-mount source directory itself, as root, and the
+      # steps below both read from and write into these two.
+      - name: Make the archive and report directories
+        run: mkdir -p backups e2e/test-results
+
+      - name: Build the images
+        run: docker compose -f docker-compose.e2e.yml build
+
+      - name: Apply migrations
+        run: docker compose -f docker-compose.e2e.yml run --rm app migrate up
+
+      - name: Bring up the stack
+        run: docker compose -f docker-compose.e2e.yml up -d
+
+      # The same readiness proof the suite's job uses, and for the same
+      # reason: `up -d` returns when containers started, not when the app can
+      # serve. Here it doubles as the "before" half of the health assertion —
+      # the stack that gets backed up is a stack that was demonstrably working.
+      - name: Wait for the app to answer through Traefik
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -sk -o /dev/null -w '%{http_code}' https://localhost:8443/healthz || true)
+            [ "$code" = "200" ] && exit 0
+            sleep 2
+          done
+          echo "app never answered a 200 from /healthz" >&2
+          docker compose -f docker-compose.e2e.yml logs app
+          exit 1
+
+      # ON_ERROR_STOP because a half-applied fixture would make the snapshot
+      # below a snapshot of the wrong thing — and it would still round-trip
+      # perfectly, which is the one way this job could pass while proving
+      # nothing.
+      - name: Seed fixtures
+        run: |
+          docker compose -f docker-compose.e2e.yml exec -T db \
+            psql -U e2e -d e2e -v ON_ERROR_STOP=1 -f /fixtures/seed.sql
+          docker compose -f docker-compose.e2e.yml exec -T db \
+            psql -U e2e -d e2e -v ON_ERROR_STOP=1 -f /fixtures/restore-roundtrip.sql
+
+      # An archive is db.sql *plus* the uploads tree, and a round trip that
+      # checks only the database leaves half the contract untested — the half
+      # holding the photos of the household's own shelves, which is the
+      # irreplaceable half. One file is enough to tell "the tree came back"
+      # from "the tree came back empty". It is written through the `backup`
+      # service's writable /restore/uploads mount and read back afterwards
+      # through its read-only /data/uploads one, so the assertion looks at the
+      # tree from the side a backup actually reads.
+      - name: Put a known file in the uploads tree
+        run: |
+          docker compose -f docker-compose.e2e.yml run --rm -T --entrypoint sh backup -c \
+            'mkdir -p /restore/uploads/products && printf "restore round trip probe\n" > /restore/uploads/products/restore-probe.txt'
+
+      # e2e/restore/snapshot.sql explains what it emits and why. `diff` and
+      # `grep` here are in the same class as the `curl` and `seq` this file
+      # already uses — shell utilities on the runner, not a language toolchain
+      # anything is built or tested with (docs/specs/01-architecture-and-
+      # deployment.md). Every command that touches the application or its
+      # database still goes through `docker compose`.
+      - name: Snapshot the instance that is about to be destroyed
+        run: |
+          docker compose -f docker-compose.e2e.yml exec -T db \
+            psql -U e2e -d e2e -tAX -v ON_ERROR_STOP=1 \
+            < e2e/restore/snapshot.sql > e2e/test-results/before.txt
+          cat e2e/test-results/before.txt
+          if grep -q '<MISSING>' e2e/test-results/before.txt; then
+            echo "a spot check named a row that does not exist before the backup;" >&2
+            echo "fix the id in e2e/restore/snapshot.sql — comparing two absences proves nothing" >&2
+            exit 1
+          fi
+
+      - name: Take the backup
+        run: docker compose -f docker-compose.e2e.yml run --rm backup
+
+      # Globbed rather than parsed out of the backup's own output: the script
+      # names the archive after a UTC timestamp it picks itself. A partial
+      # archive cannot be picked up by mistake — it is written under a
+      # dot-prefixed .part name until tar has succeeded, and this glob does not
+      # match it.
+      - name: Find the archive
+        run: |
+          set -- backups/inventory-backup-*.tar.gz
+          if [ "$#" != "1" ] || [ ! -f "$1" ]; then
+            echo "expected exactly one archive in ./backups, found $#" >&2
+            ls -la backups >&2
+            exit 1
+          fi
+          echo "ARCHIVE=$(basename "$1")" >> "$GITHUB_ENV"
+
+      # The real disaster, not a simulation of one: `down -v` removes the
+      # database's data directory and the uploads volume with it. Everything
+      # that is not in ./backups on the runner is gone after this step.
+      #
+      # The volume name is read off the running container rather than written
+      # out as `inventory-e2e_uploads`, because the project name is not always
+      # the one docker-compose.e2e.yml sets: COMPOSE_PROJECT_NAME takes
+      # precedence over the file's `name:`, and an agent worktree's .env sets
+      # it. Checking a name nothing uses would be a check that always passes.
+      - name: Destroy the stack, volumes and all
+        run: |
+          uploads=$(docker inspect \
+            -f '{{range .Mounts}}{{if eq .Destination "/data/uploads"}}{{.Name}}{{end}}{{end}}' \
+            "$(docker compose -f docker-compose.e2e.yml ps -q app)")
+          if [ -z "$uploads" ]; then
+            echo "no uploads volume is mounted behind the app container" >&2
+            exit 1
+          fi
+          docker compose -f docker-compose.e2e.yml down -v
+          if docker volume inspect "$uploads" >/dev/null 2>&1; then
+            echo "$uploads survived down -v; the restore below would prove nothing" >&2
+            exit 1
+          fi
+
+      - name: Bring the database back up, on its own
+        run: docker compose -f docker-compose.e2e.yml up -d db
+
+      # The restore refuses to run against a database it cannot reach, and a
+      # freshly destroyed volume means initdb has to run before this one
+      # answers — the slowest case there is. `backup` deliberately has no
+      # depends_on, so nothing else waits for it either.
+      - name: Wait for the empty database to accept connections
+        run: |
+          for i in $(seq 1 30); do
+            docker compose -f docker-compose.e2e.yml exec -T db \
+              pg_isready -U e2e -d e2e >/dev/null 2>&1 && exit 0
+            sleep 2
+          done
+          echo "the database never came back after down -v" >&2
+          docker compose -f docker-compose.e2e.yml logs db
+          exit 1
+
+      # Without this the whole job could pass on a stack that was never
+      # actually emptied. `to_regclass` answering NULL is the schema itself
+      # being absent, not merely the rows.
+      - name: Prove the database really is empty
+        run: |
+          empty=$(docker compose -f docker-compose.e2e.yml exec -T db \
+            psql -U e2e -d e2e -tAX -c "SELECT to_regclass('public.users') IS NULL" | tr -d '[:space:]')
+          if [ "$empty" != "t" ]; then
+            echo "the users table still exists after down -v: nothing was destroyed" >&2
+            exit 1
+          fi
+
+      - name: Restore from the archive
+        run: docker compose -f docker-compose.e2e.yml run --rm backup restore "/backups/$ARCHIVE"
+
+      # Step 4 of the documented procedure. A no-op when the dump's schema
+      # version matches the binary's, which it does here — it is in the
+      # sequence because leaving it out would test a procedure nobody follows.
+      - name: Apply migrations newer than the backup
+        run: docker compose -f docker-compose.e2e.yml run --rm app migrate up
+
+      - name: Bring the restored stack up
+        run: docker compose -f docker-compose.e2e.yml up -d
+
+      - name: The restored stack answers /healthz
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -sk -o /dev/null -w '%{http_code}' https://localhost:8443/healthz || true)
+            [ "$code" = "200" ] && exit 0
+            sleep 2
+          done
+          echo "the restored app never answered a 200 from /healthz" >&2
+          docker compose -f docker-compose.e2e.yml logs app
+          exit 1
+
+      # The assertion the 200 above cannot make. A stack that serves requests
+      # out of an empty database is a stack that answers /healthz perfectly.
+      - name: The data came back, row for row and field for field
+        run: |
+          docker compose -f docker-compose.e2e.yml exec -T db \
+            psql -U e2e -d e2e -tAX -v ON_ERROR_STOP=1 \
+            < e2e/restore/snapshot.sql > e2e/test-results/after.txt
+          cat e2e/test-results/after.txt
+          diff -u e2e/test-results/before.txt e2e/test-results/after.txt
+
+      - name: The uploads tree came back too
+        run: |
+          probe=$(docker compose -f docker-compose.e2e.yml run --rm -T --entrypoint sh backup -c \
+            'cat /data/uploads/products/restore-probe.txt' | tr -d '\r')
+          if [ "$probe" != "restore round trip probe" ]; then
+            echo "the uploads tree did not survive the round trip; got: $probe" >&2
+            exit 1
+          fi
+
+      # Nobody can reproduce this job on a machine that is running anything
+      # else out of docker-compose.e2e.yml, so a bare "diff failed" with no
+      # files attached costs a whole CI cycle to read.
+      - name: Upload the snapshots on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: restore-round-trip-snapshots
           path: e2e/test-results
           retention-days: 7
 
