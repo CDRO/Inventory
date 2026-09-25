@@ -325,6 +325,38 @@ func UpstreamFailed(err error) *Failure {
 }
 
 // Internal is an unexpected failure. The cause is logged, never serialized.
+//
+// # Why this is the one failure with no Reason
+//
+// Every other helper here that refuses a request names the check that refused
+// it, and that name reaches a dev client as debug_reason. Internal() does not,
+// and the omission is deliberate rather than an oversight — it was raised as a
+// finding once (#128) and decided repo-wide here so it need not be re-argued.
+//
+// There is no check to name. Reason is a fixed identifier for a decision this
+// package made on purpose: docs/specs/03-auth-and-multi-tenancy.md enumerates
+// the whole vocabulary — session_missing, session_expired, not_storage_member,
+// storage_not_found, not_admin, admin_area_hidden — and every one of them is an
+// authorization outcome a developer needs spelled out because the response is
+// deliberately opaque. A 500 is the opposite case: nothing decided it. The only
+// text available is whatever the failing layer happened to produce, which
+// across this function's call sites is raw store and database-driver output —
+// table and column names, constraint names, connection strings. Copying that
+// into Reason would put it in the response body in dev and change debug_reason
+// from a closed set of six audited strings into arbitrary text from any layer
+// the request touched.
+//
+// So the cause travels in Err, under the contract on that field, and the place
+// to read it is the error-level log line WriteError always emits for a 5xx
+// (docs/specs/18-operations-and-observability.md) — in dev that is the
+// foreground output of `docker compose up`, which is where a developer
+// debugging a 500 already is. Nothing is lost; it is one pane away.
+//
+// The same reading covers Conflict, ValidationFailed and UpstreamFailed, which
+// carry Err without a Reason for the same reason: Reason names a check, Err is
+// a cause. Reason stays free for a caller that genuinely has a check to name —
+// it is always safe to set, and the gate in WriteError is what decides whether
+// it is disclosed.
 func Internal(err error) *Failure {
 	return &Failure{
 		Status:  http.StatusInternalServerError,
