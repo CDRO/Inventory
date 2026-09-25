@@ -358,7 +358,9 @@ func TestWizardOverwritesOnConfirmationAndExplainsRecreate(t *testing.T) {
 	transcript, err := runWizard(t, dir, answers...)
 	require.NoError(t, err)
 
-	assert.Contains(t, transcript, "docker compose up -d --force-recreate")
+	assert.Contains(t, transcript, "recreating the app container")
+	assert.Contains(t, transcript, "README.md", "the hint must point somewhere for the actual command, not just decline to name one")
+	assert.NotContains(t, transcript, "docker compose", "the hint must not name a compose invocation: it is wrong on the Synology NAS variant")
 	assert.Equal(t, "gemini-key", readEnv(t, dir)["GEMINI_API_KEY"])
 }
 
@@ -458,9 +460,11 @@ func TestWizardFailsWithoutExample(t *testing.T) {
 }
 
 // TestWizardFirstRunPrintsStartHint covers the other closing message. On a
-// fresh install the next step is `up -d`, not `--force-recreate`; telling a
-// first-time operator to recreate containers that do not exist reads as an
-// error.
+// fresh install the next step is starting the stack, not recreating it;
+// telling a first-time operator to recreate containers that do not exist
+// reads as an error. Neither hint names a compose invocation: a bare
+// "docker compose up -d" is wrong on the Synology NAS variant (it loads the
+// dev override and starts Traefik on DSM's own port 80).
 func TestWizardFirstRunPrintsStartHint(t *testing.T) {
 	t.Parallel()
 
@@ -469,8 +473,10 @@ func TestWizardFirstRunPrintsStartHint(t *testing.T) {
 	transcript, err := runWizard(t, dir, fixtureDefaults("gemini-key")...)
 	require.NoError(t, err)
 
-	assert.Contains(t, transcript, "docker compose up -d")
-	assert.NotContains(t, transcript, "--force-recreate", "nothing is running yet on a first run")
+	assert.Contains(t, transcript, "Start the stack")
+	assert.Contains(t, transcript, "README.md", "the hint must point somewhere for the actual command, not just decline to name one")
+	assert.NotContains(t, transcript, "recreat", "nothing is running yet on a first run")
+	assert.NotContains(t, transcript, "docker compose", "the hint must not name a compose invocation: it is wrong on the Synology NAS variant")
 }
 
 // exampleKeys returns the variables of a .env.example in file order.

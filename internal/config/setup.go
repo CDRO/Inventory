@@ -168,12 +168,15 @@ func (w *Wizard) Run() error {
 	fmt.Fprintf(out, "\n%s written.\n", EnvFile)
 	if existed {
 		// Compose reads .env at file-parse time, so containers already running
-		// hold the previous values until they are recreated.
-		fmt.Fprintln(out, "Apply it with:")
-		fmt.Fprintln(out, "  docker compose up -d --force-recreate")
+		// hold the previous values until they are recreated. Deliberately does
+		// not name a compose invocation here: a bare "docker compose up -d"
+		// loads the dev override and starts Traefik on the operator's Synology
+		// NAS variant, which reserves port 80 for DSM itself
+		// (docs/specs/01-architecture-and-deployment.md, "Synology NAS
+		// variant"). README.md names the right command for every variant.
+		fmt.Fprintln(out, "Apply it by recreating the app container the way you deploy it (see README.md).")
 	} else {
-		fmt.Fprintln(out, "Start the stack with:")
-		fmt.Fprintln(out, "  docker compose up -d")
+		fmt.Fprintln(out, "Start the stack the way you deploy it (see README.md).")
 	}
 	return nil
 }

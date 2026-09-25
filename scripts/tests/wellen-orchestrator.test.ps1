@@ -1,9 +1,10 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Tests for the two Docker-isolation pieces of wellen-orchestrator.ps1:
-    Get-SanitizedProjectName / Set-WorktreeEnvOverrides (#115) and
-    Stop-PackageStack.
+    Tests for the Docker-facing pieces of wellen-orchestrator.ps1:
+    Get-SanitizedProjectName / Set-WorktreeEnvOverrides (#115),
+    Stop-PackageStack, Invoke-WaveDockerCleanup and the wave file's
+    "dockerCleanup" validation (#140 item 9).
 
 .DESCRIPTION
     The script under test is a top-to-bottom orchestrator, not a module - its
@@ -32,9 +33,18 @@
     stack, is a harmless no-op when nothing is running, and never touches a
     different project's container.
 
+    Invoke-WaveDockerCleanup is driven against a STUB cleanup script rather
+    than the real one: what is under test here is the job wrapper - that a
+    wave without "dockerCleanup" is not cleaned at all, that the cleanup's
+    own output reaches the log at the right level, that a refusal is logged
+    and swallowed instead of ending the run, and that a hanging call is
+    stopped at the time limit and returns promptly. The real script's own
+    behaviour is wellen-docker-cleanup.test.ps1's job. Docker is never
+    touched by this part.
+
     Run:  powershell -NoProfile -File scripts\tests\wellen-orchestrator.test.ps1
-    Needs Docker (the busybox image is pulled on first use). Takes well under
-    a minute.
+    Needs Docker (the busybox image is pulled on first use). Takes about a
+    minute.
 #>
 [CmdletBinding()]
 param()
@@ -256,6 +266,160 @@ try {
         if ($nets.Count -gt 0) { Dk network rm @nets }
     }
     Remove-Item -Recurse -Force -Path $root -ErrorAction SilentlyContinue
+    Remove-Item -Force -Path $script:LogFile -ErrorAction SilentlyContinue
+}
+
+Write-Host "== Import-WavePlan: the dockerCleanup boolean check (#140 item 9) =="
+
+# "dockerCleanup" is the one wave-file field the per-wave Docker cleanup reads,
+# and the one whose wrong spelling would silently switch cleaning off: Get-Field
+# would turn "yes" or "" into the default. -Validate is the planning session's
+# only check, so it has to catch a non-boolean.
+$planDir = Join-Path $env:TEMP "wotest-plan-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Force -Path $planDir | Out-Null
+function New-PlanFile {
+    param([string]$WaveExtra)
+    $path = Join-Path $planDir "plan-$([guid]::NewGuid().ToString('N')).json"
+    Set-Content -Path $path -Encoding ASCII -Value @"
+{
+  "plan":      { "name": "t", "planIssue": 1 },
+  "standards": { "model": "claude-sonnet-5", "effort": "high",
+                 "consolidationModel": "claude-opus-5", "consolidationEffort": "xhigh" },
+  "waves": [
+    { "number": 1, "waveIssue": 2, "integrationBranch": "integration/t-1", $WaveExtra
+      "packages": [ { "specIssue": 3, "slug": "ztx", "branch": "spec/ztx",
+                      "spec": "Spec X", "focus": "f" } ] }
+  ]
+}
+"@
+    return $path
+}
+function Get-PlanError {
+    param([string]$WaveExtra)
+    try { Import-WavePlan -Path (New-PlanFile $WaveExtra) | Out-Null; return $null }
+    catch { return $_.Exception.Message }
+}
+try {
+    Assert ($null -eq (Get-PlanError '"dockerCleanup": true,')) 'a wave with "dockerCleanup": true validates'
+    Assert ($null -eq (Get-PlanError '"dockerCleanup": false,')) 'a wave with "dockerCleanup": false validates'
+    Assert ($null -eq (Get-PlanError '')) 'a wave with no dockerCleanup at all validates (it defaults to false)'
+    foreach ($bad in @('"dockerCleanup": "true",', '"dockerCleanup": "yes",', '"dockerCleanup": 1,')) {
+        $err = Get-PlanError $bad
+        Assert ($err -match 'dockerCleanup: must be true or false') "a non-boolean dockerCleanup is rejected ($bad)"
+    }
+    # "" and null are what Get-Field itself turns into the default, so they are
+    # the two a naive check would let through.
+    Assert ((Get-PlanError '"dockerCleanup": "",') -match 'dockerCleanup: must be true or false') 'an EMPTY dockerCleanup is rejected, not silently defaulted'
+} finally {
+    Remove-Item -Recurse -Force -Path $planDir -ErrorAction SilentlyContinue
+}
+
+Write-Host "== Invoke-WaveDockerCleanup (#140 item 9) =="
+
+# The job wrapper, not the cleanup: $DockerCleanupScript is pointed at a stub
+# that returns, refuses or hangs on demand. Nothing here touches Docker.
+$jobDir = Join-Path $env:TEMP "wotest-job-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Force -Path $jobDir | Out-Null
+$stubHeader = @'
+[CmdletBinding()]
+param([int]$Wave = 0, [string]$WaveFile = '', [string]$RepoRoot = '', [string]$GhRepo = '')
+'@
+function New-Stub {
+    param([string]$Name, [string]$Body)
+    $path = Join-Path $jobDir "$Name.ps1"
+    Set-Content -Path $path -Encoding ASCII -Value ($stubHeader + "`n" + $Body)
+    return $path
+}
+function Get-LogText {
+    if (Test-Path -LiteralPath $script:LogFile) { return (Get-Content -Raw -LiteralPath $script:LogFile) }
+    return ''
+}
+function Reset-Log { Set-Content -Path $script:LogFile -Value '' -Encoding ASCII }
+function New-TestWave {
+    param([bool]$DockerCleanup = $true, [string[]]$Slugs = @('ztx'))
+    $wave = [pscustomobject]@{
+        number   = 7
+        packages = @($Slugs | ForEach-Object { [pscustomobject]@{ slug = $_ } })
+    }
+    if ($DockerCleanup) { $wave | Add-Member -NotePropertyName 'dockerCleanup' -NotePropertyValue $true }
+    return $wave
+}
+
+$savedTimeout = $DockerCleanupTimeoutSeconds
+try {
+    # A wave that did not ask for it must not be cleaned at all - the whole
+    # reason followups wave 1 can carry "dockerCleanup": false.
+    $script:DockerCleanupScript = New-Stub 'never' 'Write-Output "the stub ran"'
+    Reset-Log
+    Invoke-WaveDockerCleanup -Wave (New-TestWave -DockerCleanup $false)
+    Assert ((Get-LogText) -notmatch 'the stub ran') 'a wave WITHOUT "dockerCleanup" does not run the cleanup script at all'
+    Assert ([string]::IsNullOrWhiteSpace((Get-LogText))) 'and logs nothing about it'
+
+    Reset-Log
+    Invoke-WaveDockerCleanup -Wave (New-TestWave -DockerCleanup $true -Slugs @())
+    Assert ((Get-LogText) -notmatch 'the stub ran') 'a wave with no packages does not run the cleanup script either'
+
+    # -DryRun must name the command instead of running it.
+    $script:DryRun = $true
+    Reset-Log
+    try { Invoke-WaveDockerCleanup -Wave (New-TestWave) } finally { $script:DryRun = $false }
+    Assert ((Get-LogText) -match '\[DryRun\] would remove the Docker resources of wave 7') '-DryRun logs what it would do'
+    Assert ((Get-LogText) -notmatch 'the stub ran') 'and does not run the cleanup script'
+
+    # Success: the cleanup's own output has to reach the orchestrator's log, and
+    # its WARNING lines have to arrive as WARN - that convention is the only way
+    # a failed removal is visible in a multi-day run's log.
+    $script:DockerCleanupScript = New-Stub 'ok' @'
+Write-Output "Wave cleanup for 'stub': ztx"
+Write-Output "WARNING: could not remove volume 'stub-vol' (still in use?) - left in place."
+Write-Output "Done: 1 container(s), 0 network(s), 1 volume(s), 0 image tag(s) processed; 1 could not be removed."
+'@
+    Reset-Log
+    $threw = $false
+    try { Invoke-WaveDockerCleanup -Wave (New-TestWave) } catch { $threw = $true }
+    $log = Get-LogText
+    Assert (-not $threw) 'a successful cleanup does not throw'
+    Assert ($log -match "Removing the Docker resources of wave 7's package worktrees \(ztx\)") 'it announces what it is cleaning'
+    # \r?$, not $: the log is written with CRLF endings, and in PowerShell's
+    # multiline mode $ matches before the \n with the \r still unconsumed.
+    Assert ($log -match "(?m)^\[[^\]]+\] \[INFO\]\s+Wave cleanup for 'stub': ztx\r?$") "the stub's own output is logged at INFO"
+    Assert ($log -match "(?m)^\[[^\]]+\] \[WARN\]\s+WARNING: could not remove volume 'stub-vol'") 'a WARNING line from the cleanup is logged at WARN'
+    Assert ($log -match '1 could not be removed') 'and the summary line comes through'
+
+    # A refusal (the guard doing its job) must be logged and swallowed: the next
+    # wave must not wait on housekeeping.
+    $script:DockerCleanupScript = New-Stub 'refuses' 'throw "Refusing to remove anything: the wave is not known to be finished."'
+    Reset-Log
+    $threw = $false
+    try { Invoke-WaveDockerCleanup -Wave (New-TestWave) } catch { $threw = $true }
+    $log = Get-LogText
+    Assert (-not $threw) 'a refused cleanup does not throw out of the wrapper'
+    Assert ($log -match "(?m)^\[[^\]]+\] \[WARN\].*did not run: Refusing to remove anything") 'the refusal is logged at WARN, with the reason'
+    Assert ($log -match 'continuing') 'and says the run continues'
+    Assert ($log -match 'by hand once it is safe') 'and names the command to run by hand'
+
+    # A hang: a native child process that will not come back on its own, which
+    # is the shape a wedged `docker` call has. The wrapper has to stop it at the
+    # limit AND return promptly - a 15-minute default that did not actually
+    # interrupt the job would stall the whole plan.
+    $script:DockerCleanupScript = New-Stub 'hangs' '& cmd /c "ping -n 200 127.0.0.1" | Out-Null'
+    $script:DockerCleanupTimeoutSeconds = 2
+    Reset-Log
+    $threw = $false
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    try { Invoke-WaveDockerCleanup -Wave (New-TestWave) } catch { $threw = $true }
+    $watch.Stop()
+    $log = Get-LogText
+    Assert (-not $threw) 'a hanging cleanup does not throw'
+    Assert ($log -match 'did not finish within 2 s and was stopped - continuing') 'the hang is stopped at the time limit and logged'
+    Assert ($log -match '-DryRun by hand') 'and names the command to look with by hand'
+    # The stub would have run for ~200 s; anything near that means Stop-Job did
+    # not interrupt it. The bound is generous because Start-Job spins up a whole
+    # PowerShell process first.
+    Assert ($watch.Elapsed.TotalSeconds -lt 45) "Stop-Job returns promptly on a hanging call ($([int]$watch.Elapsed.TotalSeconds) s, stub would have taken ~200 s)"
+} finally {
+    $script:DockerCleanupTimeoutSeconds = $savedTimeout
+    Remove-Item -Recurse -Force -Path $jobDir -ErrorAction SilentlyContinue
     Remove-Item -Force -Path $script:LogFile -ErrorAction SilentlyContinue
 }
 

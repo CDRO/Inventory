@@ -207,18 +207,35 @@ anything left by a package whose session crashed before its issue ever
 closed — `scripts/wellen-docker-cleanup.ps1` removes instead, for the
 worktrees of a finished wave (the orchestrator runs it after the wave's
 consolidation for every wave with `"dockerCleanup": true`; by hand:
-`.\scripts\wellen-docker-cleanup.ps1 -Wave <n> -DryRun`, then without `-DryRun`).
+`.\scripts\wellen-docker-cleanup.ps1 -Wave <n> -WaveFile <plan> -DryRun`, then
+without `-DryRun`). **Always pass `-WaveFile`.** It defaults to `scripts\wellen.json`,
+and this repository has more than one wave plan — `scripts\wellen.json` (the
+completed Extended-core plan, #97) and `scripts\wellen-followups.json` (the
+follow-ups plan, #176) — each with a wave 1 of its own, holding different
+slugs. Omitting it silently resolves `-Wave <n>` against the wrong plan; where
+that plan's wave issue is already closed, the run proceeds and evaluates
+ownership against slugs that belong to another wave entirely.
 A real run refuses unless the wave issue is closed, and stops before removing
-anything if Docker cannot be listed. It decides ownership from Docker's own
+anything if Docker cannot be listed. A `-Slug` passed alongside `-Wave` that
+belongs to no package of that wave is refused as well — that wave's issue says
+nothing about another wave's packages. `-Force` skips this entire layer, the
+wave-issue check included, and is only for worktrees you know are finished; it
+never widens what counts as the wave's. It decides ownership from Docker's own
 labels, not from names: a Compose project belongs to the wave if one of its
 containers has a `com.docker.compose.project.working_dir` inside one of the
 wave's worktrees (which also catches a project a session started under a name of
 its own), or if its name is the orchestrator's `<repo>-<slug>` or that followed by
 a hyphen and more (which catches the network, volumes and images of a project
 whose containers are already gone). A slug never claims a longer sibling
-(`w5-barcode` does not claim `<repo>-w5-barcode-hot-cache`), and a project with a
-container outside the wave's worktrees is not claimed by name. It removes those
-projects' containers, networks, volumes and image tags, and it **never** touches:
+(`w5-barcode` does not claim `<repo>-w5-barcode-hot-cache`), and under *either*
+rule a project with a container outside the wave's worktrees is not claimed at
+all — one container inside a worktree is not enough when another of the same
+project sits elsewhere, which is what keeps a project name pinned in a Compose
+file (`docker-compose.e2e.yml` pins one for every worktree) from being swept. A
+container carrying the project label but no `working_dir` label at all vetoes
+the same way, since nothing places it in a worktree either.
+It removes those projects' containers, networks and volumes, and of their images
+the tags that start with the project's own name, and it **never** touches:
 
 - the main checkout's own stack (any project with a container in the repository
   root, or named after the repository);
@@ -226,8 +243,14 @@ projects' containers, networks, volumes and image tags, and it **never** touches
   which the dev override gives one fixed name that every worktree *and* the main
   checkout share — plus `postgres`, `traefik`, `tailscale`, the Playwright image
   and the build cache;
-- anything of another repository. A resource that merely mentions a slug but
-  cannot be attributed to a worktree is listed as "kept", not removed.
+- a resource whose name merely mentions a slug without being a Compose project
+  the wave can claim: it is listed as "kept", not removed.
+
+A container-less project is the one case the directory rules cannot help with:
+it has no container, so no directory to check, and a project named
+`<repo>-<slug>` that another clone of the same repository left behind is
+indistinguishable from this wave's own and is removed. Point `-RepoRoot` at the
+checkout you mean, and look with `-DryRun` first.
 
 Images are removed by tag and never by id: two projects that built the same
 content share an image id, and removing by id would take the other project's tag
@@ -347,6 +370,11 @@ Setup must run **before** the stack starts, because Docker Compose reads
 written afterwards without being recreated. The system therefore fails
 fast and says so, rather than starting half-configured:
 
+This is the plain-clone sequence. On the operator's own NAS, `docker compose
+up -d` is the wrong command (it loads the dev override and starts Traefik on
+DSM's own port 80) — use `$DC up -d` instead; see "Synology NAS variant"
+below.
+
 ```console
 $ docker compose run --rm setup      # writes ./.env interactively
 $ docker compose up -d
@@ -354,13 +382,18 @@ $ docker compose up -d
 
 **If `docker compose up` is run first (no `.env` yet):** the `app` container
 starts and validates its configuration, then exits non-zero with an actionable
-message naming the variables and the two commands that fix it:
+message naming the variables and the fix:
 
 ```
 No configuration found (DATABASE_URL, SESSION_SECRET, GEMINI_API_KEY are unset).
 Run:  docker compose run --rm setup
-Then: docker compose up -d
+Then start the stack the way you deploy it (see README.md).
 ```
+
+The second line deliberately names no compose invocation: `docker compose up
+-d` is right for a plain clone but wrong on the operator's own NAS (see
+"Synology NAS variant" below), where it loads the dev override and starts
+Traefik on DSM's own port 80.
 
 `restart: unless-stopped` must not turn this into a crash loop: the
 config error is a **fatal, non-retryable** exit, so the container exits
@@ -378,12 +411,11 @@ error that names no remedy.
 
 **If setup is run while the stack is already up**, the new `.env` is not
 picked up by running containers. The `setup` command detects this case as
-"an `.env` already existed / the stack may be running" and ends by
-printing the exact command to apply the change:
+"an `.env` already existed / the stack may be running" and says so, again
+without naming a compose invocation:
 
 ```
-.env written. Apply it with:
-  docker compose up -d --force-recreate
+.env written. Apply it by recreating the app container the way you deploy it (see README.md).
 ```
 
 The application deliberately does **not** restart containers itself. Doing
@@ -590,9 +622,21 @@ services:
       # and the symptom is a confusing "relation does not exist" from a
       # suite that migrates its own throwaway database.
       - ./migrations:/src/migrations
+      # Same reason, for deploy/synology/update_test.go: that test reads the
+      # shell script next to it, so without this mount the suite silently
+      # tests the copy baked into the image and an edit to the script looks
+      # like it passed. CI checks out fresh, so there the two are the same
+      # file either way; this is purely about the local loop.
+      - ./deploy:/src/deploy
     ports:
       - "8000:8000"             # direct access, bypassing Traefik, for debugging
 ```
+
+The block above is an abridged illustration, not a second source of truth:
+`docker-compose.override.yml` is the file that counts, and it carries the full
+reasoning in comments. Reconcile toward the real file, never the other way
+round — every mount here exists to stop a silent staleness, and deleting one
+because this excerpt is shorter reintroduces exactly the failure it prevents.
 
 ## Deployment model
 
@@ -688,10 +732,12 @@ port 8000 published past the ingress) out of the NAS stack. The pin is spelled
 out on every call, and not kept in the environment, on purpose. An earlier design
 selected the layer with `COMPOSE_FILE` in the clone's untracked `.env` and failed
 open: the setup wizard rewrites `.env` from `.env.example`, dropping every line
-that is not in the template, and the command it then prints
-(`docker compose up -d --force-recreate`) has no `-f`, so it would load the dev
-override and start a dev-flavoured stack on fresh named volumes next to the real
-data in `./pgdata`. The project name (`-p inventory`) is fixed for the same
+that is not in the template, so a subsequent bare `docker compose` call — from
+muscle memory, or from the wizard's own closing hint, which deliberately names
+no compose invocation at all (see "Interactive setup" above) precisely because
+one could be wrong here — would silently fall back to the dev override and
+start a dev-flavoured stack on fresh named volumes next to the real data in
+`./pgdata`. The project name (`-p inventory`) is fixed for the same
 reason, and so that container, network and volume names stay the same wherever
 the clone lives.
 
@@ -712,8 +758,9 @@ Consequently, on the NAS:
   any `-f` the dev override is merged as well. The `-f docker-compose.yml`
   commands elsewhere in this document and in the README are for a plain clone,
   not for this NAS.
-- **Do not copy the command the setup wizard prints when it finishes** (`docker
-  compose up -d`); use `$DC up -d`.
+- **The setup wizard's own closing hint deliberately does not name a
+  command** (see "Interactive setup" above) — a literal `docker compose up -d`
+  would be wrong here. Use `$DC up -d`.
 - **Never put a `compose.yml` (or `compose.yaml`) into the clone.** Compose
   prefers those names over `docker-compose.yml` and silently ignores the latter
   (it prints only a warning), so a private copy would replace the repository's
@@ -755,8 +802,12 @@ the stack publishes no host port at all: nothing can clash with DSM's own
   proxying to `http://app:8000`, which `serve.json` already does, would remove
   the coupling; the operator chose the shared namespace to match their other
   stacks.)
-- **The auth key is passed once, on the command line, and never written to a
-  tracked file:** `TS_AUTHKEY=tskey-auth-… $DC up -d`. It
+- **The auth key is passed once, on the command line, kept out of `.env`
+  unlike every other secret here:** `TS_AUTHKEY=tskey-auth-… $DC up -d`. `.env`
+  is rewritten wholesale from `.env.example` on every `setup` run, so a
+  one-off key placed there would either be silently dropped the next time (it
+  is not in the template) or, if added to the template, misread as a value
+  that should persist and get re-prompted forever. On the command line it
   still lands in the shell history and, through interpolation, in the
   container's configuration (`docker inspect`, the Container Manager UI) until
   the container is recreated. Use a one-off key with a short expiry, and revoke
@@ -825,7 +876,8 @@ $ $DC run --rm app migrate up  # also creates the initial admin
 $ TS_AUTHKEY=tskey-auth-… $DC up -d
 ```
 
-The wizard ends by printing `docker compose up -d`; ignore it and use `$DC up -d`.
+The wizard's closing hint deliberately names no command (see "Interactive
+setup" above); use `$DC up -d`.
 `sh deploy/synology/update` runs the build, migrate and start of this sequence for
 you when no app instance is running (mind the `TS_AUTHKEY` note under "Updating").
 
@@ -842,8 +894,22 @@ removes the old one and recreates the sidecar. Its contract:
 - **The old instance is not touched until the new one is healthy.** A failed
   build, migration or start leaves the old app serving; a new instance that fails
   to start, does not become healthy, or is interrupted is removed again, and no
-  stopped instance is left behind. The database stays migrated in every one of
-  those cases.
+  stopped instance is left behind. What the *database* is left as depends on where
+  it stopped, and "stays migrated" is only the last of the three cases: a failed
+  pull or build never reached `migrate up` at all, a failed migration can leave the
+  release half-applied (goose applies the pending migrations one at a time, each in
+  its own transaction, and stops at the one that failed), and everything after that
+  point leaves it fully migrated. Forward-only in all three.
+- **A pending job aborts the update; it is not waited out and then ignored.**
+  Both drain waits abort when jobs are still pending after `DRAIN_TIMEOUT` *or*
+  when the count cannot be read at all — with the database already migrated.
+  `--classic` is the way through, at the price of interrupting what runs.
+- **A run that ends between retiring the old instance and recreating the sidecar**
+  leaves the sidecar holding the retired instance's network namespace, so the
+  tailnet URL is down until it is recreated. The script prints that command from
+  its exit trap, which is also what reports the `--classic` stack left stopped: a
+  signal (the SIGHUP of a dropped SSH session, for an unattended run) reaches no
+  error message of its own.
 - **Both `-f` files on every compose call**, and it refuses to run if the merged
   model — checked after `git pull`, on the files it will use — lists `traefik` or
   lacks `app`, `db` or `ts-inventory` (the NAS layer is not active), or if Compose
@@ -856,7 +922,11 @@ removes the old one and recreates the sidecar. Its contract:
   for a release whose migration the previous release cannot run against. If the
   migration fails, the stack stays stopped, and the script says so.
 - **Nothing to do** is detected by asking Compose whether it would recreate, create
-  or start anything (`up --dry-run`); if not, nothing is touched.
+  or start anything (`up --dry-run`); if not, nothing is touched. Only the status
+  word Compose prints after each container's name is read, so neither a warning that
+  quotes a container name nor a project name or clone path containing "start" can
+  fake a change — and an output that cannot be read that way counts as a change, so
+  the check can never make the script skip a real update.
 
 What it does not give you, and the reasons:
 
@@ -877,7 +947,10 @@ What it does not give you, and the reasons:
   job, which is application work, not deployment (issue #121).
 - **No way back without the backup.** Going back to an earlier release after a
   migration means restoring the backup (`18`); an old binary on a newer schema is a
-  fatal start-up error there.
+  fatal start-up error there, enforced at every start by `migrate.Check`. Whether a
+  release migrated at all is `git diff --stat <commit> HEAD -- migrations/`: when
+  that prints nothing, the code alone can go back, and
+  [`deploy/synology/README.md`](../../deploy/synology/README.md) has the recipe.
 
 Two operational notes. The app container is **no longer named `inventory_app`**: a
 fixed name would forbid the second instance, so Compose names them

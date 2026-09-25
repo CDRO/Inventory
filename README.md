@@ -20,6 +20,11 @@ check with `docker compose version` before deploying.
 
 ## First run
 
+> **On the operator's own Synology NAS, use the two-file command in
+> "Deploying to a plain clone" below instead.** Every command in this
+> section — including the ones the app itself suggests when `.env` is missing
+> or changed — is wrong on that NAS: it starts Traefik on DSM's own port 80.
+
 ```bash
 docker compose run --rm setup                                   # writes ./.env
 docker compose -f docker-compose.yml run --rm app migrate up    # creates the schema
@@ -44,8 +49,10 @@ docker compose up -d --force-recreate
 ```
 
 Starting without a `.env` is not fatal to Compose, but the `app` container
-exits immediately with the variables it needs and the two commands that fix
-it.
+exits immediately, naming the variables it needs and the fix. That message
+does not print a compose invocation for the second step: `docker compose up
+-d` is right here but wrong on the Synology NAS variant (see "Deploying to a
+plain clone" below).
 
 **`migrate up` comes before `up -d`, always.** The server compares the
 database's schema version against the migrations its own binary ships and
@@ -104,22 +111,23 @@ and ES modules served as-is. In dev, `STATIC_DIR` points the server at
   `docker compose run --rm app go test ./...` works. Production is unaffected
   because it pins the base file explicitly with `-f docker-compose.yml`.
 
-### Deploying to the NAS
+### Deploying to a plain clone
 
-```bash
-docker compose -f docker-compose.yml build
-docker compose -f docker-compose.yml up -d
-```
-
-> **The operator's Synology DS923+ is a different setup** — bind-mounted data and
-> a Tailscale sidecar instead of Traefik, as one extra compose file. On it, the
-> commands above are the wrong ones (they start Traefik on DSM's port 80); use
+> **The operator's Synology DS923+ needs different commands, not the ones
+> below.** That NAS uses bind-mounted data and a Tailscale sidecar instead of
+> Traefik, as one extra compose file; the commands just below start Traefik on
+> DSM's own port 80. Use
 > `docker-compose -p inventory -f docker-compose.yml -f docker-compose.nas.yml …`
 > instead (`docker-compose` with the hyphen). `deploy/synology/` has scripts for
 > this — `install-shell` (gives you `$DC` and `dc`) and `update` (a safe rolling
 > update), documented in [`deploy/synology/README.md`](deploy/synology/README.md).
 > See "Synology NAS variant" in
 > [`docs/specs/01-architecture-and-deployment.md`](docs/specs/01-architecture-and-deployment.md).
+
+```bash
+docker compose -f docker-compose.yml build
+docker compose -f docker-compose.yml up -d
+```
 
 Before deploying, run the E2E gate
 (`docker-compose.e2e.yml`, [`docs/specs/05-frontend-pwa-foundations.md`](docs/specs/05-frontend-pwa-foundations.md)):
@@ -135,9 +143,12 @@ whole tailnet without the ingress. A deployment procedure that omits the pin is
 a broken deployment.
 
 Remote access is Tailscale by default, installed as a Synology package outside
-this compose file. A commented-out `cloudflared` service is kept in
-`docker-compose.yml` as the documented alternative; exactly one method should
-be active at a time.
+this compose file (the operator's own NAS runs it as a sidecar container
+instead, in place of Traefik — see the callout above and "Synology NAS
+variant" in
+[`docs/specs/01-architecture-and-deployment.md`](docs/specs/01-architecture-and-deployment.md)).
+A commented-out `cloudflared` service is kept in `docker-compose.yml` as the
+documented alternative; exactly one method should be active at a time.
 
 ### Why `.env` is optional to Compose
 

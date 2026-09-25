@@ -16,10 +16,11 @@
 # error responses, port 8000 past the ingress) from being merged in. A guard
 # that lived in .env would fail open the moment the setup wizard rewrites it.
 #
-# So on the NAS never run a bare `docker-compose up`, and do not copy the
-# command the setup wizard prints at the end: neither has a -f, and both load the
-# dev override. The prefix plus `config --services` must list app, db and
-# ts-inventory and must not list traefik.
+# So on the NAS never run a bare `docker-compose up` — it has no -f and loads
+# the dev override. The setup wizard's own closing hint deliberately names no
+# compose invocation at all, for the same reason. The prefix plus
+# `config --services` must list app, db and ts-inventory and must not list
+# traefik.
 #
 # Deviations from the base stack, all deliberate:
 #
@@ -88,7 +89,12 @@ services:
       # variable, and must not be replaced with a tailnet name.
       TS_SERVE_CONFIG: /config/serve.json
       # Needed only on the very first start; the node identity then persists in
-      # ./ts_inventory_state. Pass it on the command line, not in a tracked file:
+      # ./ts_inventory_state. Deliberately kept out of .env, unlike every other
+      # secret here: .env is rewritten wholesale from .env.example on every
+      # `setup` run, so a one-off key placed there would either be silently
+      # dropped on the next run (it is not in the template) or, if added to the
+      # template, misread as a value that should persist and get re-prompted
+      # forever. Pass it on the command line instead:
       #   TS_AUTHKEY=tskey-auth-... docker-compose -p inventory -f docker-compose.yml -f docker-compose.nas.yml up -d
       # It still lands in the shell history and, through interpolation, in this
       # container's configuration (`docker inspect`) until the container is
@@ -100,14 +106,17 @@ services:
       # The directory, not the single file: Tailscale only notices changes to a
       # bind-mounted serve config when the directory is mounted.
       - ./deploy/synology/tailscale:/config:ro
-      # NET_ADMIN and the tun device are inherited from the operator's other
-      # Tailscale sidecars, not required here: `tailscale serve` runs in the
-      # image's default userspace networking, and TS_USERSPACE=false is not set.
-      # The operator's NAS has the device. On a NAS without it, Docker would
-      # create a directory at this path instead of failing.
+      # The tun device is inherited from the operator's other Tailscale
+      # sidecars, not required here (see the cap_add comment below): the
+      # operator's NAS has the device. On a NAS without it, Docker would
+      # silently create a directory at this path instead of failing loudly.
       - /dev/net/tun:/dev/net/tun
     depends_on:
       - app
     cap_add:
+      # Inherited from the operator's other Tailscale sidecars, not required
+      # here: `tailscale serve` runs in the image's default userspace
+      # networking, and TS_USERSPACE=false is not set, so this and the tun
+      # device above could both be dropped without effect.
       - NET_ADMIN
     restart: unless-stopped

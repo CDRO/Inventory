@@ -20,6 +20,8 @@
 
       * A real run refuses unless the wave is finished: with -Wave, its wave
         issue must be CLOSED (checked with gh; if gh cannot tell, it refuses).
+        That issue vouches for the packages of THAT wave only, so a -Slug
+        given alongside it that belongs to another wave refuses as well.
         With -Slug alone the script cannot tell, so it refuses without -Force.
         -DryRun never removes anything and only reports.
       * Ownership is decided by Docker's own labels, and a slug is never
@@ -35,13 +37,26 @@
         orchestrator assigned, <repo>-<slug>, or that followed by a hyphen
         and more (case-insensitive, "_" and "-" treated alike). That catches
         the networks, volumes and images of a project whose containers are
-        gone. It applies only if (a) the LONGEST <repo>-<slug> that the
-        project's name matches, over every slug in the wave file, is one of
-        the requested slugs - so w5-barcode never claims
-        <repo>-w5-barcode-hot-cache - and (b) none of the project's
-        containers lives in a directory outside the requested worktrees.
-      * Everything carrying com.docker.compose.project=<such a project> is
-        removed: containers, networks, volumes and images.
+        gone. It applies only if the LONGEST <repo>-<slug> that the project's
+        name matches, over every slug in the wave file, is one of the
+        requested slugs - so w5-barcode never claims
+        <repo>-w5-barcode-hot-cache.
+      * Either way, a project with a container in a directory OUTSIDE the
+        requested worktrees is not claimed: one container inside a worktree
+        is not enough when another of the same project lives elsewhere.
+        (docker-compose.e2e.yml pins one project name for every worktree, so
+        a live E2E stack of another worktree could otherwise be swept.) A
+        container carrying the project label but no working_dir label at all
+        vetoes in the same way - it cannot be placed, so it is no evidence of
+        ownership - and is reported as unplaceable rather than as "outside".
+        A container in the repository root is handled by the main-checkout
+        rule below instead.
+      * Containers, networks and volumes carrying
+        com.docker.compose.project=<such a project> are removed. Of its
+        IMAGES only the tags that start with the project's own name are
+        (compose names a built image <project>-<service>, see Test-OwnTag):
+        an image that carries the project label but is tagged something else
+        keeps that tag.
 
     What is never touched:
 
@@ -51,16 +66,26 @@
         <repo>-app-dev image (the dev override gives it one fixed name, so
         every worktree AND the main checkout use it), postgres, traefik,
         tailscale, the Playwright image, and the build cache.
-      * Anything of another repository. Resources whose name merely mentions
-        a slug but cannot be attributed to a worktree are listed as "kept",
-        not removed.
+      * Resources whose name merely mentions a slug, without being a compose
+        project this wave can claim, are listed as "kept", not removed.
+
+    The name rule is a NAME rule, and a compose project name says nothing
+    about which checkout produced it. A CONTAINER-LESS project called
+    <repo>-<slug> that another clone of this same repository left behind is
+    therefore claimed and removed: nothing distinguishes it from the one this
+    wave's own worktree left, since the veto above needs a container to read
+    a directory from and this project has none. Run with -RepoRoot pointing
+    at the clone you mean, and look with -DryRun first.
 
     Images are removed by tag, never by id: two projects that built the same
     content share an image id, and removing by id would take the other
     project's tag with it.
 
     If Docker cannot be listed or inspected the script stops BEFORE removing
-    anything; an empty listing is never read as "nothing to do".
+    anything: a FAILED listing is never read as "nothing to do", because its
+    empty result is indistinguishable from a real one. A listing that
+    succeeds and is empty does mean there is nothing to do, and is treated
+    as such.
 
 .PARAMETER Wave
     Wave number in the wave file; its packages' slugs are used, and its wave
@@ -68,11 +93,14 @@
 
 .PARAMETER Slug
     Package slugs (comma-separated) to clean up, instead of or in addition to
-    -Wave. A real run with -Slug and no -Wave needs -Force.
+    -Wave. A real run with -Slug and no -Wave needs -Force, and so does a
+    slug that belongs to no package of the -Wave it is given with.
 
 .PARAMETER WaveFile
     The wave plan. Default: wellen.json next to this script. It is always
-    read when it exists, to know every slug of the plan.
+    read when it exists, to know every slug of the plan. With -Wave it must
+    exist; with -Slug alone a missing file only warns, since the longest-slug
+    protection then has nothing to compare against.
 
 .PARAMETER RepoRoot
     The main checkout. Default: the parent of this script's folder. Worktrees
@@ -83,7 +111,9 @@
     repository at RepoRoot.
 
 .PARAMETER Force
-    Skip the "wave is finished" check. Only for a wave you know is over.
+    Skip the "wave is finished" check entirely - the wave-issue check that
+    -Wave would otherwise do included, and the cross-wave check on a -Slug
+    given alongside it. Only for worktrees you know are finished.
 
 .PARAMETER DryRun
     Only list what would be removed, and say whether a real run would be
@@ -224,11 +254,27 @@ if (Test-Path -LiteralPath $WaveFile) {
     $plan = Get-Content -Raw -LiteralPath $WaveFile | ConvertFrom-Json
 } elseif ($Wave -gt 0) {
     throw "Wave file not found: $WaveFile"
+} else {
+    # Not fatal - -Slug on a checkout without a plan file is legitimate - but it
+    # silently costs the longest-slug protection, so it is said out loud (#140
+    # item 4). "WARNING" so the orchestrator logs it at WARN; Write-Warning
+    # goes to a stream it does not capture, and Write-Step is not defined yet.
+    Write-Output "WARNING: wave file not found ($WaveFile) - only the slugs given with -Slug are known. A longer sibling slug of the same plan (say 'w5-barcode-hot-cache' next to 'w5-barcode') cannot be recognized, so a container-less project named after it would be claimed by the shorter slug. Pass -WaveFile if this plan has one, and look with -DryRun."
 }
 $waveIssue = 0
+# Slugs that came from -Slug rather than from the wave: the finished-wave guard
+# below can only ever vouch for the slugs of the wave whose issue it reads.
+$givenSlugs = @($slugs)
+$foreignSlugs = @()
 if ($Wave -gt 0) {
     $match = @($plan.waves | Where-Object { $_.number -eq $Wave })
     if ($match.Count -eq 0) { throw "Wave $Wave is not in $WaveFile." }
+    $waveSlugs = @{}
+    foreach ($p in @($match[0].packages)) { if ($p.slug) { $waveSlugs[[string]$p.slug] = $true } }
+    # -Wave 3 -Slug w5-barcode would otherwise let wave 3's closed issue
+    # authorize the removal of wave 5's live stack: the guard below reads wave
+    # 3's issue and nothing else (#140 item 1). Such a slug needs -Force.
+    $foreignSlugs = @($givenSlugs | Where-Object { -not $waveSlugs.ContainsKey($_) })
     $slugs += @($match[0].packages | ForEach-Object { $_.slug })
     $waveIssue = [int]$match[0].waveIssue
 }
@@ -273,7 +319,11 @@ if ($Force) {
     Write-Step "-Force: not checking that the wave is finished."
 } elseif ($Wave -gt 0) {
     $state = Get-IssueState -Number $waveIssue
-    if ($state -eq 'CLOSED') {
+    if ($state -eq 'CLOSED' -and $foreignSlugs.Count -gt 0) {
+        # Wave $Wave being over says nothing about these: their own packages may
+        # still be running (#140 item 1).
+        Write-Step "Wave $Wave is finished, but -Slug names $($foreignSlugs -join ', '), which belong to no package of wave $Wave - its issue says nothing about them. Clean them with their own -Wave, or pass -Force if you know they are finished."
+    } elseif ($state -eq 'CLOSED') {
         $allowed = $true
         Write-Step "Wave $Wave is finished (wave issue #$waveIssue is closed)."
     } elseif ($state) {
@@ -312,9 +362,15 @@ function Get-LabelledProject {
 $owned = @{}
 # project name -> true: never removed (the main checkout's stack)
 $protected = @{}
-# project name -> true: has a container OUTSIDE the requested worktrees, so a
-# similar name is not enough to claim it
+# project name -> true: has a container in a real directory OUTSIDE the
+# requested worktrees, so a similar name is not enough to claim it
 $foreignDir = @{}
+# project name -> true: has a container carrying the project label but NO
+# working_dir label, so it cannot be placed at all. Vetoes exactly like
+# $foreignDir - an unplaceable container is not evidence of ownership - but it
+# is reported differently: "outside the worktrees" would name a directory that
+# does not exist and send a reader looking in the wrong place.
+$unknownDir = @{}
 
 foreach ($c in $containers) {
     $project = Get-LabelledProject $c.Config.Labels
@@ -328,7 +384,40 @@ foreach ($c in $containers) {
             $inside = $true
         }
     }
-    if (-not $inside) { $foreignDir[$project] = $true }
+    if (-not $inside) {
+        if ($workdir) { $foreignDir[$project] = $true } else { $unknownDir[$project] = $true }
+    }
+}
+
+# A project with a container in a directory outside the requested worktrees is
+# not this wave's to remove, even when another of its containers does live in
+# one (#140 item 2). docker-compose.e2e.yml pins ONE project name for every
+# worktree, so without this a wave that ran the E2E suite would take a live E2E
+# stack of another worktree with it - the exact thing the name rule's own
+# $foreignDir veto already refuses to do.
+#
+# Applied AFTER the whole container pass, not inside it: the container that
+# claims the project and the one that vetoes it are different containers, and
+# either may be seen first.
+#
+# The repository root is deliberately not such a directory: a container there
+# takes the `continue` above, so it never reaches $foreignDir. Such a project
+# stays claimable here and is removed from $owned by the main-checkout veto
+# further down, which also records it as protected.
+$vetoed = @{}   # project name -> why it was left alone
+foreach ($project in @($owned.Keys)) {
+    # A project of the main checkout is left to the main-checkout veto further
+    # down, which reports it in the right words. Without this, a main-checkout
+    # project that also has a stray container somewhere else would be reported
+    # as "outside this wave's worktrees" rather than as the main checkout's.
+    if ($protected.ContainsKey($project) -or (ConvertTo-NameKey $project) -eq $repoKey) { continue }
+    if ($foreignDir.ContainsKey($project)) {
+        $owned.Remove($project)
+        $vetoed[$project] = "has a container in a directory outside this wave's worktrees"
+    } elseif ($unknownDir.ContainsKey($project)) {
+        $owned.Remove($project)
+        $vetoed[$project] = "has a container with no working_dir label, which cannot be placed"
+    }
 }
 
 # Networks, volumes and images labelled with a project: their project names
@@ -347,7 +436,10 @@ foreach ($v in $volumes)    { $p = Get-LabelledProject $v.Labels;        if ($p)
 foreach ($i in $images)     { $p = Get-LabelledProject $i.Config.Labels; if ($p) { $candidateProjects[$p] = $true } }
 
 foreach ($project in @($candidateProjects.Keys)) {
-    if ($owned.ContainsKey($project) -or $foreignDir.ContainsKey($project)) { continue }
+    # $unknownDir vetoes the name rule exactly as $foreignDir always has: before
+    # the two were told apart for reporting, an unlabelled container landed in
+    # $foreignDir and skipped here. Splitting them must not widen what is claimed.
+    if ($owned.ContainsKey($project) -or $foreignDir.ContainsKey($project) -or $unknownDir.ContainsKey($project)) { continue }
     $key = ConvertTo-NameKey $project
     # The most specific <repo>-<slug> this name matches, over every slug of the
     # plan: "inventory-w5-barcode-hot-cache" matches both w5-barcode and
@@ -370,6 +462,14 @@ foreach ($project in @($owned.Keys)) {
         $owned.Remove($project)
         $protected[$project] = $true
     }
+}
+
+# Before the early return below: a vetoed project is the one case where
+# something WAS found and is deliberately not removed, so it must be said even
+# when nothing else is left to do.
+if ($vetoed.Count -gt 0) {
+    Write-Step "Left alone, not this wave's to remove:"
+    foreach ($project in ($vetoed.Keys | Sort-Object)) { Write-Step "  $project ($($vetoed[$project]))" }
 }
 
 if ($owned.Count -eq 0) {

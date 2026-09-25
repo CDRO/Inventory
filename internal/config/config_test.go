@@ -27,7 +27,7 @@ func complete() map[string]string {
 // TestLoadReportsEveryMissingRequiredVariable checks the operator-facing
 // failure. Reporting one variable per restart would make a fresh deployment a
 // guessing game, so all of them must appear in a single message alongside the
-// two commands that fix it.
+// fix.
 func TestLoadReportsEveryMissingRequiredVariable(t *testing.T) {
 	t.Parallel()
 
@@ -44,11 +44,14 @@ func TestLoadReportsEveryMissingRequiredVariable(t *testing.T) {
 	// and it is the only thing an operator sees when a fresh deployment will
 	// not start; a reword that keeps the tokens but drops "No configuration
 	// found" or restructures the Run/Then lines would slip past a Contains
-	// check while making the output worse.
+	// check while making the output worse. The "Then" line deliberately names
+	// no compose invocation: "docker compose up -d" is wrong on the Synology
+	// NAS variant (it loads the dev override and starts Traefik on DSM's own
+	// port 80).
 	assert.Equal(t,
 		"No configuration found (DATABASE_URL, SESSION_SECRET, GEMINI_API_KEY are unset).\n"+
 			"Run:  docker compose run --rm setup\n"+
-			"Then: docker compose up -d",
+			"Then start the stack the way you deploy it (see README.md).",
 		err.Error(),
 	)
 }

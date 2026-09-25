@@ -79,7 +79,12 @@ type MissingError struct {
 
 func (e *MissingError) Error() string {
 	return fmt.Sprintf(
-		"No configuration found (%s %s unset).\nRun:  docker compose run --rm setup\nThen: docker compose up -d",
+		// Deliberately does not name a compose invocation: "docker compose up
+		// -d" loads the dev override and starts Traefik on the operator's
+		// Synology NAS variant, which reserves port 80 for DSM itself
+		// (docs/specs/01-architecture-and-deployment.md, "Synology NAS
+		// variant"). README.md names the right command for every variant.
+		"No configuration found (%s %s unset).\nRun:  docker compose run --rm setup\nThen start the stack the way you deploy it (see README.md).",
 		strings.Join(e.Names, ", "),
 		map[bool]string{true: "is", false: "are"}[len(e.Names) == 1],
 	)
