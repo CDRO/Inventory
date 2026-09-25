@@ -181,11 +181,17 @@ function New-MiniStack {
     param([string]$Dir, [string]$ProjectName)
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
     Set-Content -Path (Join-Path $Dir '.env') -Encoding ASCII -Value "COMPOSE_PROJECT_NAME=$ProjectName`n"
+    # `data` must actually be MOUNTED, not merely declared: Compose v2 never
+    # creates an unreferenced top-level volume on `up -d`, so an unmounted
+    # `data:` would leave "the volume was removed by -v" true before -v ever
+    # ran - true no matter what Stop-PackageStack does.
     Set-Content -Path (Join-Path $Dir 'docker-compose.yml') -Encoding ASCII -Value @"
 services:
   app:
     image: busybox
     command: ["sleep", "3600"]
+    volumes:
+      - data:/data
 volumes:
   data:
 "@
@@ -201,6 +207,8 @@ try {
     Assert ($running.Count -eq 1) "the mini stack for '$slug' is running before Stop-PackageStack"
     $otherRunning = @(DkOut ps -q --filter "label=com.docker.compose.project=$otherSlug")
     Assert ($otherRunning.Count -eq 1) "the mini stack for '$otherSlug' is running before Stop-PackageStack"
+    $volBefore = @(DkOut volume ls -q --filter "label=com.docker.compose.project=$slug")
+    Assert ($volBefore.Count -eq 1) "'$slug' named volume ('data') exists before Stop-PackageStack (proves the assertion below is real, not vacuous)"
 
     Stop-PackageStack -WorktreePath $dir -Slug $slug
 

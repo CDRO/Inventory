@@ -39,9 +39,10 @@
 .DOCKER CLEANUP
     Two layers, at different times, for different problems.
 
-    Per package, the moment its issue closes (Wait-ForIssueClosed returns),
-    Stop-PackageStack runs `docker compose down -v --remove-orphans` inside
-    that worktree.
+    Per package, the moment its issue closes - Wait-ForIssueClosed returns,
+    in a sequential wave; a round-robin poll finds it closed, in an
+    unsequential one - Stop-PackageStack runs
+    `docker compose down -v --remove-orphans` inside that worktree.
     `docker compose run` (the ship loop's own `go test`/`migrate` calls) never
     stops a dependency container it started - `db` keeps running after every
     invocation - and a session may also have brought the stack up with
@@ -714,7 +715,10 @@ function Invoke-Wave {
             # problem; a package-at-a-time wait+teardown there is already
             # "the moment its issue closes" for that package.
             $pending = [System.Collections.Generic.List[object]]::new()
-            foreach ($package in $Wave.packages) { $pending.Add($package) }
+            foreach ($package in $Wave.packages) {
+                $pending.Add($package)
+                Write-Log "Waiting for issue #$($package.specIssue) ($($package.spec)) ..."
+            }
             while ($pending.Count -gt 0) {
                 $stillPending = [System.Collections.Generic.List[object]]::new()
                 foreach ($package in $pending) {
@@ -783,15 +787,19 @@ function Invoke-Wave {
 # project that worktree's own base/override files ever created. `-v` removes
 # that project's named volumes (pgdata, uploads, imagecache): a package
 # worktree is single-purpose and its own data is not meant to outlive it.
-# Deliberately a bare `docker compose down`, no `-f`: Compose only loads
-# docker-compose.e2e.yml via an explicit `-f` or COMPOSE_FILE, so that stack
-# is never touched here regardless of what it is actually named (its pinned
-# `name: inventory-e2e` is itself overridden by a worktree's own
-# COMPOSE_PROJECT_NAME - confirmed live - so whether it is even shared
-# across worktrees in practice, and whether it would be safe to tear down
-# here, is unclear; real isolation for it is #140's job, item 2). Best-effort
-# and non-fatal: a package
-# that never brought anything up simply has nothing to remove.
+# Deliberately a bare `docker compose down`, no `-f`: this command only ever
+# LOADS docker-compose.yml/override.yml, never docker-compose.e2e.yml (which
+# needs an explicit `-f` or COMPOSE_FILE). That is not the same as "never
+# touched", though: `--remove-orphans` removes any container already in the
+# loaded PROJECT whose service is not in the loaded FILES, so an E2E stack
+# that landed in this same project would be swept as an orphan, not skipped.
+# Whether it CAN land in this project depends on naming this function does
+# not control: docker-compose.e2e.yml pins `name: inventory-e2e`, but a
+# worktree's own COMPOSE_PROJECT_NAME overrides a file's `name:` - confirmed
+# live - so whether an E2E run from inside this worktree ends up isolated or
+# shares this project is genuinely unclear. Real isolation for it is #140's
+# job (item 2), not answered here. Best-effort and non-fatal: a package that
+# never brought anything up simply has nothing to remove.
 function Stop-PackageStack {
     param([string]$WorktreePath, [string]$Slug)
     if ($DryRun) {
