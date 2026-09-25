@@ -251,6 +251,9 @@ func Unauthorized(reason string) *Failure {
 }
 
 // Conflict is a legal resource in a state that forbids the action.
+//
+// It carries Err and no Reason, for the reason set out on Internal(): Reason
+// names a check, Err is a cause. The message is the disclosure here.
 func Conflict(message string, err error) *Failure {
 	if message == "" {
 		message = "That action conflicts with the current state."
@@ -281,6 +284,9 @@ func ResyncRequired(reason string) *Failure {
 }
 
 // ValidationFailed carries the per-field messages a form needs.
+//
+// It carries Err and no Reason, for the reason set out on Internal(): Reason
+// names a check, Err is a cause. The field map is the disclosure here.
 func ValidationFailed(fields map[string][]string, err error) *Failure {
 	return &Failure{
 		Status:  http.StatusUnprocessableEntity,
@@ -314,7 +320,9 @@ func ModelUnavailable(model string) *Failure {
 // or answered with nothing usable — for the one synchronous AI call there is,
 // background removal (docs/specs/09-consumption-logging.md). The provider's
 // own error is logged, never serialized, for the same reason a job's failure
-// message is written for the user rather than copied from the provider.
+// message is written for the user rather than copied from the provider — which
+// is the rule set out at greater length on Internal(): Reason names a check,
+// Err is a cause.
 func UpstreamFailed(err error) *Failure {
 	return &Failure{
 		Status:  http.StatusBadGateway,
@@ -325,6 +333,81 @@ func UpstreamFailed(err error) *Failure {
 }
 
 // Internal is an unexpected failure. The cause is logged, never serialized.
+//
+// # Why this is the one failure with no Reason
+//
+// The helpers that refuse a request for a reason of their own — NotFound,
+// Unauthorized, ResyncRequired, ModelUnavailable — name the check that refused
+// it, and that name reaches a dev client as debug_reason. Internal() does not,
+// and neither do Conflict, ValidationFailed and UpstreamFailed, for the reason
+// this comment sets out. The omission is deliberate rather than an oversight:
+// it was raised as a finding once (#128) and decided repo-wide here so it need
+// not be re-argued.
+//
+// There is no check to name, and that is the whole of it. A Reason is text this
+// package composed for a reader, about a decision it took on purpose.
+//
+// The helpers in this file set these, and they are worth knowing because two of
+// them are not what the specs would lead you to expect:
+//
+//   - the six authorization identifiers in
+//     docs/specs/03-auth-and-multi-tenancy.md — session_missing,
+//     session_expired, not_storage_member, storage_not_found, not_admin,
+//     admin_area_hidden;
+//   - ReasonNoRouteMatch and ReasonMethodNotAllowed, the router's own two
+//     refusals, fixed strings for the reason recorded above them, and already
+//     outside spec 03's list;
+//   - ModelUnavailable's "configured model not offered by the provider: …",
+//     which interpolates a model name this deployment configured;
+//   - the sentence ResyncRequired carries, which FromStoreError passes from
+//     err.Error() — safe only because the single store path returning
+//     store.ErrResyncRequired never wraps it, so the text is always that one
+//     sentinel. That is the closest thing here to serializing a layer's own
+//     output, and it is worth knowing rather than being surprised by.
+//
+// That list is this file's helpers and nothing more. It is deliberately not a
+// census of the package: handlers also build Failure values directly, and set
+// reasons of their own — invalidCredentials (auth.go), rateLimited
+// (ratelimit.go), and inline literals in admin.go, barcodes.go, devices.go and
+// shoppinglists.go. An earlier draft of this comment claimed to enumerate every
+// disclosed Reason "in full" and was wrong, which is the second time this
+// comment overclaimed; a reader wanting the real set should grep `Reason:`
+// rather than trust a list that goes stale the next time a handler adds one.
+//
+// So Reason is not a closed set of six, and a comment claiming so would send
+// the next maintainer to audit the wrong things. What holds across all of them
+// is narrower and more useful, and it is a rule this package follows rather
+// than a property anything mechanically enforces: no Reason carries text that a
+// database driver or a third party handed us. The nearest miss is admin.go's
+// duplicate-username conflict, which passes a store error's own text — that
+// text is the store's sentence plus the submitted username, not driver output,
+// so the rule holds, but it holds by a margin worth not narrowing further.
+//
+// A 500 is where that property would break. Nothing decided it, so the only
+// text available is whatever the failing layer produced — and this one function
+// cannot tell what that will be. Of its 147 call sites, 71 pass a fixed string
+// this package wrote (66 of them the sentinel errNoStorageInContext), whose
+// disclosure would be harmless. The other 76 pass an error through, plain or
+// wrapped with %w, and it is whatever the failing layer produced: mostly store
+// errors, which are raw driver output carrying table, column and constraint
+// names, but also io.ReadAll on an uploaded part (upload.go, barcodes.go),
+// uuid.NewV7 (upload.go) and json.MarshalIndent (export.go). That mixture is
+// the point rather than a caveat to it — no one wrote those strings for a
+// reader, and this function cannot tell which kind it holds. One function
+// serves both halves, so populating Reason here would disclose the second in
+// order to help the first.
+//
+// So the cause travels in Err, under the contract on that field, and the place
+// to read it is the error-level log line WriteError always emits for a 5xx
+// (docs/specs/18-operations-and-observability.md) — in dev that is the
+// foreground output of `docker compose up`, which is where a developer
+// debugging a 500 already is. Nothing is lost; it is one pane away.
+//
+// The same reading covers Conflict, ValidationFailed and UpstreamFailed, which
+// carry Err without a Reason for the same reason: Reason names a check, Err is
+// a cause. Reason stays free for a caller that genuinely has a check to name —
+// it is always safe to set, and the gate in WriteError is what decides whether
+// it is disclosed.
 func Internal(err error) *Failure {
 	return &Failure{
 		Status:  http.StatusInternalServerError,
