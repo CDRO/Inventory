@@ -344,29 +344,44 @@ func UpstreamFailed(err error) *Failure {
 // it was raised as a finding once (#128) and decided repo-wide here so it need
 // not be re-argued.
 //
-// There is no check to name, and that is the whole of it. Every Reason this
-// package sets is text it composed itself, for a reader, about a decision it
-// took on purpose. What is disclosed today, in full, so this claim can be
-// checked rather than trusted:
+// There is no check to name, and that is the whole of it. A Reason is text this
+// package composed for a reader, about a decision it took on purpose.
+//
+// The helpers in this file set these, and they are worth knowing because two of
+// them are not what the specs would lead you to expect:
 //
 //   - the six authorization identifiers in
 //     docs/specs/03-auth-and-multi-tenancy.md — session_missing,
 //     session_expired, not_storage_member, storage_not_found, not_admin,
 //     admin_area_hidden;
 //   - ReasonNoRouteMatch and ReasonMethodNotAllowed, the router's own two
-//     refusals, which are fixed strings for the reason recorded above them;
+//     refusals, fixed strings for the reason recorded above them, and already
+//     outside spec 03's list;
 //   - ModelUnavailable's "configured model not offered by the provider: …",
 //     which interpolates a model name this deployment configured;
 //   - the sentence ResyncRequired carries, which FromStoreError passes from
-//     err.Error() — safe only because the single store path that returns
+//     err.Error() — safe only because the single store path returning
 //     store.ErrResyncRequired never wraps it, so the text is always that one
 //     sentinel. That is the closest thing here to serializing a layer's own
-//     output, and it is worth knowing about rather than being surprised by.
+//     output, and it is worth knowing rather than being surprised by.
+//
+// That list is this file's helpers and nothing more. It is deliberately not a
+// census of the package: handlers also build Failure values directly, and set
+// reasons of their own — invalidCredentials (auth.go), rateLimited
+// (ratelimit.go), and inline literals in admin.go, barcodes.go, devices.go and
+// shoppinglists.go. An earlier draft of this comment claimed to enumerate every
+// disclosed Reason "in full" and was wrong, which is the second time this
+// comment overclaimed; a reader wanting the real set should grep `Reason:`
+// rather than trust a list that goes stale the next time a handler adds one.
 //
 // So Reason is not a closed set of six, and a comment claiming so would send
-// the next maintainer to audit the wrong things. The property that actually
-// holds is narrower and more useful: no Reason carries text that a database
-// driver or a third party handed us.
+// the next maintainer to audit the wrong things. What holds across all of them
+// is narrower and more useful, and it is a rule this package follows rather
+// than a property anything mechanically enforces: no Reason carries text that a
+// database driver or a third party handed us. The nearest miss is admin.go's
+// duplicate-username conflict, which passes a store error's own text — that
+// text is the store's sentence plus the submitted username, not driver output,
+// so the rule holds, but it holds by a margin worth not narrowing further.
 //
 // A 500 is where that property would break. Nothing decided it, so the only
 // text available is whatever the failing layer produced — and this one function
