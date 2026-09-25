@@ -30,12 +30,17 @@ and reviewers" below.
 2. Per package, it creates a worktree and starts a visible, interactive
    Claude session with prompt, model, effort, and advisor as CLI arguments
    (`claude --model … --effort … --advisor … --remote-control …`).
-3. It polls GitHub until every spec issue of the wave is closed, then starts
-   the consolidation session in the main checkout and waits until the wave
-   issue is closed.
-4. For a wave with `"dockerCleanup": true` it then removes the Docker
-   resources that the wave's package worktrees created (see "Docker cleanup
-   after a wave"). Only then does the next wave begin.
+3. It polls GitHub until a package's spec issue closes, tears down that
+   package's own Docker stack (`docker compose down -v` in its worktree —
+   see "Docker cleanup after a wave"), then does the same for the next
+   package; once every package of the wave is closed it starts the
+   consolidation session in the main checkout and waits until the wave issue
+   is closed.
+4. For a wave with `"dockerCleanup": true` it then removes what is left of
+   the Docker resources the wave's package worktrees created — built images,
+   and anything from a package whose session crashed before its issue ever
+   closed (see "Docker cleanup after a wave"). Only then does the next wave
+   begin.
 
 The script itself never writes to git/GitHub (other than `worktree add` and
 copying `.env`) — every substantive action is done by the sessions it
@@ -49,8 +54,10 @@ Docker isolation between parallel package worktrees (`COMPOSE_PROJECT_NAME`,
 `HTTP_PORT`, `TRAEFIK_PORT`) is automatic and needs no attention when
 planning a wave — the script assigns each package a deterministic, unique
 set of these from its position in the wave file the moment a worktree is
-created. See `docs/specs/01-architecture-and-deployment.md`, "Running more
-than one instance of the stack locally", for the mechanism itself.
+created, sanitizing the project name it derives so it is always a value
+Compose actually accepts (`Get-SanitizedProjectName`, #115). See
+`docs/specs/01-architecture-and-deployment.md`, "Running more than one
+instance of the stack locally", for the mechanism itself.
 
 ## Docker cleanup after a wave
 
@@ -58,15 +65,31 @@ Every package worktree leaves Docker state behind: a database container, a
 network, three named volumes (`pgdata`, `uploads`, `imagecache`) and the
 images built for it, and package sessions sometimes start a further Compose
 project under a name of their own to run a check. Left alone, this grows by
-several volumes and images per package, per wave.
+several volumes and images per package, per wave. Two layers remove it, at
+different times, and neither needs attention when planning a wave — nothing
+below is something a wave file sets.
 
-A wave with `"dockerCleanup": true` gets it removed **after its consolidation
-has finished** (the wave issue is closed, so no session is using any of it),
-by `scripts/wellen-docker-cleanup.ps1`. It must be `true` or `false`; anything
-else fails `-Validate`. Which waves carry it is per plan: `wellen.json` sets it
-on waves 3 to 7, `wellen-followups.json` on waves 2 to 8 — wave 1 there is
-deliberately `false`, because the package that *rewrites the cleanup script*
-runs in it and the script is re-read at every call.
+**Per package**, the moment its issue closes, `Stop-PackageStack` runs
+`docker compose down -v --remove-orphans` inside that worktree — no waiting
+for the wave to finish. This is what actually stops the containers and
+frees the host ports; it is unconditional (it does not depend on
+`"dockerCleanup"`) because a finished package's own, uniquely-named project
+is always safe to tear down on its own. It is scoped to that worktree's
+base/override project only, never to the shared `inventory-e2e` project
+(`docker-compose.e2e.yml` pins one project name for every worktree, so
+tearing it down from here could kill a concurrent package's still-running
+E2E job) — deconflicting the E2E stack across worktrees is #140's job.
+
+**Per wave**, a wave with `"dockerCleanup": true` additionally gets what the
+per-package step cannot reach removed **after its consolidation has
+finished** (the wave issue is closed, so no session is using any of it), by
+`scripts/wellen-docker-cleanup.ps1`: built images, and any resource left by a
+package whose session crashed before its issue ever closed. It must be `true`
+or `false`; anything else fails `-Validate`. Which waves carry it is per
+plan: `wellen.json` sets it on waves 3 to 7, `wellen-followups.json` on waves
+2 to 8 — wave 1 there is deliberately `false`, because the package that
+*rewrites the cleanup script* runs in it and the script is re-read at every
+call.
 
 - **What is removed:** the containers (with their anonymous volumes), networks,
   named volumes and image tags of every Compose project that belongs to the

@@ -26,22 +26,45 @@
     package, see Set-WorktreeEnvOverrides), so two worktrees running
     `docker compose up` at once - or a crashed session's orphaned
     containers sitting around in one - never collide on a host port or a
-    container/network/volume name. Full rationale:
+    container/network/volume name. The project name is sanitized (lowercased,
+    anything outside [a-z0-9_-] replaced) before it is written, since it is
+    built from the checkout's own directory name (e.g. "Inventory"), which
+    Compose's project-name rule does not allow verbatim - see
+    Get-SanitizedProjectName (#115). Full rationale:
     docs/specs/01-architecture-and-deployment.md, "Running more than one
     instance of the stack locally".
 
 .DOCKER CLEANUP
-    Every package worktree leaves containers, a network, named volumes and
-    built images behind. For a wave with "dockerCleanup": true, the script
-    runs wellen-docker-cleanup.ps1 once the wave's consolidation is done
-    (its wave issue is closed): it removes the Docker resources of that
-    wave's package worktrees, decided by Docker's own labels, and never the
-    main checkout's stack or the images that are shared with it. A failure is
-    logged and does not stop the next wave. A wave that is already complete
-    at start-up is cleaned as well; waves skipped with -StartWave are not.
-    The orchestrator and the wave file are read once at start-up, so a
-    running orchestrator does not pick up a change to either (the cleanup
-    script is read afresh at every call). Details and manual use:
+    Two layers, at different times, for different problems.
+
+    Per package, the moment its issue closes (Wait-ForIssueClosed returns),
+    Stop-PackageStack runs `docker compose down -v` inside that worktree.
+    `docker compose run` (the ship loop's own `go test`/`migrate` calls) never
+    stops a dependency container it started - `db` keeps running after every
+    invocation - and a session may also have brought the stack up with
+    `docker compose up -d` for manual verification and never taken it back
+    down. This step is independent of "dockerCleanup" and always runs: a
+    finished package's own, uniquely-named project is safe to tear down
+    unconditionally, and doing it immediately (rather than waiting for the
+    wave to finish) is what keeps a long or parallel wave from accumulating
+    containers, networks and bound host ports across packages that are
+    already done. It is scoped to the worktree's own base/override project
+    only - never the shared `inventory-e2e` project (docker-compose.e2e.yml
+    pins one name for every worktree; tearing it down from here could kill a
+    concurrent package's still-running E2E job - tracked as part of #140).
+
+    Per wave, for a wave with "dockerCleanup": true, the script also runs
+    wellen-docker-cleanup.ps1 once the wave's consolidation is done (its wave
+    issue is closed): it removes the Docker resources of that wave's package
+    worktrees, decided by Docker's own labels, and never the main checkout's
+    stack or the images that are shared with it. A failure is logged and does
+    not stop the next wave. A wave that is already complete at start-up is
+    cleaned as well; waves skipped with -StartWave are not. The orchestrator
+    and the wave file are read once at start-up, so a running orchestrator
+    does not pick up a change to either (the cleanup script is read afresh at
+    every call). This layer exists for what the per-package step cannot
+    reach: built images, and any resource left by a package whose session
+    crashed before its issue ever closed. Details and manual use:
     scripts\wellen-planen.md, "Docker cleanup after a wave".
 
 .ARCHITECTURE
@@ -408,6 +431,24 @@ function Set-EnvValue {
     [System.IO.File]::WriteAllText($EnvPath, (($lines -join "`n") + "`n"), $utf8NoBom)
 }
 
+# Docker Compose's project-name rule (v2.31.0, confirmed live): "must consist
+# only of lowercase alphanumeric characters, hyphens, and underscores as well
+# as start with a letter or number". $RepoName is a checkout's directory
+# name, which is free-form and, for this repo, starts with a capital
+# ("Inventory") - passing "$RepoName-$Slug" straight through makes EVERY
+# `docker compose` invocation in EVERY worktree fail before it does anything
+# (#115). Compose's own default project-name derivation (no
+# COMPOSE_PROJECT_NAME set at all) already lowercases the directory name for
+# exactly this reason; this function applies the same rule to the name this
+# script constructs explicitly, rather than relying on every caller to
+# remember it.
+function Get-SanitizedProjectName {
+    param([string]$Value)
+    $sanitized = $Value.ToLowerInvariant() -replace '[^a-z0-9_-]', '-'
+    if ($sanitized -notmatch '^[a-z0-9]') { $sanitized = "x-$sanitized" }
+    return $sanitized
+}
+
 # Gives a package worktree's .env its own COMPOSE_PROJECT_NAME, HTTP_PORT,
 # and TRAEFIK_PORT (see "Running more than one instance of the stack
 # locally" in docs/specs/01-architecture-and-deployment.md), so that
@@ -423,7 +464,7 @@ function Set-WorktreeEnvOverrides {
         throw "No port index assigned for slug '$Slug' - this is an orchestrator bug, not a wave-file problem (PackagePortIndex should be populated for every package before any worktree is created)."
     }
     $index = $script:PackagePortIndex[$Slug]
-    $projectName = "$RepoName-$Slug"
+    $projectName = Get-SanitizedProjectName "$RepoName-$Slug"
     $httpPort = $HttpPortBase + $index
     $traefikPort = $TraefikPortBase + $index
     Set-EnvValue -EnvPath $EnvPath -Key 'COMPOSE_PROJECT_NAME' -Value $projectName
@@ -637,6 +678,7 @@ function Invoke-Wave {
             Invoke-Package -Plan $Plan -Standards $Standards -Wave $Wave -Package $package
             if (-not $DryRun) {
                 Wait-ForIssueClosed -Number $package.specIssue -Description $package.spec
+                Stop-PackageStack -WorktreePath (Join-Path $ParentDir "$RepoName-$($package.slug)") -Slug $package.slug
             }
         }
     } else {
@@ -646,6 +688,7 @@ function Invoke-Wave {
         foreach ($package in $Wave.packages) {
             if (-not $DryRun) {
                 Wait-ForIssueClosed -Number $package.specIssue -Description $package.spec
+                Stop-PackageStack -WorktreePath (Join-Path $ParentDir "$RepoName-$($package.slug)") -Slug $package.slug
             }
         }
     }
@@ -688,6 +731,49 @@ function Invoke-Wave {
     }
     Invoke-WaveDockerCleanup -Wave $Wave
     Write-Log "=== Wave ${n}: done ==="
+}
+
+# Tears down whatever a finished package's Claude session left running in its
+# own worktree, the moment its issue closes. `docker compose run` (the ship
+# loop's own `go test`/`migrate` calls) never stops a dependency container it
+# started - `db` keeps running after every invocation via `depends_on` - and
+# a session may separately have brought the stack up with `docker compose up
+# -d` for manual verification and never taken it back down. Run from inside
+# the worktree so Compose auto-loads its own .env - the isolated
+# COMPOSE_PROJECT_NAME Set-WorktreeEnvOverrides wrote there - which is what
+# makes this safe to call unconditionally: it only ever touches the one
+# project that worktree's own base/override files ever created. `-v` removes
+# that project's named volumes (pgdata, uploads, imagecache): a package
+# worktree is single-purpose and its own data is not meant to outlive it.
+# Deliberately NOT `docker-compose.e2e.yml`: that file pins one project name
+# ("inventory-e2e") shared by every worktree, so tearing it down here could
+# kill a concurrent package's still-running E2E job - real isolation for that
+# stack is #140's job, not this one's. Best-effort and non-fatal: a package
+# that never brought anything up simply has nothing to remove.
+function Stop-PackageStack {
+    param([string]$WorktreePath, [string]$Slug)
+    if ($DryRun) {
+        Write-Log "[DryRun] would run 'docker compose down -v --remove-orphans' for '$Slug' in $WorktreePath"
+        return
+    }
+    if (-not (Test-Path -LiteralPath $WorktreePath)) {
+        # A package whose issue was already closed before this run started
+        # (Invoke-Package's own early-return) never gets a worktree here -
+        # nothing to tear down, and Push-Location on a missing path would
+        # otherwise throw under this script's $ErrorActionPreference = 'Stop'.
+        return
+    }
+    Push-Location -LiteralPath $WorktreePath
+    try {
+        Invoke-Native { docker compose down -v --remove-orphans } | Out-Null
+        if ($script:NativeExit -eq 0) {
+            Write-Log "Stopped the Docker stack for '$Slug'."
+        } else {
+            Write-Log "'docker compose down' for '$Slug' exited $($script:NativeExit) - continuing (it may never have brought anything up)." 'WARN'
+        }
+    } finally {
+        Pop-Location
+    }
 }
 
 function Invoke-Package {
