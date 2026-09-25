@@ -11,7 +11,8 @@ catalogs), [`20-barcode-recall.md`](20-barcode-recall.md) (the scan sheet's
 
 Amends: `05`, "PWA" — the bullet that prescribes
 `<input type="file" accept="image/*" capture="environment">` is replaced by
-a pointer to this spec. `20`, "Server-side decode fallback" — the scan
+a pointer to this spec; `05`, "File layout" — gains `js/photo-picker.js`.
+`20`, "Server-side decode fallback" — the scan
 sheet's photo input becomes this spec's picker in single-photo mode. `09`
 is unchanged: the mode selector, the sticky mode and the "one camera entry
 point" all stay exactly as they are; this spec only changes how a photo
@@ -21,13 +22,17 @@ gets into that entry point.
 
 `ingest.html`'s photo field is one `<input type="file" accept="image/*"
 capture="environment" multiple>`. `05` says `capture` "opens the rear camera
-directly while still allowing a gallery pick". On the phones this PWA is
-actually used on, the second half is false: with `capture` present, iOS
-Safari opens the camera and offers **no** way to the photo library, and
-Android Chrome does the same. The `multiple` attribute is ignored in that
-mode as well, so the field cannot even take several shots in one go. A
-photo already on the phone — a shelf photographed earlier, a receipt-style
-shot someone sent, a screenshot — cannot be uploaded at all.
+directly while still allowing a gallery pick". On the phone this PWA is
+actually used on, the second half is false. **Observed** by the owner on
+his own phone on 2026-09-25: tapping the field opens the camera and offers
+no way to the photo library. That matches the documented behaviour of iOS
+Safari, where `capture` means camera-only, and of Android Chrome. The
+`multiple` attribute is ignored alongside `capture` (documented for iOS
+Safari; the implementing package confirms it on Android when it verifies on
+hardware, and records browser and OS versions for both claims in its PR so
+the next person can tell whether they still hold). A photo already on the
+phone — a shelf photographed earlier, a receipt-style shot someone sent, a
+screenshot — cannot be uploaded at all.
 
 Dropping `capture` is not the fix either: without it, every tap opens the
 OS chooser ("Take Photo / Photo Library / Browse") and the frequent case —
@@ -78,8 +83,11 @@ tell them apart and must not try.
     `<input type="file" accept="image/*" capture="environment">`, always
     without `multiple`: `capture` takes one shot, and the list below is
     what makes a second shot possible.
-- Both buttons meet a 44×44 CSS-pixel touch target (`05`: usable
-  one-handed on a phone). The icons are inline `<svg aria-hidden="true">`
+- Both buttons meet a 44×44 CSS-pixel touch target. `05` only says
+  "usable one-handed on a phone"; 44 px is this repo's own `.btn` minimum
+  height (`components.css`, `min-height: 2.75rem`), written down here so
+  it is a number a test can check rather than a judgement. The icons are
+  inline `<svg aria-hidden="true">`
   elements in the page or module — no icon font, no image file, no CDN
   (`05`'s vendoring rule). Their colour is `currentColor`, so they follow
   the button's tokens; no literal colour values (`05`).
@@ -119,6 +127,19 @@ calls `onChange([file])` at once and the caller acts on it, exactly as the
 sheet acts on its input's `change` event today. The two buttons stay; the
 selection UI does not appear.
 
+### What a page reload costs
+
+The selection lives in memory. Some Android browsers reload the page on
+return from the OS camera (reported by the owner, not measured here); a
+reload loses whatever was selected before that shot. This spec accepts
+that: keeping `File` objects across a reload would mean writing blobs to
+IndexedDB and reading them back, and the frequent case — pick, upload —
+never reloads. The Camera control's own next step,
+[`37-in-page-camera.md`](37-in-page-camera.md), removes the round trip that
+causes it. What the picker does guarantee is that nothing is uploaded
+without an explicit Upload press, so a reload can only lose a selection,
+never send half of one.
+
 ### Behaviour that does not change
 
 - `ingest.js` still uploads one request per photo, one after another, and
@@ -144,7 +165,19 @@ New keys in **both** `en.json` and `de.json` (`19`): the two captions, the
 count line (with `.one`/`.other` forms), the Remove button's accessible
 name (which includes the file name: "Remove shelf.jpg"), and the empty
 state ("No photos selected yet"). `ingest.photos.label` is removed with the
-field it labelled.
+field it labelled. `barcode.photographLabel` ("Or photograph the barcode")
+is kept: it becomes the caption above the sheet's two controls instead of
+the `<label>` of an input that no longer exists.
+
+## What the implementing package touches besides the above
+
+So nothing is left citing the old rule: the comment above the input in
+`web/static/ingest.html` (it cites `05`'s replaced bullet), that input's
+`<label for="photos">` and `required`, `barcode.js`'s input and its label,
+`ingest.js`'s reads of `photosInput` (`onSubmit`, `form.reset()`, the
+`.focus()` in `onUnknownCode`), and `e2e/specs/ingestion.spec.js`, whose
+upload journey addresses `#photos` and must address the picker's library
+input instead.
 
 ## Acceptance criteria
 
@@ -169,8 +202,8 @@ field it labelled.
   path; either source hands the photo to `POST …/barcodes/decode`
   unchanged.
 - `barcode.js` and `ingest.html` contain no `<input type="file">` other
-  than the ones the picker renders. `docs/specs/05` no longer prescribes a
-  single `capture` input.
+  than the ones the picker renders, and no comment in `web/static` still
+  says `capture` allows a gallery pick.
 - `en.json` and `de.json` carry every new key, with identical key sets
   (`19`).
 - `web/static/js/photo-picker.js` is in `SHELL_ASSETS` in `sw.js` and

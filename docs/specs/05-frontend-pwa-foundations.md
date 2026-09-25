@@ -53,6 +53,8 @@ web/static/
 │   ├── tree.js                # shared tree view (locations + categories)
 │   ├── dom.js                 # small helpers: el(), render templates, escape
 │   ├── nav.js                 # shared navigation bar + logout (34)
+│   ├── photo-picker.js        # library-or-camera photo picker + selection list (36)
+│   ├── camera.js              # in-page viewfinder; falls back to the picker (37)
 │   └── pages/                 # one module per HTML page, imported by that page
 ├── vendor/                    # single-file vendored libraries (see 11)
 ├── icons/                     # PWA icons (192, 512)

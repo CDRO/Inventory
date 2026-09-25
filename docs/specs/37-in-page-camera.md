@@ -12,9 +12,9 @@ limits, EXIF orientation-then-strip), [`09-consumption-logging.md`](09-consumpti
 opens a camera stream the same way; shared conventions, not shared code —
 see "What is deliberately not shared").
 
-Amends: nothing. `36` stays the contract for the two controls; this spec
-changes only what the **Camera** control does when the browser can do
-better than hand off to the OS.
+Amends: `05`, "File layout" — gains `js/camera.js`. `36` stays the contract
+for the two controls; this spec changes only what the **Camera** control
+does when the browser can do better than hand off to the OS.
 
 ## Why this spec exists
 
@@ -23,12 +23,16 @@ left, a shot is taken, the OS camera closes, the page comes back with the
 photo in the list. For one photo that is fine. For a run — twenty shelves,
 one after the other, which is what `09` says the real usage is — it is the
 same page-leave-and-return round trip twenty times, with the sticky mode
-and the location field out of sight each time, and on some Android
-browsers the page is reloaded on return and the selection list is gone.
+and the location field out of sight each time — and on Android browsers
+that reload the page on return (reported, not measured here; `36`, "What a
+page reload costs"), the selection list is gone with it.
 
-A viewfinder **inside the page** keeps the mode selector, the location
-hint and the growing list of shots on screen while photographing, and
-makes "take another" one tap instead of a round trip. The browser API for
+A viewfinder **inside the page** never leaves it: the dialog is modal
+(`showModal()`, like every dialog here), so it covers the form while open —
+which is why the mode's name is repeated in its heading — but nothing is
+navigated away from or reloaded, the growing list of shots is exactly
+where it was when Done is pressed, and "take another" is one tap instead
+of a round trip. The browser API for
 it (`getUserMedia`) is the one `js/barcode.js` already uses for live
 scanning, so the platform support and the secure-context requirement are
 already known quantities here.
@@ -37,7 +41,8 @@ already known quantities here.
 
 Tapping **Camera** (`36`) on a browser that supports it opens a
 `<dialog>` — the same `card stack` dialog idiom `barcode.js` and
-`tree-modal.js` use — containing:
+`tree-modal.js` use — from a new module, `web/static/js/camera.js`,
+containing:
 
 - a `<video playsinline muted>` fed by
   `getUserMedia({video: {facingMode: "environment"}, audio: false})`,
@@ -61,9 +66,14 @@ Each shutter press:
    the current frame is drawn onto a `<canvas>` at
    `video.videoWidth × video.videoHeight` — the preview resolution, which
    on most phones is 1080p-class rather than the sensor's 12 MP. That is
-   an accepted trade-off, stated in the UI hint below, not a bug: the
-   analysis (`06`) works on 1080p shelf photos, and anyone who wants the
-   full sensor uses the OS camera through `36`.
+   an accepted trade-off — the owner's decision, stated in the UI hint
+   below rather than hidden. `06` and `04` accept shelf photos up to 50 MP
+   and pass them to the model at upload resolution, so a 1080p-class still
+   simply gives the model less to work with; nothing in `00`–`35` says how
+   much that costs on a crowded shelf. The implementing package measures it
+   on real shelves — the same shelf via the OS camera and via the
+   viewfinder, reviewed side by side — and reports in its PR. Anyone who
+   wants the full sensor uses the OS camera through `36`.
 2. Encodes it as JPEG (`canvas.toBlob("image/jpeg", 0.92)`, or the Blob
    `takePhoto()` returns) and wraps it in a `File` named
    `capture-<n>.jpg`.
@@ -155,16 +165,25 @@ mode name interpolated), Shutter, Done, Flip camera, the shot count
   `row` and `btn` tokens (`05`). The camera `<video>` has an accessible
   name.
 - `en.json` and `de.json` carry every new key, with identical key sets
-  (`19`). If the viewfinder lives in a new module, it is in `SHELL_ASSETS`
-  and `CACHE_VERSION` is bumped (`05`).
+  (`19`). `web/static/js/camera.js` is in `SHELL_ASSETS` and
+  `CACHE_VERSION` is bumped (`05`).
 - E2E (`e2e/specs/ingestion.spec.js`): the Chromium project's
   `launchOptions.args` gain `--use-fake-device-for-media-stream` and
   `--use-fake-ui-for-media-stream` (a synthetic camera, permission
-  auto-granted — no hardware, no prompt). The journey opens Camera,
-  asserts the dialog and its `<video>` are visible, presses Shutter twice,
-  asserts two list rows exist, presses Done, asserts the dialog is gone
-  and the rows remain; then with route interception, Upload produces two
-  multipart requests whose files are `image/jpeg` and non-empty.
+  auto-granted — no hardware, no prompt). These are Chromium's documented
+  flags, and this repo has once been caught by a documented flag that did
+  not do what it said (`playwright.config.js`'s own note on
+  `--unsafely-treat-insecure-origin-as-secure`), so the package confirms
+  them live before relying on them and records the result in its PR. The
+  journey proves whichever still path desktop Chromium takes with the
+  fake device — it asserts the files produced, not the branch: it opens
+  Camera, asserts the dialog and its `<video>` are visible, presses
+  Shutter twice, asserts two list rows exist, presses Done, asserts the
+  dialog is gone and the rows remain; then with route interception,
+  Upload produces two multipart requests whose files are `image/jpeg` and
+  non-empty. The once-only resolution hint is asserted only when the test
+  finds `ImageCapture` absent (`page.evaluate(() => "ImageCapture" in
+  window)`), since that is the only case in which it appears.
 - E2E, fallback: with `getUserMedia` stubbed to reject
   (`page.addInitScript`), tapping Camera does not open the dialog, and
   the `capture="environment"` input receives a `click` (asserted through
