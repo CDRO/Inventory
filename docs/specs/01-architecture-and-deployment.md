@@ -363,6 +363,11 @@ Setup must run **before** the stack starts, because Docker Compose reads
 written afterwards without being recreated. The system therefore fails
 fast and says so, rather than starting half-configured:
 
+This is the plain-clone sequence. On the operator's own NAS, `docker compose
+up -d` is the wrong command (it loads the dev override and starts Traefik on
+DSM's own port 80) — use `$DC up -d` instead; see "Synology NAS variant"
+below.
+
 ```console
 $ docker compose run --rm setup      # writes ./.env interactively
 $ docker compose up -d
@@ -370,13 +375,18 @@ $ docker compose up -d
 
 **If `docker compose up` is run first (no `.env` yet):** the `app` container
 starts and validates its configuration, then exits non-zero with an actionable
-message naming the variables and the two commands that fix it:
+message naming the variables and the fix:
 
 ```
 No configuration found (DATABASE_URL, SESSION_SECRET, GEMINI_API_KEY are unset).
 Run:  docker compose run --rm setup
-Then: docker compose up -d
+Then start the stack the way you deploy it (see README.md).
 ```
+
+The second line deliberately names no compose invocation: `docker compose up
+-d` is right for a plain clone but wrong on the operator's own NAS (see
+"Synology NAS variant" below), where it loads the dev override and starts
+Traefik on DSM's own port 80.
 
 `restart: unless-stopped` must not turn this into a crash loop: the
 config error is a **fatal, non-retryable** exit, so the container exits
@@ -394,12 +404,11 @@ error that names no remedy.
 
 **If setup is run while the stack is already up**, the new `.env` is not
 picked up by running containers. The `setup` command detects this case as
-"an `.env` already existed / the stack may be running" and ends by
-printing the exact command to apply the change:
+"an `.env` already existed / the stack may be running" and says so, again
+without naming a compose invocation:
 
 ```
-.env written. Apply it with:
-  docker compose up -d --force-recreate
+.env written. Apply it by recreating the app container the way you deploy it (see README.md).
 ```
 
 The application deliberately does **not** restart containers itself. Doing
@@ -704,10 +713,12 @@ port 8000 published past the ingress) out of the NAS stack. The pin is spelled
 out on every call, and not kept in the environment, on purpose. An earlier design
 selected the layer with `COMPOSE_FILE` in the clone's untracked `.env` and failed
 open: the setup wizard rewrites `.env` from `.env.example`, dropping every line
-that is not in the template, and the command it then prints
-(`docker compose up -d --force-recreate`) has no `-f`, so it would load the dev
-override and start a dev-flavoured stack on fresh named volumes next to the real
-data in `./pgdata`. The project name (`-p inventory`) is fixed for the same
+that is not in the template, so a subsequent bare `docker compose` call — from
+muscle memory, or from the wizard's own closing hint, which deliberately names
+no compose invocation at all (see "Interactive setup" above) precisely because
+one could be wrong here — would silently fall back to the dev override and
+start a dev-flavoured stack on fresh named volumes next to the real data in
+`./pgdata`. The project name (`-p inventory`) is fixed for the same
 reason, and so that container, network and volume names stay the same wherever
 the clone lives.
 
@@ -728,8 +739,9 @@ Consequently, on the NAS:
   any `-f` the dev override is merged as well. The `-f docker-compose.yml`
   commands elsewhere in this document and in the README are for a plain clone,
   not for this NAS.
-- **Do not copy the command the setup wizard prints when it finishes** (`docker
-  compose up -d`); use `$DC up -d`.
+- **The setup wizard's own closing hint deliberately does not name a
+  command** (see "Interactive setup" above) — a literal `docker compose up -d`
+  would be wrong here. Use `$DC up -d`.
 - **Never put a `compose.yml` (or `compose.yaml`) into the clone.** Compose
   prefers those names over `docker-compose.yml` and silently ignores the latter
   (it prints only a warning), so a private copy would replace the repository's
@@ -771,8 +783,12 @@ the stack publishes no host port at all: nothing can clash with DSM's own
   proxying to `http://app:8000`, which `serve.json` already does, would remove
   the coupling; the operator chose the shared namespace to match their other
   stacks.)
-- **The auth key is passed once, on the command line, and never written to a
-  tracked file:** `TS_AUTHKEY=tskey-auth-… $DC up -d`. It
+- **The auth key is passed once, on the command line, kept out of `.env`
+  unlike every other secret here:** `TS_AUTHKEY=tskey-auth-… $DC up -d`. `.env`
+  is rewritten wholesale from `.env.example` on every `setup` run, so a
+  one-off key placed there would either be silently dropped the next time (it
+  is not in the template) or, if added to the template, misread as a value
+  that should persist and get re-prompted forever. On the command line it
   still lands in the shell history and, through interpolation, in the
   container's configuration (`docker inspect`, the Container Manager UI) until
   the container is recreated. Use a one-off key with a short expiry, and revoke
@@ -841,7 +857,8 @@ $ $DC run --rm app migrate up  # also creates the initial admin
 $ TS_AUTHKEY=tskey-auth-… $DC up -d
 ```
 
-The wizard ends by printing `docker compose up -d`; ignore it and use `$DC up -d`.
+The wizard's closing hint deliberately names no command (see "Interactive
+setup" above); use `$DC up -d`.
 `sh deploy/synology/update` runs the build, migrate and start of this sequence for
 you when no app instance is running (mind the `TS_AUTHKEY` note under "Updating").
 
