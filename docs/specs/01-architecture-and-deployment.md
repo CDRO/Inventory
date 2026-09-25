@@ -224,7 +224,9 @@ whose containers are already gone). A slug never claims a longer sibling
 rule a project with a container outside the wave's worktrees is not claimed at
 all — one container inside a worktree is not enough when another of the same
 project sits elsewhere, which is what keeps a project name pinned in a Compose
-file (`docker-compose.e2e.yml` pins one for every worktree) from being swept.
+file (`docker-compose.e2e.yml` pins one for every worktree) from being swept. A
+container carrying the project label but no `working_dir` label at all vetoes
+the same way, since nothing places it in a worktree either.
 It removes those projects' containers, networks and volumes, and of their images
 the tags that start with the project's own name, and it **never** touches:
 

@@ -121,10 +121,11 @@ the cleanup script* runs in it and the script is re-read at every call.
   is what keeps a wave from sweeping a Compose project whose name is pinned in
   a file rather than derived per worktree — `docker-compose.e2e.yml` pins one
   for every worktree. A container carrying the project label but no
-  `working_dir` label at all vetoes the same way, since it cannot be placed. A container-less project has no directory to check, so
-  for it the name rule stands alone: one left behind by another clone of this
-  same repository under the same `<repo>-<slug>` name is indistinguishable from
-  this wave's own and is removed.
+  `working_dir` label at all vetoes the same way, since it cannot be placed.
+  A container-less project has no directory to check, so for it the name rule
+  stands alone: one left behind by another clone of this same repository under
+  the same `<repo>-<slug>` name is indistinguishable from this wave's own and
+  is removed.
 - **What is never removed:** the main checkout's own stack; the shared
   `inventory-app-dev` image (the dev override gives it one fixed name, so the
   main checkout uses it too) and every other image without a worktree project's
