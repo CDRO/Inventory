@@ -363,7 +363,6 @@ func Internal(err error) *Failure {
 		Code:    CodeInternal,
 		Message: "Internal error.",
 		Err:     err,
-		Reason:  "internal_error",
 	}
 }
 
