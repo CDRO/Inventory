@@ -9,11 +9,12 @@
 --     psql -U e2e -d e2e -f /fixtures/restore-roundtrip.sql
 --
 -- Why it exists. The round trip asserts that every table's row count survives
--- a backup, a `down -v` and a restore, and admin_audit_log is the one table on
--- that list seed.sql leaves empty. A count assertion over an empty table is
--- satisfied by a restore that lost the table's contents entirely — 0 = 0 — so
--- without these rows the admin audit trail would be a thing the round trip
--- claims to check and does not. Every other table on the list
+-- a backup, a `down -v` and a restore, and admin_audit_log and settings are
+-- the two tables on that list seed.sql leaves empty. A count assertion over
+-- an empty table is satisfied by a restore that lost the table's contents
+-- entirely — 0 = 0 — so without these rows the admin audit trail and the
+-- settings overrides would each be a thing the round trip claims to check and
+-- does not. Every other table on the list
 -- (users, storages, storage_members, locations, categories, products,
 -- inventory_batches, inventory_logs, jobs) already has seeded rows.
 --
@@ -60,6 +61,20 @@ INSERT INTO admin_audit_log (id, actor_id, action, target, details, created_at) 
    'settings_updated', 'catalog_moderation',
    '{"value":"on"}', '2025-06-01T11:10:00Z')
 ON CONFLICT (id) DO NOTHING;
+
+-- The one row settings ever holds in production: the admin override named by
+-- internal/vision/vision.go's SettingsModelKey ("gemini_model"), currently
+-- the table's only real caller (internal/store/store.go's SetSetting comment).
+-- updated_by is e2e-admin-2 for the same reason the admin_audit_log rows above
+-- use it — e2e-admin's id is not knowable from here, since `migrate up`
+-- bootstraps it under a genuine UUIDv7 — and it matters here more than there:
+-- the column is ON DELETE SET NULL, not NOT NULL, so an id that does not
+-- resolve to any user would silently read back as itself rather than NULL,
+-- and only a real, existing user id exercises the FK at all.
+INSERT INTO settings (key, value, updated_at, updated_by) VALUES
+  ('gemini_model', 'gemini-2.5-flash', '2025-06-01T11:15:00Z',
+   '00000000-0000-7000-8000-000000000005')
+ON CONFLICT (key) DO NOTHING;
 
 -- Two live sessions, for the half of spec 15's restore criterion that the
 -- before/after snapshot cannot express: "all prior sessions are invalid".

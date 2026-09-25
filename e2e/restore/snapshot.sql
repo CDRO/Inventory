@@ -61,13 +61,17 @@
 
 SELECT key, value FROM (
 
-    -- Row counts. Which ten tables is this file's own choice, not a list
+    -- Row counts. Which eleven tables is this file's own choice, not a list
     -- issue #133 hands down — it asks only that "the seeded data is present
-    -- and correct". These are the ten that carry the seeded fixture: the
+    -- and correct". These are the eleven that carry the seeded fixture: the
     -- tenancy spine (users, storages, storage_members), the inventory it
-    -- holds (locations, categories, products, inventory_batches), and the
-    -- three append-only trails a lossy restore would strip in silence
-    -- (inventory_logs, jobs, admin_audit_log).
+    -- holds (locations, categories, products, inventory_batches), the three
+    -- append-only trails a lossy restore would strip in silence
+    -- (inventory_logs, jobs, admin_audit_log), and the one operational
+    -- override table (settings) — SetSetting writes a settings row and its
+    -- admin_audit_log row in the same transaction (internal/store/store.go),
+    -- so a restore that brought one back without the other has broken that
+    -- pairing after the fact.
     SELECT 'count.admin_audit_log'  AS key, count(*)::text AS value FROM admin_audit_log
     UNION ALL SELECT 'count.categories',        count(*)::text FROM categories
     UNION ALL SELECT 'count.inventory_batches', count(*)::text FROM inventory_batches
@@ -75,6 +79,7 @@ SELECT key, value FROM (
     UNION ALL SELECT 'count.jobs',              count(*)::text FROM jobs
     UNION ALL SELECT 'count.locations',         count(*)::text FROM locations
     UNION ALL SELECT 'count.products',          count(*)::text FROM products
+    UNION ALL SELECT 'count.settings',          count(*)::text FROM settings
     UNION ALL SELECT 'count.storage_members',   count(*)::text FROM storage_members
     UNION ALL SELECT 'count.storages',          count(*)::text FROM storages
     UNION ALL SELECT 'count.users',             count(*)::text FROM users
@@ -237,6 +242,23 @@ SELECT key, value FROM (
                    ('00000000-0000-7000-8000-000000000102'::uuid),
                    ('00000000-0000-7000-8000-000000000103'::uuid)) AS e(id)
       LEFT JOIN admin_audit_log a ON a.id = e.id
+
+    -- The one operational setting the fixture seeds, keyed by its own text
+    -- primary key rather than a UUID (migrations/00002_core_schema.sql).
+    -- updated_by is included for the same reason is_admin is on the users
+    -- spot check below: it is a column a restore that nulled the foreign key,
+    -- rather than dropping the row outright, must still be caught by. Rendered
+    -- in UTC explicitly, as admin_audit_log.created_at is above, so the
+    -- session's TimeZone setting cannot change the text.
+    UNION ALL
+    SELECT 'spot.settings.' || e.key,
+           CASE WHEN st.key IS NULL THEN '<MISSING>' ELSE
+                'value=' || coalesce(st.value, '<null>')
+             || ', updated_by=' || coalesce(st.updated_by::text, '<null>')
+             || ', updated_at=' || coalesce(to_char(st.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'), '<null>')
+           END
+      FROM (VALUES ('gemini_model')) AS e(key)
+      LEFT JOIN settings st ON st.key = e.key
 
 ) snapshot
 ORDER BY key COLLATE "C";

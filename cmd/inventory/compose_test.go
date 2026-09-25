@@ -90,6 +90,23 @@ func composeService(t *testing.T, file, name string) string {
 	return strings.Join(block, "\n")
 }
 
+// lineFrom returns the one line of block whose trimmed text starts with
+// prefix, failing the test if there is none. Used to pull a value forward
+// from one compose file's service block into an assertion on another's,
+// rather than hardcoding what that value happened to be when the test was
+// written - a literal copy would keep passing after the source drifted.
+func lineFrom(t *testing.T, block, prefix string) string {
+	t.Helper()
+
+	for _, line := range strings.Split(block, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), prefix) {
+			return line
+		}
+	}
+	require.Fail(t, "no line found", "block has no line starting with %q", prefix)
+	return ""
+}
+
 // TestBackupServiceMountsOnlyWhatMayTravel is the first acceptance criterion
 // of docs/specs/15-backup-restore-and-export.md expressed as a test: a backup
 // archive contains the SQL dump and the uploads tree, and nothing from
@@ -167,22 +184,24 @@ func TestE2EBackupServiceMatchesTheProductionOne(t *testing.T) {
 	t.Parallel()
 
 	block := composeService(t, "docker-compose.e2e.yml", "backup")
+	prodBlock := composeService(t, "docker-compose.yml", "backup")
 
-	assert.Contains(t, block, "image: postgres:16-alpine",
-		"the same image as db, so pg_dump and BusyBox tar arrive with it")
-	assert.Contains(t, block, `entrypoint: ["/bin/sh", "/usr/local/bin/inventory-backup"]`,
-		"the same entrypoint as the base file's copy, so the round trip exercises the real script")
-	assert.Contains(t, block, `profiles: ["tools"]`,
-		"a backup runs when it is invoked, never as part of `up`")
-
-	assert.Contains(t, block, "- uploads:/data/uploads:ro",
-		"the uploads tree is what a backup reads, and it reads it read-only")
-	assert.Contains(t, block, "- uploads:/restore/uploads",
-		"a restore needs one writable path into the same volume")
-	assert.Contains(t, block, "- ./backups:/backups",
-		"archives land in ./backups, which survives the round trip's `down -v` because it is a bind mount")
-	assert.Contains(t, block, "- ./scripts/backup:/usr/local/bin/inventory-backup:ro",
-		"the round trip must run the repository's real script, not a copy of it")
+	// Pulled from the production file itself, not hardcoded, so what this
+	// test actually catches is the production service changing underneath
+	// it: a literal copy of today's values would keep passing forever after
+	// a real drift, which is the failure mode this test exists to prevent.
+	for _, prefix := range []string{
+		"image:",
+		"entrypoint:",
+		"profiles:",
+		"- uploads:/data/uploads:ro",
+		"- uploads:/restore/uploads",
+		"- ./backups:/backups",
+		"- ./scripts/backup:/usr/local/bin/inventory-backup:ro",
+	} {
+		assert.Contains(t, block, lineFrom(t, prodBlock, prefix),
+			"the E2E backup service has drifted from the production one's %q line", prefix)
+	}
 
 	// The one intended difference from the base file's copy: no .env exists in
 	// the E2E stack, so the credentials are inline — and they have to be the
@@ -224,6 +243,8 @@ func TestE2EAppMountsTheUploadsTheRoundTripDestroys(t *testing.T) {
 
 	assert.Contains(t, block, "- uploads:/data/uploads",
 		"the uploads tree must be a named volume, or `down -v` destroys nothing and the restore proves nothing")
+	assert.NotContains(t, block, "- uploads:/data/uploads:ro",
+		"the app writes new uploads, so its mount must not be read-only - Contains alone would also accept this line")
 	assert.NotContains(t, block, "imagecache",
 		"imagecache is not in a backup archive, so the E2E stack has no reason to hold one")
 }
