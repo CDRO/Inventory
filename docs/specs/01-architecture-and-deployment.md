@@ -158,7 +158,13 @@ variables that `docker compose` and the app both already read:
   with no compose-file change needed at all. Left unset, Compose derives it
   from the directory name, which already differs between worktrees — setting
   it explicitly just makes that guarantee visible and independent of the
-  directory naming happening to stay unique.
+  directory naming happening to stay unique. A directory name is free-form
+  and Compose's project-name rule is not (lowercase alphanumeric, hyphens and
+  underscores only, must start with a letter or number), so a value built
+  from one — as the wave orchestrator's does, `<repo>-<slug>` — has to be
+  sanitized before it is written, or Compose refuses it outright and every
+  `docker compose` command in that worktree fails before it does anything
+  (`scripts/wellen-orchestrator.ps1`'s `Get-SanitizedProjectName`).
 - **`HTTP_PORT`** — already an application variable
   (`internal/config/config.go`): the app listens on whatever this says, not
   a hardcoded `8000`. `docker-compose.override.yml`'s port mapping reads the
@@ -185,8 +191,20 @@ containers left running — never collide on a host port or a container name.
 
 **Removing what a worktree leaves behind.** Every such checkout leaves, per
 Compose project, a database container, a network, three named volumes
-(`pgdata`, `uploads`, `imagecache`) and the images it built, and nothing removes
-them when the work is merged. `scripts/wellen-docker-cleanup.ps1` does, for the
+(`pgdata`, `uploads`, `imagecache`) and the images it built. Two things remove
+this, at different times, for the wave orchestrator's own worktrees.
+
+The moment a package's issue closes, the orchestrator itself runs
+`docker compose down -v --remove-orphans` inside that worktree
+(`Stop-PackageStack`) — no waiting for the wave to finish, so a long or
+parallel wave never accumulates containers, networks or bound host ports from
+packages that are already done. This only ever reaches the worktree's own
+default Compose project, never a further project a session started under a
+name of its own for some check.
+
+What that step cannot reach — built images, such an extra project, and
+anything left by a package whose session crashed before its issue ever
+closed — `scripts/wellen-docker-cleanup.ps1` removes instead, for the
 worktrees of a finished wave (the orchestrator runs it after the wave's
 consolidation for every wave with `"dockerCleanup": true`; by hand:
 `.\scripts\wellen-docker-cleanup.ps1 -Wave <n> -DryRun`, then without `-DryRun`).
