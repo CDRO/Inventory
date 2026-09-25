@@ -138,13 +138,20 @@ type Runner struct {
 // New builds a Runner. Call Recover once before the server accepts requests,
 // and run RunLeases for as long as the process serves.
 //
-// The lease owner is minted here, per process. uuid.New rather than the UUIDv7
-// the rest of the system uses for stored ids: this one is not an entity id, it
-// is never returned by the API, never a key and never ordered on, so it has no
-// use for a time prefix — and unlike a stored id there is nothing to degrade to
-// if the system's randomness is unavailable, because a runner with no owner
-// would see every pending row, its own included, as an orphan. A process that
-// cannot read crypto/rand cannot mint a session token either.
+// The lease owner is minted here, per process, with uuid.New rather than the
+// uuid.NewV7 the rest of the system uses for stored ids: this one is not an
+// entity id — never returned by the API, never a key, never ordered on — so it
+// has no use for a time prefix.
+//
+// uuid.New is Must(NewRandom()), so it panics where every other reader of
+// crypto/rand in this repository returns an error (store.NewToken,
+// auth.HashPassword's salt). That is the deliberate part, and it is not an
+// appeal to those call sites: it is that they have somewhere to degrade to and
+// this does not. A token that cannot be minted fails one request; a runner with
+// no owner would read every pending row — including the ones it is working
+// itself — as an orphan, and fail live work on every tick. Start-up is the right
+// place for that to stop, and on the Linux/scratch target crypto/rand blocks
+// rather than failing anyway.
 func New(s Store, log *slog.Logger) *Runner {
 	if log == nil {
 		log = slog.Default()
