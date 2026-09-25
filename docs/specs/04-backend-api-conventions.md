@@ -257,7 +257,11 @@ CREATE TABLE jobs (
     error        TEXT,
     created_by   UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Which process is working this pending row, and until when. NULL on any
+    -- row that is not pending, and on a pending row nobody claims.
+    lease_owner      UUID,
+    lease_expires_at TIMESTAMPTZ
 );
 ```
 
@@ -273,8 +277,25 @@ CREATE TABLE jobs (
   [`32-inbox-discard-all.md`](32-inbox-discard-all.md)). Uploading and reviewing are decoupled: a `done` job waits
   indefinitely, is visible to every member of the storage, and is never
   auto-expired while unreviewed (`06-vision-shelf-ingestion.md`).
-- On process restart, jobs left `pending` are marked `failed` with a
-  retryable error at startup — never left hanging forever.
+- A `pending` job records which process is working it: `lease_owner` is
+  that process, minted fresh at every start-up, and `lease_expires_at`
+  is how long the claim stands without being renewed. The claim is
+  written by the same statement that makes the row `pending` — the
+  insert, or a re-analysis — so there is no instant in which a pending
+  row is unowned.
+- Jobs left `pending` by a process that is gone are marked `failed` with
+  a retryable error — never left hanging forever. What identifies "gone"
+  is the claim: a row nobody claims, or one whose claim stopped being
+  renewed. This runs at startup **and** on a timer for as long as the
+  process serves, because a second instance can be removed while the
+  first keeps serving and no later startup would ever look at its rows
+  again. A process failing its own lapsed claims is the one exception —
+  a renewal that did not get through is a database problem, not a dead
+  goroutine — and another instance still fails them.
+- **Recovery never fails a job another live process owns.** The app is
+  not assumed to be a single process: the rolling update in
+  [`01-architecture-and-deployment.md`](01-architecture-and-deployment.md)
+  runs a second instance next to the first on purpose.
 - `POST /api/storages/{storage_id}/jobs/{job_id}/reanalyze` moves a `done`
   or `failed` job that still has its photo back to `pending`, clearing its
   payload and error, and runs its vision call again under the same job id

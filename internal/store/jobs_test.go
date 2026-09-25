@@ -20,6 +20,49 @@ func jobStatus(t *testing.T, ctx context.Context, id uuid.UUID) string {
 	return status
 }
 
+// jobClaim reads a job's lease columns: who owns the pending row, and when the
+// claim lapses. Both nil is an unclaimed row (migrations/00014_job_lease.sql).
+func jobClaim(t *testing.T, ctx context.Context, id uuid.UUID) (*uuid.UUID, *time.Time) {
+	t.Helper()
+	var owner *uuid.UUID
+	var expires *time.Time
+	require.NoError(t, testPool.QueryRow(ctx,
+		`SELECT lease_owner, lease_expires_at FROM jobs WHERE id = $1`, id).Scan(&owner, &expires))
+	return owner, expires
+}
+
+// plantPendingJob inserts a pending job with its lease columns written by hand,
+// which is how a row another process left behind is reproduced: a fixture built
+// through CreateJob would prove nothing about rows CreateJob did not write, and
+// those — an old binary's insert, a claim given up at shutdown, a claim nobody
+// renewed — are exactly what recovery has to judge.
+//
+// owner uuid.Nil writes NULL, and so does a zero expiresIn: together they are the
+// unclaimed state. A negative expiresIn is a claim whose owner stopped renewing
+// it.
+func plantPendingJob(t *testing.T, ctx context.Context, storageID, owner uuid.UUID, expiresIn time.Duration) uuid.UUID {
+	t.Helper()
+
+	id, err := uuid.NewV7()
+	require.NoError(t, err)
+
+	var ownerArg *uuid.UUID
+	if owner != uuid.Nil {
+		ownerArg = &owner
+	}
+	var secs *float64
+	if expiresIn != 0 {
+		s := expiresIn.Seconds()
+		secs = &s
+	}
+	_, err = execTest(ctx, `
+		INSERT INTO jobs (id, storage_id, kind, status, lease_owner, lease_expires_at)
+		VALUES ($1, $2, 'shelf_ingestion', 'pending', $3, now() + make_interval(secs => $4))`,
+		id, storageID, ownerArg, secs)
+	require.NoError(t, err)
+	return id
+}
+
 func TestJobLifecyclePendingToDone(t *testing.T) {
 	s := requireDB(t)
 	ctx := context.Background()
@@ -62,9 +105,9 @@ func TestOnlyAPendingJobCanFinish(t *testing.T) {
 	assert.ErrorIs(t, s.CompleteJob(ctx, discarded.ID, json.RawMessage(`{}`)), store.ErrNotFound)
 }
 
-// TestFailInterruptedJobsLeavesFinishedOnesAlone — the restart sweep fails what
-// was pending and touches nothing else.
-func TestFailInterruptedJobsLeavesFinishedOnesAlone(t *testing.T) {
+// TestFailOrphanedJobsLeavesFinishedOnesAlone — the restart sweep fails what
+// was pending and unowned, and touches nothing else.
+func TestFailOrphanedJobsLeavesFinishedOnesAlone(t *testing.T) {
 	s := requireDB(t)
 	ctx := context.Background()
 	storageID := newStorage(t, ctx)
@@ -75,7 +118,7 @@ func TestFailInterruptedJobsLeavesFinishedOnesAlone(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.CompleteJob(ctx, done.ID, json.RawMessage(`{"ok":true}`)))
 
-	n, err := s.FailInterruptedJobs(ctx)
+	n, err := s.FailOrphanedJobs(ctx, uuid.Must(uuid.NewV7()))
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, n, int64(1))
 
@@ -86,6 +129,176 @@ func TestFailInterruptedJobsLeavesFinishedOnesAlone(t *testing.T) {
 	assert.Equal(t, store.InterruptedJobError, *got.Error)
 
 	assert.Equal(t, "done", jobStatus(t, ctx, done.ID), "a finished proposal survives a restart")
+}
+
+// TestFailOrphanedJobsSparesWorkALiveProcessOwns is issue #121 at the statement
+// that used to cause it. Recovery ran `WHERE status = 'pending'` and nothing
+// else, on the reasoning that nothing could be working a pending row while it
+// ran — true of one process, false during the rolling update on the NAS, which
+// starts a second instance next to the first on purpose
+// (deploy/synology/update).
+//
+// Four rows, four rules:
+//   - a claim another process is still renewing is live work: left alone;
+//   - a claim nobody renewed is a process that died: failed;
+//   - no claim at all — an old binary's insert, or a claim given up at
+//     shutdown — is nobody's work: failed, which is what keeps stop-then-start
+//     behaving as it always has;
+//   - a lapsed claim of the sweeping process itself is left alone, because a
+//     renewal of ours that did not get through is evidence about the database,
+//     not about our own goroutines. Another instance still fails it.
+func TestFailOrphanedJobsSparesWorkALiveProcessOwns(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+
+	me := uuid.Must(uuid.NewV7())
+	otherInstance := uuid.Must(uuid.NewV7())
+
+	live := plantPendingJob(t, ctx, storageID, otherInstance, time.Hour)
+	abandoned := plantPendingJob(t, ctx, storageID, otherInstance, -time.Second)
+	unclaimed := plantPendingJob(t, ctx, storageID, uuid.Nil, 0)
+	mineStalled := plantPendingJob(t, ctx, storageID, me, -time.Second)
+
+	n, err := s.FailOrphanedJobs(ctx, me)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, n, int64(2))
+
+	assert.Equal(t, "pending", jobStatus(t, ctx, live), "the other instance is still working this one")
+	owner, expires := jobClaim(t, ctx, live)
+	require.NotNil(t, owner)
+	assert.Equal(t, otherInstance, *owner, "and its claim is untouched")
+	require.NotNil(t, expires)
+
+	assert.Equal(t, "failed", jobStatus(t, ctx, abandoned), "a claim nobody renews is a process that is gone")
+	owner, expires = jobClaim(t, ctx, abandoned)
+	assert.Nil(t, owner, "a job that is no longer pending holds no claim")
+	assert.Nil(t, expires)
+
+	assert.Equal(t, "failed", jobStatus(t, ctx, unclaimed), "a pending row nobody claims is nobody's work")
+
+	assert.Equal(t, "pending", jobStatus(t, ctx, mineStalled),
+		"our own lapsed claim is a failed renewal, not a dead goroutine")
+
+	// The same row, swept by any other process, is failed: that is what makes an
+	// instance killed while another kept serving recoverable at all
+	// (issue #124, item 4).
+	_, err = s.FailOrphanedJobs(ctx, otherInstance)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", jobStatus(t, ctx, mineStalled))
+}
+
+// TestRenewJobLeasesOnlyPushesItsOwnClaims — the heartbeat, and the one thing it
+// must not do: touch updated_at, which is the job's own last change and what the
+// retention sweep and every client order by. A claim renewed every few seconds
+// is bookkeeping about a process, not a change to the job.
+func TestRenewJobLeasesOnlyPushesItsOwnClaims(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+
+	me := uuid.Must(uuid.NewV7())
+	otherInstance := uuid.Must(uuid.NewV7())
+	mine := plantPendingJob(t, ctx, storageID, me, time.Second)
+	theirs := plantPendingJob(t, ctx, storageID, otherInstance, time.Second)
+
+	var before time.Time
+	require.NoError(t, testPool.QueryRow(ctx, `SELECT updated_at FROM jobs WHERE id = $1`, mine).Scan(&before))
+	_, mineExpiredAt := jobClaim(t, ctx, mine)
+	require.NotNil(t, mineExpiredAt)
+	_, theirsExpiredAt := jobClaim(t, ctx, theirs)
+	require.NotNil(t, theirsExpiredAt)
+
+	n, err := s.RenewJobLeases(ctx, store.JobLease{Owner: me, TTL: time.Hour})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n, "only this process's claims")
+
+	_, renewed := jobClaim(t, ctx, mine)
+	require.NotNil(t, renewed)
+	assert.True(t, renewed.After(*mineExpiredAt), "the claim is pushed forward")
+
+	_, untouched := jobClaim(t, ctx, theirs)
+	require.NotNil(t, untouched)
+	assert.True(t, untouched.Equal(*theirsExpiredAt), "another process's claim is not ours to renew")
+
+	var after time.Time
+	require.NoError(t, testPool.QueryRow(ctx, `SELECT updated_at FROM jobs WHERE id = $1`, mine).Scan(&after))
+	assert.True(t, after.Equal(before), "renewing a claim is not a change to the job")
+
+	_, err = s.RenewJobLeases(ctx, store.JobLease{TTL: time.Hour})
+	assert.ErrorIs(t, err, store.ErrValidation, "a lease with no owner claims nothing")
+}
+
+// TestReleaseJobLeasesLeavesTheRowPendingAndUnowned — what a process does on its
+// way out for the jobs whose outcome it could not record in time. The row stays
+// pending, so a straggler goroutine can still finish it, and it stops naming an
+// owner, so the next start-up fails it at once instead of waiting out a claim
+// nobody will renew.
+func TestReleaseJobLeasesLeavesTheRowPendingAndUnowned(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+
+	me := uuid.Must(uuid.NewV7())
+	otherInstance := uuid.Must(uuid.NewV7())
+	mine := plantPendingJob(t, ctx, storageID, me, time.Hour)
+	theirs := plantPendingJob(t, ctx, storageID, otherInstance, time.Hour)
+
+	n, err := s.ReleaseJobLeases(ctx, me)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n)
+
+	assert.Equal(t, "pending", jobStatus(t, ctx, mine), "releasing a claim does not fail the job")
+	owner, expires := jobClaim(t, ctx, mine)
+	assert.Nil(t, owner)
+	assert.Nil(t, expires)
+
+	owner, _ = jobClaim(t, ctx, theirs)
+	require.NotNil(t, owner)
+	assert.Equal(t, otherInstance, *owner, "another process's claim is not ours to give up")
+
+	// And an unowned pending row is what the next start-up fails.
+	_, err = s.FailOrphanedJobs(ctx, uuid.Must(uuid.NewV7()))
+	require.NoError(t, err)
+	assert.Equal(t, "failed", jobStatus(t, ctx, mine))
+}
+
+// TestCreateJobClaimsTheJobInTheSameStatement — there must be no instant in
+// which a row is pending and unclaimed, because another instance's recovery
+// running in that instant would fail it. The claim is written by the insert, and
+// dropped again by the row's outcome.
+func TestCreateJobClaimsTheJobInTheSameStatement(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+
+	me := uuid.Must(uuid.NewV7())
+	job, err := s.CreateJob(ctx, store.NewJob{
+		StorageID: storageID,
+		Kind:      store.JobShelfIngestion,
+		Lease:     store.JobLease{Owner: me, TTL: time.Hour},
+	})
+	require.NoError(t, err)
+
+	owner, expires := jobClaim(t, ctx, job.ID)
+	require.NotNil(t, owner)
+	assert.Equal(t, me, *owner)
+	require.NotNil(t, expires)
+	assert.True(t, expires.After(time.Now()), "the claim is current from the moment the row exists")
+
+	require.NoError(t, s.CompleteJob(ctx, job.ID, json.RawMessage(`{"ok":true}`)))
+	owner, expires = jobClaim(t, ctx, job.ID)
+	assert.Nil(t, owner, "a job that is no longer pending holds no claim")
+	assert.Nil(t, expires)
+
+	// A job created with no lease at all is unowned, and that is a state the
+	// sweep is meant to fail rather than an error to reject: nothing is working
+	// a row nobody claimed.
+	unowned, err := s.CreateJob(ctx, store.NewJob{StorageID: storageID, Kind: store.JobShelfIngestion})
+	require.NoError(t, err)
+	owner, expires = jobClaim(t, ctx, unowned.ID)
+	assert.Nil(t, owner)
+	assert.Nil(t, expires)
 }
 
 func TestJobsAreStorageScoped(t *testing.T) {
@@ -255,6 +468,10 @@ func TestRequeueJobAnalysesAFinishedPhotoAgain(t *testing.T) {
 	storageID := newStorage(t, ctx)
 	photo := uuid.NewString() + ".jpg"
 
+	// The claim of the process running the new analysis. A requeued job is
+	// pending again, so it needs an owner for the same reason a new one does.
+	reanalysis := store.JobLease{Owner: uuid.Must(uuid.NewV7()), TTL: time.Hour}
+
 	newJob := func(image *string) *store.Job {
 		job, err := s.CreateJob(ctx, store.NewJob{StorageID: storageID, Kind: store.JobShelfIngestion, ImageFilename: image})
 		require.NoError(t, err)
@@ -263,8 +480,8 @@ func TestRequeueJobAnalysesAFinishedPhotoAgain(t *testing.T) {
 
 	done := newJob(&photo)
 	require.NoError(t, s.CompleteJob(ctx, done.ID, json.RawMessage(`{"rows":[]}`)))
-	assert.ErrorIs(t, s.RequeueJob(ctx, newStorage(t, ctx), done.ID), store.ErrNotFound, "another storage's job")
-	require.NoError(t, s.RequeueJob(ctx, storageID, done.ID))
+	assert.ErrorIs(t, s.RequeueJob(ctx, newStorage(t, ctx), done.ID, reanalysis), store.ErrNotFound, "another storage's job")
+	require.NoError(t, s.RequeueJob(ctx, storageID, done.ID, reanalysis))
 
 	got, err := s.Job(ctx, storageID, done.ID)
 	require.NoError(t, err)
@@ -273,14 +490,20 @@ func TestRequeueJobAnalysesAFinishedPhotoAgain(t *testing.T) {
 	require.NotNil(t, got.ImageFilename)
 	assert.Equal(t, photo, *got.ImageFilename, "the photo stays with the job")
 
-	assert.ErrorIs(t, s.RequeueJob(ctx, storageID, done.ID), store.ErrConflict, "a pending job is already being analysed")
+	owner, expires := jobClaim(t, ctx, done.ID)
+	require.NotNil(t, owner)
+	assert.Equal(t, reanalysis.Owner, *owner, "the re-analysis claims the job it just made pending")
+	require.NotNil(t, expires)
+	assert.True(t, expires.After(time.Now()))
+
+	assert.ErrorIs(t, s.RequeueJob(ctx, storageID, done.ID, reanalysis), store.ErrConflict, "a pending job is already being analysed")
 
 	// A requeued job finishes like a new one.
 	require.NoError(t, s.CompleteJob(ctx, done.ID, json.RawMessage(`{"rows":[{"row_id":"0"}]}`)))
 
 	failed := newJob(&photo)
 	require.NoError(t, s.FailJob(ctx, failed.ID, "The photo could not be analysed."))
-	require.NoError(t, s.RequeueJob(ctx, storageID, failed.ID))
+	require.NoError(t, s.RequeueJob(ctx, storageID, failed.ID, reanalysis))
 	got, err = s.Job(ctx, storageID, failed.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.JobPending, got.Status)
@@ -288,7 +511,7 @@ func TestRequeueJobAnalysesAFinishedPhotoAgain(t *testing.T) {
 
 	noPhoto := newJob(nil)
 	require.NoError(t, s.CompleteJob(ctx, noPhoto.ID, json.RawMessage(`{"rows":[]}`)))
-	assert.ErrorIs(t, s.RequeueJob(ctx, storageID, noPhoto.ID), store.ErrConflict, "nothing to analyse")
+	assert.ErrorIs(t, s.RequeueJob(ctx, storageID, noPhoto.ID, reanalysis), store.ErrConflict, "nothing to analyse")
 
 	consumed := newJob(&photo)
 	require.NoError(t, s.CompleteJob(ctx, consumed.ID, json.RawMessage(`{"rows":[]}`)))
@@ -296,8 +519,8 @@ func TestRequeueJobAnalysesAFinishedPhotoAgain(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.ConsumeJob(ctx, tx, storageID, consumed.ID))
 	require.NoError(t, tx.Commit(ctx))
-	assert.ErrorIs(t, s.RequeueJob(ctx, storageID, consumed.ID), store.ErrConflict, "an applied proposal cannot be replaced")
+	assert.ErrorIs(t, s.RequeueJob(ctx, storageID, consumed.ID, reanalysis), store.ErrConflict, "an applied proposal cannot be replaced")
 	assert.Equal(t, "consumed", jobStatus(t, ctx, consumed.ID))
 
-	assert.ErrorIs(t, s.RequeueJob(ctx, storageID, uuid.New()), store.ErrNotFound)
+	assert.ErrorIs(t, s.RequeueJob(ctx, storageID, uuid.New(), reanalysis), store.ErrNotFound)
 }

@@ -185,15 +185,21 @@ DOCKER_COMPOSE=/volume1/docker/bin/docker-compose sh /volume1/docker/inventory/d
 - **Two releases overlap.** The migration of step 2 runs against the old app, and
   the old app runs on the migrated schema until step 6. A migration that the
   previous release cannot work with needs `--classic`.
-- **The app assumes one process, and the script can only narrow the gap.** On
-  start the app marks *every* pending job as failed (`FailInterruptedJobs`), and on
-  a normal stop it cancels the jobs it is running and fails them as interrupted. The
-  script waits for no job to be pending before it starts the second instance
-  (step 3) and again before it stops the old one (step 6). A job submitted in the
-  seconds after a check can still be failed: by the new instance's start-up, or by
-  the old instance's stop. The user re-runs the analysis. Closing that needs the
-  recovery to know which process owns a job (issue #121). `--classic` avoids the
-  overlap altogether, at the price of interrupting whatever is running.
+- **Starting the new instance no longer fails the old one's jobs; stopping the old
+  one still can.** A pending job records which process is working it and start-up
+  fails only the jobs whose owner is gone, so step 4 leaves the old instance's work
+  alone. On a normal stop, though, the app still cancels the jobs it is running and
+  fails them as interrupted — it is not racing anything, it is saying it will not
+  finish them. The script waits for no job to be pending before it starts the second
+  instance (step 3) and again before it stops the old one (step 6); a job submitted
+  in the seconds after that second check is failed by the stop, and the user re-runs
+  the analysis. `--classic` avoids the overlap altogether, at the price of
+  interrupting whatever is running.
+- **A new instance the trap removes no longer strands its jobs.** It is force-removed
+  with `docker rm -f`, so the jobs it had accepted stay `pending` with no process
+  behind them. The surviving instance fails them within about a minute — it sweeps
+  claims nobody renews for as long as it serves, not only at start-up — so the next
+  update's drain wait is not blocked by them.
 - **A crash of the app is not handled by any of this.** Docker restarts the app
   container by itself, and the sidecar keeps the dead namespace until you run
   `dc restart ts-inventory`.

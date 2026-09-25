@@ -312,15 +312,23 @@ func serve() error {
 	}
 
 	// Background jobs (docs/specs/04-backend-api-conventions.md). Recover runs
-	// before the listener, while no goroutine of this process can own a
-	// pending job, so everything pending is orphaned by the previous one. Like
-	// the bootstrap it is warned about rather than fatal: the schema is known
-	// to be current by now, so a failure here is a database problem, and an
-	// unrecovered job is a stuck review rather than a broken deployment.
+	// before the listener and fails the pending jobs whose owning process is
+	// gone — not every pending job, because a rolling update runs a second
+	// instance next to the first on purpose (issue #121). Like the bootstrap it
+	// is warned about rather than fatal: the schema is known to be current by
+	// now, so a failure here is a database problem, and an unrecovered job is a
+	// stuck review rather than a broken deployment.
 	jobRunner := jobs.New(db, slog.Default())
 	if err := jobRunner.Recover(ctx); err != nil {
 		slog.Warn("could not recover interrupted jobs", slog.Any("err", err))
 	}
+
+	// Renews this process's claims on the jobs it is working, and fails the ones
+	// whose owner stopped renewing. A goroutine like the sweeps below, not a
+	// second job runner: it starts no work and calls no provider. It is what
+	// recovers an instance that was killed while the other kept serving, which
+	// no start-up will ever look at again.
+	go jobRunner.RunLeases(ctx)
 
 	// The matching service is shared with specs 06, 07 and 09; it is
 	// constructed once here so all of them use the same thresholds.

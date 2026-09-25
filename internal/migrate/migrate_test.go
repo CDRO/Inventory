@@ -349,18 +349,19 @@ func TestRecoverFatalReraisesOtherPanics(t *testing.T) {
 // protects is the dev and staging use of `migrate down`, and the maintainer who
 // reads a down block and assumes it works.
 //
-// The assertion is on storage_members.start_page, the column
-// migrations/00013_storage_member_start_page.sql adds, whose acceptance
-// criterion in docs/specs/34-navigation-and-start-page.md is "its down
-// migration drops the column". `migrate up` afterwards must put it back: a
-// rollback that cannot be undone is not a rollback.
+// The assertions are on two columns, from the two ends of the walk below.
+// storage_members.start_page is the one migrations/00013_storage_member_start_page.sql
+// adds, whose acceptance criterion in docs/specs/34-navigation-and-start-page.md
+// is "its down migration drops the column"; jobs.lease_owner is the one
+// migrations/00014_job_lease.sql adds, and it is the newest, so it is the block
+// a walk that stopped one step short would silently skip. `migrate up`
+// afterwards must put both back: a rollback that cannot be undone is not a
+// rollback.
 //
 // The rollback walks the shipped migration list from the newest version down to
 // startPageVersion rather than naming a fixed number of steps, so it keeps
-// covering the newest down block as the schema grows. **Today 00013 *is* the
-// newest, so that walk is a single step** — the loop is written for the schema
-// this test will live in, not for the one it has now, and there is currently no
-// version above 13 at which to observe the column still present.
+// covering the newest down block as the schema grows — the loop is written for
+// the schema this test will live in, not for the one it has now.
 func TestRunDownRollsBackTheRepositorysOwnMigrations(t *testing.T) {
 	// Not parallel: chdir mutates process state.
 	ctx := context.Background()
@@ -381,6 +382,8 @@ func TestRunDownRollsBackTheRepositorysOwnMigrations(t *testing.T) {
 	require.NoError(t, Run(ctx, dsn, "up", io.Discard))
 	require.True(t, columnExists(t, dsn, "storage_members", "start_page"),
 		"migrate up must add the column migration %d declares", startPageVersion)
+	require.True(t, columnExists(t, dsn, "jobs", "lease_owner"),
+		"migrate up must add the job lease column")
 
 	// One call per *shipped migration* from the newest down to
 	// startPageVersion inclusive — iterating the versions slice rather than
@@ -397,12 +400,73 @@ func TestRunDownRollsBackTheRepositorysOwnMigrations(t *testing.T) {
 
 	assert.False(t, columnExists(t, dsn, "storage_members", "start_page"),
 		"migration %d's down block must drop start_page", startPageVersion)
+	assert.False(t, columnExists(t, dsn, "jobs", "lease_owner"),
+		"the job lease migration's down block must drop lease_owner")
 
 	require.NoError(t, Run(ctx, dsn, "up", io.Discard))
 	assert.True(t, columnExists(t, dsn, "storage_members", "start_page"),
 		"re-applying must restore the column")
+	assert.True(t, columnExists(t, dsn, "jobs", "lease_owner"),
+		"re-applying must restore the job lease column")
 	assert.NoError(t, Check(ctx, dsn),
 		"a database rolled back and migrated up again must satisfy the shipped binary")
+}
+
+// TestJobLeaseMigrationGivesExistingPendingJobsAGraceClaim covers the one thing
+// migrations/00014_job_lease.sql does beyond adding two columns, and the one
+// claim about it that nothing else can check.
+//
+// The release that applies that migration is itself installed by the rolling
+// update (docs/specs/01-architecture-and-deployment.md): `migrate up` runs while
+// the *old* binary is still serving, and that binary writes no lease. Without
+// the backfill its pending rows would meet the new instance's recovery with no
+// claim and be failed — the exact race the migration exists to close, happening
+// once, during the update that closes it. So every row that is already pending
+// when the columns arrive gets a short claim with no owner: current enough to
+// survive that start-up, and lapsed soon after, so a genuine orphan is still
+// failed a minute later.
+//
+// Rolling back one migration and applying it again is how the "already pending"
+// state is reached, because the test database is migrated all the way up before
+// anything can insert a row.
+func TestJobLeaseMigrationGivesExistingPendingJobsAGraceClaim(t *testing.T) {
+	// Not parallel: chdir mutates process state.
+	ctx := context.Background()
+	dsn := newTestDatabase(t)
+	chdir(t, filepath.Join("..", ".."))
+
+	require.NoError(t, Run(ctx, dsn, "up", io.Discard))
+	require.True(t, columnExists(t, dsn, "jobs", "lease_expires_at"))
+
+	require.NoError(t, Run(ctx, dsn, "down", io.Discard), "roll back the lease migration")
+	require.False(t, columnExists(t, dsn, "jobs", "lease_expires_at"),
+		"the lease migration must be the newest one for this test to mean anything")
+
+	db, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	// A pending job written by a binary that knows nothing about leases.
+	storage := "3f1c0f9e-0000-7000-8000-000000000001"
+	job := "3f1c0f9e-0000-7000-8000-000000000002"
+	_, err = db.ExecContext(ctx, `INSERT INTO storages (id, name) VALUES ($1, 'lease-backfill')`, storage)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO jobs (id, storage_id, kind, status)
+		VALUES ($1, $2, 'shelf_ingestion', 'pending')`, job, storage)
+	require.NoError(t, err)
+
+	require.NoError(t, Run(ctx, dsn, "up", io.Discard))
+
+	var owner *string
+	var stillCurrent *bool
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT lease_owner::text, lease_expires_at > now() FROM jobs WHERE id = $1`, job).
+		Scan(&owner, &stillCurrent))
+	assert.Nil(t, owner, "no process owns a row written before the columns existed")
+	require.NotNil(t, stillCurrent)
+	assert.True(t, *stillCurrent,
+		"an already pending job must survive the start-up of the release that migrates it")
 }
 
 // columnExists asks the database's own catalogue whether public.table.column

@@ -903,7 +903,11 @@ removes the old one and recreates the sidecar. Its contract:
 - **A pending job aborts the update; it is not waited out and then ignored.**
   Both drain waits abort when jobs are still pending after `DRAIN_TIMEOUT` *or*
   when the count cannot be read at all — with the database already migrated.
-  `--classic` is the way through, at the price of interrupting what runs.
+  `--classic` is the way through, at the price of interrupting what runs. A job
+  the aborted run's own instance had accepted does not block the next attempt:
+  that instance is force-removed, and the surviving one fails the jobs whose
+  owner stopped renewing its claim within about a minute
+  (`04-backend-api-conventions.md`).
 - **A run that ends between retiring the old instance and recreating the sidecar**
   leaves the sidecar holding the retired instance's network namespace, so the
   tailnet URL is down until it is recreated. The script prints that command from
@@ -936,15 +940,17 @@ What it does not give you, and the reasons:
   new one before its health check has passed.
 - **Two releases overlap:** the migration runs against the old app, and the old app
   runs on the migrated schema until it is retired.
-- **The app assumes a single process.** `FailInterruptedJobs` marks every pending
-  job failed on start (`04-backend-api-conventions.md`), and a normal stop cancels
-  the jobs the app is running and fails them as interrupted. So a second instance can
-  fail a job the first is still working on, and stopping the first can fail a job
-  submitted to it during the overlap. The script waits for pending jobs to finish
-  before it starts the second instance and again before it stops the old one; a job
-  submitted in the seconds after either check is still failed, and the user re-runs
-  the analysis. Closing that needs the recovery to be aware of which process owns a
-  job, which is application work, not deployment (issue #121).
+- **Stopping the old instance still fails a job submitted to it during the
+  overlap.** Recovery no longer assumes one process: a pending job records which
+  process is working it, and start-up fails only the jobs whose owner is gone
+  (`04-backend-api-conventions.md`), so the new instance's start-up leaves the old
+  one's work alone. What is left is the other half — a normal stop cancels the jobs
+  the stopping app is running and fails them as interrupted, which is the app
+  telling the truth about work it is not going to finish rather than a race. The
+  script waits for pending jobs to finish before it starts the second instance and
+  again before it stops the old one; a job submitted in the seconds after the second
+  check is still failed by that stop, and the user re-runs the analysis. `--classic`
+  avoids the overlap altogether.
 - **No way back without the backup.** Going back to an earlier release after a
   migration means restoring the backup (`18`); an old binary on a newer schema is a
   fatal start-up error there, enforced at every start by `migrate.Check`. Whether a

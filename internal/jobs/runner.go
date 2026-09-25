@@ -38,6 +38,24 @@ const (
 	// what the jobs table exists to prevent.
 	DefaultTimeout = 2 * time.Minute
 
+	// DefaultLeaseTTL is how long this process's claim on a pending job stands
+	// without being renewed (issue #121). It is the only knob in the trade the
+	// lease makes: a shorter TTL fails a hard-killed process's jobs sooner, a
+	// longer one is more forgiving of a database stall that delays a renewal in
+	// a process that is perfectly alive.
+	//
+	// It has deliberately nothing to do with DefaultTimeout. That bounds a
+	// job's *execution* and starts only once the job has a concurrency slot, so
+	// a queued job is legitimately pending for far longer — which is why an age
+	// bound cannot stand in for an owner.
+	DefaultLeaseTTL = time.Minute
+
+	// defaultLeaseInterval is how often the lease keeper renews this process's
+	// claims and fails everyone else's lapsed ones. Three renewals per TTL, so
+	// two that do not get through — a slow query, a moment of database trouble —
+	// do not make a live instance look dead to another one.
+	defaultLeaseInterval = DefaultLeaseTTL / 3
+
 	// finishTimeout bounds the final write of a job's outcome. It runs on a
 	// context detached from the job's own, so a job cancelled by shutdown can
 	// still record that it was interrupted.
@@ -54,10 +72,12 @@ const TimeoutFailure = "Processing took too long. Try uploading the photo again.
 // Store is the slice of the store the runner writes.
 type Store interface {
 	CreateJob(ctx context.Context, in store.NewJob) (*store.Job, error)
-	RequeueJob(ctx context.Context, storageID, id uuid.UUID) error
+	RequeueJob(ctx context.Context, storageID, id uuid.UUID, lease store.JobLease) error
 	CompleteJob(ctx context.Context, id uuid.UUID, payload json.RawMessage) error
 	FailJob(ctx context.Context, id uuid.UUID, message string) error
-	FailInterruptedJobs(ctx context.Context) (int64, error)
+	FailOrphanedJobs(ctx context.Context, owner uuid.UUID) (int64, error)
+	RenewJobLeases(ctx context.Context, lease store.JobLease) (int64, error)
+	ReleaseJobLeases(ctx context.Context, owner uuid.UUID) (int64, error)
 }
 
 // Work does one job and returns its proposal.
@@ -90,6 +110,16 @@ type Runner struct {
 	log     *slog.Logger
 	timeout time.Duration
 
+	// owner identifies this process among however many are running against the
+	// same database — during the rolling update on the NAS, two of them
+	// (deploy/synology/update). Every job this runner starts is claimed in its
+	// name, and recovery in another process leaves those rows alone for as long
+	// as the claim is renewed.
+	owner    uuid.UUID
+	leaseTTL time.Duration
+	// leaseInterval is defaultLeaseInterval, overridden by tests.
+	leaseInterval time.Duration
+
 	// base is the parent of every job's context. Cancelling it is how Shutdown
 	// tells in-flight work to stop.
 	base   context.Context
@@ -105,28 +135,55 @@ type Runner struct {
 	wg     sync.WaitGroup
 }
 
-// New builds a Runner. Call Recover once before the server accepts requests.
+// New builds a Runner. Call Recover once before the server accepts requests,
+// and run RunLeases for as long as the process serves.
+//
+// The lease owner is minted here, per process. uuid.New rather than the UUIDv7
+// the rest of the system uses for stored ids: this one is not an entity id, it
+// is never returned by the API, never a key and never ordered on, so it has no
+// use for a time prefix — and unlike a stored id there is nothing to degrade to
+// if the system's randomness is unavailable, because a runner with no owner
+// would see every pending row, its own included, as an orphan. A process that
+// cannot read crypto/rand cannot mint a session token either.
 func New(s Store, log *slog.Logger) *Runner {
 	if log == nil {
 		log = slog.Default()
 	}
 	base, cancel := context.WithCancel(context.Background())
 	return &Runner{
-		store:   s,
-		log:     log,
-		timeout: DefaultTimeout,
-		base:    base,
-		cancel:  cancel,
-		slots:   make(chan struct{}, DefaultConcurrency),
+		store:         s,
+		log:           log,
+		timeout:       DefaultTimeout,
+		owner:         uuid.New(),
+		leaseTTL:      DefaultLeaseTTL,
+		leaseInterval: defaultLeaseInterval,
+		base:          base,
+		cancel:        cancel,
+		slots:         make(chan struct{}, DefaultConcurrency),
 	}
 }
 
-// Recover fails every job the previous process left pending.
+// lease is the claim this runner puts on every job it starts.
+func (r *Runner) lease() store.JobLease {
+	return store.JobLease{Owner: r.owner, TTL: r.leaseTTL}
+}
+
+// Recover fails every pending job whose owner is gone.
 //
-// It must run before Submit is first called: at that point no goroutine of
-// this process can own a pending row, so every one of them is orphaned.
+// Before the lease existed this failed every pending row, on the reasoning that
+// it runs before Submit and so no goroutine of this process can own one. That
+// reasoning was never about *this* process: it silently assumed there is only
+// ever one, which the rolling update on the NAS breaks on purpose by starting a
+// second instance next to the first (deploy/synology/update, issue #121). What
+// it now fails is a row nobody claims and a row whose claim has lapsed — a
+// process that stopped renewing — and it leaves alone the pending work of an
+// instance that is demonstrably still alive.
+//
+// One statement against a partial index, as before: it runs before the listener
+// and must not be what delays it.
 func (r *Runner) Recover(ctx context.Context) error {
-	n, err := r.store.FailInterruptedJobs(ctx)
+	r.log.Info("job lease owner", slog.String("owner", r.owner.String()))
+	n, err := r.store.FailOrphanedJobs(ctx, r.owner)
 	if err != nil {
 		return err
 	}
@@ -134,6 +191,49 @@ func (r *Runner) Recover(ctx context.Context) error {
 		r.log.Info("marked interrupted jobs failed", slog.Int64("count", n))
 	}
 	return nil
+}
+
+// RunLeases keeps this process's claims current and fails the ones nobody is
+// keeping current any more, once per lease interval until ctx ends. Run it in a
+// goroutine for the life of the process.
+//
+// The two halves are the same tick on purpose. Renewing is what tells other
+// instances that this one's pending jobs — running and queued alike — are still
+// being worked; sweeping is what fails a job whose owner died without being
+// replaced, which start-up recovery alone cannot do. An instance that is
+// force-removed while the other keeps running (issue #124, item 4) leaves rows
+// no start-up will ever look at again, and before this they stayed pending for
+// good.
+func (r *Runner) RunLeases(ctx context.Context) {
+	ticker := time.NewTicker(r.leaseInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-r.base.Done():
+			// Shutdown cancels base first, so the keeper stops before Shutdown
+			// releases the claims it is holding, rather than renewing one back
+			// to life a moment afterwards.
+			return
+		case <-ticker.C:
+			if n, err := r.store.RenewJobLeases(ctx, r.lease()); err != nil {
+				if ctx.Err() == nil {
+					r.log.Warn("renewing job leases failed", slog.Any("err", err))
+				}
+			} else if n > 0 {
+				r.log.Debug("renewed job leases", slog.Int64("count", n))
+			}
+
+			if n, err := r.store.FailOrphanedJobs(ctx, r.owner); err != nil {
+				if ctx.Err() == nil {
+					r.log.Warn("sweeping orphaned jobs failed", slog.Any("err", err))
+				}
+			} else if n > 0 {
+				r.log.Info("marked interrupted jobs failed", slog.Int64("count", n))
+			}
+		}
+	}
 }
 
 // Submit records a pending job and starts its work in the background.
@@ -148,6 +248,10 @@ func (r *Runner) Submit(ctx context.Context, in store.NewJob, work Work) (*store
 		return nil, ErrShutDown
 	}
 
+	// The claim is this runner's, whatever the caller built: it is the process
+	// that is about to work the job, and it is written by the insert itself so
+	// the row is never pending and unowned.
+	in.Lease = r.lease()
 	job, err := r.store.CreateJob(ctx, in)
 	if err != nil {
 		return nil, err
@@ -173,7 +277,7 @@ func (r *Runner) Resubmit(ctx context.Context, storageID, id uuid.UUID, work Wor
 		return ErrShutDown
 	}
 
-	if err := r.store.RequeueJob(ctx, storageID, id); err != nil {
+	if err := r.store.RequeueJob(ctx, storageID, id, r.lease()); err != nil {
 		return err
 	}
 
@@ -186,7 +290,8 @@ func (r *Runner) Resubmit(ctx context.Context, storageID, id uuid.UUID, work Wor
 var ErrShutDown = errors.New("jobs: runner is shut down")
 
 // Shutdown cancels in-flight work and waits for every job to record its
-// outcome, or for ctx to end.
+// outcome, or for ctx to end. Either way it gives up this process's claims
+// before it returns.
 func (r *Runner) Shutdown(ctx context.Context) error {
 	r.mu.Lock()
 	r.closed = true
@@ -201,11 +306,34 @@ func (r *Runner) Shutdown(ctx context.Context) error {
 
 	select {
 	case <-done:
+		r.releaseLeases()
 		return nil
 	case <-ctx.Done():
-		// Whatever is still running stays pending, and the next Recover
-		// fails it. Nothing is left hanging either way.
+		// Whatever is still running stays pending, and releasing the claim is
+		// what lets the next Recover fail it straight away instead of waiting
+		// out a lease nobody will renew. Nothing is left hanging either way.
+		r.releaseLeases()
 		return ctx.Err()
+	}
+}
+
+// releaseLeases gives up this process's claims on whatever is still pending.
+//
+// On its own context, like finish: it runs when the shutdown deadline has
+// usually already passed, and it is precisely then that there is something left
+// to release. It is best-effort — a process that is killed outright never gets
+// here, which is what the timed sweep in RunLeases covers.
+func (r *Runner) releaseLeases() {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.base), finishTimeout)
+	defer cancel()
+
+	n, err := r.store.ReleaseJobLeases(ctx, r.owner)
+	if err != nil {
+		r.log.Warn("releasing job leases failed", slog.Any("err", err))
+		return
+	}
+	if n > 0 {
+		r.log.Info("released job leases still held at shutdown", slog.Int64("count", n))
 	}
 }
 

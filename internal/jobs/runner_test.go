@@ -17,27 +17,56 @@ import (
 	"github.com/CDRO/Inventory/internal/store"
 )
 
-// fakeStore mirrors the store's rules that matter to the runner: only a pending
-// job can finish, and a deleted one is ErrNotFound.
-type fakeStore struct {
-	mu   sync.Mutex
-	jobs map[uuid.UUID]*store.Job
+// claim is what jobs.lease_owner and jobs.lease_expires_at hold for one row.
+//
+// held distinguishes "no owner" from "owned by the zero UUID", because the
+// store's sweep does: its predicate is `lease_owner IS DISTINCT FROM $1`, under
+// which a NULL owner never matches any caller. A fake that compared zero values
+// would quietly skip unclaimed rows.
+type claim struct {
+	held    bool
+	owner   uuid.UUID
+	expires time.Time
 }
 
-func newFakeStore() *fakeStore { return &fakeStore{jobs: map[uuid.UUID]*store.Job{}} }
+// claimFrom mirrors the store writing a lease: an unowned lease writes NULL for
+// both columns, and an owned one an expiry TTL from now.
+func claimFrom(l store.JobLease) claim {
+	if l.Owner == uuid.Nil {
+		return claim{}
+	}
+	return claim{held: true, owner: l.Owner, expires: time.Now().Add(l.TTL)}
+}
+
+// lapsed reports what the sweep's `lease_expires_at IS NULL OR < now()` reports.
+func (c claim) lapsed() bool { return !c.held || !c.expires.After(time.Now()) }
+
+// fakeStore mirrors the store's rules that matter to the runner: only a pending
+// job can finish, a deleted one is ErrNotFound, and a pending row carries the
+// claim of the process working it.
+type fakeStore struct {
+	mu     sync.Mutex
+	jobs   map[uuid.UUID]*store.Job
+	claims map[uuid.UUID]claim
+}
+
+func newFakeStore() *fakeStore {
+	return &fakeStore{jobs: map[uuid.UUID]*store.Job{}, claims: map[uuid.UUID]claim{}}
+}
 
 func (f *fakeStore) CreateJob(_ context.Context, in store.NewJob) (*store.Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	j := &store.Job{ID: uuid.New(), StorageID: in.StorageID, Kind: in.Kind, Status: store.JobPending, CreatedBy: in.CreatedBy, ImageFilename: in.ImageFilename}
 	f.jobs[j.ID] = j
+	f.claims[j.ID] = claimFrom(in.Lease)
 	copied := *j
 	return &copied, nil
 }
 
 // RequeueJob mirrors the store: only a done or failed job with a photo, in its
-// own storage, moves back to pending.
-func (f *fakeStore) RequeueJob(_ context.Context, storageID, id uuid.UUID) error {
+// own storage, moves back to pending — claimed by whoever requeued it.
+func (f *fakeStore) RequeueJob(_ context.Context, storageID, id uuid.UUID, lease store.JobLease) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	j, ok := f.jobs[id]
@@ -48,6 +77,7 @@ func (f *fakeStore) RequeueJob(_ context.Context, storageID, id uuid.UUID) error
 		return store.ErrConflict
 	}
 	j.Status, j.Payload, j.Error = store.JobPending, nil, nil
+	f.claims[id] = claimFrom(lease)
 	return nil
 }
 
@@ -67,21 +97,75 @@ func (f *fakeStore) finish(id uuid.UUID, status store.JobStatus, payload json.Ra
 		return store.ErrNotFound
 	}
 	j.Status, j.Payload, j.Error = status, payload, message
+	f.claims[id] = claim{}
 	return nil
 }
 
-func (f *fakeStore) FailInterruptedJobs(context.Context) (int64, error) {
+// FailOrphanedJobs mirrors the store's predicate: pending, not claimed by the
+// caller itself, and either never claimed or claimed by a process that stopped
+// renewing.
+func (f *fakeStore) FailOrphanedJobs(_ context.Context, owner uuid.UUID) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var n int64
-	for _, j := range f.jobs {
-		if j.Status == store.JobPending {
-			msg := store.InterruptedJobError
-			j.Status, j.Error = store.JobFailed, &msg
+	for id, j := range f.jobs {
+		c := f.claims[id]
+		if j.Status != store.JobPending || (c.held && c.owner == owner) || !c.lapsed() {
+			continue
+		}
+		msg := store.InterruptedJobError
+		j.Status, j.Error = store.JobFailed, &msg
+		f.claims[id] = claim{}
+		n++
+	}
+	return n, nil
+}
+
+func (f *fakeStore) RenewJobLeases(_ context.Context, lease store.JobLease) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var n int64
+	for id, j := range f.jobs {
+		if c := f.claims[id]; j.Status == store.JobPending && c.held && c.owner == lease.Owner {
+			f.claims[id] = claimFrom(lease)
 			n++
 		}
 	}
 	return n, nil
+}
+
+func (f *fakeStore) ReleaseJobLeases(_ context.Context, owner uuid.UUID) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var n int64
+	for id, j := range f.jobs {
+		if c := f.claims[id]; j.Status == store.JobPending && c.held && c.owner == owner {
+			f.claims[id] = claim{}
+			n++
+		}
+	}
+	return n, nil
+}
+
+// claimOf reports what a row's lease columns hold, for the tests below.
+func (f *fakeStore) claimOf(id uuid.UUID) claim {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.claims[id]
+}
+
+// claimFor plants a pending job owned by another process, as the second instance
+// of a rolling update leaves behind. A TTL in the past is one whose owner stopped
+// renewing it.
+func (f *fakeStore) claimFor(t *testing.T, owner uuid.UUID, ttl time.Duration) uuid.UUID {
+	t.Helper()
+	job, err := f.CreateJob(context.Background(), store.NewJob{
+		StorageID: uuid.New(),
+		Kind:      store.JobShelfIngestion,
+		Lease:     store.JobLease{Owner: owner, TTL: ttl},
+	})
+	require.NoError(t, err)
+	return job.ID
 }
 
 func (f *fakeStore) delete(id uuid.UUID) {
@@ -370,6 +454,153 @@ func TestRecoverFailsWhatThePreviousProcessLeftPending(t *testing.T) {
 
 	got, _ := s.get(orphan.ID)
 	assert.Equal(t, store.JobFailed, got.Status)
+}
+
+// TestRecoverLeavesAnotherLiveInstancesWorkAlone is issue #121: the rolling
+// update on the NAS starts a second instance next to the first on purpose
+// (deploy/synology/update), and the second one's start-up used to fail every
+// pending job — including the ones the first instance was in the middle of.
+//
+// The three rows here are the whole rule. A claim another process is still
+// renewing is live work and survives; a claim nobody renewed is a process that
+// died and is failed; a row with no claim at all — an old binary's insert, or a
+// claim given up at shutdown — is failed too, which is what keeps stop-then-start
+// behaving exactly as it always has.
+func TestRecoverLeavesAnotherLiveInstancesWorkAlone(t *testing.T) {
+	t.Parallel()
+
+	s := newFakeStore()
+	otherInstance := uuid.New()
+	live := s.claimFor(t, otherInstance, time.Hour)
+	abandoned := s.claimFor(t, otherInstance, -time.Second)
+	unclaimed, err := s.CreateJob(context.Background(), store.NewJob{StorageID: uuid.New(), Kind: store.JobShelfIngestion})
+	require.NoError(t, err)
+
+	require.NoError(t, New(s, quietLogger()).Recover(context.Background()))
+
+	got, _ := s.get(live)
+	assert.Equal(t, store.JobPending, got.Status, "a job the other instance is still working")
+	assert.Equal(t, otherInstance, s.claimOf(live).owner, "and its claim is left as it was")
+
+	got, _ = s.get(abandoned)
+	assert.Equal(t, store.JobFailed, got.Status, "a claim nobody renews is a process that is gone")
+	require.NotNil(t, got.Error)
+	assert.Equal(t, store.InterruptedJobError, *got.Error)
+
+	got, _ = s.get(unclaimed.ID)
+	assert.Equal(t, store.JobFailed, got.Status, "a pending row nobody claims is nobody's work")
+}
+
+// TestSubmitClaimsTheJobForThisProcess — the claim is written by the insert, so
+// there is no instant in which a pending row is unowned and another instance's
+// recovery could fail it.
+func TestSubmitClaimsTheJobForThisProcess(t *testing.T) {
+	t.Parallel()
+
+	s := newFakeStore()
+	r, other := New(s, quietLogger()), New(s, quietLogger())
+	assert.NotEqual(t, r.owner, other.owner, "two processes never share an owner")
+
+	release := make(chan struct{})
+	job, err := r.Submit(context.Background(), store.NewJob{StorageID: uuid.New(), Kind: store.JobShelfIngestion},
+		func(context.Context) (json.RawMessage, error) {
+			<-release
+			return json.RawMessage(`{}`), nil
+		})
+	require.NoError(t, err)
+
+	held := s.claimOf(job.ID)
+	assert.True(t, held.held)
+	assert.Equal(t, r.owner, held.owner)
+	assert.False(t, held.lapsed(), "the claim is current from the moment the row exists")
+
+	// The other instance starting up now must not touch it.
+	require.NoError(t, other.Recover(context.Background()))
+	got, _ := s.get(job.ID)
+	assert.Equal(t, store.JobPending, got.Status)
+
+	close(release)
+	assert.Equal(t, store.JobDone, waitFor(t, s, job.ID).Status)
+	assert.False(t, s.claimOf(job.ID).held, "a job that is no longer pending holds no claim")
+}
+
+// TestTheLeaseKeeperRenewsItsOwnAndFailsTheAbandoned — the two halves of one
+// tick. Renewing is what tells the other instance this one's work is alive;
+// sweeping is what recovers an instance that was killed while this one kept
+// serving, which no start-up will ever look at again (issue #124, item 4).
+func TestTheLeaseKeeperRenewsItsOwnAndFailsTheAbandoned(t *testing.T) {
+	t.Parallel()
+
+	s := newFakeStore()
+	r := New(s, quietLogger())
+	r.leaseTTL = 500 * time.Millisecond
+	r.leaseInterval = 5 * time.Millisecond
+
+	release := make(chan struct{})
+	mine, err := r.Submit(context.Background(), store.NewJob{StorageID: uuid.New(), Kind: store.JobShelfIngestion},
+		func(context.Context) (json.RawMessage, error) {
+			<-release
+			return json.RawMessage(`{}`), nil
+		})
+	require.NoError(t, err)
+	abandoned := s.claimFor(t, uuid.New(), -time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go r.RunLeases(ctx)
+
+	require.Eventually(t, func() bool {
+		got, ok := s.get(abandoned)
+		return ok && got.Status == store.JobFailed
+	}, 5*time.Second, 5*time.Millisecond, "a lapsed claim of another process is swept while this one runs")
+
+	// Its own job is still pending well past the TTL, because the keeper keeps
+	// renewing the claim.
+	firstSeen := s.claimOf(mine.ID).expires
+	require.Eventually(t, func() bool { return s.claimOf(mine.ID).expires.After(firstSeen) },
+		5*time.Second, 5*time.Millisecond, "the claim is pushed forward")
+	got, _ := s.get(mine.ID)
+	assert.Equal(t, store.JobPending, got.Status, "the keeper never fails its own work")
+
+	close(release)
+	assert.Equal(t, store.JobDone, waitFor(t, s, mine.ID).Status)
+}
+
+// TestShutdownGivesUpTheClaimsItCouldNotFinish — a job whose outcome could not
+// be written inside the shutdown grace stays pending, and giving up its claim is
+// what lets the next process fail it at once instead of waiting out a lease
+// nobody will renew. That is the stop-then-start behaviour this feature must not
+// change.
+func TestShutdownGivesUpTheClaimsItCouldNotFinish(t *testing.T) {
+	t.Parallel()
+
+	s := newFakeStore()
+	r := New(s, quietLogger())
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	job, err := r.Submit(context.Background(), store.NewJob{StorageID: uuid.New(), Kind: store.JobShelfIngestion},
+		func(context.Context) (json.RawMessage, error) {
+			close(started)
+			<-release // deaf to cancellation, like a provider call mid-flight
+			return json.RawMessage(`{}`), nil
+		})
+	require.NoError(t, err)
+	<-started
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, r.Shutdown(ctx), context.DeadlineExceeded)
+
+	got, _ := s.get(job.ID)
+	require.Equal(t, store.JobPending, got.Status, "the work never got to record an outcome")
+	assert.False(t, s.claimOf(job.ID).held, "the claim is given up on the way out")
+
+	require.NoError(t, New(s, quietLogger()).Recover(context.Background()))
+	got, _ = s.get(job.ID)
+	assert.Equal(t, store.JobFailed, got.Status, "the next start-up fails it immediately, as it always did")
+
+	close(release)
 }
 
 // TestResubmitAnalysesAFinishedJobAgain — "Analyze again" puts a finished job
