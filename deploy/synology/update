@@ -12,13 +12,16 @@
 #      image, build the app image
 #   2. migrate up            (the OLD app keeps serving while this runs)
 #   3. wait until no job is pending, so the new instance's start-up recovery
-#      cannot fail a job the old instance is still working on
+#      cannot fail a job the old instance is still working on. If they do not
+#      drain in time, or the count cannot be read, the run ABORTS here with the
+#      database already migrated; --classic is the way through.
 #   4. start a SECOND app instance from the new image, next to the old one
 #   5. wait until the new instance answers GET /healthz
 #        - it does not, or the start fails, or you press Ctrl-C: the new instance
 #          is removed again. The old instance was never touched.
 #   6. wait once more until no job is pending (stopping the old instance cancels
-#      what it is running), then stop and remove it; the count is back to one
+#      what it is running), aborting again on the same two conditions, then stop
+#      and remove it; the count is back to one
 #   7. recreate the Tailscale sidecar, which shares the app's network namespace
 #      and would otherwise keep pointing at the dead one (a few seconds without
 #      the tailnet URL: that gap is not avoidable with this layout)
@@ -53,7 +56,7 @@ die() { echo "update: $*" >&2; exit 1; }
 say() { echo "==> $*"; }
 
 usage() {
-  sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 pull=1 classic=0 force=0 prune=0
@@ -329,13 +332,16 @@ fi
 # --- Classic update -----------------------------------------------------------
 
 if [ "$classic" -eq 1 ]; then
-  # Set before the stop, so a `stop` that fails half-way reports the same way.
   # Everything from here to the `up -d` leaves the stack stopped, whether it ends
   # in a failed migration, an error, a failing `up -d` or a signal - only the
-  # first of those used to say so.
-  recover="the app and the sidecar are STOPPED. Fix the cause and run this script again, or start them with: $DC_HINT up -d"
+  # first of those used to say so. The two messages are not one: a `stop` that
+  # fails outright leaves the app serving, so "are STOPPED" is only true once the
+  # stop has returned, and claiming it earlier would send the operator looking for
+  # a stopped stack that never stopped.
+  recover="this run was stopping the app and the sidecar, and did not start them again. Check with: $DC_HINT ps - and start them with: $DC_HINT up -d"
   say "Classic update: stopping the app and the sidecar"
   $DC stop ts-inventory app
+  recover="the app and the sidecar are STOPPED. Fix the cause and run this script again, or start them with: $DC_HINT up -d"
   say "Migrating"
   $DC run --rm -T app migrate up || die "the migration failed."
   say "Starting the stack"
@@ -428,7 +434,7 @@ say "Recreating the sidecar (it shared the old instance's network namespace)"
 tries=0
 until $DC up -d --no-deps --force-recreate ts-inventory; do
   tries=$((tries + 1))
-  [ "$tries" -lt 3 ] || die "the app is updated and running, but the sidecar could not be recreated."
+  [ "$tries" -lt 3 ] || die "the sidecar could not be recreated after 3 attempts."
   echo "    retrying in 3s ($tries/2)"
   sleep 3
 done

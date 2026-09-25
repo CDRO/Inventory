@@ -143,6 +143,16 @@ esac
 exit 0
 `
 
+// The script's retry and wait loops call `sleep`, and it is their own counters,
+// not the wall clock, that decide when they give up - so a stub that returns at
+// once costs no coverage and saves the suite the real seconds. That is more than
+// a convenience here: the Dockerfile's builder stage runs `go test ./...`, so
+// every `docker compose build` would otherwise wait them out - and `build` is a
+// step of the very script under test, on the operator's NAS.
+const sleepStub = `#!/bin/sh
+exit 0
+`
+
 // projectSeq keeps every scenario on its own Compose project name, so the lock
 // directory of one cannot collide with another's.
 var projectSeq int64
@@ -188,6 +198,7 @@ func run(t *testing.T, env map[string]string, args ...string) result {
 		"docker-compose": composeStub,
 		"docker":         dockerStub,
 		"git":            gitStub,
+		"sleep":          sleepStub,
 	} {
 		if err := os.WriteFile(filepath.Join(stubs, name), []byte(body), 0o755); err != nil {
 			t.Fatal(err)
@@ -358,15 +369,33 @@ func TestOneOffContainersAreNotAppInstances(t *testing.T) {
 // Item 3, classic half: everything between the stop and the `up -d` leaves the
 // stack stopped, and only a failing migration used to say so.
 func TestClassicPathAlwaysReportsTheStoppedStack(t *testing.T) {
-	cases := map[string]map[string]string{
-		"a failing migration": {"STUB_MIGRATE_RC": "1"},
-		"a failing up -d":     {"STUB_UP_RC": "1"},
-		"a failing stop":      {"STUB_STOP_RC": "1"},
+	cases := map[string]struct {
+		env    map[string]string
+		expect string
+		absent string
+	}{
+		// The stop returned, so the stack really is stopped and the hint says so.
+		"a failing migration": {
+			env:    map[string]string{"STUB_MIGRATE_RC": "1"},
+			expect: "the app and the sidecar are STOPPED",
+		},
+		"a failing up -d": {
+			env:    map[string]string{"STUB_UP_RC": "1"},
+			expect: "the app and the sidecar are STOPPED",
+		},
+		// The stop itself failed, so nothing may have stopped at all and the app
+		// can still be serving. Claiming a stopped stack here would send the
+		// operator hunting for one that never stopped.
+		"a failing stop": {
+			env:    map[string]string{"STUB_STOP_RC": "1"},
+			expect: "this run was stopping the app and the sidecar",
+			absent: "are STOPPED",
+		},
 	}
-	for name, extra := range cases {
+	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			env := rollingEnv()
-			for k, v := range extra {
+			for k, v := range c.env {
 				env[k] = v
 			}
 
@@ -375,7 +404,10 @@ func TestClassicPathAlwaysReportsTheStoppedStack(t *testing.T) {
 			if r.exit == 0 {
 				t.Fatal("expected a failure, got exit 0")
 			}
-			mustContain(t, r.stderr, "the app and the sidecar are STOPPED", "the recovery hint")
+			mustContain(t, r.stderr, c.expect, "the recovery hint")
+			if c.absent != "" {
+				mustNotContain(t, r.stderr, c.absent, "the recovery hint")
+			}
 			// The hint has to be runnable from anywhere, so it carries both -f
 			// files by absolute path.
 			mustContain(t, r.stderr, "docker-compose.nas.yml up -d", "the recovery hint")
@@ -597,13 +629,17 @@ func TestLockSaysWhetherItsHolderIsAlive(t *testing.T) {
 			deadPID = strconv.Itoa(n)
 		}
 	}
+	// The test's own process is the live one: always running, and always
+	// signalable by the script, which runs as the same user. Pid 1 would need
+	// permission to signal init, so a non-root run of this suite would take the
+	// "gone" branch and fail for a script defect that is not there.
+	livePID := strconv.Itoa(os.Getpid())
 
 	cases := map[string]struct {
 		holder string
 		expect string
 	}{
-		// pid 1 always exists inside a container.
-		"a live holder":    {holder: "1 started 2026-09-25 10:00:00", expect: "another update is running (1 started"},
+		"a live holder":    {holder: livePID + " started 2026-09-25 10:00:00", expect: "another update is running (" + livePID + " started"},
 		"a dead holder":    {holder: deadPID + " started 2026-09-25 10:00:00", expect: "was killed and left its lock behind"},
 		"an empty holder":  {holder: "", expect: "names no process"},
 		"a garbage holder": {holder: "not-a-pid", expect: "names no process"},
@@ -643,6 +679,38 @@ func TestLockSaysWhetherItsHolderIsAlive(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Nit: the lock used to live under `$TMPDIR`, so an interactive root shell and a
+// Task Scheduler job - which do not share one - did not share a lock either. With
+// the path pinned to /tmp, a lock already held there has to stop a run whose
+// TMPDIR points somewhere else entirely; a revert of that line would take a second
+// lock under TMPDIR and sail past it.
+func TestTheLockIgnoresTMPDIR(t *testing.T) {
+	project := fmt.Sprintf("lock%d", atomic.AddInt64(&projectSeq, 1))
+	lock := filepath.Join("/tmp", "inventory-update-"+project+".lock")
+	if err := os.MkdirAll(lock, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(lock) })
+	holder := strconv.Itoa(os.Getpid()) + " started 2026-09-25 10:00:00"
+	if err := os.WriteFile(filepath.Join(lock, "holder"), []byte(holder+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := rollingEnv()
+	env["INVENTORY_PROJECT"] = project
+	// Writable, and empty of any lock: somewhere the run could happily have taken
+	// one, if it still looked at TMPDIR.
+	env["TMPDIR"] = t.TempDir()
+
+	r := run(t, env, "--no-pull")
+
+	if r.exit == 0 {
+		t.Fatal("the run took a lock under TMPDIR instead of seeing the one held in /tmp")
+	}
+	mustContain(t, r.stderr, "another update is running", "the lock refusal")
+	mustContain(t, r.stderr, lock, "the lock refusal names the /tmp path")
 }
 
 // A run that takes the lock leaves none behind.
