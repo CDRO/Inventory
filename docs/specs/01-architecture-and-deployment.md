@@ -209,16 +209,24 @@ worktrees of a finished wave (the orchestrator runs it after the wave's
 consolidation for every wave with `"dockerCleanup": true`; by hand:
 `.\scripts\wellen-docker-cleanup.ps1 -Wave <n> -DryRun`, then without `-DryRun`).
 A real run refuses unless the wave issue is closed, and stops before removing
-anything if Docker cannot be listed. It decides ownership from Docker's own
+anything if Docker cannot be listed. A `-Slug` passed alongside `-Wave` that
+belongs to no package of that wave is refused as well — that wave's issue says
+nothing about another wave's packages. `-Force` skips this entire layer, the
+wave-issue check included, and is only for worktrees you know are finished; it
+never widens what counts as the wave's. It decides ownership from Docker's own
 labels, not from names: a Compose project belongs to the wave if one of its
 containers has a `com.docker.compose.project.working_dir` inside one of the
 wave's worktrees (which also catches a project a session started under a name of
 its own), or if its name is the orchestrator's `<repo>-<slug>` or that followed by
 a hyphen and more (which catches the network, volumes and images of a project
 whose containers are already gone). A slug never claims a longer sibling
-(`w5-barcode` does not claim `<repo>-w5-barcode-hot-cache`), and a project with a
-container outside the wave's worktrees is not claimed by name. It removes those
-projects' containers, networks, volumes and image tags, and it **never** touches:
+(`w5-barcode` does not claim `<repo>-w5-barcode-hot-cache`), and under *either*
+rule a project with a container outside the wave's worktrees is not claimed at
+all — one container inside a worktree is not enough when another of the same
+project sits elsewhere, which is what keeps a project name pinned in a Compose
+file (`docker-compose.e2e.yml` pins one for every worktree) from being swept.
+It removes those projects' containers, networks and volumes, and of their images
+the tags that start with the project's own name, and it **never** touches:
 
 - the main checkout's own stack (any project with a container in the repository
   root, or named after the repository);
@@ -226,8 +234,14 @@ projects' containers, networks, volumes and image tags, and it **never** touches
   which the dev override gives one fixed name that every worktree *and* the main
   checkout share — plus `postgres`, `traefik`, `tailscale`, the Playwright image
   and the build cache;
-- anything of another repository. A resource that merely mentions a slug but
-  cannot be attributed to a worktree is listed as "kept", not removed.
+- a resource whose name merely mentions a slug without being a Compose project
+  the wave can claim: it is listed as "kept", not removed.
+
+A container-less project is the one case the directory rules cannot help with:
+it has no container, so no directory to check, and a project named
+`<repo>-<slug>` that another clone of the same repository left behind is
+indistinguishable from this wave's own and is removed. Point `-RepoRoot` at the
+checkout you mean, and look with `-DryRun` first.
 
 Images are removed by tag and never by id: two projects that built the same
 content share an image id, and removing by id would take the other project's tag

@@ -139,8 +139,12 @@ param(
     [string]$WaveFile = '',
 
     # Wave number the script starts orchestrating from. Waves before it are
-    # skipped (assumed complete). 0 = all waves in the file; already-closed
-    # wave issues are recognized and skipped regardless.
+    # skipped entirely, Docker cleanup included - clean those by hand.
+    # 0 = all waves in the file. A wave whose issue is already closed has its
+    # packages and its consolidation skipped, but is still Docker-cleaned when
+    # it carries "dockerCleanup": true, since that is idempotent and the wave
+    # may have finished under an orchestrator that did not clean (.DOCKER
+    # CLEANUP).
     [int]$StartWave = 0,
 
     # How often (seconds) GitHub state is polled. 120s is plenty for a
