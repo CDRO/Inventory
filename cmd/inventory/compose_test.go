@@ -90,6 +90,23 @@ func composeService(t *testing.T, file, name string) string {
 	return strings.Join(block, "\n")
 }
 
+// lineFrom returns the one line of block whose trimmed text starts with
+// prefix, failing the test if there is none. Used to pull a value forward
+// from one compose file's service block into an assertion on another's,
+// rather than hardcoding what that value happened to be when the test was
+// written - a literal copy would keep passing after the source drifted.
+func lineFrom(t *testing.T, block, prefix string) string {
+	t.Helper()
+
+	for _, line := range strings.Split(block, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), prefix) {
+			return line
+		}
+	}
+	require.Fail(t, "no line found", "block has no line starting with %q", prefix)
+	return ""
+}
+
 // TestBackupServiceMountsOnlyWhatMayTravel is the first acceptance criterion
 // of docs/specs/15-backup-restore-and-export.md expressed as a test: a backup
 // archive contains the SQL dump and the uploads tree, and nothing from
@@ -147,6 +164,89 @@ func TestNASVariantGivesBackupTheBindMountedUploads(t *testing.T) {
 		"on the NAS the real tree is the bind mount, not the named volume")
 	assert.Contains(t, block, "- ./uploads:/restore/uploads",
 		"a restore on the NAS must write into the same bind mount")
+}
+
+// TestE2EBackupServiceMatchesTheProductionOne guards a copy.
+//
+// The restore round trip (.github/workflows/e2e.yml, issue #133) needs a
+// `backup` service in the E2E stack, and docker-compose.e2e.yml carries its
+// own rather than reusing the base file's, because that stack has no .env to
+// read credentials from. Two declarations of one service is a thing that
+// drifts, and the drift would be invisible: the round trip would keep passing
+// against whatever the E2E copy had become, while the service it is meant to
+// stand in for went on being something else.
+//
+// The mount list is the part worth pinning, for the reason
+// TestBackupServiceMountsOnlyWhatMayTravel gives above — "nothing from
+// imagecache, no .env" holds because those bytes are unreachable from inside
+// the container, not because the script declines to read them.
+func TestE2EBackupServiceMatchesTheProductionOne(t *testing.T) {
+	t.Parallel()
+
+	block := composeService(t, "docker-compose.e2e.yml", "backup")
+	prodBlock := composeService(t, "docker-compose.yml", "backup")
+
+	// Pulled from the production file itself, not hardcoded, so what this
+	// test actually catches is the production service changing underneath
+	// it: a literal copy of today's values would keep passing forever after
+	// a real drift, which is the failure mode this test exists to prevent.
+	for _, prefix := range []string{
+		"image:",
+		"entrypoint:",
+		"profiles:",
+		"- uploads:/data/uploads:ro",
+		"- uploads:/restore/uploads",
+		"- ./backups:/backups",
+		"- ./scripts/backup:/usr/local/bin/inventory-backup:ro",
+	} {
+		assert.Contains(t, block, lineFrom(t, prodBlock, prefix),
+			"the E2E backup service has drifted from the production one's %q line", prefix)
+	}
+
+	// The one intended difference from the base file's copy: no .env exists in
+	// the E2E stack, so the credentials are inline — and they have to be the
+	// ones `db` is started with, or the backup cannot authenticate at all.
+	assert.Contains(t, block, "POSTGRES_USER: e2e",
+		"the E2E stack has no .env, so the credentials are inline and must match db's")
+	assert.Contains(t, block, "POSTGRES_DB: e2e",
+		"the E2E stack has no .env, so the database name is inline and must match db's")
+	assert.NotContains(t, block, "env_file",
+		"there is no .env in the E2E stack to read; an env_file here would only ever be a missing file")
+
+	// The same negative half as the production service, and it fails just as
+	// silently here.
+	assert.NotContains(t, block, "imagecache",
+		"the suggestion cache is re-fetchable by definition and must not be reachable from the backup container")
+	assert.NotContains(t, block, "/data/cache",
+		"the suggestion cache must not be reachable under its container path either")
+	assert.NotContains(t, block, "- .:/work",
+		"mounting the project directory would put .env next to the archive source")
+	assert.NotContains(t, block, "/var/run/docker.sock",
+		"a backup container has no business holding the Docker socket")
+	assert.NotContains(t, block, "depends_on",
+		"`run` starts a service's dependencies, and the restore has to be able to report an unreachable database")
+}
+
+// TestE2EAppMountsTheUploadsTheRoundTripDestroys is the other half of that
+// arrangement.
+//
+// The round trip's whole claim is that a `down -v` destroys the data and the
+// archive brings it back. An uploads tree living in the app container's own
+// writable layer would be recreated empty by the restart either way, so the
+// round trip would "prove" the images came back without the archive having
+// contributed anything. Only a named volume can actually be destroyed and
+// actually be repopulated.
+func TestE2EAppMountsTheUploadsTheRoundTripDestroys(t *testing.T) {
+	t.Parallel()
+
+	block := composeService(t, "docker-compose.e2e.yml", "app")
+
+	assert.Contains(t, block, "- uploads:/data/uploads",
+		"the uploads tree must be a named volume, or `down -v` destroys nothing and the restore proves nothing")
+	assert.NotContains(t, block, "- uploads:/data/uploads:ro",
+		"the app writes new uploads, so its mount must not be read-only - Contains alone would also accept this line")
+	assert.NotContains(t, block, "imagecache",
+		"imagecache is not in a backup archive, so the E2E stack has no reason to hold one")
 }
 
 // TestBackupArchivesAreNotCommittable — an archive holds the whole database
