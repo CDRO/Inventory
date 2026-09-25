@@ -17,6 +17,23 @@
 #   docker compose -f docker-compose.e2e.yml run --rm e2e
 #   docker compose -f docker-compose.e2e.yml down -v
 #
+# The `backup` service below belongs to the second thing this file drives: the
+# backup/restore round trip (docs/specs/15-backup-restore-and-export.md, issue
+# #133), run by the `restore-round-trip` job in .github/workflows/e2e.yml. It
+# destroys this project's volumes half way through, on purpose, so it must
+# never run beside another session's E2E stack — `name:` below is one project
+# for every worktree on a machine, and a `down -v` here takes that other stack
+# with it. On CI each job gets its own runner, so the two are already
+# isolated; locally, run one or the other, never both at once.
+#
+# One more local caveat, which is about the worktrees rather than about this
+# file: an agent worktree's .env sets COMPOSE_PROJECT_NAME, and that takes
+# precedence over `name:` below — so in such a checkout this file and
+# docker-compose.yml share one project, and the `uploads` volume both declare
+# is one volume. A round trip run there therefore also destroys the dev
+# stack's uploads. On CI, where there is no .env, `name:` stands and the two
+# are separate. (Whether E2E is isolated per worktree at all is issue #140.)
+#
 # This does not violate the no-host-toolchain rule
 # (docs/specs/01-architecture-and-deployment.md): the Playwright image is
 # pulled from a registry, nothing is installed on the host, and the
@@ -64,6 +81,21 @@ services:
       - ADMIN_INITIAL_USERNAME=e2e-admin
       - ADMIN_INITIAL_PASSWORD=e2e-fixture-password
       - GEMINI_API_KEY=e2e-fixture-unused-key
+    volumes:
+      # The uploads tree as a named volume rather than the container's own
+      # writable layer, because the restore round trip
+      # (.github/workflows/e2e.yml's `restore-round-trip` job, issue #133) has
+      # to destroy it with `down -v` and get it back out of an archive — which
+      # a container layer cannot demonstrate, since it is recreated empty
+      # either way. docker-compose.yml mounts uploads on `app` exactly like
+      # this, so the E2E stack is now a truer copy of the stack spec 15's
+      # restore procedure actually targets.
+      #
+      # imagecache stays deliberately absent. It is not in a backup archive
+      # (docs/specs/15-backup-restore-and-export.md) and no E2E journey needs
+      # it, so giving it a volume here would only invite a round trip that
+      # asserts something the archive never promised.
+      - uploads:/data/uploads
     depends_on:
       db:
         condition: service_healthy
@@ -106,6 +138,33 @@ services:
       timeout: 5s
       retries: 10
 
+  # Whole-instance backup and restore, for the restore round trip
+  # (docs/specs/15-backup-restore-and-export.md, issue #133). Under the same
+  # `tools` profile as `e2e`, so `up -d` never starts it.
+  #
+  # A deliberate copy of docker-compose.yml's `backup` service — same image,
+  # same entrypoint, the same three mounts, and the same deliberate absence of
+  # `depends_on: db` — differing in exactly one thing: where the credentials
+  # come from. The E2E stack has no .env, so POSTGRES_* are set inline to the
+  # same throwaway values `db` above already uses. docker-compose.yml is the
+  # original; keep the two in step when either changes.
+  backup:
+    image: postgres:16-alpine
+    entrypoint: ["/bin/sh", "/usr/local/bin/inventory-backup"]
+    environment:
+      POSTGRES_USER: e2e
+      POSTGRES_PASSWORD: e2e
+      POSTGRES_DB: e2e
+    volumes:
+      - ./scripts/backup:/usr/local/bin/inventory-backup:ro
+      # The uploads volume twice, for the reason docker-compose.yml gives: a
+      # backup reads the tree through the read-only mount and so cannot damage
+      # it, a restore gets a separate writable path for that one job.
+      - uploads:/data/uploads:ro
+      - uploads:/restore/uploads
+      - ./backups:/backups
+    profiles: ["tools"]
+
   e2e:
     image: mcr.microsoft.com/playwright:v1.48.0-noble
     working_dir: /e2e
@@ -127,3 +186,12 @@ services:
     # in /e2e/node_modules, where Node's normal resolution actually looks.)
     entrypoint: ["sh", "-c", "npm install --no-audit --no-fund && npx playwright test --config=/e2e/playwright.config.js"]
     profiles: ["tools"] # only runs when invoked explicitly, like `setup`
+
+# The uploads tree, shared by `app` (which writes it) and `backup` (which
+# archives and restores it). Named rather than anonymous on purpose: the
+# restore round trip destroys it with `down -v` and then has to see it come
+# back out of the archive, and only a volume the compose file names is one
+# `down -v` reliably removes. The database's own data directory stays
+# anonymous, for the reason the `db` service's comment gives.
+volumes:
+  uploads:
