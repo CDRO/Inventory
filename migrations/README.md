@@ -1,6 +1,26 @@
 # Migrations
 
-goose SQL migrations, applied only through Docker:
+goose SQL migrations, applied only through Docker.
+
+> **On the operator's Synology NAS these commands are wrong.** That variant
+> keeps its data in a bind-mounted `./pgdata` supplied by
+> `docker-compose.nas.yml`, so an invocation that pins only
+> `docker-compose.yml` starts a *second*, throwaway `db` on a named volume and
+> migrates that instead — reporting success while the real database is
+> untouched. Use the NAS compose command, which carries both files:
+>
+> ```bash
+> $DC run --rm app migrate up
+> $DC run --rm app migrate status
+> ```
+>
+> where `$DC` is
+> `docker-compose -p inventory -f docker-compose.yml -f docker-compose.nas.yml`
+> (`deploy/synology/install-shell` exports it, and `dc` as an alias). See
+> [`deploy/synology/README.md`](../deploy/synology/README.md); in practice
+> `deploy/synology/update` runs the migration for you.
+
+On a plain clone:
 
 ```bash
 docker compose -f docker-compose.yml run --rm app migrate up

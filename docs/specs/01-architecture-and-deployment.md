@@ -207,7 +207,14 @@ anything left by a package whose session crashed before its issue ever
 closed — `scripts/wellen-docker-cleanup.ps1` removes instead, for the
 worktrees of a finished wave (the orchestrator runs it after the wave's
 consolidation for every wave with `"dockerCleanup": true`; by hand:
-`.\scripts\wellen-docker-cleanup.ps1 -Wave <n> -DryRun`, then without `-DryRun`).
+`.\scripts\wellen-docker-cleanup.ps1 -Wave <n> -WaveFile <plan> -DryRun`, then
+without `-DryRun`). **Always pass `-WaveFile`.** It defaults to `scripts\wellen.json`,
+and this repository has more than one wave plan — `scripts\wellen.json` (the
+completed Extended-core plan, #97) and `scripts\wellen-followups.json` (the
+follow-ups plan, #176) — each with a wave 1 of its own, holding different
+slugs. Omitting it silently resolves `-Wave <n>` against the wrong plan; where
+that plan's wave issue is already closed, the run proceeds and evaluates
+ownership against slugs that belong to another wave entirely.
 A real run refuses unless the wave issue is closed, and stops before removing
 anything if Docker cannot be listed. A `-Slug` passed alongside `-Wave` that
 belongs to no package of that wave is refused as well — that wave's issue says
@@ -615,9 +622,21 @@ services:
       # and the symptom is a confusing "relation does not exist" from a
       # suite that migrates its own throwaway database.
       - ./migrations:/src/migrations
+      # Same reason, for deploy/synology/update_test.go: that test reads the
+      # shell script next to it, so without this mount the suite silently
+      # tests the copy baked into the image and an edit to the script looks
+      # like it passed. CI checks out fresh, so there the two are the same
+      # file either way; this is purely about the local loop.
+      - ./deploy:/src/deploy
     ports:
       - "8000:8000"             # direct access, bypassing Traefik, for debugging
 ```
+
+The block above is an abridged illustration, not a second source of truth:
+`docker-compose.override.yml` is the file that counts, and it carries the full
+reasoning in comments. Reconcile toward the real file, never the other way
+round — every mount here exists to stop a silent staleness, and deleting one
+because this excerpt is shorter reintroduces exactly the failure it prevents.
 
 ## Deployment model
 

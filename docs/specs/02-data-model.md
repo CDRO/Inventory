@@ -11,8 +11,12 @@ reference at all** so that it cannot reveal anything about other storages.
 Migrations are goose SQL files under `/migrations`, invoked only through
 Docker (`docker compose -f docker-compose.yml run --rm app migrate up`), per
 `01-architecture-and-deployment.md` — the base file is pinned because `migrate`
-lives in the compiled binary, which only the production image carries. The first migration must enable the
-trigram extension used for matching:
+lives in the compiled binary, which only the production image carries. **That
+form is for a plain clone.** On the Synology NAS variant the command must carry
+`docker-compose.nas.yml` as well, or it migrates a throwaway named-volume
+database instead of the bind-mounted one; `migrations/README.md` and
+`deploy/synology/README.md` give the invocation. The first migration must
+enable the trigram extension used for matching:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
