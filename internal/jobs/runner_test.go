@@ -566,6 +566,62 @@ func TestTheLeaseKeeperRenewsItsOwnAndFailsTheAbandoned(t *testing.T) {
 	assert.Equal(t, store.JobDone, waitFor(t, s, mine.ID).Status)
 }
 
+// TestTheLeaseKeeperOutlivesTheShutdownSignal — the keeper must stop when this
+// process actually stops working, not when it is merely *asked* to stop.
+//
+// cmd/inventory builds its root context with signal.NotifyContext, so that
+// context is done the instant SIGTERM arrives — while the in-flight jobs keep
+// running for up to shutdownGrace afterwards. A keeper that ended with the
+// signal would let a live job's claim lapse with the work still running, and the
+// instance starting up beside it would fail that job out from under it: issue
+// #121's split-brain, on the ordinary rolling-update path rather than the
+// killed-outright one. So the loop ignores the context it is handed and ends
+// only with Shutdown, and this test is what keeps that true — it is otherwise a
+// property that holds only by an unenforced margin between shutdownGrace, the
+// lease interval and the TTL, none of which reference each other.
+func TestTheLeaseKeeperOutlivesTheShutdownSignal(t *testing.T) {
+	t.Parallel()
+
+	s := newFakeStore()
+	r := New(s, quietLogger())
+	r.leaseTTL = 500 * time.Millisecond
+	r.leaseInterval = 5 * time.Millisecond
+
+	release := make(chan struct{})
+	job, err := r.Submit(context.Background(), store.NewJob{StorageID: uuid.New(), Kind: store.JobShelfIngestion},
+		func(context.Context) (json.RawMessage, error) {
+			<-release // still working, deaf to cancellation, like a provider call
+			return json.RawMessage(`{}`), nil
+		})
+	require.NoError(t, err)
+
+	// Stands in for the signal context cmd/inventory used to hand the keeper.
+	signalled, cancel := context.WithCancel(context.Background())
+	go r.RunLeases(signalled)
+
+	// SIGTERM: the root context is done, and the job above is still running.
+	cancel()
+
+	atSignal := s.claimOf(job.ID).expires
+	require.Eventually(t, func() bool { return s.claimOf(job.ID).expires.After(atSignal) },
+		5*time.Second, 5*time.Millisecond,
+		"the claim must keep moving forward while the work is in flight, signal or no signal")
+
+	// It does stop at the real boundary. Shutdown cancels the runner's base
+	// context, and a keeper that has ended sweeps nothing — a lapsed claim of
+	// another process planted afterwards is left alone, where the running keeper
+	// above failed one within a tick.
+	close(release)
+	require.NoError(t, r.Shutdown(context.Background()))
+	require.Equal(t, store.JobDone, waitFor(t, s, job.ID).Status)
+
+	abandoned := s.claimFor(t, uuid.New(), -time.Second)
+	time.Sleep(20 * r.leaseInterval)
+	got, ok := s.get(abandoned)
+	require.True(t, ok)
+	assert.Equal(t, store.JobPending, got.Status, "a keeper that has stopped sweeps nothing")
+}
+
 // TestShutdownGivesUpTheClaimsItCouldNotFinish — a job whose outcome could not
 // be written inside the shutdown grace stays pending, and giving up its claim is
 // what lets the next process fail it at once instead of waiting out a lease

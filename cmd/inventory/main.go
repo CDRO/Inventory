@@ -328,7 +328,14 @@ func serve() error {
 	// second job runner: it starts no work and calls no provider. It is what
 	// recovers an instance that was killed while the other kept serving, which
 	// no start-up will ever look at again.
-	go jobRunner.RunLeases(ctx)
+	//
+	// Background rather than ctx, on purpose: ctx is cancelled the instant
+	// SIGTERM arrives, but this process keeps working its in-flight jobs for up
+	// to shutdownGrace after that, and the keeper has to go on renewing their
+	// claims for as long as it does. Shutdown is what stops it, by cancelling
+	// the runner's own context after the work has been told to stop and just
+	// before the claims are released.
+	go jobRunner.RunLeases(context.Background())
 
 	// The matching service is shared with specs 06, 07 and 09; it is
 	// constructed once here so all of them use the same thresholds.

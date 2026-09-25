@@ -201,8 +201,14 @@ func (r *Runner) Recover(ctx context.Context) error {
 }
 
 // RunLeases keeps this process's claims current and fails the ones nobody is
-// keeping current any more, once per lease interval until ctx ends. Run it in a
-// goroutine for the life of the process.
+// keeping current any more, once per lease interval until the runner is shut
+// down. Run it in a goroutine for the life of the process.
+//
+// ctx is the context of the lease statements themselves. It deliberately does
+// not stop the loop, so it is safe — and in cmd/inventory correct — to hand
+// this a context that outlives the process's shutdown signal. Only Shutdown
+// stops the keeper; the select below says why that distinction is the whole
+// point of the feature.
 //
 // The two halves are the same tick on purpose. Renewing is what tells other
 // instances that this one's pending jobs — running and queued alike — are still
@@ -216,12 +222,21 @@ func (r *Runner) RunLeases(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		select {
-		case <-ctx.Done():
-			return
 		case <-r.base.Done():
-			// Shutdown cancels base first, so the keeper stops before Shutdown
-			// releases the claims it is holding, rather than renewing one back
-			// to life a moment afterwards.
+			// The only way out, and deliberately not ctx.Done(). Shutdown
+			// cancels base first, so the keeper stops before Shutdown releases
+			// the claims it is holding, rather than renewing one back to life a
+			// moment afterwards.
+			//
+			// Stopping on ctx as well would end the keeper when the process is
+			// *asked* to stop rather than when it actually stops working:
+			// cmd/inventory's root context is cancelled the instant SIGTERM
+			// arrives, and the in-flight jobs keep running for up to the
+			// shutdown grace after that. A claim that stops being renewed while
+			// its work is still running is precisely what lets the instance
+			// starting up beside this one fail that job out from under it —
+			// issue #121, on the ordinary rolling-update path rather than the
+			// killed-outright one.
 			return
 		case <-ticker.C:
 			if n, err := r.store.RenewJobLeases(ctx, r.lease()); err != nil {
