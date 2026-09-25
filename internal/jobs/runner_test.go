@@ -545,8 +545,13 @@ func TestTheLeaseKeeperRenewsItsOwnAndFailsTheAbandoned(t *testing.T) {
 	require.NoError(t, err)
 	abandoned := s.claimFor(t, uuid.New(), -time.Second)
 
+	// Shutdown, not a cancelled context, is what stops the keeper — cancelling
+	// the context it was handed leaves the goroutine running for the rest of the
+	// test binary's life (see TestTheLeaseKeeperOutlivesTheShutdownSignal for
+	// why that is the deliberate behaviour and not a bug here).
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	defer func() { _ = r.Shutdown(context.Background()) }()
 	go r.RunLeases(ctx)
 
 	require.Eventually(t, func() bool {

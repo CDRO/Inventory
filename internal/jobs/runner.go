@@ -204,11 +204,12 @@ func (r *Runner) Recover(ctx context.Context) error {
 // keeping current any more, once per lease interval until the runner is shut
 // down. Run it in a goroutine for the life of the process.
 //
-// ctx is the context of the lease statements themselves. It deliberately does
-// not stop the loop, so it is safe — and in cmd/inventory correct — to hand
-// this a context that outlives the process's shutdown signal. Only Shutdown
-// stops the keeper; the select below says why that distinction is the whole
-// point of the feature.
+// stmtCtx is the context of the lease statements themselves, and is named that
+// way because it deliberately does not end the loop — the one thing a reader
+// would otherwise assume a context parameter does. So it is safe, and in
+// cmd/inventory correct, to hand this a context that outlives the process's
+// shutdown signal. Only Shutdown stops the keeper; the select below says why
+// that distinction is the whole point of the feature.
 //
 // The two halves are the same tick on purpose. Renewing is what tells other
 // instances that this one's pending jobs — running and queued alike — are still
@@ -217,18 +218,26 @@ func (r *Runner) Recover(ctx context.Context) error {
 // force-removed while the other keeps running (issue #124, item 4) leaves rows
 // no start-up will ever look at again, and before this they stayed pending for
 // good.
-func (r *Runner) RunLeases(ctx context.Context) {
+func (r *Runner) RunLeases(stmtCtx context.Context) {
 	ticker := time.NewTicker(r.leaseInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-r.base.Done():
-			// The only way out, and deliberately not ctx.Done(). Shutdown
-			// cancels base first, so the keeper stops before Shutdown releases
-			// the claims it is holding, rather than renewing one back to life a
-			// moment afterwards.
+			// The only way out, and deliberately not stmtCtx.Done(). Shutdown
+			// cancels base as its first statement, so this case is reachable
+			// well before Shutdown releases the claims at the end of it.
 			//
-			// Stopping on ctx as well would end the keeper when the process is
+			// That ordering is a courtesy, not the guarantee: nothing makes a
+			// goroutine observe a cancelled context by any deadline, so a tick
+			// already in flight can still land after releaseLeases has run. It
+			// is harmless, and the reason is in the SQL rather than in the
+			// scheduling — RenewJobLeases matches on `lease_owner = $1` and
+			// never writes it, ReleaseJobLeases is the only statement that
+			// nulls it, so a renewal that arrives after a release matches no
+			// row and cannot bring a claim back to life.
+			//
+			// Stopping on stmtCtx as well would end the keeper when the process is
 			// *asked* to stop rather than when it actually stops working:
 			// cmd/inventory's root context is cancelled the instant SIGTERM
 			// arrives, and the in-flight jobs keep running for up to the
@@ -239,16 +248,22 @@ func (r *Runner) RunLeases(ctx context.Context) {
 			// killed-outright one.
 			return
 		case <-ticker.C:
-			if n, err := r.store.RenewJobLeases(ctx, r.lease()); err != nil {
-				if ctx.Err() == nil {
+			// A renewal that worked is deliberately not logged. It is the
+			// routine path — once per interval for as long as anything is
+			// pending — so the only level quiet enough for it is debug, and
+			// internal/logging floors the handler at info with no level knob to
+			// lower it, on purpose (docs/specs/18-operations-and-observability.md).
+			// A debug record here would be a diagnostic nobody could ever read.
+			// The sweep below is the half that earns a record, because it
+			// changes rows.
+			if _, err := r.store.RenewJobLeases(stmtCtx, r.lease()); err != nil {
+				if stmtCtx.Err() == nil {
 					r.log.Warn("renewing job leases failed", slog.Any("err", err))
 				}
-			} else if n > 0 {
-				r.log.Debug("renewed job leases", slog.Int64("count", n))
 			}
 
-			if n, err := r.store.FailOrphanedJobs(ctx, r.owner); err != nil {
-				if ctx.Err() == nil {
+			if n, err := r.store.FailOrphanedJobs(stmtCtx, r.owner); err != nil {
+				if stmtCtx.Err() == nil {
 					r.log.Warn("sweeping orphaned jobs failed", slog.Any("err", err))
 				}
 			} else if n > 0 {
