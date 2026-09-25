@@ -66,7 +66,11 @@ CREATE TABLE notification_settings (
 - `POST /api/storages/{storage_id}/notification-settings/test` — sends a
   test message now, returns the delivery outcome inline. This is how a
   typo in the URL is found at setup time instead of silently, days
-  later.
+  later. `409 conflict` while `enabled = FALSE` — the "no code path can
+  send" guarantee (below) covers the test button too, not only the
+  scheduler. Standard storage scoping applies: `404`, identical for an
+  unknown storage and one the caller cannot access
+  (`03-auth-and-multi-tenancy.md`).
 - The settings UI lives on `settings.html`, visible only when the
   active storage is resolved.
 
