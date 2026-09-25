@@ -233,9 +233,11 @@ main element. The first such page is the inventory table,
   [`36-photo-source-picker.md`](36-photo-source-picker.md). *(Amended: this
   bullet used to prescribe a single
   `<input type="file" accept="image/*" capture="environment">` on the
-  claim that it "still allows a gallery pick". On iOS Safari and Android
-  Chrome it does not — `capture` forces the camera and drops `multiple` —
-  so a photo already on the phone could not be uploaded at all.)* An
+  claim that it "still allows a gallery pick". It does not: on iOS Safari
+  `capture` forces the camera and drops `multiple`, and Android Chrome
+  forces the camera too (whether it also drops `multiple` is for `36`'s
+  package to confirm on hardware) — so a photo already on the phone could
+  not be uploaded at all.)* An
   in-page viewfinder that avoids leaving the page for the OS camera is
   [`37-in-page-camera.md`](37-in-page-camera.md); it falls back to `36`.
 
