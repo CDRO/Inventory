@@ -2,7 +2,8 @@
 <#
 .SYNOPSIS
     Tests for the two Docker-isolation pieces of wellen-orchestrator.ps1:
-    Get-SanitizedProjectName (#115) and Stop-PackageStack.
+    Get-SanitizedProjectName / Set-WorktreeEnvOverrides (#115) and
+    Stop-PackageStack.
 
 .DESCRIPTION
     The script under test is a top-to-bottom orchestrator, not a module - its
@@ -14,9 +15,19 @@
     of side-effect-free variable assignments above it - into its own scope,
     so the real function bodies are under test without any of that.
 
-    Get-SanitizedProjectName is pure and tested directly. Stop-PackageStack
-    is tested against a real, disposable Compose project in a scratch
-    directory (this repo's own convention for these scripts: see
+    Get-SanitizedProjectName's string output is checked with CASE-SENSITIVE
+    comparisons (-ceq/-cmatch) - PowerShell's default -eq/-match are
+    case-insensitive, which would make every assertion pass even with the
+    fix fully reverted, since Compose's rule (the entire point of #115) is
+    about case. Set-WorktreeEnvOverrides - the actual call site where #115
+    manifested - is driven directly against a real worktree .env, then
+    Compose itself is used as the oracle: `docker compose config` against
+    the file this function actually wrote, proving Compose accepts it, and
+    against the exact unsanitized value #115 reported, proving Compose
+    rejects THAT - so this suite fails if the sanitizer's call is ever
+    removed, not just if its own logic regresses. Stop-PackageStack is
+    tested against a real, disposable Compose project in a scratch directory
+    (this repo's own convention for these scripts: see
     wellen-docker-cleanup.test.ps1), confirming it actually stops a running
     stack, is a harmless no-op when nothing is running, and never touches a
     different project's container.
@@ -93,8 +104,68 @@ $cases = @(
 )
 foreach ($case in $cases) {
     $got = Get-SanitizedProjectName $case.In
-    Assert ($got -eq $case.Out) "'$($case.In)' -> '$got' (expected '$($case.Out)')"
-    Assert ($got -match '^[a-z0-9][a-z0-9_-]*$') "'$got' matches Compose's own project-name rule"
+    # -ceq/-cmatch, deliberately NOT the default -eq/-match: those are
+    # case-INSENSITIVE in PowerShell, so 'Inventory-w1-delta-sync' -eq
+    # 'inventory-w1-delta-sync' is $true - which would make every assertion
+    # here pass even with .ToLowerInvariant() removed from the function
+    # entirely, i.e. with #115 fully reintroduced. Compose's own rule is
+    # case-sensitive (it rejects any uppercase letter), so the test has to be.
+    Assert ($got -ceq $case.Out) "'$($case.In)' -> '$got' (expected '$($case.Out)')"
+    Assert ($got -cmatch '^[a-z0-9][a-z0-9_-]*$') "'$got' matches Compose's own project-name rule"
+}
+
+Write-Host "== Set-WorktreeEnvOverrides (the real #115 call site) =="
+
+# Get-SanitizedProjectName in isolation proves nothing about #115 actually
+# being fixed if the one call site that matters - Set-WorktreeEnvOverrides,
+# scripts/wellen-orchestrator.ps1:465 - stopped calling it. This drives that
+# real function against a real worktree .env, then uses Compose itself as
+# the oracle: not "does the string look right", but "does Compose actually
+# accept the project name that gets written to disk."
+$envTestDir = Join-Path $env:TEMP "wotest-envoverride-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Force -Path $envTestDir | Out-Null
+try {
+    $envPath = Join-Path $envTestDir '.env'
+    Set-Content -Path $envPath -Encoding ASCII -Value "SOME_EXISTING_VALUE=kept`n"
+    Set-Content -Path (Join-Path $envTestDir 'docker-compose.yml') -Encoding ASCII -Value @"
+services:
+  app:
+    image: busybox
+"@
+    # $RepoName and $script:PackagePortIndex are read by Set-WorktreeEnvOverrides
+    # from the scope it was defined in (this test's own, via the dot-source
+    # above) - the real script populates both before any worktree is ever
+    # created; this reproduces #115's own exact repro string, "Inventory-w1-delta-sync".
+    $RepoName = 'Inventory'
+    $testSlug = 'w1-delta-sync'
+    $script:PackagePortIndex[$testSlug] = 0
+
+    Set-WorktreeEnvOverrides -EnvPath $envPath -Slug $testSlug
+
+    Assert ((Get-Content -Raw -LiteralPath $envPath) -match '(?m)^SOME_EXISTING_VALUE=kept$') "Set-WorktreeEnvOverrides preserves an existing .env line it does not own"
+    $writtenLine = (Get-Content -LiteralPath $envPath) | Where-Object { $_ -cmatch '^COMPOSE_PROJECT_NAME=' }
+    Assert ($null -ne $writtenLine) "Set-WorktreeEnvOverrides wrote a COMPOSE_PROJECT_NAME line"
+    $writtenValue = ($writtenLine -split '=', 2)[1]
+    Assert ($writtenValue -ceq 'inventory-w1-delta-sync') "the written value is lowercased ('$writtenValue')"
+
+    Push-Location -LiteralPath $envTestDir
+    try { Dk compose config } finally { Pop-Location }
+    Assert ($LASTEXITCODE -eq 0) "Compose ACCEPTS the value Set-WorktreeEnvOverrides actually wrote to disk"
+
+    # The contrast that makes the assertion above non-vacuous: feed Compose
+    # the exact unsanitized value #115 reported ("$RepoName-$Slug" verbatim,
+    # bypassing the sanitizer) and confirm Compose itself - not a regex this
+    # test invented - rejects it. If Get-SanitizedProjectName's call were
+    # ever removed from Set-WorktreeEnvOverrides, the ACCEPTS assertion above
+    # would fail exactly like this one currently does.
+    Set-Content -Path $envPath -Encoding ASCII -Value "COMPOSE_PROJECT_NAME=$RepoName-$testSlug`n"
+    Push-Location -LiteralPath $envTestDir
+    $previousEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $rejectOutput = (& docker compose config 2>&1 | Out-String) } finally { $ErrorActionPreference = $previousEap; Pop-Location }
+    Assert ($LASTEXITCODE -ne 0) "Compose REJECTS the unsanitized value ('$RepoName-$testSlug') - the #115 repro, reproduced live"
+    Assert ($rejectOutput -match 'invalid project name') "Compose's own rejection message is the one #115 quoted"
+} finally {
+    Remove-Item -Recurse -Force -Path $envTestDir -ErrorAction SilentlyContinue
 }
 
 Write-Host "== Stop-PackageStack =="
@@ -160,9 +231,21 @@ try {
     try { Stop-PackageStack -WorktreePath (Join-Path $root "$slug-does-not-exist") -Slug "$slug-does-not-exist" } catch { $threw = $true }
     Assert (-not $threw) "Stop-PackageStack against a nonexistent worktree path does not throw"
 } finally {
-    if (Test-Path -LiteralPath $otherDir) {
-        Push-Location -LiteralPath $otherDir
-        try { Dk compose down -v --remove-orphans } finally { Pop-Location }
+    # Symmetric safety-net teardown for BOTH mini-stacks, not just $otherDir:
+    # $dir's is expected to already be gone via the in-band Stop-PackageStack
+    # call above, but if that call is exactly the thing broken - the
+    # scenario this test exists to catch - an Assert failure does not throw,
+    # so execution reaches here with $dir's containers/volume still live.
+    # Tearing down by PROJECT LABEL rather than by re-running `docker compose
+    # down` in $dir works even if $dir itself (and its compose file) is about
+    # to be deleted below, or was never fully written.
+    foreach ($s in @($slug, $otherSlug)) {
+        $ids = @(DkOut ps -a -q --filter "label=com.docker.compose.project=$s")
+        if ($ids.Count -gt 0) { Dk rm -f -v @ids }
+        $vols = @(DkOut volume ls -q --filter "label=com.docker.compose.project=$s")
+        if ($vols.Count -gt 0) { Dk volume rm -f @vols }
+        $nets = @(DkOut network ls -q --filter "label=com.docker.compose.project=$s")
+        if ($nets.Count -gt 0) { Dk network rm @nets }
     }
     Remove-Item -Recurse -Force -Path $root -ErrorAction SilentlyContinue
     Remove-Item -Force -Path $script:LogFile -ErrorAction SilentlyContinue

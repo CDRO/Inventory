@@ -4,10 +4,12 @@
     Generic wave orchestrator: reads a wave plan from a JSON file (default:
     scripts\wellen.json), waits for the previous wave, creates one worktree
     per package, starts a visible, interactive Claude Code session with the
-    matching prompt/model/effort, waits for completion (issue closed),
-    kicks off consolidation, removes the Docker leftovers of the wave's
-    worktrees (waves with "dockerCleanup": true), and moves on to the next
-    wave.
+    matching prompt/model/effort, tears down that package's own Docker stack
+    the moment it is done (issue closed), kicks off consolidation once every
+    package of the wave is done, removes what is left of the wave's Docker
+    footprint (waves with "dockerCleanup": true - see .DOCKER CLEANUP for what
+    that layer catches that the per-package teardown cannot), and moves on to
+    the next wave.
 
     New waves are planned exclusively in the JSON file - this script never
     needs to change for that. How a wave is planned is described in
@@ -38,7 +40,8 @@
     Two layers, at different times, for different problems.
 
     Per package, the moment its issue closes (Wait-ForIssueClosed returns),
-    Stop-PackageStack runs `docker compose down -v` inside that worktree.
+    Stop-PackageStack runs `docker compose down -v --remove-orphans` inside
+    that worktree.
     `docker compose run` (the ship loop's own `go test`/`migrate` calls) never
     stops a dependency container it started - `db` keeps running after every
     invocation - and a session may also have brought the stack up with
@@ -48,10 +51,15 @@
     unconditionally, and doing it immediately (rather than waiting for the
     wave to finish) is what keeps a long or parallel wave from accumulating
     containers, networks and bound host ports across packages that are
-    already done. It is scoped to the worktree's own base/override project
-    only - never the shared `inventory-e2e` project (docker-compose.e2e.yml
-    pins one name for every worktree; tearing it down from here could kill a
-    concurrent package's still-running E2E job - tracked as part of #140).
+    already done. It runs a bare `docker compose down`, no `-f`, so it only
+    ever selects the default files (docker-compose.yml/override.yml) -
+    never docker-compose.e2e.yml, which Compose loads only via an explicit
+    `-f` or COMPOSE_FILE that this call does not pass. That E2E stack pins
+    its own project name in the file, but a worktree's own COMPOSE_PROJECT_NAME
+    (from its .env, which Compose auto-loads regardless of -f) overrides a
+    file's `name:` - confirmed live - so what that stack is actually named,
+    and whether it is safe to blindly tear down at all, is genuinely unclear
+    and is #140's question (item 2), not answered here.
 
     Per wave, for a wave with "dockerCleanup": true, the script also runs
     wellen-docker-cleanup.ps1 once the wave's consolidation is done (its wave
@@ -63,9 +71,13 @@
     and the wave file are read once at start-up, so a running orchestrator
     does not pick up a change to either (the cleanup script is read afresh at
     every call). This layer exists for what the per-package step cannot
-    reach: built images, and any resource left by a package whose session
-    crashed before its issue ever closed. Details and manual use:
-    scripts\wellen-planen.md, "Docker cleanup after a wave".
+    reach: built images; a package's OWN further Compose project under a name
+    of its own (Stop-PackageStack only ever runs a bare `docker compose down`,
+    which touches only the worktree's default project - a project a session
+    started under a different name for some check of its own is invisible to
+    it); and any resource left by a package whose session crashed before its
+    issue ever closed. Details and manual use: scripts\wellen-planen.md,
+    "Docker cleanup after a wave".
 
 .ARCHITECTURE
     This script itself makes NO git/GitHub write operations other than
@@ -678,17 +690,43 @@ function Invoke-Wave {
             Invoke-Package -Plan $Plan -Standards $Standards -Wave $Wave -Package $package
             if (-not $DryRun) {
                 Wait-ForIssueClosed -Number $package.specIssue -Description $package.spec
-                Stop-PackageStack -WorktreePath (Join-Path $ParentDir "$RepoName-$($package.slug)") -Slug $package.slug
             }
+            # Unconditional, not "if (-not $DryRun)": Stop-PackageStack checks
+            # $DryRun itself (like every other action function here), which is
+            # what makes a -DryRun run log that a teardown would happen here
+            # too, instead of silently skipping it.
+            Stop-PackageStack -WorktreePath (Join-Path $ParentDir "$RepoName-$($package.slug)") -Slug $package.slug
         }
     } else {
         foreach ($package in $Wave.packages) {
             Invoke-Package -Plan $Plan -Standards $Standards -Wave $Wave -Package $package
         }
-        foreach ($package in $Wave.packages) {
-            if (-not $DryRun) {
-                Wait-ForIssueClosed -Number $package.specIssue -Description $package.spec
+        if ($DryRun) {
+            foreach ($package in $Wave.packages) {
                 Stop-PackageStack -WorktreePath (Join-Path $ParentDir "$RepoName-$($package.slug)") -Slug $package.slug
+            }
+        } else {
+            # Poll every still-open package together, tearing each one's
+            # stack down the moment ITS OWN issue closes - never in file
+            # order. A package listed later that finishes first must not
+            # wait for an earlier-listed sibling still running in the same
+            # (unsequential) wave; the sequential branch above has no such
+            # problem; a package-at-a-time wait+teardown there is already
+            # "the moment its issue closes" for that package.
+            $pending = [System.Collections.Generic.List[object]]::new()
+            foreach ($package in $Wave.packages) { $pending.Add($package) }
+            while ($pending.Count -gt 0) {
+                $stillPending = [System.Collections.Generic.List[object]]::new()
+                foreach ($package in $pending) {
+                    if (Test-IssueClosed -Number $package.specIssue) {
+                        Write-Log "Issue #$($package.specIssue) ($($package.spec)) is closed."
+                        Stop-PackageStack -WorktreePath (Join-Path $ParentDir "$RepoName-$($package.slug)") -Slug $package.slug
+                    } else {
+                        $stillPending.Add($package)
+                    }
+                }
+                $pending = $stillPending
+                if ($pending.Count -gt 0) { Start-Sleep -Seconds $PollSeconds }
             }
         }
     }
@@ -745,10 +783,14 @@ function Invoke-Wave {
 # project that worktree's own base/override files ever created. `-v` removes
 # that project's named volumes (pgdata, uploads, imagecache): a package
 # worktree is single-purpose and its own data is not meant to outlive it.
-# Deliberately NOT `docker-compose.e2e.yml`: that file pins one project name
-# ("inventory-e2e") shared by every worktree, so tearing it down here could
-# kill a concurrent package's still-running E2E job - real isolation for that
-# stack is #140's job, not this one's. Best-effort and non-fatal: a package
+# Deliberately a bare `docker compose down`, no `-f`: Compose only loads
+# docker-compose.e2e.yml via an explicit `-f` or COMPOSE_FILE, so that stack
+# is never touched here regardless of what it is actually named (its pinned
+# `name: inventory-e2e` is itself overridden by a worktree's own
+# COMPOSE_PROJECT_NAME - confirmed live - so whether it is even shared
+# across worktrees in practice, and whether it would be safe to tear down
+# here, is unclear; real isolation for it is #140's job, item 2). Best-effort
+# and non-fatal: a package
 # that never brought anything up simply has nothing to remove.
 function Stop-PackageStack {
     param([string]$WorktreePath, [string]$Slug)
