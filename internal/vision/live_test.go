@@ -7,7 +7,10 @@ import (
 	"image/color"
 	"image/draw"
 	"image/png"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,6 +91,9 @@ func TestLiveAnalyzeProductHonoursContract(t *testing.T) {
 
 	client := NewClient(key)
 	analysis, err := client.Analyze(ctx, model, ModeProduct, photo, "image/png")
+	if isProviderOutage(err) {
+		t.Skipf("Gemini answered with an outage status, not a contract violation: %v", err)
+	}
 
 	// NoError and Len(1) are the two assertions carrying live signal: they
 	// depend on what the model actually saw. Everything else about a
@@ -97,4 +103,60 @@ func TestLiveAnalyzeProductHonoursContract(t *testing.T) {
 	// them again here would test the parser a second time, not Gemini.
 	require.NoError(t, err)
 	require.Len(t, analysis.Items, 1, "ModeProduct must return exactly one item")
+}
+
+// isProviderOutage reports whether err is the client-side symptom of a Gemini
+// outage (429 or 5xx) rather than a contract violation in a response the
+// provider actually returned successfully. generate (gemini.go) wraps any
+// non-2xx, non-404 status as "vision: generateContent returned <resp.Status>",
+// so the status line is still there to read back out of the error string
+// without any change to production code.
+func isProviderOutage(err error) bool {
+	if err == nil {
+		return false
+	}
+	const prefix = "generateContent returned "
+	idx := strings.Index(err.Error(), prefix)
+	if idx < 0 {
+		return false
+	}
+	status := err.Error()[idx+len(prefix):]
+	return strings.HasPrefix(status, "5") || strings.HasPrefix(status, "429")
+}
+
+// TestProviderOutageIsRecognizedFromRealErrors exercises both the skip branch
+// and the hard-fail branch against a local fake Gemini endpoint, so the
+// distinction is checked on every run instead of only during an actual
+// outage. A 503 or 429 status is the client-side symptom of an outage and
+// must be recognized as one; a 200 with a body that violates the contract is
+// not an outage at all and must not be, however the two errors are wrapped by
+// the same generate call.
+func TestProviderOutageIsRecognizedFromRealErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+		wantOutage bool
+	}{
+		{"503 service unavailable is an outage", http.StatusServiceUnavailable, `{}`, true},
+		{"429 too many requests is an outage", http.StatusTooManyRequests, `{}`, true},
+		{"500 internal server error is an outage", http.StatusInternalServerError, `{}`, true},
+		{"200 with a contract-violating body is not an outage", http.StatusOK, `not json`, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.statusCode)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+
+			client := &Client{APIKey: "test", Endpoint: srv.URL, HTTP: srv.Client()}
+			_, err := client.Analyze(context.Background(), "gemini-test", ModeProduct, []byte("fake-image-bytes"), "image/png")
+
+			require.Error(t, err)
+			assert.Equal(t, tt.wantOutage, isProviderOutage(err), "err: %v", err)
+		})
+	}
 }
