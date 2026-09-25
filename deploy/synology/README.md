@@ -82,12 +82,15 @@ has proved itself:
 1. Refuse if the clone has local changes to tracked files, then `git pull --ff-only`,
    check the pulled compose files, pull the sidecar image, build the app image.
 2. `migrate up` — the *old* app is still serving while this runs.
-3. Wait until **no job is pending** (up to `DRAIN_TIMEOUT`, 60 s).
+3. Wait until **no job is pending** (up to `DRAIN_TIMEOUT`, 60 s). If jobs are
+   still pending when that runs out, or the count cannot be read at all, the
+   update **aborts here** — it does not wait and then carry on. The database is
+   already migrated by then; try again later, or use `--classic`.
 4. Start a **second** app instance from the new image, next to the old one.
 5. Wait until the new instance answers `GET /healthz` (up to `HEALTH_TIMEOUT`,
    120 s).
-6. Wait **once more** until no job is pending, then stop and remove the old
-   instance. The count is back to one.
+6. Wait **once more** until no job is pending — aborting again, on the same two
+   conditions — then stop and remove the old instance. The count is back to one.
 7. Recreate the Tailscale sidecar.
 
 Before it pulls anything it refuses to run if more than one app instance is
@@ -95,11 +98,24 @@ already running, or if a stopped app container is left over (an earlier update w
 interrupted): it names what to remove with `docker rm -f`.
 
 If the update stops before step 6 completes, the old instance is **untouched**: a
-failed build or a failed migration changes nothing; a new instance that fails to
-start, does not become healthy, or is interrupted (Ctrl-C, a dropped SSH session)
-is removed again, and the script says so. Two things do stay: **the database is
-already migrated** from step 2 on (forward-only, see below), and a job the old
-instance was running keeps running. From step 6 on the new app is already serving.
+new instance that fails to start, does not become healthy, or is interrupted
+(Ctrl-C, a dropped SSH session) is removed again, and the script says so. What the
+*database* is left as depends on where it stopped:
+
+- **A failed `git pull` or a failed build changes nothing at all.** Step 2 never
+  ran, so the schema is still the one the old app has been serving on.
+- **A failed migration can leave the release half-applied.** goose applies the
+  pending migrations one at a time, each in its own transaction, and stops at the
+  one that failed — the ones before it stay applied. The schema then sits between
+  the two releases, and the old app keeps serving against it.
+- **Anything after step 2 leaves the database fully migrated**: an aborted drain,
+  an unhealthy new instance, an error, Ctrl-C. Migrations only go forward (see
+  "Going back"), so the way out is forward.
+
+A job the old instance was running also keeps running. From step 6 on the new app
+is already serving — and if the run ends between step 6 and step 7, the sidecar
+still holds the retired instance's network namespace, so the tailnet URL is down
+until it is recreated. The script prints that one command when it exits that way.
 
 | Option | Effect |
 |---|---|
@@ -124,8 +140,13 @@ as a change, and the update goes ahead. (Docker Desktop's containerd image store
 writes a new image id at every build, so there this check never finds "nothing";
 the NAS's Docker does not.)
 
-**One at a time.** A lock directory (`/tmp/inventory-update-inventory.lock`) keeps a
-second run out. A run that was killed hard leaves it behind; the message names it.
+**One at a time.** A lock directory (`/tmp/inventory-update-inventory.lock` — the
+last part is `INVENTORY_PROJECT`, and the path does not depend on `TMPDIR`, so an
+interactive run and a scheduled one share the same lock) keeps a second run out. It
+holds the pid and start time of the run that took it. A run killed hard (SIGKILL, a
+power cut) leaves the directory behind, and the next run then says whether that pid
+is still alive. Removing it is left to you on purpose: a run killed that hard can
+also have left a second app instance behind, which wants the same look.
 
 **First start.** When no app instance is running, the script builds, migrates and
 starts the whole stack — the sequence of the spec's "First start", after
@@ -184,20 +205,35 @@ earlier release after a migration means restoring the backup you took before the
 update.** Checking out an old commit and rebuilding starts an old binary on a newer
 schema, which spec 18 makes a fatal start-up error.
 
-If the schema did not change between the two releases, the code alone can go back:
+If the schema did not change between the two releases, the code alone can go back.
+Check that first — the question is whether anything was added under `migrations/`:
 
 ```console
+$ git diff --stat <commit> HEAD -- migrations/   # no output: no schema change
 $ git checkout <commit>                       # detached HEAD
 $ sh deploy/synology/update --no-pull --force
 $ git switch main                             # later: so that the next update can pull
 ```
 
+If that diff prints anything, the schema did change and this recipe is not
+available: the old binary refuses to start against the newer schema (`migrate.Check`
+runs at every start, per spec 18) and you are back to restoring the backup.
+
 ### Verifying a change to these scripts
 
-There is no automated test for them; a change is verified against a scratch stack,
-never against the real one. In a scratch clone (`git clone` of the branch, a dummy
-`.env`, and `INVENTORY_PROJECT=scratch DOCKER_COMPOSE="docker compose"`, so the
-real project `inventory` and its containers are not touched), run and check:
+`docker compose run --rm app go test ./deploy/...`
+([`update_test.go`](update_test.go)) covers the parts of `update` that are
+*decisions* rather than Docker: it runs the real script under busybox `sh` against
+recording stubs for `docker`, `docker-compose` and `git`, and asserts which
+commands it issued, with which container ids, and what it printed. That catches a
+wrong branch, a wrong message, a wrong id and a missing abort. It proves nothing
+about the daemon, about Compose, or about the DSM — the stubs only reproduce what
+Compose 2.31.0 was observed to do.
+
+So a change is still verified against a scratch stack as well, never against the
+real one. In a scratch clone (`git clone` of the branch, a dummy `.env`, and
+`INVENTORY_PROJECT=scratch DOCKER_COMPOSE="docker compose"`, so the real project
+`inventory` and its containers are not touched), run and check:
 
 | Scenario | Expected |
 |---|---|
@@ -212,7 +248,13 @@ real project `inventory` and its containers are not touched), run and check:
 | A `RUN false` in the `Dockerfile` | The build fails; nothing changed. |
 | A local change to a tracked file, then `update` | Refuses and lists the file; with `--no-pull` it deploys the tree as it is. |
 | A second app container started by hand | The script refuses before it pulls. |
-| The lock directory created by hand | The script refuses and names it. |
-| `--classic` with a failing migration | Stack stays stopped and the message says so. |
+| The lock directory created by hand | The script refuses, names it, and says whether the pid inside it is still alive. |
+| `--classic` with a failing migration | Stack stays stopped and the message says so, with the `up -d` that starts it again. |
+| `--prune` on each of the four ends: first start, "nothing to swap", `--classic`, rolling | A dangling image the build left behind is gone in all four cases. |
+| `traefik` in the merged model (drop the `-f docker-compose.nas.yml`) | Refuses; no container is touched, and after a pull that moved the clone the message names the commit it moved to. |
+| Compose older than 2.24 (`DOCKER_COMPOSE=` the Container Manager binary) | Refuses before it touches anything. |
+| `kill` (SIGTERM) of the run between the health check and step 6 | Exit 143; the new instance is removed, the old app and the sidecar keep their ids, and the lock directory is gone. |
+| `dc run --rm app migrate status` left running while an update aborts | The trap removes the new app instance and leaves that one-off container alone. |
+| `install-shell`, then `install-shell` again, then `--remove` | One marked block in `~/.profile`; `dc` is an alias; the backup matches the original; `--remove` takes the block out and creates no file when there is none; an unbalanced marker leaves the profile byte-identical. |
 
 Clean up with `dc down -v` in the scratch clone and delete it.
