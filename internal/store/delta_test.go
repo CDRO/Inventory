@@ -162,10 +162,13 @@ func TestDeltaWatermarkNeverOutrunsAnOpenTransaction(t *testing.T) {
 
 // TestProductDeltaReportsChangesAndDeletions is the ordinary path: what moved,
 // what went, and a cursor to come back with.
+//
+// This test asserts the sync point never moves backward, so it needs a
+// database nothing else is touching — see isolatedStore and #136.
 func TestProductDeltaReportsChangesAndDeletions(t *testing.T) {
-	s := requireDB(t)
 	ctx := context.Background()
-	storageID := newStorage(t, ctx)
+	s, pool := isolatedStore(t, ctx)
+	storageID := newStorageIn(t, ctx, pool)
 
 	kept, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Butter"})
 	require.NoError(t, err)
@@ -174,7 +177,7 @@ func TestProductDeltaReportsChangesAndDeletions(t *testing.T) {
 
 	// A cursor taken after both products exist and before anything happens to
 	// them: the delta from here must be empty.
-	cursor := timeNow(t, ctx)
+	cursor := timeNowIn(t, ctx, pool)
 
 	quiet, err := s.ProductsChangedSince(ctx, storageID, cursor)
 	require.NoError(t, err)
@@ -200,15 +203,19 @@ func TestProductDeltaReportsChangesAndDeletions(t *testing.T) {
 // TestDeltaSyncPointIsUsableAsTheNextCursor closes the loop the whole feature
 // depends on: feeding SyncedAt back must not skip a change, and must not repeat
 // the whole list either.
+//
+// This test asserts an untouched product does not reappear once its cursor
+// has already synced past it, so it needs a database nothing else is
+// touching — see isolatedStore and #136.
 func TestDeltaSyncPointIsUsableAsTheNextCursor(t *testing.T) {
-	s := requireDB(t)
 	ctx := context.Background()
-	storageID := newStorage(t, ctx)
+	s, pool := isolatedStore(t, ctx)
+	storageID := newStorageIn(t, ctx, pool)
 
 	first, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Butter"})
 	require.NoError(t, err)
 
-	initial, err := s.ProductsChangedSince(ctx, storageID, timeNow(t, ctx).Add(-time.Hour))
+	initial, err := s.ProductsChangedSince(ctx, storageID, timeNowIn(t, ctx, pool).Add(-time.Hour))
 	require.NoError(t, err)
 	require.Len(t, initial.Changed, 1)
 
@@ -332,6 +339,36 @@ func TestDeltaDoesNotMixEntityKinds(t *testing.T) {
 	assert.Equal(t, []uuid.UUID{product.ID}, products.Deleted)
 	assert.Equal(t, []uuid.UUID{category.ID}, categories.Deleted)
 	assert.Equal(t, []uuid.UUID{location.ID}, locations.Deleted)
+}
+
+// TestDeltaWatermarkIsolationSurvivesANeighbourHoldingTheSharedDatabaseOpen is
+// the proof for #136. It holds a transaction open on testPool — the shared
+// package database these two tests used to run against, and that other tests
+// in this package (or another package, under `go test ./...`) still share —
+// for as long as it runs, modelling exactly the condition #136 says drags
+// deltaWatermark backward. TestProductDeltaReportsChangesAndDeletions and
+// TestDeltaSyncPointIsUsableAsTheNextCursor now run on their own isolated
+// database (isolatedStore), so that held-open transaction must not be able to
+// reach their watermark at all: both must still pass with it open.
+func TestDeltaWatermarkIsolationSurvivesANeighbourHoldingTheSharedDatabaseOpen(t *testing.T) {
+	requireDB(t)
+	ctx := context.Background()
+
+	conn, err := testPool.Acquire(ctx)
+	require.NoError(t, err)
+	defer conn.Release()
+
+	tx, err := conn.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Force the transaction to take its snapshot, so xact_start is set for as
+	// long as this test runs.
+	var xactStart time.Time
+	require.NoError(t, tx.QueryRow(ctx, `SELECT now()`).Scan(&xactStart))
+
+	t.Run("TestProductDeltaReportsChangesAndDeletions", TestProductDeltaReportsChangesAndDeletions)
+	t.Run("TestDeltaSyncPointIsUsableAsTheNextCursor", TestDeltaSyncPointIsUsableAsTheNextCursor)
 }
 
 // TestEveryDeltaKindRefusesAStaleCursor — the resync boundary is a property of
