@@ -117,12 +117,26 @@ function New-PathShim {
     Set-Content -Path (Join-Path $dir "$Name.cmd") -Encoding ASCII -Value $Body
     return $dir
 }
+# Save and restore, never a string subtraction on PATH: a shim that outlived
+# its block would quietly change a LATER section's meaning - a leftover `gh`
+# saying CLOSED under the "-Force: the fake wave issue cannot be closed"
+# heading would pass either way, because -Force short-circuits the issue read.
 function Invoke-WithShim {
     param([string]$ShimDir, [scriptblock]$Body)
     $saved = $env:PATH
     $env:PATH = "$ShimDir;$saved"
     try { return & $Body } finally { $env:PATH = $saved; Remove-Item -Recurse -Force $ShimDir -ErrorAction SilentlyContinue }
 }
+$pathBefore = $env:PATH
+function Test-PathRestored {
+    param([string]$When)
+    Assert ($env:PATH -eq $pathBefore) "PATH is exactly as it was $When (no shim outlives its block)"
+}
+$ghClosedBody = @"
+@echo off
+echo CLOSED
+exit /b 0
+"@
 
 $cleanupScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'wellen-docker-cleanup.ps1'
 $id = -join ((1..8) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
@@ -241,6 +255,11 @@ try {
     # whole point - matching it anywhere passed either way.
     $keptNames = Get-SectionNames $r.Out 'Kept - mentions a slug'
     $removeNames = Get-SectionNames $r.Out 'To remove:' -Kinded
+    # Most assertions below are of the shape "this name is NOT in that list",
+    # which is vacuously true if the parser returned an empty list at all - a
+    # drifted header, a changed $mode prefix, a blank line inside a section.
+    # Both lists are known to be non-empty here, so say so once.
+    Assert ($removeNames.Count -gt 0 -and $keptNames.Count -gt 0) "both sections parsed non-empty ($($removeNames.Count) to remove, $($keptNames.Count) kept) - the ''is not in'' assertions below are real"
     Assert ($keptNames -contains "other-$repo-zta-app-1") 'the foreign project''s container is listed under "Kept"'
     Assert (-not ($removeNames | Where-Object { $_ -like "other-$repo-zta*" })) 'nothing of the foreign project is under "To remove"'
 
@@ -310,18 +329,13 @@ exit /b 0
     Assert ($r.Error -match 'docker container inspect failed') 'a failed inspect stops the script'
     Assert ($r.Error -match 'nothing was removed') 'and says so'
     Test-Project "$repo-zta" 1 1 1 1 'failed inspect: nothing removed'
+    Test-PathRestored 'after the docker shims'
 
     # #140 items 1 and 9: everything below needs the wave issue to read CLOSED.
     # A fake issue number cannot be closed on GitHub, and the guard that item 1
     # is about only bites once the wave IS finished - so gh is faked.
     Write-Host "Wave issue reads CLOSED (#140 items 1 and 9)"
-    $ghClosed = New-PathShim -Name 'gh' -Body @"
-@echo off
-echo CLOSED
-exit /b 0
-"@
-    $env:PATH = "$ghClosed;$env:PATH"
-    try {
+    Invoke-WithShim (New-PathShim -Name 'gh' -Body $ghClosedBody) {
         $r = Invoke-Cleanup @{ Wave = 1; DryRun = $true }
         Assert ($r.Out -match "Wave 1 is finished \(wave issue #2147483000 is closed\)") '-Wave with a closed wave issue is allowed'
         Assert ($r.Out -notmatch 'A real run would refuse') 'and a real run would not refuse'
@@ -342,10 +356,8 @@ exit /b 0
         $r = Invoke-Cleanup @{ Wave = 1; Slug = 'ztd' }
         Assert ($r.Error -match 'Refusing') 'a REAL -Wave 1 -Slug ztd run throws'
         Test-Project "$repo-ztd" 1 1 1 1 'and wave 2''s stack is untouched'
-    } finally {
-        $env:PATH = ($env:PATH -replace [regex]::Escape("$ghClosed;"), '')
-        Remove-Item -Recurse -Force $ghClosed -ErrorAction SilentlyContinue
     }
+    Test-PathRestored 'after the gh shim'
 
     Write-Host "Real run (-Force: the fake wave issue cannot be closed)"
     $r = Invoke-Cleanup @{ Slug = 'zta,ztb,ztc'; Force = $true }
@@ -367,20 +379,12 @@ exit /b 0
     # The positive -Wave path end to end: not "would be allowed", but a real
     # run that removes, driven only by the wave issue being closed.
     Write-Host "Real -Wave run with a closed wave issue (#140 item 9)"
-    $ghClosed = New-PathShim -Name 'gh' -Body @"
-@echo off
-echo CLOSED
-exit /b 0
-"@
-    $env:PATH = "$ghClosed;$env:PATH"
-    try {
+    Invoke-WithShim (New-PathShim -Name 'gh' -Body $ghClosedBody) {
         $r = Invoke-Cleanup @{ Wave = 1 }
         Assert ($null -eq $r.Error) "a real -Wave run with a closed issue does not throw ($($r.Error))"
         Assert ($r.Out -match '0 could not be removed') 'and nothing failed to remove'
-    } finally {
-        $env:PATH = ($env:PATH -replace [regex]::Escape("$ghClosed;"), '')
-        Remove-Item -Recurse -Force $ghClosed -ErrorAction SilentlyContinue
     }
+    Test-PathRestored 'after the second gh shim'
     Test-Project "$repo-ztc-long" 0 0 0 0 'ztc-long, this time a requested slug, is removed'
     Test-Project "$repo-ztc-long-orphan" 0 0 0 0 'and so is the container-less project named after it'
     Test-Project $repo 2 1 1 1 'the main checkout project is still untouched'
