@@ -10,3 +10,9 @@ deploy/synology/update text eol=lf
 # problem with a CRLF shebang. It is bind-mounted into the container straight
 # from the checkout, so the checkout's line endings are the ones that run.
 scripts/backup text eol=lf
+
+# update_test.go writes the stub shell scripts it needs from Go raw string
+# literals, so its own line endings end up in theirs. Go discards a \r inside a
+# raw string literal, which would save it on a CRLF checkout anyway, but pinning
+# the file is the version that does not depend on knowing that.
+deploy/synology/update_test.go text eol=lf

@@ -12,13 +12,16 @@
 #      image, build the app image
 #   2. migrate up            (the OLD app keeps serving while this runs)
 #   3. wait until no job is pending, so the new instance's start-up recovery
-#      cannot fail a job the old instance is still working on
+#      cannot fail a job the old instance is still working on. If they do not
+#      drain in time, or the count cannot be read, the run ABORTS here with the
+#      database already migrated; --classic is the way through.
 #   4. start a SECOND app instance from the new image, next to the old one
 #   5. wait until the new instance answers GET /healthz
 #        - it does not, or the start fails, or you press Ctrl-C: the new instance
 #          is removed again. The old instance was never touched.
 #   6. wait once more until no job is pending (stopping the old instance cancels
-#      what it is running), then stop and remove it; the count is back to one
+#      what it is running), aborting again on the same two conditions, then stop
+#      and remove it; the count is back to one
 #   7. recreate the Tailscale sidecar, which shares the app's network namespace
 #      and would otherwise keep pointing at the dead one (a few seconds without
 #      the tailnet URL: that gap is not avoidable with this layout)
@@ -31,8 +34,8 @@
 # Nothing to do: after the build, Compose is asked (up --dry-run) whether it would
 # recreate or start anything. If not, the script exits without touching anything.
 #
-# One update at a time: a lock directory in $TMPDIR (default /tmp) keeps a second
-# run out; a run that was killed hard leaves it behind, and the message says so.
+# One update at a time: a lock directory in /tmp keeps a second run out; it holds
+# the pid, so a run killed hard is reported as gone instead of guessed about.
 #
 # Environment: TS_AUTHKEY is passed through to the very first start; HEALTH_TIMEOUT
 # and DRAIN_TIMEOUT are seconds (defaults 120 and 60). DOCKER_COMPOSE and
@@ -53,7 +56,7 @@ die() { echo "update: $*" >&2; exit 1; }
 say() { echo "==> $*"; }
 
 usage() {
-  sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 pull=1 classic=0 force=0 prune=0
@@ -78,16 +81,27 @@ DC_HINT="$COMPOSE -p $PROJECT -f $ROOT/docker-compose.yml -f $ROOT/docker-compos
 
 # --- Cleanup and lock ---------------------------------------------------------
 
-lockdir="${TMPDIR:-/tmp}/inventory-update-$PROJECT.lock"
+# A fixed path, not $TMPDIR: an interactive root shell and a Task Scheduler job do
+# not have the same TMPDIR, and two lock paths are not a lock.
+lockdir="/tmp/inventory-update-$PROJECT.lock"
 have_lock=0
 armed=0        # 1 while a second app instance started by this run may need removing
 old_ids=       # the app instance(s) that were running before this run started one
+recover=       # what an abort from here on leaves behind, and the way out of it
+pulled_note=   # names the commit `git pull` moved to, for a refusal after it
 
 # Every app container of the project, in any state and with its full id.
+#
+# oneoff=False leaves out what `docker-compose run` creates - an interrupted
+# `migrate up` leaves such a container behind. Compose labels those oneoff=True
+# and `ps -q` never lists them, so without this filter one of them looks like a
+# stray app instance: the pre-flight below would call it a leftover, and the EXIT
+# trap would remove a `run` container that belongs to somebody else's command.
 app_ids_all() {
   docker ps -aq --no-trunc \
     --filter "label=com.docker.compose.project=$PROJECT" \
-    --filter "label=com.docker.compose.service=app"
+    --filter "label=com.docker.compose.service=app" \
+    --filter "label=com.docker.compose.oneoff=False"
 }
 
 on_exit() {
@@ -104,7 +118,16 @@ on_exit() {
     done
     [ "$removed" -eq 0 ] || echo "update: the new app instance was removed; the old one was not touched." >&2
   fi
-  [ "$have_lock" -eq 0 ] || rmdir "$lockdir" 2>/dev/null || true
+  # The paths that leave something half-done say so from here, not from each
+  # `die`: a signal ends the run without reaching any of them, and a dropped SSH
+  # session of an unattended run is exactly that (SIGHUP).
+  if [ "$rc" -ne 0 ] && [ -n "$recover" ]; then
+    echo "update: $recover" >&2
+  fi
+  if [ "$have_lock" -eq 1 ]; then
+    rm -f "$lockdir/holder" 2>/dev/null || true
+    rmdir "$lockdir" 2>/dev/null || true
+  fi
   exit "$rc"
 }
 trap on_exit EXIT
@@ -120,9 +143,25 @@ major=${v%%.*}; rest=${v#*.}; minor=${rest%%.*}
 { [ "$major" -gt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -ge 24 ]; }; } \
   || die "Compose $v is too old: these files need >= 2.24 (the one bundled with Container Manager is 2.20)"
 
-mkdir "$lockdir" 2>/dev/null \
-  || die "another update is running. If none is (a killed run leaves the lock behind), remove $lockdir and try again."
+# The holder file turns "another update is running" from a guess into a fact. A
+# run killed hard (SIGKILL, a power cut) leaves the directory behind, and on a NAS
+# that updates from Task Scheduler every later run then fails with nothing to say
+# whether a live run or a dead one holds the lock. It is reported, not cleaned up
+# on its own: a run that was killed that hard can also have left a second app
+# instance behind, which the operator has to look at anyway.
+if ! mkdir "$lockdir" 2>/dev/null; then
+  holder=$(cat "$lockdir/holder" 2>/dev/null) || holder=
+  pid=${holder%% *}
+  case "$pid" in
+    ''|*[!0-9]*) die "another update seems to be running: $lockdir exists but names no process. Remove it and try again." ;;
+  esac
+  if kill -0 "$pid" 2>/dev/null; then
+    die "another update is running ($holder). Wait for it to finish, or remove $lockdir if that process is not this script."
+  fi
+  die "a previous update was killed and left its lock behind ($holder; that process is gone). Check 'docker ps -a' for a leftover app container, then remove $lockdir and run this again."
+fi
 have_lock=1
+echo "$$ started $(date '+%Y-%m-%d %H:%M:%S')" > "$lockdir/holder"
 
 # The merged model must be the NAS one. Checked on the files this run will use, so
 # it runs after the pull: a pulled commit could change them.
@@ -132,7 +171,10 @@ check_model() {
     echo "$services" | grep -qx "$s" || die "the merged model has no service '$s'"
   done
   if echo "$services" | grep -qx traefik; then
-    die "the merged model lists traefik: the NAS layer is not active. Nothing was changed."
+    # Not "nothing was changed": this runs after the pull, which may already have
+    # moved the clone. No container was touched, and $pulled_note says whether the
+    # working tree is still the one the operator looked at.
+    die "the merged model lists traefik: the NAS layer is not active. No container was touched.$pulled_note"
   fi
 }
 
@@ -150,6 +192,11 @@ container_port() {
 }
 
 is_running() { [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = true ]; }
+
+# --prune is "afterwards, remove dangling images". Every path that gets as far as
+# the build can have left one behind - including the two that then find nothing to
+# do - so all four ends of this script go through here.
+maybe_prune() { [ "$prune" -eq 0 ] || docker image prune -f; }
 
 # The number of pending jobs, or nothing when it cannot be read.
 pending_jobs() {
@@ -212,10 +259,18 @@ if [ "$pull" -eq 1 ]; then
   # The clone is meant to carry no local edit (that is what the layered compose
   # file is for). What is deployed must be what was pulled, so refuse instead of
   # building someone's leftovers; --no-pull deploys the tree as it is.
-  if ! git diff --quiet HEAD -- 2>/dev/null; then
-    git status --short --untracked-files=no >&2
-    die "the clone has local changes to tracked files (listed above). Commit, stash or discard them, or use --no-pull to deploy the tree as it is."
-  fi
+  # Status 1 is "there are differences". Anything else is git itself failing - no
+  # commit yet, a broken index, not a repository at all - which must not be
+  # reported as an edit the operator can commit away. git's own message stays on
+  # stderr for that case.
+  rc=0
+  git diff --quiet HEAD -- || rc=$?
+  case $rc in
+    0) ;;
+    1) git status --short --untracked-files=no >&2
+       die "the clone has local changes to tracked files (listed above). Commit, stash or discard them, or use --no-pull to deploy the tree as it is." ;;
+    *) die "'git diff --quiet HEAD --' failed with status $rc (its own message is above): $ROOT does not look like a usable clone. Fix that, or use --no-pull to deploy the tree as it is." ;;
+  esac
   say "git pull --ff-only ($(git rev-parse --abbrev-ref HEAD))"
   before=$(git rev-parse HEAD)
   # --no-rebase: a user's pull.rebase setting must not turn this into a rebase.
@@ -223,6 +278,7 @@ if [ "$pull" -eq 1 ]; then
   after=$(git rev-parse HEAD)
   if [ "$before" != "$after" ]; then
     echo "    $(git rev-parse --short "$before") -> $(git rev-parse --short "$after")"
+    pulled_note=" The clone was moved to $(git rev-parse --short "$after") (from $(git rev-parse --short "$before"))."
   else
     echo "    already up to date"
   fi
@@ -241,6 +297,7 @@ if [ -z "$old" ]; then
   $DC run --rm -T app migrate up
   $DC up -d
   $DC ps
+  maybe_prune
   exit 0
 fi
 
@@ -248,12 +305,26 @@ fi
 
 if [ "$force" -eq 0 ]; then
   # Compose knows whether the image or the configuration differs from what runs.
-  # Anything it would recreate, create or start counts as a change; if it cannot
-  # tell, the update goes ahead.
   plan=$($DC up -d --no-deps --dry-run app ts-inventory 2>&1) || plan=error
-  if ! echo "$plan" | grep -qiE 'recreat|creat|start|stop|error'; then
+  # Compose prints one line per container - "<prefix> Container <name>  <status>" -
+  # and only that status says whether it would change anything. The container name
+  # sits on the same line, so looking at whole lines makes a project name or clone
+  # path containing "start", "stop" or "creat" look like a change on every single
+  # run, and so does any warning that quotes a container name ("Found orphan
+  # containers ([inventory-x-1]) ..." is one). That fails safe - it swaps - but it
+  # swaps and bounces the sidecar for nothing.
+  #
+  # So only the status words are read, and only when every container line yields
+  # one. "Running" is the whole no-change set; any other status, and any output
+  # this cannot read that way, still counts as a change. A Compose whose --dry-run
+  # prints something else therefore cannot make this script skip a real update.
+  lines=$(echo "$plan" | grep -c 'Container ') || lines=0
+  states=$(echo "$plan" | sed -n 's/.*Container  *[^ ]*  *\([A-Za-z][A-Za-z]*\) *$/\1/p')
+  seen=$(echo "$states" | grep -c .) || seen=0
+  if [ "$seen" -ge 1 ] && [ "$seen" -eq "$lines" ] && ! echo "$states" | grep -qvx Running; then
     say "Compose would change nothing (same image, same configuration): nothing to swap (use --force to swap anyway)"
     $DC ps
+    maybe_prune
     exit 0
   fi
 fi
@@ -261,15 +332,23 @@ fi
 # --- Classic update -----------------------------------------------------------
 
 if [ "$classic" -eq 1 ]; then
+  # Everything from here to the `up -d` leaves the stack stopped, whether it ends
+  # in a failed migration, an error, a failing `up -d` or a signal - only the
+  # first of those used to say so. The two messages are not one: a `stop` that
+  # fails outright leaves the app serving, so "are STOPPED" is only true once the
+  # stop has returned, and claiming it earlier would send the operator looking for
+  # a stopped stack that never stopped.
+  recover="this run was stopping the app and the sidecar, and did not start them again. Check with: $DC_HINT ps - and start them with: $DC_HINT up -d"
   say "Classic update: stopping the app and the sidecar"
   $DC stop ts-inventory app
+  recover="the app and the sidecar are STOPPED. Fix the cause and run this script again, or start them with: $DC_HINT up -d"
   say "Migrating"
-  $DC run --rm -T app migrate up \
-    || die "the migration failed, and the app and the sidecar are STOPPED. Fix the cause and run this script again."
+  $DC run --rm -T app migrate up || die "the migration failed."
   say "Starting the stack"
   $DC up -d
+  recover=
   $DC ps
-  [ "$prune" -eq 0 ] || docker image prune -f
+  maybe_prune
   exit 0
 fi
 
@@ -286,6 +365,17 @@ case $rc in
   1) die "$pending_left job(s) still pending after ${DRAIN_TIMEOUT}s. Nothing was swapped (the database is migrated); try again later, or use --classic." ;;
   *) die "cannot read the pending-job count. Nothing was swapped (the database is migrated); use --classic if you accept interrupting jobs." ;;
 esac
+
+# $old was read before the pull, the build and the migration, which together take
+# minutes. If the app container was replaced in that window - an `up -d` run by
+# hand, Docker's own restart policy recreating it - then $old names a container
+# that is gone, and arming the trap on it would make an abort remove the instance
+# that is actually serving. Read it again, and refuse rather than guess which one
+# is which.
+now=$(app_ids)
+if [ "$now" != "$old" ]; then
+  die "the app container changed while this run was pulling, building and migrating (it was $old, it is now ${now:-none}). Nothing was swapped (the database is migrated). Check 'docker ps' and run this again."
+fi
 
 say "Starting a second app instance from the new image"
 # From here until the old instance is retired, anything that ends this run (a
@@ -327,8 +417,12 @@ case $rc in
 esac
 
 # The new instance is proven. From here on the update is committed: the old
-# instance goes, and the sidecar must follow whatever else happens.
+# instance goes, and the sidecar must follow whatever else happens. Until it has
+# been recreated it still holds the retired instance's network namespace, so
+# anything that ends this run in between - an error, or the SIGHUP of a dropped
+# SSH session - leaves the tailnet URL dead; the trap says so and how to fix it.
 armed=0
+recover="the app was updated, but the sidecar was not recreated: it still holds the retired instance's network namespace, so the tailnet URL is down. Run: $DC_HINT up -d --no-deps --force-recreate ts-inventory"
 say "Retiring the old instance"
 docker stop -t 30 "$old" >/dev/null 2>&1 || echo "    warning: could not stop the old instance $old" >&2
 docker rm -f "$old" >/dev/null 2>&1 || echo "    warning: could not remove the old instance $old" >&2
@@ -340,11 +434,12 @@ say "Recreating the sidecar (it shared the old instance's network namespace)"
 tries=0
 until $DC up -d --no-deps --force-recreate ts-inventory; do
   tries=$((tries + 1))
-  [ "$tries" -lt 3 ] || die "the app is updated and running, but the sidecar could not be recreated. Run: $DC_HINT up -d --no-deps --force-recreate ts-inventory"
+  [ "$tries" -lt 3 ] || die "the sidecar could not be recreated after 3 attempts."
   echo "    retrying in 3s ($tries/2)"
   sleep 3
 done
+recover=
 
 $DC ps
-[ "$prune" -eq 0 ] || docker image prune -f
+maybe_prune
 say "Done."

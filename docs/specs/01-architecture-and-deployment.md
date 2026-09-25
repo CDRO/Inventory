@@ -858,8 +858,22 @@ removes the old one and recreates the sidecar. Its contract:
 - **The old instance is not touched until the new one is healthy.** A failed
   build, migration or start leaves the old app serving; a new instance that fails
   to start, does not become healthy, or is interrupted is removed again, and no
-  stopped instance is left behind. The database stays migrated in every one of
-  those cases.
+  stopped instance is left behind. What the *database* is left as depends on where
+  it stopped, and "stays migrated" is only the last of the three cases: a failed
+  pull or build never reached `migrate up` at all, a failed migration can leave the
+  release half-applied (goose applies the pending migrations one at a time, each in
+  its own transaction, and stops at the one that failed), and everything after that
+  point leaves it fully migrated. Forward-only in all three.
+- **A pending job aborts the update; it is not waited out and then ignored.**
+  Both drain waits abort when jobs are still pending after `DRAIN_TIMEOUT` *or*
+  when the count cannot be read at all — with the database already migrated.
+  `--classic` is the way through, at the price of interrupting what runs.
+- **A run that ends between retiring the old instance and recreating the sidecar**
+  leaves the sidecar holding the retired instance's network namespace, so the
+  tailnet URL is down until it is recreated. The script prints that command from
+  its exit trap, which is also what reports the `--classic` stack left stopped: a
+  signal (the SIGHUP of a dropped SSH session, for an unattended run) reaches no
+  error message of its own.
 - **Both `-f` files on every compose call**, and it refuses to run if the merged
   model — checked after `git pull`, on the files it will use — lists `traefik` or
   lacks `app`, `db` or `ts-inventory` (the NAS layer is not active), or if Compose
@@ -872,7 +886,11 @@ removes the old one and recreates the sidecar. Its contract:
   for a release whose migration the previous release cannot run against. If the
   migration fails, the stack stays stopped, and the script says so.
 - **Nothing to do** is detected by asking Compose whether it would recreate, create
-  or start anything (`up --dry-run`); if not, nothing is touched.
+  or start anything (`up --dry-run`); if not, nothing is touched. Only the status
+  word Compose prints after each container's name is read, so neither a warning that
+  quotes a container name nor a project name or clone path containing "start" can
+  fake a change — and an output that cannot be read that way counts as a change, so
+  the check can never make the script skip a real update.
 
 What it does not give you, and the reasons:
 
@@ -893,7 +911,10 @@ What it does not give you, and the reasons:
   job, which is application work, not deployment (issue #121).
 - **No way back without the backup.** Going back to an earlier release after a
   migration means restoring the backup (`18`); an old binary on a newer schema is a
-  fatal start-up error there.
+  fatal start-up error there, enforced at every start by `migrate.Check`. Whether a
+  release migrated at all is `git diff --stat <commit> HEAD -- migrations/`: when
+  that prints nothing, the code alone can go back, and
+  [`deploy/synology/README.md`](../../deploy/synology/README.md) has the recipe.
 
 Two operational notes. The app container is **no longer named `inventory_app`**: a
 fixed name would forbid the second instance, so Compose names them
