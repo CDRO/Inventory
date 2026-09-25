@@ -1,10 +1,10 @@
 # 50 — Gamification: Overview & Principles
 
 **Phase marker:** specs numbered `50` and above are a **later phase**.
-Numbers `12`–`20`, `24`, `26`–`30` and `32`–`35` are accepted core work,
-`21`–`23`, `25` and `31` are claimed by spikes, and `36`–`49` remain reserved
+Numbers `12`–`20`, `24`, `26`–`30` and `32`–`37` are accepted core work,
+`21`–`23`, `25` and `31` are claimed by spikes, and `38`–`49` remain reserved
 (see `00-overview.md` for the shared spec/spike number space).
-Nothing in specs `00`–`35` may depend on anything defined here: the
+Nothing in specs `00`–`37` may depend on anything defined here: the
 inventory system must be complete, correct, and shippable with the entire
 `50` range unimplemented.
 
