@@ -169,6 +169,32 @@ sheet is itself a modal dialog, has no list to append to, and a live
 camera for a barcode is `20`'s own scan path — the sheet's Camera control
 always opens the OS camera input.
 
+**Only the multi-photo picker carries the ids** `#photos-library`,
+`#photos-camera` and `#photo-list`. The sheet is appended to `<body>` while
+the upload form's picker is still in the document, and a document may not
+hold two elements with one id — so the single-photo picker renders the
+same two `data-role` buttons and two id-less inputs. The sheet's E2E
+addresses them inside the dialog: `dialog [data-role="pick-library"]`, and
+`dialog input[type="file"]:not([capture])` for `setInputFiles`.
+
+### Module API
+
+`mountPhotoPicker(container, {multiple, onChange, onCameraTap})` returns
+`{files(), add(files), clear(), setStatus(text)}`:
+
+- `files()` — the current selection, in list order.
+- `add(files)` — appends as if they had been picked; `onChange` fires. This
+  is how `37`'s viewfinder hands captures to the list.
+- `clear()` — as above.
+- `setStatus(text)` — shows one muted line under the two controls, or
+  clears it when `text` is empty. `37` uses it for its "Using your phone's
+  camera." state; nothing in this spec sets it.
+- `onCameraTap(openOsCamera)` — optional. When given, a tap on the Camera
+  button calls it instead of opening the OS input, passing a function that
+  opens the OS input **synchronously** (the tap's activation must still be
+  alive when it runs, `37`). When absent, or in single-photo mode, the
+  Camera button opens the OS input directly.
+
 ### What a page reload costs
 
 The selection lives in memory. Some Android browsers reload the page on
@@ -199,7 +225,9 @@ never send half of one.
 The picker replaces the "Photos" field in place — below the location
 field and the barcode affordance, above the Upload button — so `20`'s
 "beside the shutter" placement of the barcode button still reads
-correctly: the two picker buttons are the shutter now.
+correctly: in `09`'s and `20`'s sense — the page-level control that starts
+a capture — the two picker buttons are the shutter now. `37`'s in-dialog
+Shutter button is a different control, named in that spec.
 
 ## Strings
 

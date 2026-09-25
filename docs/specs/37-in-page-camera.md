@@ -41,8 +41,11 @@ already known quantities here.
 
 Tapping **Camera** (`36`) on a browser that supports it opens a
 `<dialog>` — the same `card stack` dialog idiom `barcode.js` and
-`tree-modal.js` use — from a new module, `web/static/js/camera.js`,
-containing:
+`tree-modal.js` use — from a new module, `web/static/js/camera.js`. It
+attaches through `36`'s module API: `ingest.js` passes `onCameraTap` to
+`mountPhotoPicker`, the viewfinder appends captures with `picker.add()`,
+and shows its one status line with `picker.setStatus()`. The dialog
+contains:
 
 - a `<video playsinline muted>` fed by
   `getUserMedia({video: {facingMode: "environment"}, audio: false})`,
@@ -149,8 +152,9 @@ then taps Block. So:
 - If `getUserMedia` is absent, the tap opens `36`'s hidden
   `capture="environment"` input **synchronously** — no `await` in between.
 - If `getUserMedia` rejects while the activation is still alive
-  (`navigator.userActivation?.isActive`, or the rejection was immediate),
-  the same tap opens that input.
+  (`navigator.userActivation?.isActive`; on a browser without
+  `userActivation` — iOS before 16.4 — a rejection within 1 s of the tap
+  counts as alive), the same tap opens that input.
 - If it rejects after the activation has expired, `click()` would be a
   silent no-op and the Camera button would look dead. The viewfinder then
   remembers `cameraUnavailable` in memory for the rest of the page's life,
