@@ -285,8 +285,11 @@ func TestInternalErrorDoesNotLeakItsCause(t *testing.T) {
 // is absent, so setting Reason to a fixed string — "internal_error", say —
 // would keep it green while putting the field back on a 500 in dev, which is
 // the change #128 asked for and this package declined. Asserting the key is
-// absent from the decoded envelope closes that door, and an empty-but-present
-// field fails here where a substring search for "debug_reason" would not.
+// absent from the decoded envelope closes that door: pinning the exact field
+// set catches a debug_reason carrying any value at all, where a substring
+// search for one expected string would only catch the value it was told to
+// look for. (An empty-but-present field is not among the cases — debug_reason
+// is omitempty, so an empty Reason emits no key.)
 //
 // If a future reader wants to reverse the decision, the argument is in the
 // comment on Internal() and the change starts by editing this test.
@@ -358,6 +361,65 @@ func keysOf(fields map[string]any) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// TestInternalSendsItsCauseToTheLogInstead is the other half of the decision
+// documented on Internal(), and without it that decision is only half tested.
+//
+// Every test above asserts what a 500 does *not* disclose. The argument for
+// withholding it, though, is not that the cause does not matter — it is that
+// the cause goes somewhere better: the error-level line WriteError emits for
+// every 5xx, which an operator can read and a caller cannot
+// (docs/specs/18-operations-and-observability.md). That claim is what makes
+// "nothing is lost" true rather than a consolation, and it was resting on
+// nothing. TestA500IsLoggedAtErrorAnd4xxAtInfo (requestlog_test.go) pins the
+// level of the completion line; it says nothing about the cause reaching the
+// log at all.
+//
+// So: the same failure, rendered in both environments, asserting that the cause
+// is in the log and not in the body either time. If someone later stops logging
+// Err, the comment on Internal() becomes false and this fails.
+func TestInternalSendsItsCauseToTheLogInstead(t *testing.T) {
+	t.Parallel()
+
+	const schemaDetail = `pq: relation "storage_members" does not exist`
+
+	for _, dev := range []bool{false, true} {
+		name := "prod"
+		if dev {
+			name = "dev"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			capture, logger := newCapturedLog()
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/api/storages/018f/products", nil)
+			httpapi.NewErrorWriter(dev, logger).WriteError(rec, req, httpapi.Internal(errors.New(schemaDetail)))
+
+			require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+			// Decoded rather than substring-matched: the log is JSON, so the
+			// quotes in a pq message arrive escaped and a raw search for the
+			// cause misses a line that does carry it. Reading the attribute
+			// also pins *where* the cause is — the err field — rather than
+			// merely that its bytes appear somewhere in the output.
+			var logged struct {
+				Level string `json:"level"`
+				Err   string `json:"err"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(capture.text())), &logged))
+			assert.Equal(t, schemaDetail, logged.Err,
+				"the operator must be able to read the cause; this is what makes withholding it from the response cost nothing")
+			assert.Equal(t, "ERROR", logged.Level,
+				"and a 500 is logged at error level (docs/specs/18-operations-and-observability.md)")
+
+			assert.NotContains(t, rec.Body.String(), schemaDetail,
+				"and the caller must not, in either environment")
+			assert.NotContains(t, rec.Body.String(), "storage_members",
+				"not even the table name on its own")
+		})
+	}
 }
 
 // cloneFailure returns a copy, because WriteError fills in defaults on the

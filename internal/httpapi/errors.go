@@ -320,7 +320,9 @@ func ModelUnavailable(model string) *Failure {
 // or answered with nothing usable — for the one synchronous AI call there is,
 // background removal (docs/specs/09-consumption-logging.md). The provider's
 // own error is logged, never serialized, for the same reason a job's failure
-// message is written for the user rather than copied from the provider.
+// message is written for the user rather than copied from the provider — which
+// is the rule set out at greater length on Internal(): Reason names a check,
+// Err is a cause.
 func UpstreamFailed(err error) *Failure {
 	return &Failure{
 		Status:  http.StatusBadGateway,
@@ -334,10 +336,13 @@ func UpstreamFailed(err error) *Failure {
 //
 // # Why this is the one failure with no Reason
 //
-// Every other helper here that refuses a request names the check that refused
+// The helpers that refuse a request for a reason of their own — NotFound,
+// Unauthorized, ResyncRequired, ModelUnavailable — name the check that refused
 // it, and that name reaches a dev client as debug_reason. Internal() does not,
-// and the omission is deliberate rather than an oversight — it was raised as a
-// finding once (#128) and decided repo-wide here so it need not be re-argued.
+// and neither do Conflict, ValidationFailed and UpstreamFailed, for the reason
+// this comment sets out. The omission is deliberate rather than an oversight:
+// it was raised as a finding once (#128) and decided repo-wide here so it need
+// not be re-argued.
 //
 // There is no check to name, and that is the whole of it. Every Reason this
 // package sets is text it composed itself, for a reader, about a decision it
@@ -367,10 +372,15 @@ func UpstreamFailed(err error) *Failure {
 // text available is whatever the failing layer produced — and this one function
 // cannot tell what that will be. Of its 147 call sites, 71 pass a fixed string
 // this package wrote (66 of them the sentinel errNoStorageInContext), whose
-// disclosure would be harmless. The other 76 pass a store error through, plain
-// or wrapped with %w: raw driver output, carrying table, column and constraint
-// names, and on a connection failure a DSN. One function serves both halves, so
-// populating Reason here would disclose the second in order to help the first.
+// disclosure would be harmless. The other 76 pass an error through, plain or
+// wrapped with %w, and it is whatever the failing layer produced: mostly store
+// errors, which are raw driver output carrying table, column and constraint
+// names, but also io.ReadAll on an uploaded part (upload.go, barcodes.go),
+// uuid.NewV7 (upload.go) and json.MarshalIndent (export.go). That mixture is
+// the point rather than a caveat to it — no one wrote those strings for a
+// reader, and this function cannot tell which kind it holds. One function
+// serves both halves, so populating Reason here would disclose the second in
+// order to help the first.
 //
 // So the cause travels in Err, under the contract on that field, and the place
 // to read it is the error-level log line WriteError always emits for a 5xx
