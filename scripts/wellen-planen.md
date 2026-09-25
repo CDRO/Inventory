@@ -83,8 +83,10 @@ no `-f`, so it only ever selects the default files — never
 `COMPOSE_FILE`. That file pins its own project name, but a worktree's own
 `COMPOSE_PROJECT_NAME` overrides a file's `name:` (confirmed live), so what
 that stack actually runs as, and whether it is even shared across worktrees
-in practice, is genuinely unclear — real isolation for it is #140's job
-(item 2), not answered here.
+in practice, is genuinely unclear — real isolation for it is #190's job, not
+answered here. (#190 was split out of #140 item 2 when that closed: #140 gave
+the per-wave cleanup a veto that makes it safe whatever the E2E project ends up
+being called, but it did not settle what the name actually is.)
 
 **Per wave**, a wave with `"dockerCleanup": true` additionally gets what the
 per-package step cannot reach removed **after its consolidation has
@@ -118,7 +120,8 @@ the cleanup script* runs in it and the script is re-read at every call.
   the same project lives in a directory that is no worktree of this wave. That
   is what keeps a wave from sweeping a Compose project whose name is pinned in
   a file rather than derived per worktree — `docker-compose.e2e.yml` pins one
-  for every worktree. A container-less project has no directory to check, so
+  for every worktree. A container carrying the project label but no
+  `working_dir` label at all vetoes the same way, since it cannot be placed. A container-less project has no directory to check, so
   for it the name rule stands alone: one left behind by another clone of this
   same repository under the same `<repo>-<slug>` name is indistinguishable from
   this wave's own and is removed.
@@ -126,8 +129,12 @@ the cleanup script* runs in it and the script is re-read at every call.
   `inventory-app-dev` image (the dev override gives it one fixed name, so the
   main checkout uses it too) and every other image without a worktree project's
   label and tag (`postgres`, `traefik`, `tailscale`, the Playwright image); the
-  build cache; anything of another repository. Something that merely mentions a
-  slug but cannot be attributed is printed as "kept".
+  build cache; and anything whose name merely mentions a slug without being a
+  Compose project the wave can claim — that is printed as "kept". Note this is
+  a weaker promise than "anything of another repository": what protects another
+  checkout's resources is a *container* tying them to a directory, so a
+  container-less project sharing the `<repo>-<slug>` name is not protected, as
+  the bullet above says.
 - **The worktrees themselves and their branches stay.** Only Docker state goes,
   and a package worktree recreates what it needs the next time someone runs
   `docker compose` in it.

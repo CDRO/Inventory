@@ -46,8 +46,11 @@
         is not enough when another of the same project lives elsewhere.
         (docker-compose.e2e.yml pins one project name for every worktree, so
         a live E2E stack of another worktree could otherwise be swept.) A
-        container in the repository root is handled by the main-checkout rule
-        below instead.
+        container carrying the project label but no working_dir label at all
+        vetoes in the same way - it cannot be placed, so it is no evidence of
+        ownership - and is reported as unplaceable rather than as "outside".
+        A container in the repository root is handled by the main-checkout
+        rule below instead.
       * Containers, networks and volumes carrying
         com.docker.compose.project=<such a project> are removed. Of its
         IMAGES only the tags that start with the project's own name are
@@ -359,9 +362,15 @@ function Get-LabelledProject {
 $owned = @{}
 # project name -> true: never removed (the main checkout's stack)
 $protected = @{}
-# project name -> true: has a container OUTSIDE the requested worktrees, so a
-# similar name is not enough to claim it
+# project name -> true: has a container in a real directory OUTSIDE the
+# requested worktrees, so a similar name is not enough to claim it
 $foreignDir = @{}
+# project name -> true: has a container carrying the project label but NO
+# working_dir label, so it cannot be placed at all. Vetoes exactly like
+# $foreignDir - an unplaceable container is not evidence of ownership - but it
+# is reported differently: "outside the worktrees" would name a directory that
+# does not exist and send a reader looking in the wrong place.
+$unknownDir = @{}
 
 foreach ($c in $containers) {
     $project = Get-LabelledProject $c.Config.Labels
@@ -375,7 +384,9 @@ foreach ($c in $containers) {
             $inside = $true
         }
     }
-    if (-not $inside) { $foreignDir[$project] = $true }
+    if (-not $inside) {
+        if ($workdir) { $foreignDir[$project] = $true } else { $unknownDir[$project] = $true }
+    }
 }
 
 # A project with a container in a directory outside the requested worktrees is
@@ -393,11 +404,19 @@ foreach ($c in $containers) {
 # takes the `continue` above, so it never reaches $foreignDir. Such a project
 # stays claimable here and is removed from $owned by the main-checkout veto
 # further down, which also records it as protected.
-$vetoed = @{}
+$vetoed = @{}   # project name -> why it was left alone
 foreach ($project in @($owned.Keys)) {
+    # A project of the main checkout is left to the main-checkout veto further
+    # down, which reports it in the right words. Without this, a main-checkout
+    # project that also has a stray container somewhere else would be reported
+    # as "outside this wave's worktrees" rather than as the main checkout's.
+    if ($protected.ContainsKey($project) -or (ConvertTo-NameKey $project) -eq $repoKey) { continue }
     if ($foreignDir.ContainsKey($project)) {
         $owned.Remove($project)
-        $vetoed[$project] = $true
+        $vetoed[$project] = "has a container in a directory outside this wave's worktrees"
+    } elseif ($unknownDir.ContainsKey($project)) {
+        $owned.Remove($project)
+        $vetoed[$project] = "has a container with no working_dir label, which cannot be placed"
     }
 }
 
@@ -417,7 +436,10 @@ foreach ($v in $volumes)    { $p = Get-LabelledProject $v.Labels;        if ($p)
 foreach ($i in $images)     { $p = Get-LabelledProject $i.Config.Labels; if ($p) { $candidateProjects[$p] = $true } }
 
 foreach ($project in @($candidateProjects.Keys)) {
-    if ($owned.ContainsKey($project) -or $foreignDir.ContainsKey($project)) { continue }
+    # $unknownDir vetoes the name rule exactly as $foreignDir always has: before
+    # the two were told apart for reporting, an unlabelled container landed in
+    # $foreignDir and skipped here. Splitting them must not widen what is claimed.
+    if ($owned.ContainsKey($project) -or $foreignDir.ContainsKey($project) -or $unknownDir.ContainsKey($project)) { continue }
     $key = ConvertTo-NameKey $project
     # The most specific <repo>-<slug> this name matches, over every slug of the
     # plan: "inventory-w5-barcode-hot-cache" matches both w5-barcode and
@@ -446,7 +468,8 @@ foreach ($project in @($owned.Keys)) {
 # something WAS found and is deliberately not removed, so it must be said even
 # when nothing else is left to do.
 if ($vetoed.Count -gt 0) {
-    Write-Step "Left alone, has a container outside this wave's worktrees: $((@($vetoed.Keys) | Sort-Object) -join ', ')"
+    Write-Step "Left alone, not this wave's to remove:"
+    foreach ($project in ($vetoed.Keys | Sort-Object)) { Write-Step "  $project ($($vetoed[$project]))" }
 }
 
 if ($owned.Count -eq 0) {

@@ -24,6 +24,8 @@
       * ztb   a project with one container here and one in a folder that is
               no worktree at all - the shape docker-compose.e2e.yml's pinned
               project name produces across worktrees
+      * ztb   a project with one container here and one carrying the project
+              label but NO working_dir label, which cannot be placed at all
       * ztc, ztc-long  two live worktrees where one slug is a PREFIX of the
               other; cleaning zta, ztb, ztc must not touch ztc-long
       * ztc-long  a CONTAINER-LESS project named after the longer slug, which
@@ -144,8 +146,9 @@ $repo = "zt$id"
 $root = Join-Path $env:TEMP "wctest-$id"
 $repoDir = Join-Path $root $repo
 $shared = "zshared$id"
+$unplaceable = "zunplaced$id"
 $projects = @(
-    $repo, "$repo-zta", "zcust$id", "$repo-ztb-orphan", $shared,
+    $repo, "$repo-zta", "zcust$id", "$repo-ztb-orphan", $shared, $unplaceable,
     "$repo-ztc", "$repo-ztc-long", "$repo-ztc-long-orphan", "$repo-ztd",
     "other-$repo-zta"
 )
@@ -217,6 +220,13 @@ try {
     # checkouts have run it.
     New-Stack (Join-Path $root "$repo-ztb") $shared
     New-ProbeStack (Join-Path $root 'elsewhere') $shared 'probe'
+    # Same shape, but the second container carries the project label and NO
+    # working_dir label at all - a hand-started container, or an old Compose
+    # that did not set one. It must veto just like a foreign directory does,
+    # and be reported as unplaceable rather than as "outside the worktrees",
+    # which would name a directory that does not exist.
+    New-Stack (Join-Path $root "$repo-ztb") $unplaceable
+    Dk run -d --label "com.docker.compose.project=$unplaceable" busybox sleep 3600
     New-Stack (Join-Path $root "$repo-ztc")
     New-Stack (Join-Path $root "$repo-ztc-long")
     # Named after the LONGER slug and container-less: the $foreignDir veto
@@ -236,6 +246,7 @@ try {
     }
     Test-Project $repo 2 1 1 1 'the main-checkout project has a container in the repo root AND one in the zta worktree'
     Test-Project $shared 2 1 1 1 'the shared-name project has a container in the ztb worktree AND one elsewhere'
+    Test-Project $unplaceable 2 1 1 1 'the unplaceable project has a container in the ztb worktree AND one with no working_dir label'
     Test-Project "$repo-ztb-orphan" 0 1 1 1 'orphan project has network, volume and image but no container'
     Test-Project "$repo-ztc-long-orphan" 0 1 1 1 'ztc-long-orphan has network, volume and image but no container'
 
@@ -266,8 +277,14 @@ try {
     # #140 item 2: one container in a worktree is not enough when another of
     # the same project lives outside every worktree.
     Assert (-not ($ownedList | Where-Object { $_ -like "$shared (*" })) 'a project with a container outside the worktrees is NOT claimed by its container inside one'
-    Assert ($r.Out -match "Left alone, has a container outside this wave's worktrees: $shared") 'and it is reported as left alone, with the reason'
+    Assert ($r.Out -match "$shared \(has a container in a directory outside this wave's worktrees\)") 'and it is reported as left alone, with the reason'
     Assert (-not ($removeNames | Where-Object { $_ -like "$shared*" })) 'nothing of the shared-name project is under "To remove"'
+
+    # A container that cannot be placed at all vetoes just the same, but saying
+    # it sits "outside the worktrees" would name a directory that does not exist.
+    Assert (-not ($ownedList | Where-Object { $_ -like "$unplaceable (*" })) 'a container with no working_dir label does not leave the project claimed'
+    Assert ($r.Out -match "$unplaceable \(has a container with no working_dir label, which cannot be placed\)") 'and it is reported as unplaceable, not as "outside the worktrees"'
+    Assert (-not ($removeNames | Where-Object { $_ -like "$unplaceable*" })) 'nothing of the unplaceable project is under "To remove"'
 
     # #140 item 6: the main-checkout veto that runs AFTER ownership - only a
     # project the working_dir rule already claimed can reach it.
@@ -368,6 +385,7 @@ exit /b 0
     Test-Project "$repo-ztc-long-orphan" 0 1 1 1 'the container-less project of the longer slug is untouched'
     Test-Project $repo 2 1 1 1 'the main checkout project is untouched, both containers'
     Test-Project $shared 2 1 1 1 'the project with a container outside the worktrees is untouched'
+    Test-Project $unplaceable 2 1 1 1 'the project with an unplaceable container is untouched'
     Test-Project "$repo-ztd" 1 1 1 1 'wave 2''s stack is untouched'
     Test-Project "other-$repo-zta" 1 1 1 1 'the foreign project is untouched'
 
@@ -389,6 +407,7 @@ exit /b 0
     Test-Project "$repo-ztc-long-orphan" 0 0 0 0 'and so is the container-less project named after it'
     Test-Project $repo 2 1 1 1 'the main checkout project is still untouched'
     Test-Project $shared 2 1 1 1 'the project with a container outside the worktrees is still untouched'
+    Test-Project $unplaceable 2 1 1 1 'the project with an unplaceable container is still untouched'
     Test-Project "$repo-ztd" 1 1 1 1 'wave 2''s stack is still untouched'
     Test-Project "other-$repo-zta" 1 1 1 1 'the foreign project is still untouched'
 }
