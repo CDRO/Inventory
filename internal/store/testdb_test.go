@@ -205,7 +205,7 @@ func newStorage(t *testing.T, ctx context.Context) uuid.UUID {
 	id, err := uuid.NewV7()
 	require.NoError(t, err)
 
-	_, err = execTest(ctx, `INSERT INTO storages (id, name) VALUES ($1, $2)`, id, "test-"+id.String()[:8])
+	_, err = execTest(ctx, `INSERT INTO storages (id, name) VALUES ($1, $2)`, id, "test-"+randomSuffix())
 	require.NoError(t, err)
 	return id
 }
@@ -322,7 +322,7 @@ func newStorageIn(t *testing.T, ctx context.Context, pool *pgxpool.Pool) uuid.UU
 	id, err := uuid.NewV7()
 	require.NoError(t, err)
 
-	_, err = pool.Exec(ctx, `INSERT INTO storages (id, name) VALUES ($1, $2)`, id, "test-"+id.String()[:8])
+	_, err = pool.Exec(ctx, `INSERT INTO storages (id, name) VALUES ($1, $2)`, id, "test-"+randomSuffix())
 	require.NoError(t, err)
 	return id
 }

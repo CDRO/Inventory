@@ -39,7 +39,7 @@ func TestExportStorageCarriesNothingFromAnotherStorage(t *testing.T) {
 	// cross-household by design (docs/specs/02-data-model.md), so it is the
 	// most plausible route for one storage's id to reach the other's archive.
 	catalog, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{
-		DisplayName: "Butter " + mine.String()[:8],
+		DisplayName: "Butter " + randomSuffix(),
 		ItemType:    store.ItemPerishable,
 	})
 	require.NoError(t, err)
@@ -109,7 +109,7 @@ func TestExportStorageCarriesNoCredentialMaterial(t *testing.T) {
 
 	const hash = "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$do-not-export-me"
 	admin, err := s.CreateUser(ctx, store.NewUser{
-		Username:     "admin-" + storageID.String()[:8],
+		Username:     "admin-" + randomSuffix(),
 		PasswordHash: hash,
 		DisplayName:  "Alex Admin",
 		IsAdmin:      true,
