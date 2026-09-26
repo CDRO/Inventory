@@ -195,8 +195,12 @@ is_running() { [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = 
 
 # --prune is "afterwards, remove dangling images". Every path that gets as far as
 # the build can have left one behind - including the two that then find nothing to
-# do - so all four ends of this script go through here.
-maybe_prune() { [ "$prune" -eq 0 ] || docker image prune -f; }
+# do - so all four ends of this script go through here. The update itself is
+# already done by the time this runs, so a prune failure (another docker command
+# holding a lock, an image that started being used between listing and removal, a
+# plain daemon hiccup) must not turn a successful update into a non-zero exit -
+# it is reported instead, the same way the retirement steps below report theirs.
+maybe_prune() { [ "$prune" -eq 0 ] || docker image prune -f || echo "    warning: could not prune dangling images" >&2; }
 
 # The number of pending jobs, or nothing when it cannot be read.
 pending_jobs() {
