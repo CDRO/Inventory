@@ -1,5 +1,17 @@
--- E2E fixture: a known admin, two ordinary users, and two storages with small
--- inventories of their own (docs/specs/05-frontend-pwa-foundations.md).
+-- E2E fixture: fourteen user rows (two of them admins) across thirteen
+-- storages (docs/specs/05-frontend-pwa-foundations.md).
+--
+-- It began as "a known admin, two ordinary users, and two storages with small
+-- inventories of their own", and those first two storages — "E2E Household"
+-- and "E2E Other Household" — are still what most journeys run against. The
+-- other eleven exist because of the rule spec 05 states and every block below
+-- follows: a journey that writes state another journey would observe gets its
+-- **own** seeded user and storage, because the suite runs files in parallel.
+-- That is why this file grows by a block rather than by a row.
+--
+-- Count the inserts rather than trusting this sentence if the number matters.
+-- It was stale for six waves before anyone noticed, which is the failure mode
+-- a comment stating a total always has.
 --
 -- Applied directly to the disposable E2E database after migrations, NOT
 -- through the application layer, so fixed ids can be referenced by name from
@@ -94,7 +106,13 @@ INSERT INTO users (id, username, password_hash, display_name, is_admin) VALUES
   -- rest of the run; reading either one for "still zero" would depend on
   -- test-scheduling order against that write. A dedicated storage this suite
   -- never writes to sidesteps the race instead of hoping to win it.
-  ('00000000-0000-7000-8000-00000000000d', 'e2e-stocktake-empty', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Stocktake Empty User', false)
+  ('00000000-0000-7000-8000-00000000000d', 'e2e-stocktake-empty', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Stocktake Empty User', false),
+  -- e2e-barcode-first belongs only to "E2E Barcode First" (below), dedicated
+  -- to #157: it needs barcode_prompt_seen_at to still be NULL, which e2e-dana
+  -- no longer guarantees once barcode-recall.spec.js's earlier tests have
+  -- shown her the offer. Nothing else in this suite may log in as this user,
+  -- or its seen_at would advance before #157's assertion runs.
+  ('00000000-0000-7000-8000-00000000000e', 'e2e-barcode-first', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Barcode First User', false)
 ON CONFLICT DO NOTHING;
 
 -- Two storages, so the "member of storage A gets 404 for storage B"
@@ -164,7 +182,22 @@ INSERT INTO storages (id, name) VALUES
   -- "E2E Stocktake Empty" (...01b), e2e-stocktake-empty's alone, holds no
   -- locations at all — see that user's own fixture comment for why this
   -- needs a storage no other suite's location-quick-create test can touch.
-  ('00000000-0000-7000-8000-00000000001b', 'E2E Stocktake Empty')
+  ('00000000-0000-7000-8000-00000000001b', 'E2E Stocktake Empty'),
+  -- "E2E Barcode First" (...01c), e2e-barcode-first's alone, for #157: a
+  -- product that already carries a barcode must never burn this user's
+  -- one-time barcode_prompt_seen_at. Asserting that needs a user whose
+  -- seen_at is still NULL, which "E2E Barcode Household" cannot provide —
+  -- Dana's seen_at is no longer NULL by the time that file reaches this
+  -- assertion, because the two tests that actually render the offer
+  -- (barcode-recall.spec.js's "the capture-time offer presents exactly three
+  -- actions" and "a product that already has a barcode is never offered
+  -- another") run before it under that file's
+  -- test.describe.configure({ mode: "serial" }). It is those two
+  -- specifically, not "every earlier test": the ones before them are
+  -- page.request API calls and a decode-fallback check that render no offer
+  -- at all. Dana stays unusable here either way, but stating which tests do
+  -- it keeps the reason checkable if the file leaves serial mode.
+  ('00000000-0000-7000-8000-00000000001c', 'E2E Barcode First')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO storage_members (storage_id, user_id) VALUES
@@ -177,7 +210,8 @@ INSERT INTO storage_members (storage_id, user_id) VALUES
   ('00000000-0000-7000-8000-000000000015', '00000000-0000-7000-8000-000000000008'), -- e2e-inbox: E2E Inbox, and nothing else
   ('00000000-0000-7000-8000-000000000016', '00000000-0000-7000-8000-000000000009'), -- e2e-inventory: E2E Inventory, and nothing else
   ('00000000-0000-7000-8000-00000000001a', '00000000-0000-7000-8000-00000000000c'), -- e2e-stocktake: E2E Stocktake, and nothing else
-  ('00000000-0000-7000-8000-00000000001b', '00000000-0000-7000-8000-00000000000d')  -- e2e-stocktake-empty: E2E Stocktake Empty, and nothing else
+  ('00000000-0000-7000-8000-00000000001b', '00000000-0000-7000-8000-00000000000d'), -- e2e-stocktake-empty: E2E Stocktake Empty, and nothing else
+  ('00000000-0000-7000-8000-00000000001c', '00000000-0000-7000-8000-00000000000e')  -- e2e-barcode-first: E2E Barcode First, and nothing else
 ON CONFLICT DO NOTHING;
 
 -- The start-page memberships (docs/specs/34-navigation-and-start-page.md),
@@ -201,6 +235,13 @@ INSERT INTO storage_members (storage_id, user_id, start_page) VALUES
   ('00000000-0000-7000-8000-000000000019', '00000000-0000-7000-8000-00000000000b', 'locations')  -- e2e-start-multi: E2E Start Two
 ON CONFLICT (storage_id, user_id) DO UPDATE SET start_page = EXCLUDED.start_page;
 
+-- "E2E Household" (...010) has THREE root locations, not just the two below:
+-- "E2E Audited Shelf" (...ba) is a third, added further down for #169. Do not
+-- add a count- or index-based assertion over this storage's location tree —
+-- no test in the repo has one today (every household location assertion is
+-- name-scoped), and the ...ba block's own comment explains why it was safe to
+-- add a root here at all. If you need a tree you can count, seed your own
+-- storage; several blocks below already do.
 INSERT INTO locations (id, storage_id, name, description) VALUES
   ('00000000-0000-7000-8000-000000000020', '00000000-0000-7000-8000-000000000010', 'Pantry', 'Kitchen pantry shelf'),
   ('00000000-0000-7000-8000-000000000021', '00000000-0000-7000-8000-000000000010', 'Fridge', 'Kitchen fridge')
@@ -217,6 +258,57 @@ ON CONFLICT (id) DO NOTHING;
 INSERT INTO locations (id, storage_id, parent_id, name, description) VALUES
   ('00000000-0000-7000-8000-0000000000b6', '00000000-0000-7000-8000-000000000010', '00000000-0000-7000-8000-000000000021', 'Door Bin', 'A bin in the fridge door')
 ON CONFLICT (id) DO NOTHING;
+
+-- A root location whose last_audited_at is in the past, dedicated to #169:
+-- Pantry and Fridge above have never been audited, so neither exercises
+-- formatAudited()'s relative-time phrase (web/static/js/audited.js) at all.
+-- Read-only here, so it is safe alongside every other suite that reads this
+-- storage's tree.
+--
+-- It is a new ROOT of the shared storage, and being a root is NOT a technical
+-- requirement — do not read it as one. A child would have rendered the phrase
+-- just as well: web/static/js/tree.js calls renderDetail for every node at
+-- every depth, and locations.js's renderAuditState gates on nothing, so the
+-- audited span is emitted for nested nodes too. ...b6 one screen above is the
+-- proof, and its "a child of Fridge rather than a new root" note is the
+-- pattern this block simply did not follow. It is a root because #169's
+-- package made it one; it stays a root because two consolidation reviews
+-- independently verified it is harmless here (every household location
+-- assertion is name-scoped, and internal/store/locations.go orders by
+-- created_at then id while this file is one transaction, so ...ba sorts LAST
+-- rather than into the path of a first-option default). See the warning on the
+-- Pantry/Fridge insert above for what it costs. If you need another
+-- audited-state fixture, give it its own storage instead of widening this
+-- storage's root set again.
+--
+-- ...ba is the next free id after ...b9 (this file's own Nested Location
+-- Source range, below).
+--
+-- DO UPDATE, not DO NOTHING, and this one is load-bearing: the interval is
+-- evaluated when the seed runs, and #169's test asserts the exact phrase
+-- "geprüft vor 5 Tagen". formatAudited buckets with Math.floor(elapsed / ms),
+-- so a row left frozen at a previous seed's timestamp renders "vor 6 Tagen"
+-- a day later and "vor 1 Woche" two days later, failing a test nothing has
+-- touched. The documented sequence in docker-compose.e2e.yml re-seeds on
+-- every run, but ON CONFLICT DO NOTHING would silently keep the stale row on
+-- a database volume that outlives one run — which is exactly how this stack
+-- is operated, since a wave's consolidation leaves it up for the
+-- orchestrator. Re-seeding must therefore refresh this timestamp.
+--
+-- This is why "computed relative to now(), so the fixture never goes stale"
+-- is only half true, and the half that applies depends on the ASSERTION, not
+-- on the fixture. The E2E Stocktake block below holds seven now()-relative
+-- timestamps under plain DO NOTHING and is genuinely drift-proof, because
+-- everything asserted over it is RELATIVE: stocktake.js's stalestFirst() is a
+-- sort plus slice(0, STALEST_LIMIT) with no threshold anywhere, so all seven
+-- rows ageing together changes neither the order nor the top-N, and that
+-- file's test reads each item's name span rather than its audited phrase.
+-- This block is the opposite case — one row whose exact rendered phrase is
+-- asserted — and an absolute assertion over a frozen relative timestamp is
+-- the combination that rots. Copy the pattern that matches your assertion.
+INSERT INTO locations (id, storage_id, name, description, last_audited_at) VALUES
+  ('00000000-0000-7000-8000-0000000000ba', '00000000-0000-7000-8000-000000000010', 'E2E Audited Shelf', 'Audited a few days ago', now() - interval '5 days')
+ON CONFLICT (id) DO UPDATE SET last_audited_at = EXCLUDED.last_audited_at;
 
 INSERT INTO categories (id, storage_id, name, default_shelf_life_days) VALUES
   ('00000000-0000-7000-8000-000000000030', '00000000-0000-7000-8000-000000000010', 'Canned Goods', 730)
@@ -349,6 +441,38 @@ ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
   ('00000000-0000-7000-8000-0000000000b9', '00000000-0000-7000-8000-0000000000b7', '00000000-0000-7000-8000-0000000000b8', 6, 'purchase', '00000000-0000-7000-8000-000000000003')
+ON CONFLICT (id) DO NOTHING;
+
+-- One more product, dedicated to #163: cancelling the location quick-create
+-- modal from the *move* picker's own trigger. The existing cancel scenario
+-- above (...92/...93) only opens the split form's trigger; the existing
+-- move-quick-create fixture (...96/...97) is read and mutated by the
+-- create-then-complete-the-move test in this same file, so reusing it here
+-- would race that test under fullyParallel — same one-product-per-scenario
+-- reasoning as every other block in this file. ...bb/...bc/...bd are the
+-- next free ids after ...ba, which #169's "E2E Audited Shelf" location took
+-- (above); ...b7-...b9 before it were the #174 nested-location fixture. These
+-- three ids are free either way — but this comment originally derived them
+-- from ...b9 and never mentioned ...ba, leaving the one link in this file's
+-- id chain that a reader cannot follow. State your immediate predecessor, not
+-- the last one you happen to remember: the next block that computes "next
+-- free after ...b9" lands on ...ba, and no insert in this file raises a
+-- duplicate-key error — every one of them ends in ON CONFLICT. Most DO
+-- NOTHING, so a colliding row is dropped and the symptom is a fixture that
+-- simply is not there; ...ba is one of the two that DO UPDATE, so colliding
+-- with THAT one silently rewrites a live row's last_audited_at instead. Either
+-- way the failure surfaces somewhere else entirely, which is the whole reason
+-- this ledger is maintained by hand.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
+  ('00000000-0000-7000-8000-0000000000bb', '00000000-0000-7000-8000-000000000010', 'E2E Quick-Create Move Cancel Source', NULL, 'non_perishable', 0)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_date, expiration_source) VALUES
+  ('00000000-0000-7000-8000-0000000000bc', '00000000-0000-7000-8000-0000000000bb', '00000000-0000-7000-8000-000000000020', 7, NULL, 'derived')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
+  ('00000000-0000-7000-8000-0000000000bd', '00000000-0000-7000-8000-0000000000bb', '00000000-0000-7000-8000-0000000000bc', 7, 'purchase', '00000000-0000-7000-8000-000000000003')
 ON CONFLICT (id) DO NOTHING;
 
 -- "E2E Other Household" (...011), Alice's second storage. It held nothing at
@@ -500,6 +624,19 @@ INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) V
   -- cache degrades to spec 20 unchanged" test scans with nothing seeded.
   ('00000000-0000-7000-8000-000000000051', '00000000-0000-7000-8000-000000000014', 'Hot Cache Preview Beans',  NULL, 'long_shelf_life', 0),
   ('00000000-0000-7000-8000-000000000052', '00000000-0000-7000-8000-000000000014', 'Hot Cache Fallback Beans', NULL, 'long_shelf_life', 0)
+ON CONFLICT (id) DO NOTHING;
+
+-- Two products in "E2E Barcode First" (...01c), for #157: no location, since
+-- associating a barcode and calling offerBarcodeCapture need none. The test
+-- attaches a code to "Pre-coded" itself via the API, the same way "Pre-coded
+-- Beans" above does for Dana's version of the same check; "Control" stays
+-- codeless, so the same test can also show that a real first showing (not a
+-- short-circuited one) does advance barcode_prompt_seen_at — without that,
+-- the pre-coded assertion alone could not tell "correctly guarded" from
+-- "the whole offer is broken and never marks anything shown".
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
+  ('00000000-0000-7000-8000-000000000054', '00000000-0000-7000-8000-00000000001c', 'First-Timer Pre-coded Beans', NULL, 'long_shelf_life', 0),
+  ('00000000-0000-7000-8000-000000000055', '00000000-0000-7000-8000-00000000001c', 'First-Timer Control Beans',   NULL, 'long_shelf_life', 0)
 ON CONFLICT (id) DO NOTHING;
 
 -- One consumption proposal (docs/specs/09-consumption-logging.md), in the

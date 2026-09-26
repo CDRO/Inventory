@@ -111,6 +111,36 @@ test("formatDate and formatNumber render German Intl conventions when de is acti
   expect(number).toBe("1.234,5"); // German decimal comma + thousands dot, vs. English "1,234.5"
 });
 
+// formatAudited (web/static/js/audited.js) switched Intl.RelativeTimeFormat
+// from the browser's default locale to getLanguage(), the resolved app
+// language, in the same PR that introduced getLanguage() — a real behaviour
+// change with no test asserting the German phrasing actually renders (#169).
+// Exercised through a real page (locations.html) rather than a dynamic
+// import like the formatDate/formatNumber test above: audited.js builds its
+// one `relative` Intl.RelativeTimeFormat instance at module-load time, so a
+// fresh import that runs before the language override is read would not
+// prove anything about a page that loaded it after.
+test("a location's audited state renders the German relative-time phrase once de is active", async ({
+  page,
+}) => {
+  const login = await page.request.post("/api/auth/login", {
+    data: { username: "e2e-alice", password: PASSWORD },
+  });
+  expect(login.status()).toBe(200);
+
+  await page.goto("/index.html");
+  await page.evaluate(() => localStorage.setItem("inventory.language", "de"));
+
+  await page.goto(`/locations.html?storage=${HOUSEHOLD}`);
+  await expect(page.locator("html")).toHaveAttribute("lang", "de");
+
+  // "E2E Audited Shelf" (e2e/fixtures/seed.sql), last_audited_at 5 days ago.
+  const AUDITED_SHELF = "00000000-0000-7000-8000-0000000000ba";
+  const detail = page.locator(`.tree-node[data-id="${AUDITED_SHELF}"] .muted`);
+  await expect(detail).toHaveText("geprüft vor 5 Tagen");
+  await expect(detail).not.toContainText("days ago");
+});
+
 // apiErrorMessage (web/static/js/i18n.js) is likewise exercised directly: a
 // real server round trip would only prove one status/code combination per
 // UI action found to trigger it, whereas this pins the actual boundary the
@@ -229,5 +259,34 @@ test.describe("a batch expiry date under a non-UTC browser timezone", () => {
     // (numeric) format applies: "1/1/2030" for "en".
     await expect(row).toContainText("1/1/2030");
     await expect(row).not.toContainText("12/31/2029");
+  });
+
+  // renderFound's found-on-shelf list (stocktake.js:414) is a third call
+  // site with the identical fix, exercised through the found-item form
+  // rather than a fixture row: addFound() renders the list purely from what
+  // was typed, with no round trip to the server, so this needs no seed data
+  // beyond a product that already exists in this storage.
+  const GREEK_YOGURT = "00000000-0000-7000-8000-000000000041";
+
+  test("the found-on-shelf list also survives the same non-UTC timezone", async ({ page }) => {
+    const login = await page.request.post("/api/auth/login", {
+      data: { username: "e2e-alice", password: PASSWORD },
+    });
+    expect(login.status()).toBe(200);
+
+    await page.goto(`/stocktake.html?location=${FRIDGE_LOCATION}&storage=${HOUSEHOLD_STORAGE}`);
+    await page.selectOption("#found-product", GREEK_YOGURT);
+    await page.fill("#found-expiry", "2030-01-01");
+    await page.click("#add-found button[type=submit]");
+
+    // Scoped to the ROW, not to #found itself: renderFound appends one
+    // div.row.row--between per entry (web/static/js/pages/stocktake.js:399),
+    // and filtering #found — a single container div — by its own subtree
+    // resolves back to the whole list. With one entry that passes either way,
+    // but the day the list holds two, a correct date on one row would satisfy
+    // the assertion for the other. There are no <li>s here; .row is the row.
+    const item = page.locator("#found .row").filter({ hasText: "Greek Yogurt" });
+    await expect(item).toContainText("1/1/2030");
+    await expect(item).not.toContainText("12/31/2029");
   });
 });
