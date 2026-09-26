@@ -130,22 +130,37 @@ Three things the sequence alone doesn't make obvious:
 ## Continuous integration
 
 A GitHub Actions workflow (`.github/workflows/test.yml`) runs on every push
-to `main` and on every pull request. It runs exactly the commands documented
-above — `docker compose run --rm app go vet ./...` then
+to `main`, confirming what is about to be deployed. It runs exactly the
+commands documented above — `docker compose run --rm app go vet ./...` then
 `docker compose run --rm app go test ./...` — against an ephemeral `.env`
 generated at the start of the job (throwaway credentials, never committed,
 never reused outside that run). This does not relax the no-host-toolchain
 rule: the runner has no Go, Node, or Postgres installed directly, only
 Docker; every command still goes through `docker compose`.
 
-This exists because not every environment that needs a real pass/fail signal
-for this suite can start a Docker daemon locally — the `test` job on a
-GitHub-hosted runner is the fallback source of truth in that case, since it
-runs the identical command against a real daemon.
+On `pull_request` it is scoped to `branches: [main]` — a wave consolidation
+PR (`integration/*` -> `main`), or any other PR that merges straight to
+`main` — **not** a package PR against an integration branch, which isn't
+merging to `main` yet. A persisted Go build cache
+(`docker-compose.override.yml`'s `go-build-cache` volume — created once per
+machine with `docker volume create inventory-go-build-cache`, never removed
+by a package worktree's own `docker compose down -v` because it is declared
+`external: true`) makes a local `docker compose run --rm app go test ./...`
+fast enough that running full CI automatically on every push to every one of
+a wave's several package PRs was pure cost for the common case: a local
+Docker daemon has been available to every session that has produced a
+package or consolidation PR on this project so far. `push: main` stays
+automatic too, as a backstop for a direct push that skips a PR entirely.
 
-The workflow also accepts `workflow_dispatch`, so the fallback is not limited
-to the post-PR review gate. A session with no local Docker can still develop:
-push the work-in-progress branch, then ask for a signal on it directly. Two
+The workflow also accepts `workflow_dispatch`: a session with no local
+Docker reviewing a **package** PR (no automatic run to fall back to) can
+still ask for a signal on that branch directly - see
+`.claude/agents/review-tests.md`'s own recipe, which checks the PR's base
+branch first and dispatches only when it isn't `main`. This is not new for
+the branch-with-no-PR-yet case — it already existed as the
+earlier-implementation-loop fallback, before a PR does. A PR whose base
+**is** `main` is unaffected: `gh pr checks` finds the automatic run there,
+exactly as before. Two
 things `gh run watch` needs help with outside an interactive terminal — every
 agent session: it requires an explicit run id, and `gh run list` can briefly
 still show only an older run from the same branch right after dispatch, so
@@ -171,20 +186,21 @@ each round-trip costs a push and a runner boot — so it is a fallback, not a
 replacement: use local Docker when it is available, and this loop only when
 it is not.
 
-**`test.yml` is the merge gate; `e2e.yml` deliberately is not.** A second
-workflow, `.github/workflows/e2e.yml`, runs the same suite's E2E counterpart
-(`docker-compose.e2e.yml`, `05-frontend-pwa-foundations.md`) on
-GitHub-hosted runners for the same Docker-availability reason — but only on
-push to `main` and on `workflow_dispatch`, **not** on `pull_request`. A PR's
-only required status check is `test.yml` (`go vet` + `go test`): E2E is the
-pre-deployment gate described in "Deployment model" below, not a per-PR one
-— it is materially slower (a full stack plus a real browser) and running it
-on every push would make ordinary review cycles wait on it for no benefit,
-since `review-tests` (the ship loop's test reviewer) already treats E2E
-journeys as work it explicitly could not verify locally rather than a
-blocking requirement. Anyone who wants an E2E signal on a specific branch
-before it merges triggers `workflow_dispatch` on it explicitly, using the
-same dispatch-and-poll recipe as `test.yml`, above.
+**`test.yml` is a main-bound check; `e2e.yml` is never a PR check at all.** A
+second workflow, `.github/workflows/e2e.yml`, runs the same suite's E2E
+counterpart (`docker-compose.e2e.yml`, `05-frontend-pwa-foundations.md`) on
+GitHub-hosted runners for the same Docker-availability reason, but only on
+push to `main` and on `workflow_dispatch` — **not** on `pull_request` at
+all, for either a package PR or one merging to `main`. That choice predates
+and is for a different reason than `test.yml`'s narrower one above: E2E is
+materially slower (a full stack plus a real browser), and `review-tests`
+already treats E2E journeys as work it explicitly could not verify locally
+rather than a blocking requirement, so it was never a per-PR gate the way
+`test.yml` still partly is. E2E is the pre-deployment gate described in
+"Deployment model" below. Anyone who wants a signal
+from either workflow on a specific branch before it merges triggers
+`workflow_dispatch` on it explicitly, using the same dispatch-and-poll
+recipe as `test.yml`, above.
 
 ## Running more than one instance of the stack locally
 
