@@ -6,9 +6,11 @@
 # (docs/specs/01-architecture-and-deployment.md) — not a PR merge gate: it is
 # slow (a full stack plus a real browser), and review-tests
 # (.claude/agents/review-tests.md) already treats E2E journeys as "not
-# verified here" rather than requiring them per PR. The only required check
-# on a PR is test.yml (go vet + go test). This workflow instead runs after
-# every push to main (confirming what is about to be deployed) and on
+# verified here" rather than requiring them per PR. `test.yml` (go vet + go
+# test) no longer runs automatically on a PR either, for a different reason —
+# see its own header — so neither workflow is an automatic PR check any more;
+# both run after every push to main (confirming what is about to be deployed)
+# and on
 # `workflow_dispatch` for an explicit pre-deploy or debugging run. If a PR
 # ever needs its own E2E signal, that is a deliberate `workflow_dispatch`
 # call against the PR branch, per the dispatch/poll recipe below — never an

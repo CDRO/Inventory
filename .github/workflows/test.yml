@@ -5,14 +5,34 @@
 # cannot start a Docker daemon at all (missing CAP_NET_ADMIN — see issue #48),
 # so `docker compose run --rm app go test ./...` has no environment to execute
 # in locally. GitHub-hosted runners have a working Docker daemon, so this
-# workflow is the actual pass/fail signal for those sessions: they read this
-# run's result instead of executing the suite themselves.
+# workflow is the fallback signal for those sessions when they ask for one.
 #
-# The `pull_request` trigger covers the review gate (a PR already exists, so
-# every push to it re-runs automatically). `workflow_dispatch` covers the
-# earlier implementation loop, before a PR exists: a session with no local
-# Docker can push a work-in-progress branch and ask for a signal on it
-# directly. Two things `gh run watch` needs help with outside an interactive
+# Triggered on `pull_request` **only when the base is `main`** - a wave
+# consolidation PR (`integration/*` -> `main`) or any other PR that merges
+# directly to `main` - not on a package PR (a feature branch against an
+# integration branch), which is not merging to `main` yet and has already
+# been reviewed by `review-tests` running the suite itself. This is a
+# deliberate narrowing, made once a persisted Go build cache (see
+# docker-compose.override.yml's `go-build-cache` volume) made a local run
+# fast enough that running full CI automatically on every push to every one
+# of a wave's several package PRs was pure cost for the common case: a local
+# Docker daemon has been available in every session that has produced a PR
+# on this project so far. `push: main` stays automatic too, as a backstop for
+# a direct push that skips a PR entirely.
+#
+# The accepted trade-off is the one `e2e.yml` already makes for a different
+# reason: a session with no local Docker reviewing a PACKAGE PR now has no
+# automatic CI signal to fall back to (only the on-demand one below) - see
+# `review-tests.md`'s own fallback recipe, which checks the PR's base branch
+# and dispatches this workflow explicitly rather than assuming a
+# PR-triggered run exists, for exactly that case. A PR against `main` is
+# unaffected: `gh pr checks <PR>` finds the automatic run there as before.
+#
+# `workflow_dispatch` is the on-demand escape hatch for the case above, and
+# for the earlier implementation loop, before a PR exists at all: a session
+# with no local Docker can push a branch (with or without a PR yet) and ask
+# for a signal on it directly. Two things `gh run watch` needs help with
+# outside an interactive
 # terminal (every agent session): it requires an explicit run id, and the run
 # list can briefly still show only an older run from the same branch right
 # after dispatch — so poll by the exact commit SHA under test, not just "the
@@ -42,6 +62,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
