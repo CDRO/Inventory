@@ -301,12 +301,17 @@ ON CONFLICT (id) DO NOTHING;
 --
 -- This is why "computed relative to now(), so the fixture never goes stale"
 -- is only half true, and the half that applies depends on the ASSERTION, not
--- on the fixture. The E2E Stocktake block below holds seven now()-relative
+-- on the fixture. The E2E Stocktake block below holds six now()-relative
 -- timestamps under plain DO NOTHING and is genuinely drift-proof, because
 -- everything asserted over it is RELATIVE: stocktake.js's stalestFirst() is a
--- sort plus slice(0, STALEST_LIMIT) with no threshold anywhere, so all seven
+-- sort plus slice(0, STALEST_LIMIT) with no threshold anywhere, so all six
 -- rows ageing together changes neither the order nor the top-N, and that
 -- file's test reads each item's name span rather than its audited phrase.
+-- The seventh row, Pantry, is never audited (last_audited_at NULL) and leads
+-- that ranking anyway, through stalestFirst()'s never-audited partition
+-- (`!node.last_audited_at` sorts before any timestamp comparison) rather than
+-- through its own timestamp — it has none. Don't "fix" that tie-break; it
+-- is not one.
 -- This block is the opposite case — one row whose exact rendered phrase is
 -- asserted — and an absolute assertion over a frozen relative timestamp is
 -- the combination that rots. Copy the pattern that matches your assertion.
