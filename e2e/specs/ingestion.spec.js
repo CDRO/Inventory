@@ -368,15 +368,89 @@ test("a location can be created from the review screen without leaving it, refre
   }
 });
 
+// #154 item 1: .card puts its padding on the <dialog> element itself
+// (css/components.css), so event.target === dialog is also true for a click
+// that never left the dialog's own box. tree-modal.js must tell that apart
+// from an actual backdrop click, or a misclick this close to the edge closes
+// the modal and loses whatever the user was mid-typing in the add-root form.
+test("a click inside the location modal's own padding does not close it or lose an unsubmitted root name", async ({
+  page,
+}) => {
+  await logInAsBob(page);
+  await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOCATION_MODAL_JOB}`);
+  const first = page.locator("#rows .review-row").first();
+
+  await first.locator('[data-role="location-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByRole("button", { name: "Add top-level location" }).click();
+  const input = dialog.locator('input[aria-label="Name of the new top-level location"]');
+  await input.fill("Garage Shelf");
+
+  // Two pixels in from the dialog's own top-left corner: still inside its
+  // rendered box (--space-5 padding is 24px, css/tokens.css), on no child
+  // element, so event.target is the <dialog> itself — the exact shape of a
+  // click on the padding rather than the backdrop.
+  const box = await dialog.boundingBox();
+  await page.mouse.click(box.x + 2, box.y + 2);
+
+  await expect(dialog).toBeVisible();
+  await expect(input).toHaveValue("Garage Shelf");
+});
+
+// #154 item 2: close() must wait for a create POST that's still in flight
+// before resolving createdIds, or Done/Esc pressed early loses the new
+// location from that resolve and the caller's own refresh races the commit.
+test("closing the location modal while its create POST is still in flight still preselects the new location", async ({
+  page,
+}) => {
+  await logInAsBob(page);
+  await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOCATION_MODAL_JOB}`);
+  const first = page.locator("#rows .review-row").first();
+
+  await first.locator('[data-role="location-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(dialog).toBeVisible();
+
+  // Held open until released below, so Done can be clicked while the create
+  // POST this test cares about is still unresolved.
+  let releasePost;
+  const postHeld = new Promise((resolve) => {
+    releasePost = resolve;
+  });
+  await page.route(`**/api/storages/${HOUSEHOLD}/locations`, async (route) => {
+    if (route.request().method() === "POST") await postHeld;
+    await route.continue();
+  });
+
+  await dialog.getByRole("button", { name: "Add top-level location" }).click();
+  await dialog.locator('input[aria-label="Name of the new top-level location"]').fill("Cellar Rack");
+  await dialog.locator("#location-modal-add-root-form button[type=submit]").click();
+
+  // Done, clicked before the POST above returns: the dialog must stay open
+  // rather than resolving createdIds without the id that POST will carry.
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeVisible();
+
+  releasePost();
+  await page.unroute(`**/api/storages/${HOUSEHOLD}/locations`);
+
+  await expect(dialog).toBeHidden();
+  await expect(first.locator('[data-role="location"] option', { hasText: "Cellar Rack" })).toHaveCount(1);
+  await expect(first.locator('[data-role="location"] option:checked')).toContainText("Cellar Rack");
+});
+
 // docs/specs/26-location-quick-create.md's first acceptance criterion, for
 // `06` review specifically: "in a storage with zero locations ... the user
 // opens the modal, creates a root location, closes the modal, and that
 // location is immediately selectable — no page reload." The test above
 // covers the *second* bullet (an already-populated tree); this one starts
-// from "E2E Admin Household", the one seeded storage with no locations at
-// all, so the placeholder-only select, the empty-tree message inside the
-// modal, and setupLocation's option handling with nothing already appended
-// are all exercised from a genuine cold start.
+// from "E2E Admin Household", which — despite the name — also has no
+// locations at all (the same as "E2E Zero-Locations Household" does), so
+// the placeholder-only select, the empty-tree message inside the modal, and
+// setupLocation's option handling with nothing already appended are all
+// exercised from a genuine cold start.
 test("a location can be created from the review screen in a storage with zero locations", async ({ page }) => {
   const login = await page.request.post("/api/auth/login", {
     data: { username: "e2e-admin-2", password: "e2e-fixture-password" },

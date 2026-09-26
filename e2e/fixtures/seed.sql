@@ -373,8 +373,9 @@ INSERT INTO jobs (id, storage_id, kind, status, payload, created_by) VALUES
    '00000000-0000-7000-8000-000000000003')
 ON CONFLICT (id) DO NOTHING;
 
--- One shelf-ingestion job in "E2E Admin Household" (...012), the one seeded
--- storage with zero locations, dedicated to
+-- One shelf-ingestion job in "E2E Admin Household" (...012), which —
+-- despite the name — also starts with zero locations, the same as "E2E
+-- Zero-Locations Household" (...013) does; dedicated to
 -- e2e/specs/ingestion.spec.js's zero-locations location-quick-create test
 -- (docs/specs/26-location-quick-create.md's first acceptance criterion).
 -- Never confirmed, so it can be revisited by that test however many times it

@@ -13,12 +13,16 @@ CRUD endpoints, ingestion review UI),
 Two review-style screens ask the user to attach a **location** to an item
 while reviewing/resolving it: the ingestion review row
 (`06-vision-shelf-ingestion.md`) and a shopping-list line's resolution
-(`07-shopping-list-reconciliation.md`). Both render through one shared
-component, `js/review.js` (`05-frontend-pwa-foundations.md`). A third
-screen built on the same component, `09-consumption-logging.md`'s manual
-correction, has no location field at all — consumption only ever decrements
-an existing batch, and every batch already carries a location — so it never
-had this gap to begin with; see "Scope" below.
+(`07-shopping-list-reconciliation.md`). The ingestion review row renders
+through the shared row component, `js/review.js` (`05-frontend-pwa-foundations.md`);
+the location field itself, like every field on the row, is set up by the
+page module (`web/static/js/pages/review.js`), not by `js/review.js` itself.
+The shopping-list resolution UI is its own page module
+(`web/static/js/pages/shopping-list.js`) and does not use `js/review.js` at
+all. A third screen that does use `js/review.js`, `09-consumption-logging.md`'s
+manual correction, has no location field at all — consumption only ever
+decrements an existing batch, and every batch already carries a location —
+so it never had this gap to begin with; see "Scope" below.
 
 Only the ingestion confirm endpoint (`06`) accepts a location **path** and
 silently creates any node on it that doesn't exist yet. The shopping-list
@@ -38,19 +42,20 @@ memory only until "Confirm" is pressed
 before confirm).
 
 This spec adds one small, shared escape hatch to the location field
-wherever `js/review.js` renders one: a trigger that opens the real location
+wherever a page module renders one: a trigger that opens the real location
 tree editor **without leaving the page**, so the user can create whatever
 they need and land back on the exact screen they were on, every other
 field's edits intact, with the new location immediately selectable.
 
 ## Scope
 
-Applies to every location field rendered by `js/review.js` that actually
-exists: the row of `06`'s `review.html` and the resolution UI of `07`'s
-`shopping-list.html`. `09`'s `consume-review.html` renders no location field
-at all and is out of scope — see below. Implemented once per page module, so
-both inherit the same trigger and the same single-GET refresh rule `05`
-already applies to the three row actions (accept/correct/reject).
+Applies to every location field a review/resolution page module renders
+that actually exists: the row of `06`'s `review.html` and the resolution UI
+of `07`'s `shopping-list.html`. `09`'s `consume-review.html` renders no
+location field at all and is out of scope — see below. Implemented once per
+page module, so both inherit the same trigger and the same single-GET
+refresh rule `05` already applies to the three row actions
+(accept/correct/reject).
 
 No backend change. This is a frontend-only addition that composes two
 endpoints `06` already defines: `GET`/`POST
@@ -118,7 +123,8 @@ which generalizes this module to categories: the file is renamed
 over unchanged. The description above is this spec's own contract as
 originally shipped; the current module name and signature are `27`'s.
 
-`js/review.js` calls it from a field's trigger, and on resolve:
+Each page module calls it from a field's trigger — `openLocationField`
+(`web/static/js/location-options.js`) — and on resolve:
 
 - Re-fetches `GET /api/storages/{storage_id}/locations` **once** and
   refreshes every open location field's option list on the page from that

@@ -73,6 +73,15 @@ const KINDS = {
 export function openTreeManager(storageId, { kind }) {
   const config = KINDS[kind];
   const createdIds = [];
+  // pendingMutation is whichever runMutation() attempt is currently in
+  // flight (already caught internally, so it never rejects); requestClose
+  // waits for it before finalizing, instead of resolving createdIds without
+  // an id the create POST hasn't returned yet and racing the caller's own
+  // refresh against that same in-flight write. pendingMutationFailed tracks
+  // whether that attempt ended in an error the user hasn't seen close the
+  // dialog on yet.
+  let pendingMutation = null;
+  let pendingMutationFailed = false;
 
   const errorBox = el("div", { class: "alert", role: "alert", hidden: true });
   const statusBox = el("p", { class: "empty-state", role: "status", hidden: true });
@@ -124,11 +133,14 @@ export function openTreeManager(storageId, { kind }) {
   // predicting the new shape, exactly as locations.js and categories.js do.
   async function runMutation(mutate) {
     clearMessages();
-    try {
-      await mutate();
-    } catch (err) {
+    pendingMutationFailed = false;
+    const attempt = mutate().catch((err) => {
       showError(err);
-    }
+      pendingMutationFailed = true;
+    });
+    pendingMutation = attempt;
+    await attempt;
+    pendingMutation = null;
     await reload();
   }
 
@@ -205,16 +217,50 @@ export function openTreeManager(storageId, { kind }) {
     input.focus();
   });
 
+  // requestClose is every dismissal's shared path — Done, a genuine backdrop
+  // click, and Esc all route through it, so all three wait the same way for
+  // a mutation that's still in flight instead of resolving createdIds without
+  // it. If that mutation ended in an error, the dialog stays open on this
+  // request so the user actually sees showError's message rather than it
+  // landing in a dialog already removed; dismissing again (Done or Esc, with
+  // nothing pending this time) closes it.
+  function requestClose() {
+    if (pendingMutation) {
+      pendingMutation.then(() => {
+        if (!pendingMutationFailed) dialog.close();
+      });
+      return;
+    }
+    dialog.close();
+  }
+
   return new Promise((resolve) => {
-    doneButton.addEventListener("click", () => dialog.close());
+    doneButton.addEventListener("click", requestClose);
 
     // A click that lands on the dialog element itself, rather than on any of
-    // its children, is a click on the backdrop: the dialog's box only covers
-    // its rendered content, so nothing else inside it can be the target of
-    // such a click. Esc is handled by the browser already — it fires the
-    // dialog's own "cancel" then "close" — so both dismissals converge here.
+    // its children, is USUALLY a click on the backdrop — but .card puts its
+    // padding on the <dialog> element (css/components.css), so a click on
+    // that padding also has event.target === dialog without being outside
+    // the dialog's own box. Comparing the click's coordinates against the
+    // dialog's rendered box is what actually tells backdrop and padding
+    // apart.
     dialog.addEventListener("click", (event) => {
-      if (event.target === dialog) dialog.close();
+      if (event.target !== dialog) return;
+      const box = dialog.getBoundingClientRect();
+      const insideBox =
+        event.clientX >= box.left &&
+        event.clientX <= box.right &&
+        event.clientY >= box.top &&
+        event.clientY <= box.bottom;
+      if (!insideBox) requestClose();
+    });
+
+    // Esc fires the dialog's own "cancel" then "close" natively; preventing
+    // the default on "cancel" routes it through requestClose too, so Esc
+    // waits for an in-flight mutation exactly like Done and the backdrop do.
+    dialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      requestClose();
     });
 
     dialog.addEventListener("close", () => {
