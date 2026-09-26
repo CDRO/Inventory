@@ -628,6 +628,17 @@ services:
       # like it passed. CI checks out fresh, so there the two are the same
       # file either way; this is purely about the local loop.
       - ./deploy:/src/deploy
+      # Same reason again, for cmd/inventory/compose_test.go: its repoFile
+      # helper reads these repository-root files directly, so without
+      # mounting each one `go test` verdicts the copy baked into the image
+      # rather than the file just edited.
+      - ./docker-compose.yml:/src/docker-compose.yml
+      - ./docker-compose.nas.yml:/src/docker-compose.nas.yml
+      - ./docker-compose.e2e.yml:/src/docker-compose.e2e.yml
+      - ./.gitignore:/src/.gitignore
+      - ./.dockerignore:/src/.dockerignore
+      - ./.gitattributes:/src/.gitattributes
+      - ./scripts/backup:/src/scripts/backup
     ports:
       - "8000:8000"             # direct access, bypassing Traefik, for debugging
 ```
