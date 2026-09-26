@@ -262,16 +262,27 @@ ON CONFLICT (id) DO NOTHING;
 -- A root location whose last_audited_at is in the past, dedicated to #169:
 -- Pantry and Fridge above have never been audited, so neither exercises
 -- formatAudited()'s relative-time phrase (web/static/js/audited.js) at all.
--- Computed relative to now() rather than hardcoded, like the E2E Stocktake
--- block below, so the fixture never goes stale. Read-only here, so it is
--- safe alongside every other suite that reads this storage's tree — and it is
--- a new ROOT of the shared storage, which the "child of Fridge rather than a
--- new root" reasoning on ...b6 above deliberately avoided: that block needed
--- a nested path and had a Fridge to hang it from, while an audited-state
--- phrase has to be the tree's own top-level row to be rendered by
--- locations.html at all. See the warning on the Pantry/Fridge insert above
--- for what that costs. ...ba is the next free id after ...b9 (this file's own
--- Nested Location Source range, below).
+-- Read-only here, so it is safe alongside every other suite that reads this
+-- storage's tree.
+--
+-- It is a new ROOT of the shared storage, and being a root is NOT a technical
+-- requirement — do not read it as one. A child would have rendered the phrase
+-- just as well: web/static/js/tree.js calls renderDetail for every node at
+-- every depth, and locations.js's renderAuditState gates on nothing, so the
+-- audited span is emitted for nested nodes too. ...b6 one screen above is the
+-- proof, and its "a child of Fridge rather than a new root" note is the
+-- pattern this block simply did not follow. It is a root because #169's
+-- package made it one; it stays a root because two consolidation reviews
+-- independently verified it is harmless here (every household location
+-- assertion is name-scoped, and internal/store/locations.go orders by
+-- created_at then id while this file is one transaction, so ...ba sorts LAST
+-- rather than into the path of a first-option default). See the warning on the
+-- Pantry/Fridge insert above for what it costs. If you need another
+-- audited-state fixture, give it its own storage instead of widening this
+-- storage's root set again.
+--
+-- ...ba is the next free id after ...b9 (this file's own Nested Location
+-- Source range, below).
 --
 -- DO UPDATE, not DO NOTHING, and this one is load-bearing: the interval is
 -- evaluated when the seed runs, and #169's test asserts the exact phrase
@@ -283,6 +294,18 @@ ON CONFLICT (id) DO NOTHING;
 -- a database volume that outlives one run — which is exactly how this stack
 -- is operated, since a wave's consolidation leaves it up for the
 -- orchestrator. Re-seeding must therefore refresh this timestamp.
+--
+-- This is why "computed relative to now(), so the fixture never goes stale"
+-- is only half true, and the half that applies depends on the ASSERTION, not
+-- on the fixture. The E2E Stocktake block below holds seven now()-relative
+-- timestamps under plain DO NOTHING and is genuinely drift-proof, because
+-- everything asserted over it is RELATIVE: stocktake.js's stalestFirst() is a
+-- sort plus slice(0, STALEST_LIMIT) with no threshold anywhere, so all seven
+-- rows ageing together changes neither the order nor the top-N, and that
+-- file's test reads each item's name span rather than its audited phrase.
+-- This block is the opposite case — one row whose exact rendered phrase is
+-- asserted — and an absolute assertion over a frozen relative timestamp is
+-- the combination that rots. Copy the pattern that matches your assertion.
 INSERT INTO locations (id, storage_id, name, description, last_audited_at) VALUES
   ('00000000-0000-7000-8000-0000000000ba', '00000000-0000-7000-8000-000000000010', 'E2E Audited Shelf', 'Audited a few days ago', now() - interval '5 days')
 ON CONFLICT (id) DO UPDATE SET last_audited_at = EXCLUDED.last_audited_at;
@@ -433,9 +456,13 @@ ON CONFLICT (id) DO NOTHING;
 -- from ...b9 and never mentioned ...ba, leaving the one link in this file's
 -- id chain that a reader cannot follow. State your immediate predecessor, not
 -- the last one you happen to remember: the next block that computes "next
--- free after ...b9" lands on ...ba, and ON CONFLICT DO NOTHING drops a
--- duplicate id silently rather than erroring, so the symptom is not a
--- duplicate-key failure but a fixture that simply is not there.
+-- free after ...b9" lands on ...ba, and no insert in this file raises a
+-- duplicate-key error — every one of them ends in ON CONFLICT. Most DO
+-- NOTHING, so a colliding row is dropped and the symptom is a fixture that
+-- simply is not there; ...ba is one of the two that DO UPDATE, so colliding
+-- with THAT one silently rewrites a live row's last_audited_at instead. Either
+-- way the failure surfaces somewhere else entirely, which is the whole reason
+-- this ledger is maintained by hand.
 INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
   ('00000000-0000-7000-8000-0000000000bb', '00000000-0000-7000-8000-000000000010', 'E2E Quick-Create Move Cancel Source', NULL, 'non_perishable', 0)
 ON CONFLICT (id) DO NOTHING;
