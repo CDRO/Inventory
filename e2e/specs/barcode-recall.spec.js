@@ -7,6 +7,12 @@
 // the capture-time offer's state lives on the *user* row, so a shared user
 // would have this file's on/off flips land in another suite's run.
 //
+// One exception: the barcode_prompt_seen_at test near the end (#157) runs as
+// e2e-barcode-first against "E2E Barcode First" instead. It needs a user whose
+// seen_at is still NULL, which Dana no longer is by the time this file reaches
+// that test — every earlier test here has already shown her the offer at
+// least once.
+//
 // Serial, unlike most files here. playwright.config.js sets fullyParallel, and
 // two of these tests move the same per-user preference in opposite directions —
 // which is a race whatever storage they use. Each test also gets its own
@@ -44,11 +50,26 @@ const CONFLICT_CODE = "5449000000996";
 const TYPED_CODE = "7622210449283";
 const PRE_CODED_CODE = "3017620422003";
 
+// #157's own household, user and codes — see the file header for why they
+// cannot be Dana's.
+const FIRST_TIMER_HOUSEHOLD = "00000000-0000-7000-8000-00000000001c";
+const FIRST_TIMER_BASE = `/api/storages/${FIRST_TIMER_HOUSEHOLD}`;
+const FIRST_TIMER_PRE_CODED = "00000000-0000-7000-8000-000000000054";
+const FIRST_TIMER_CONTROL = "00000000-0000-7000-8000-000000000055";
+const FIRST_TIMER_CODE = "0043000009805";
+
 const OFFER_DIALOG = "dialog[aria-labelledby='barcode-offer-title']";
 
 async function loginAsDana(page) {
   const login = await page.request.post("/api/auth/login", {
     data: { username: "e2e-dana", password: "e2e-fixture-password" },
+  });
+  expect(login.status()).toBe(200);
+}
+
+async function loginAsFirstTimer(page) {
+  const login = await page.request.post("/api/auth/login", {
+    data: { username: "e2e-barcode-first", password: "e2e-fixture-password" },
   });
   expect(login.status()).toBe(200);
 }
@@ -247,6 +268,77 @@ test("a product that already has a barcode is never offered another", async ({ p
   await expect(page.locator(OFFER_DIALOG)).toBeVisible();
   await page.locator(`${OFFER_DIALOG} button`).nth(1).click();
   await expect(page.locator(OFFER_DIALOG)).toHaveCount(0);
+});
+
+// #157: the test above asserts that no dialog appears for a pre-coded
+// product, but no dialog appears in *either* line order of
+// hasBarcodeAlready/shouldOffer inside offerBarcodeCapture, since shouldOffer
+// is never reached either way once hasBarcodeAlready has returned true. What
+// only the correct order (hasBarcodeAlready first) guarantees is that
+// shouldOffer's POST to .../shown never fires for that product — so this
+// pins the side effect docs/specs/20-barcode-recall.md actually requires:
+// "barcode_prompt_seen_at is set exactly once, on the first time the offer is
+// shown". Swap the two lines and this product would silently burn that
+// one-time flag without the offer ever appearing.
+//
+// Needs its own fixture user whose seen_at is still NULL — see the file
+// header for why that cannot be Dana.
+test("a pre-coded product's offer check leaves barcode_prompt_seen_at untouched", async ({ page }) => {
+  await loginAsFirstTimer(page);
+
+  // Never shown yet: first_time reads true straight from seen_at IS NULL.
+  const before = await page.request.get("/api/auth/barcode-prompt");
+  expect(before.status()).toBe(200);
+  expect(await before.json()).toEqual({ enabled: true, first_time: true });
+
+  // The product carries a code before the offer is ever considered — the same
+  // state a product created from a catalogue barcode hint is in.
+  expect(
+    (
+      await page.request.post(`${FIRST_TIMER_BASE}/products/${FIRST_TIMER_PRE_CODED}/barcodes`, {
+        data: { barcode: FIRST_TIMER_CODE },
+      })
+    ).status(),
+  ).toBe(201);
+
+  await page.goto(`/products.html?storage=${FIRST_TIMER_HOUSEHOLD}`);
+
+  await page.evaluate(
+    async ([storageId, id]) => {
+      const module = await import("/js/barcode-offer.js");
+      await module.offerBarcodeCapture(storageId, { productId: id });
+    },
+    [FIRST_TIMER_HOUSEHOLD, FIRST_TIMER_PRE_CODED],
+  );
+  await expect(page.locator(OFFER_DIALOG)).toHaveCount(0);
+
+  // The assertion #157 exists for: still first_time, because nothing was ever
+  // shown to burn it.
+  const stillFirst = await page.request.get("/api/auth/barcode-prompt");
+  expect(await stillFirst.json()).toEqual({ enabled: true, first_time: true });
+
+  // The control: the same call, same page, same user, for a codeless product
+  // does show the offer and does burn first_time. Without this, the
+  // assertion above would also pass if the offer were broken outright and
+  // never marked anything shown at all.
+  //
+  // Not showOfferFor: that helper is fixed to BARCODE_HOUSEHOLD, which is not
+  // this test's storage.
+  await page.evaluate(
+    async ([storageId, id]) => {
+      const module = await import("/js/barcode-offer.js");
+      window.__offer = module.offerBarcodeCapture(storageId, { productId: id });
+    },
+    [FIRST_TIMER_HOUSEHOLD, FIRST_TIMER_CONTROL],
+  );
+  const dialog = page.locator(OFFER_DIALOG);
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator("h2")).toHaveText("One scan now, one tap forever");
+  await dialog.locator("button").nth(1).click();
+  await expect(dialog).toHaveCount(0);
+
+  const afterShown = await page.request.get("/api/auth/barcode-prompt");
+  expect(await afterShown.json()).toEqual({ enabled: true, first_time: false });
 });
 
 test("turning the offer off stops it everywhere, and settings turns it back on", async ({ page }) => {
