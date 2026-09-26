@@ -42,6 +42,8 @@ const CANCEL_PRODUCT = "00000000-0000-7000-8000-000000000092";
 const CANCEL_BATCH = "00000000-0000-7000-8000-000000000093";
 const MOVE_QUICK_CREATE_PRODUCT = "00000000-0000-7000-8000-000000000096";
 const MOVE_QUICK_CREATE_BATCH = "00000000-0000-7000-8000-000000000097";
+const DOUBLE_CLICK_PRODUCT = "00000000-0000-7000-8000-000000000099";
+const DOUBLE_CLICK_BATCH = "00000000-0000-7000-8000-00000000009a";
 
 // "E2E Other Household" (...011) — Alice's, not Bob's — and its own Garage
 // location, used only as a target_location_id/location_id from *another*
@@ -373,4 +375,62 @@ test("a location can be created from the move picker, without leaving products.h
   expect(moved.id).toBe(MOVE_QUICK_CREATE_BATCH); // same batch, not a new one
   expect(moved.quantity).toBe(3); // unchanged
   expect(moved.location_id).toBe(newLocationId);
+});
+
+// #161: two quick clicks on Split could each pass the server's own
+// per-request validation and stack silently — splitting 2 off a batch of 5
+// twice legally succeeds both times, leaving the source at 1 and two new
+// batches instead of the one the user intended. products.js now disables the
+// submit button for the duration of the request, the same pattern
+// openLocationField already uses in js/location-options.js.
+//
+// The button's own `disabled` state is what stops a second dispatched click
+// from doing anything — a disabled button does not fire click, so calling
+// .click() on it twice back to back (synchronously, in the page) is a
+// faithful stand-in for two real clicks landing before the first request
+// settles: the second call lands after the handler has already set
+// `disabled = true` but well before the network response (delayed below)
+// lets the button through `finally` again.
+test("a second click on Split while the first request is in flight creates only one new batch", async ({ page }) => {
+  await logIn(page);
+  await openProduct(page, "E2E Double-Click Split Source");
+
+  const row = batchRow(page, DOUBLE_CLICK_BATCH);
+  await expect(row).toContainText("5 × Pantry");
+  await row.locator('[data-role="split-toggle"]').click();
+
+  const form = row.locator('[data-role="split-form"]');
+  await expect(form).toBeVisible();
+  await form.locator("input").fill("2");
+  await form.locator("select").selectOption(FRIDGE);
+
+  let splitRequests = 0;
+  await page.route(`**/inventory-batches/${DOUBLE_CLICK_BATCH}/split`, async (route) => {
+    splitRequests++;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await route.continue();
+  });
+
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (res) => res.url().endsWith(`/inventory-batches/${DOUBLE_CLICK_BATCH}/split`) && res.request().method() === "POST",
+    ),
+    form.evaluate((formEl) => {
+      const button = formEl.querySelector('button[type="submit"]');
+      button.click();
+      button.click(); // the double-click: a no-op once the first click disabled the button
+    }),
+  ]);
+  expect(response.status()).toBe(201);
+  await page.unroute(`**/inventory-batches/${DOUBLE_CLICK_BATCH}/split`);
+
+  expect(splitRequests).toBe(1);
+
+  const product = await fetchProduct(page, DOUBLE_CLICK_PRODUCT);
+  expect(product.current_stock).toBe(5); // net stock unchanged by a split
+  expect(product.batches).toHaveLength(2); // source + one split, not two splits
+
+  const source = product.batches.find((b) => b.id === DOUBLE_CLICK_BATCH);
+  expect(source).toBeTruthy();
+  expect(source.quantity).toBe(3); // 5 - 2, not 5 - 2 - 2
 });

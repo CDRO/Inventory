@@ -562,10 +562,15 @@ function renderBatchRow(batch, locationSelects) {
     type: "number",
     min: "1",
     step: "1",
+    required: true,
     "aria-label": t("products.batch.splitQuantityAriaLabel"),
     placeholder: t("products.batch.quantityPlaceholder"),
   });
-  const splitTarget = el("select", { "aria-label": t("products.batch.splitTargetAriaLabel"), "data-field": "location" });
+  const splitTarget = el("select", {
+    "aria-label": t("products.batch.splitTargetAriaLabel"),
+    "data-field": "location",
+    required: true,
+  });
   locationOptionsWithPlaceholder(splitTarget);
   locationSelects.push(splitTarget);
   const splitLocationAdd = el(
@@ -582,6 +587,7 @@ function renderBatchRow(batch, locationSelects) {
       onError: showFieldError,
     }),
   );
+  const splitSubmit = el("button", { type: "submit", class: "btn btn--primary" }, [text(t("products.batch.split"))]);
   const splitForm = el(
     "form",
     { class: "row", hidden: true, "data-role": "split-form" },
@@ -589,7 +595,7 @@ function renderBatchRow(batch, locationSelects) {
       splitQuantity,
       splitTarget,
       splitLocationAdd,
-      el("button", { type: "submit", class: "btn btn--primary" }, [text(t("products.batch.split"))]),
+      splitSubmit,
       el(
         "button",
         { type: "button", class: "btn btn--ghost", onclick: () => closeForms() },
@@ -599,9 +605,13 @@ function renderBatchRow(batch, locationSelects) {
   );
   splitForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    // Guards a second click racing the in-flight request, same pattern as
+    // openLocationField's trigger.disabled in js/location-options.js.
+    if (splitSubmit.disabled) return;
     const quantity = Number.parseInt(splitQuantity.value, 10);
     if (!Number.isFinite(quantity) || !splitTarget.value) return;
     errorLine.hidden = true;
+    splitSubmit.disabled = true;
     try {
       await post(`${batchesBasePath()}/${batch.id}/split`, {
         quantity,
@@ -610,12 +620,18 @@ function renderBatchRow(batch, locationSelects) {
       await reload();
     } catch (err) {
       fail(err);
+    } finally {
+      splitSubmit.disabled = false;
     }
   });
 
   // Move: the whole batch, same id, new location_id — a different endpoint
   // from split, not a split of the full quantity.
-  const moveTarget = el("select", { "aria-label": t("products.batch.moveTargetAriaLabel"), "data-field": "location" });
+  const moveTarget = el("select", {
+    "aria-label": t("products.batch.moveTargetAriaLabel"),
+    "data-field": "location",
+    required: true,
+  });
   locationOptionsWithPlaceholder(moveTarget);
   locationSelects.push(moveTarget);
   const moveLocationAdd = el(
@@ -632,13 +648,14 @@ function renderBatchRow(batch, locationSelects) {
       onError: showFieldError,
     }),
   );
+  const moveSubmit = el("button", { type: "submit", class: "btn btn--primary" }, [text(t("products.batch.move"))]);
   const moveForm = el(
     "form",
     { class: "row", hidden: true, "data-role": "move-form" },
     [
       moveTarget,
       moveLocationAdd,
-      el("button", { type: "submit", class: "btn btn--primary" }, [text(t("products.batch.move"))]),
+      moveSubmit,
       el(
         "button",
         { type: "button", class: "btn btn--ghost", onclick: () => closeForms() },
@@ -648,13 +665,19 @@ function renderBatchRow(batch, locationSelects) {
   );
   moveForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    // Guards a second click racing the in-flight request, same pattern as
+    // openLocationField's trigger.disabled in js/location-options.js.
+    if (moveSubmit.disabled) return;
     if (!moveTarget.value) return;
     errorLine.hidden = true;
+    moveSubmit.disabled = true;
     try {
       await patch(`${batchesBasePath()}/${batch.id}`, { location_id: moveTarget.value });
       await reload();
     } catch (err) {
       fail(err);
+    } finally {
+      moveSubmit.disabled = false;
     }
   });
 
