@@ -56,6 +56,15 @@ const KINDS = {
   },
 };
 
+// True while a dialog opened by openTreeManager is on document.body, of
+// either kind. location-options.js's openLocationField and
+// category-options.js's openCategoryField each disable only their own
+// trigger before calling openTreeManager, so nothing stops a location
+// trigger's dialog and a category trigger's dialog from stacking at once
+// (#144) — per-trigger disabling can't fix that, since neither caller knows
+// about the other kind's trigger, so the guard lives here once instead.
+let dialogOpen = false;
+
 /**
  * openTreeManager renders js/tree.js inside a native <dialog>, scoped to
  * storageId and to one kind of tree. Resolves once the dialog is dismissed —
@@ -66,11 +75,20 @@ const KINDS = {
  * openLocationManager(storageId) used to have, parametrized by which tree
  * js/tree.js renders inside the dialog.
  *
+ * A second call of either kind, while a dialog from an earlier call is still
+ * open, is refused rather than queued: it resolves immediately with no
+ * created ids and never touches the DOM. Simpler than queuing, and nothing
+ * in docs/specs/26 or docs/specs/27 asks for a second attempt to eventually
+ * open once the first closes.
+ *
  * @param {string} storageId
  * @param {{kind: "locations"|"categories"}} options
  * @returns {Promise<{createdIds: string[]}>}
  */
 export function openTreeManager(storageId, { kind }) {
+  if (dialogOpen) return Promise.resolve({ createdIds: [] });
+  dialogOpen = true;
+
   const config = KINDS[kind];
   const createdIds = [];
   // pendingMutation is whichever runMutation() attempt is currently in
@@ -296,6 +314,7 @@ export function openTreeManager(storageId, { kind }) {
 
     dialog.addEventListener("close", () => {
       dialog.remove();
+      dialogOpen = false;
       resolve({ createdIds: [...createdIds] });
     });
 
