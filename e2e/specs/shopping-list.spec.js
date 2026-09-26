@@ -556,6 +556,45 @@ test("a category can be created from the new-product form, without leaving the s
   });
 });
 
+// #144: a location field's "+ New location" trigger and a category field's
+// "+ New category" trigger each disable only their own button
+// (location-options.js, category-options.js) — nothing before tree-modal.js's
+// module-level guard stopped the two from stacking a second <dialog> on
+// document.body when both are clicked before the first closes. A line of its
+// own ("whole nutmeg pods"), for the same reason the category-create test
+// above gives.
+//
+// The category trigger's click is dispatched directly rather than through a
+// real Playwright `.click()`: once the location dialog is open, its native
+// showModal() backdrop already makes the rest of the page inert to an actual
+// pointer, so a real click could never even reach the category trigger to
+// begin with, and the test would just be asserting the browser's own modal
+// semantics instead of tree-modal.js's guard. Dispatching the click event
+// directly is what exercises openTreeManager's guard itself.
+test("a location dialog and a category dialog never stack: the second trigger is refused", async ({ page }) => {
+  const created = await pasteList(page, ["whole nutmeg pods"]);
+  expect(created.items[0].status).toBe("new_item");
+  const line = lineFor(page, "whole nutmeg pods");
+  await expect(line.locator('[data-field="new-product"]')).toBeVisible();
+
+  await line.locator('[data-field="location-add"]').click();
+  const locationDialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(locationDialog).toBeVisible();
+
+  // Refused, not queued: openTreeManager resolves this immediately with
+  // nothing created, so the category trigger re-enables itself right away
+  // rather than waiting for the location dialog to close.
+  await line.locator('[data-field="category-add"]').dispatchEvent("click");
+  await expect(line.locator('[data-field="category-add"]')).toBeEnabled();
+
+  await expect(page.locator("dialog")).toHaveCount(1);
+  await expect(locationDialog).toBeVisible();
+
+  await locationDialog.getByRole("button", { name: "Done" }).click();
+  await expect(locationDialog).toBeHidden();
+  await expect(page.locator("dialog")).toHaveCount(0);
+});
+
 // docs/specs/26-location-quick-create.md: in a storage with zero locations,
 // the "+ New location" escape hatch is what makes a line resolvable at all —
 // without it "Choose a location…" would be the only option, forever.
