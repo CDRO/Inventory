@@ -304,10 +304,10 @@ function renderRecentAchievements(items) {
 }
 
 // achievementLabel prefers a catalog entry for the achievement's stable key
-// (gamification.achievement.<key>, none of which exist yet — see this
-// module's localization report) and otherwise falls back to the same plain
-// text substitution this always did, so an untranslated key still degrades
-// to something readable rather than the raw dotted catalog key.
+// (gamification.achievement.<key>, none of which exist yet) and otherwise
+// falls back to the same plain text substitution this always did, so an
+// untranslated key still degrades to something readable rather than the
+// raw dotted catalog key.
 function achievementLabel(key) {
   const catalogKey = `gamification.achievement.${key}`;
   const translated = t(catalogKey);
