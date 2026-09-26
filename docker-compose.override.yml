@@ -48,6 +48,21 @@ services:
       # fresh, so there the two are the same file either way; this is purely
       # about the local loop.
       - ./deploy:/src/deploy
+      # Same reason again, for cmd/inventory/compose_test.go: its repoFile
+      # helper reads these repository-root files directly, so without mounting
+      # each one `go test` verdicts the copy baked into the image rather than
+      # the file just edited - in the dangerous direction, since a compose
+      # change that should now fail an assertion keeps passing. Individual
+      # files rather than the whole root, matching the mounts above: narrow,
+      # at the cost of needing a new line here if compose_test.go starts
+      # reading something else.
+      - ./docker-compose.yml:/src/docker-compose.yml
+      - ./docker-compose.nas.yml:/src/docker-compose.nas.yml
+      - ./docker-compose.e2e.yml:/src/docker-compose.e2e.yml
+      - ./.gitignore:/src/.gitignore
+      - ./.dockerignore:/src/.dockerignore
+      - ./.gitattributes:/src/.gitattributes
+      - ./scripts/backup:/src/scripts/backup
     # Both sides read the same variable, not a fixed "8000:8000": the app
     # itself listens on $HTTP_PORT (internal/config/config.go), not a
     # hardcoded 8000, so the host and container sides must move together.
