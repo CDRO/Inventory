@@ -38,9 +38,17 @@ shelf-life-rule detail via its `renderDetail` callback. `js/location-modal.js`
 becomes `js/tree-modal.js`, and its exported function becomes:
 
 ```js
-// openTreeManager(storageId, {kind: "locations" | "categories"}) -> Promise<{ createdIds: string[] }>
+// openTreeManager(storageId, {kind: "locations" | "categories"})
+//   -> Promise<{ opened: boolean, createdIds: string[] }>
 // Same contract as 26's openLocationManager, parametrized by which tree
 // js/tree.js renders inside the <dialog>. Never navigates the page.
+//
+// A call made while a dialog of either kind is already open is refused
+// rather than queued (#144): it resolves immediately with opened: false
+// and no created ids, and never touches the DOM. `opened` is what tells
+// that refusal apart from a dialog that really ran and happened to create
+// nothing — both carry an empty createdIds, but only the second is a
+// reason for the caller to refresh anything (#227).
 ```
 
 The existing location-field call site, `openLocationField`
