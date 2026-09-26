@@ -4,7 +4,8 @@
     Tests for the Docker-facing pieces of wellen-orchestrator.ps1:
     Get-SanitizedProjectName / Set-WorktreeEnvOverrides (#115),
     Stop-PackageStack, Invoke-WaveDockerCleanup and the wave file's
-    "dockerCleanup" validation (#140 item 9).
+    "dockerCleanup" validation (#140 item 9) - plus Invoke-Wave's parallel
+    polling loop's teardown ordering (#188), which touches no Docker at all.
 
 .DESCRIPTION
     The script under test is a top-to-bottom orchestrator, not a module - its
@@ -478,6 +479,59 @@ $packagePromptEmpty = Get-PackagePrompt -Plan $emptyPlan -Standards $conventions
 $consolidationPromptEmpty = Get-ConsolidationPrompt -Plan $emptyPlan -Standards $conventionsStandards -Wave $conventionsWave -NextWave $null
 Assert ($packagePromptEmpty -notmatch '  ') 'empty plan.conventions leaves no double space in Get-PackagePrompt'
 Assert ($consolidationPromptEmpty -notmatch '  ') 'empty plan.conventions leaves no double space in Get-ConsolidationPrompt'
+
+Write-Host "== Invoke-Wave (parallel branch): teardown follows ACTUAL close order (#188) =="
+
+# The parallel branch's own polling loop (wellen-orchestrator.ps1, the `while
+# ($pending.Count -gt 0)` loop inside Invoke-Wave) was never exercised: this
+# drives the real Invoke-Wave with two fake packages where the SECOND-listed
+# one ('iw-b') closes FIRST, and asserts Stop-PackageStack fires in that
+# close order, not file order. Two concrete regressions this has to catch:
+# dropping the `$pending = $stillPending` reassignment (already-torn-down
+# packages keep getting re-checked and the loop never shrinks or exits), and
+# swapping the closed/open branches so $stillPending is added to on the
+# CLOSED condition instead of the OPEN one (tears every package down on every
+# poll instead of once, when it actually closes). Test-IssueClosed,
+# Stop-PackageStack, Invoke-Package and Start-Sleep are shadowed per the
+# deferred review's own suggestion; Invoke-Native is shadowed too, purely so
+# the surrounding consolidation step it also runs (a `git ls-remote` and a
+# `gh pr list`) never makes a real call - it is made to look like a PR is
+# already open, so Invoke-Wave logs and skips instead of starting a second
+# session. That skip means the marker-file branch (Set-Content) is never
+# taken either; the one real-path touch left is the unconditional
+# `Remove-Item $marker -ErrorAction SilentlyContinue` at the end of
+# Invoke-Wave, which is a no-op here since nothing in this test ever creates
+# that file.
+$stopOrder = [System.Collections.Generic.List[string]]::new()
+$closed = @{}
+$pkgA = [pscustomobject]@{ spec = 'A'; specIssue = 1; slug = 'iw-a' }
+$pkgB = [pscustomobject]@{ spec = 'B'; specIssue = 2; slug = 'iw-b' }
+$wave = [pscustomobject]@{ number = 9; waveIssue = 3; integrationBranch = 'x'; packages = @($pkgA, $pkgB) }
+$closed[$pkgB.specIssue] = $true
+function Test-IssueClosed { param([int]$Number) return [bool]$closed[$Number] }
+function Invoke-Package { param($Plan, $Standards, $Wave, $Package) }
+function Invoke-Native { param([scriptblock]$Command) $script:NativeExit = 0; return '999' }
+function Stop-PackageStack {
+    param([string]$WorktreePath, [string]$Slug)
+    $stopOrder.Add($Slug)
+    # iw-a's fake issue only "closes" once iw-b (its sibling, closing first)
+    # has been torn down; the wave issue only "closes" once iw-a has too, so
+    # Invoke-Wave's own final Wait-ForIssueClosed returns at once instead of
+    # really waiting.
+    if ($Slug -eq 'iw-b') { $closed[$pkgA.specIssue] = $true }
+    if ($Slug -eq 'iw-a') { $closed[$wave.waveIssue] = $true }
+}
+$script:sleeps = 0
+function Start-Sleep {
+    param($Seconds)
+    $script:sleeps++
+    if ($script:sleeps -gt 3) { throw 'watchdog: the polling loop did not shrink/terminate' }
+}
+
+$threw = $false; $err = $null
+try { Invoke-Wave -Plan $null -Standards $null -Wave $wave -NextWave $null } catch { $threw = $true; $err = $_.Exception.Message }
+Assert (-not $threw) "the polling loop terminates without a shadowed helper throwing ($err)"
+Assert (($stopOrder -join ',') -eq 'iw-b,iw-a') "teardown fires in ACTUAL close order (iw-b, listed second, closes first) - got '$($stopOrder -join ',')'"
 
 Write-Host ""
 if ($script:failures -gt 0) {

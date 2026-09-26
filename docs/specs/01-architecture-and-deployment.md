@@ -48,7 +48,7 @@ Every command is therefore a Docker invocation:
 | Run the stack (dev) | `docker compose up -d` |
 | Run the stack (production) | `docker compose -f docker-compose.yml up -d` |
 | Run unit tests | `docker compose run --rm app go test ./...` |
-| Run E2E tests (deployment gate) | `docker compose -f docker-compose.e2e.yml run --rm e2e` |
+| Run E2E tests (deployment gate) | Six-step sequence, not a single command — see "Running the E2E suite" below |
 | Run migrations | `docker compose -f docker-compose.yml run --rm app migrate up` |
 | Lint / vet | `docker compose run --rm app go vet ./...` |
 | Rebuild gamification progress from scratch | `docker compose -f docker-compose.yml run --rm app recompute-progress` |
@@ -84,6 +84,33 @@ toolchain — it is plain files. Browser behavior is covered by end-to-end
 tests that run in a throwaway pulled container: **not** part of the image
 build or the dev loop, but **required to pass before deploying**. See
 `05-frontend-pwa-foundations.md` for the suite and its required coverage.
+
+### Running the E2E suite
+
+`docker compose -f docker-compose.e2e.yml run --rm e2e` alone is **not** the
+gate, and running it as a single command fails all tests: the `e2e` service's
+own `depends_on` starts only `app` and `db`, so Traefik never comes up, and
+the suite's `BASE_URL=https://traefik` then fails every test at DNS
+resolution before the browser suite runs anything real.
+
+The correct sequence — build, migrate, start, seed, run, tear down — is
+documented once, in `docker-compose.e2e.yml`'s own header comment; run it
+from there rather than copying the commands here, so there is exactly one
+place they can go stale.
+
+Two things the sequence alone doesn't make obvious:
+
+- **The suite is not idempotent.** Nothing resets state between runs.
+  Re-running `run --rm e2e` against a stack that already ran once fails
+  roughly 21 tests with symptoms that look exactly like product bugs — e.g. a
+  fresh `POST` of a barcode answering `409 Conflict` instead of `201`. The
+  sequence's closing `down -v` is not tidiness; it's what makes the next run
+  trustworthy. A red result against a stack that has already run the suite
+  once is not evidence of a bug — reset (`down -v`, then the full sequence
+  again) and re-run before trusting it.
+- **On Git Bash on Windows**, the seed step needs `MSYS_NO_PATHCONV=1` in
+  front of it, or MSYS rewrites the container path `/fixtures/seed.sql` into
+  a host path and `psql` fails with "No such file or directory".
 
 ## Continuous integration
 
@@ -628,6 +655,17 @@ services:
       # like it passed. CI checks out fresh, so there the two are the same
       # file either way; this is purely about the local loop.
       - ./deploy:/src/deploy
+      # Same reason again, for cmd/inventory/compose_test.go: its repoFile
+      # helper reads these repository-root files directly, so without
+      # mounting each one `go test` verdicts the copy baked into the image
+      # rather than the file just edited.
+      - ./docker-compose.yml:/src/docker-compose.yml
+      - ./docker-compose.nas.yml:/src/docker-compose.nas.yml
+      - ./docker-compose.e2e.yml:/src/docker-compose.e2e.yml
+      - ./.gitignore:/src/.gitignore
+      - ./.dockerignore:/src/.dockerignore
+      - ./.gitattributes:/src/.gitattributes
+      - ./scripts/backup:/src/scripts/backup
     ports:
       - "8000:8000"             # direct access, bypassing Traefik, for debugging
 ```
