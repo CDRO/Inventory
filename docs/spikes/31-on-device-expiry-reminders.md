@@ -131,11 +131,11 @@ gaps:
   show on a lock screen. A promoted design should pin the on-device notification
   body to counts only, not digest lines.
 - **Where the per-user, per-device setting lives is unspecified.** "One read
-  endpoint and client code, no new tables" (below) conflicts with needing a
-  per-user, per-device setting somewhere, and a service worker cannot read the
-  `localStorage` that holds the active storage (`web/static/js/session.js`).
-  Undecided: which storage(s) the worker queries, and whether the badge is per
-  storage or summed across storages.
+  endpoint and client code" (above) and "no new tables" (below) conflict with
+  needing a per-user, per-device setting somewhere, and a service worker
+  cannot read the `localStorage` that holds the active storage
+  (`web/static/js/session.js`). Undecided: which storage(s) the worker
+  queries, and whether the badge is per storage or summed across storages.
 - **Spec 06's own no-nudge rule.** Spec 06 says the inbox's count badge next to
   the storage switcher "is the only nudge — no notifications, no emails"
   (`06-vision-shelf-ingestion.md`). An OS-level icon badge from this spike would
@@ -176,7 +176,12 @@ gaps:
       7 days, or the handler cannot show a notification. On the iPhone: record
       whether the installed PWA does anything in the background (expected:
       nothing) and whether the Badging API works there; these are recorded, not
-      pass/fail, since B1 does not depend on iOS background behaviour.
+      pass/fail, since B1 does not depend on iOS background behaviour. Where
+      the probe lives is deferred to whoever runs the gate: it needs no
+      production code, only a throwaway `periodicsync`/`showNotification`
+      handler in a disposable branch or test page, discarded once the two
+      devices are measured — naming a permanent module now would be building
+      the feature's plumbing before the gate has decided the feature.
 - [ ] The owner decides that "reminders while the app is used" (B1, or B2 on
       Chromium) is worth having next to spec 17, given that it cannot reach a closed
       app on iOS at all and only as often as the app is used on Android.
@@ -216,7 +221,7 @@ decisions rule out"); the exact list of Chromium engines with Periodic Backgroun
 Sync — MDN confirms Chrome and Edge, but Opera and Samsung Internet came from a
 search summary and were not checked against a primary source; the two Chrome for
 Developers quotes in "What the two decisions rule out", whose page could not be
-re-fetched by the reviewers; and the ntfy iOS delay finding about spec 17 below,
+re-fetched by the reviewers; and the ntfy iOS delay finding about spec 17 above,
 checked only against the ntfy documentation. Only the `periodicsync`/notification
 and Badging-API behaviour is answered by the first gate condition; the ntfy iOS
 finding has its own gate; the rest are out of scope for a candidate.
