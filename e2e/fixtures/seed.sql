@@ -16,8 +16,12 @@
 -- Applied directly to the disposable E2E database after migrations, NOT
 -- through the application layer, so fixed ids can be referenced by name from
 -- the test files. Run via
---   docker compose -f docker-compose.e2e.yml exec -T db \
+--   docker compose -p inventory-e2e -f docker-compose.e2e.yml exec -T db \
 --     psql -U e2e -d e2e -f /fixtures/seed.sql
+-- (`-p inventory-e2e` for the reason docker-compose.e2e.yml's `name:` comment
+-- gives: locally, a checkout's own COMPOSE_PROJECT_NAME would otherwise win
+-- and seed the wrong stack. On CI there is no `.env` and the workflow omits
+-- it.)
 --
 -- The admin row usually already exists by then. `migrate up` and `serve` both
 -- bootstrap the initial admin from ADMIN_INITIAL_USERNAME/PASSWORD
@@ -838,6 +842,24 @@ ON CONFLICT (id) DO NOTHING;
 INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock, icon_name) VALUES
   ('00000000-0000-7000-8000-0000000000fa', '00000000-0000-7000-8000-000000000010', 'E2E Picture Picker Source', NULL, 'non_perishable', 0, NULL),
   ('00000000-0000-7000-8000-0000000000fb', '00000000-0000-7000-8000-000000000010', 'E2E Picture Clear Source',  NULL, 'non_perishable', 0, 'noto:cheese-wedge')
+ON CONFLICT (id) DO NOTHING;
+
+-- #224: the move form's own empty-submit native-validation test, mirroring
+-- ...b3/...b4/...b5 above (the split form's equivalent) but for moveTarget.
+-- A dedicated product rather than reusing ...b3: that fixture's split form is
+-- read by the split scenario above, and this suite runs fullyParallel.
+-- ...fc/...fd/...fe are the next free ids after ...fb, the last one this file
+-- uses.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
+  ('00000000-0000-7000-8000-0000000000fc', '00000000-0000-7000-8000-000000000010', 'E2E Empty Submit Move Source', NULL, 'non_perishable', 0)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_date, expiration_source) VALUES
+  ('00000000-0000-7000-8000-0000000000fd', '00000000-0000-7000-8000-0000000000fc', '00000000-0000-7000-8000-000000000020', 4, NULL, 'derived')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
+  ('00000000-0000-7000-8000-0000000000fe', '00000000-0000-7000-8000-0000000000fc', '00000000-0000-7000-8000-0000000000fd', 4, 'purchase', '00000000-0000-7000-8000-000000000003')
 ON CONFLICT (id) DO NOTHING;
 
 COMMIT;

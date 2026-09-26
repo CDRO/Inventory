@@ -81,24 +81,43 @@ let dialogOpen = false;
  * in docs/specs/26 or docs/specs/27 asks for a second attempt to eventually
  * open once the first closes.
  *
+ * `opened` is how a caller tells that refusal from a dialog that really ran
+ * and happened to create nothing — both carry an empty createdIds, but only
+ * the second is a reason to refresh anything. A caller that ignores it turns
+ * a deliberate no-op into a network request, and a hiccup on that request
+ * into an error message for a click the application chose not to act on
+ * (#227).
+ *
  * @param {string} storageId
  * @param {{kind: "locations"|"categories"}} options
- * @returns {Promise<{createdIds: string[]}>}
+ * @returns {Promise<{opened: boolean, createdIds: string[]}>}
  */
 export function openTreeManager(storageId, { kind }) {
-  if (dialogOpen) return Promise.resolve({ createdIds: [] });
+  if (dialogOpen) return Promise.resolve({ opened: false, createdIds: [] });
   dialogOpen = true;
 
   const config = KINDS[kind];
   const createdIds = [];
-  // pendingMutation is whichever runMutation() attempt is currently in
-  // flight (already caught internally, so it never rejects); requestClose
-  // waits for it before finalizing, instead of resolving createdIds without
+  // pendingMutations holds every runMutation() attempt still in flight (each
+  // catches internally, so none ever rejects); requestClose waits until the
+  // set is empty before finalizing, instead of resolving createdIds without
   // an id the create POST hasn't returned yet and racing the caller's own
-  // refresh against that same in-flight write. pendingMutationFailed tracks
-  // whether that attempt ended in an error the user hasn't seen close the
-  // dialog on yet.
-  let pendingMutation = null;
+  // refresh against that same in-flight write.
+  //
+  // A set rather than a single slot naming "the most recently started
+  // mutation", because nothing orders POST responses by request order. With
+  // a slot, an earlier-started mutation that settles *after* a later-started
+  // one is lost: the later one finds the slot still naming itself, clears
+  // it, and a requestClose waiting on it then sees an empty slot and
+  // finalizes while the earlier one's create is still in flight — its id
+  // never reaching createdIds and its late answer landing in a dialog
+  // already removed (#221). Membership of a set is independent of settle
+  // order, so the question "is anything still outstanding?" stops having a
+  // wrong answer.
+  //
+  // pendingMutationFailed tracks whether an attempt ended in an error the
+  // user hasn't seen close the dialog on yet.
+  const pendingMutations = new Set();
   let pendingMutationFailed = false;
 
   const errorBox = el("div", { class: "alert", role: "alert", hidden: true });
@@ -156,13 +175,15 @@ export function openTreeManager(storageId, { kind }) {
       showError(err);
       pendingMutationFailed = true;
     });
-    pendingMutation = attempt;
-    await attempt;
-    // Only clear the slot if nothing newer has already claimed it — a second
-    // mutation started while this one was still in flight (the add-root form
-    // reopens the instant it's submitted, before its POST returns) owns the
-    // slot now, and this settling first must not clobber that.
-    if (pendingMutation === attempt) pendingMutation = null;
+    pendingMutations.add(attempt);
+    try {
+      await attempt;
+    } finally {
+      // Leaves the set the moment it settles, whoever else is still in it and
+      // whenever they started — the whole point of tracking membership rather
+      // than "the latest one".
+      pendingMutations.delete(attempt);
+    }
     await reload();
   }
 
@@ -247,26 +268,21 @@ export function openTreeManager(storageId, { kind }) {
   // landing in a dialog already removed; dismissing again (Done or Esc, with
   // nothing pending this time) closes it.
   //
-  // pendingMutation is single-slot: nothing stops a second mutation from
-  // starting while this function is already waiting on a first one (the
-  // add-root form reopens the moment it's submitted, before its POST
-  // returns). Comparing the settled attempt against the current
-  // pendingMutation, rather than finalizing once any attempt settles, is
-  // what tells "nothing else started meanwhile" from "a newer mutation is
-  // now the one to wait for" — finalizing on the first case only would
-  // resolve createdIds without whatever that newer mutation is still in the
-  // middle of creating, one level up from the exact race this function
-  // exists to close.
+  // INVARIANT: finalize only with pendingMutations empty, and re-check it
+  // after every wait instead of finalizing once the batch awaited here
+  // settles. Nothing stops a further mutation from starting while this
+  // function is already waiting (the add-root form reopens the moment it's
+  // submitted, before its own POST returns); such a mutation joins the set
+  // and has to be waited for too. Recursing until the set is genuinely empty
+  // is what makes both who-started-last and who-settles-last irrelevant —
+  // finalizing on the first settled batch would resolve createdIds without
+  // whatever a newer mutation is still in the middle of creating.
   function requestClose() {
-    const attempt = pendingMutation;
-    if (!attempt) {
+    if (pendingMutations.size === 0) {
       finalize();
       return;
     }
-    attempt.then(() => {
-      if (pendingMutation === attempt) finalize();
-      else requestClose();
-    });
+    Promise.all([...pendingMutations]).then(() => requestClose());
   }
 
   // A failed mutation keeps the dialog open on the request that discovers
@@ -315,7 +331,7 @@ export function openTreeManager(storageId, { kind }) {
     dialog.addEventListener("close", () => {
       dialog.remove();
       dialogOpen = false;
-      resolve({ createdIds: [...createdIds] });
+      resolve({ opened: true, createdIds: [...createdIds] });
     });
 
     document.body.append(dialog);

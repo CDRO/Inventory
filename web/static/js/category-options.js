@@ -117,12 +117,16 @@ export function refreshCategoryOptions(select, categories, keepValue = select.va
 export async function openCategoryField({ storageId, trigger, openedSelect, getOpenSelects, onError }) {
   if (trigger.disabled) return; // a dialog for this trigger is already open
   trigger.disabled = true;
+  let opened;
   let createdIds;
   try {
-    ({ createdIds } = await openTreeManager(storageId, { kind: "categories" }));
+    ({ opened, createdIds } = await openTreeManager(storageId, { kind: "categories" }));
   } finally {
     trigger.disabled = false;
   }
+  // Refused because a dialog of either kind was already open — the same
+  // no-op-stays-a-no-op rule openLocationField's own comment gives (#227).
+  if (!opened) return;
 
   let categories;
   try {

@@ -10,9 +10,11 @@ reused here).
 
 ## Why this spec exists
 
-`26` closed the location-quick-create gap for the two review-style screens
-that render through `js/review.js`: the ingestion review row and the
-shopping-list resolution UI. The batch **split**
+`26` closed the location-quick-create gap for two screens: the ingestion
+review row, which renders through the shared row component `js/review.js`,
+and the shopping-list resolution UI, which is its own page module
+(`js/pages/shopping-list.js`) and does not use `js/review.js`. The batch
+**split**
 (`POST /api/storages/{storage_id}/inventory-batches/{id}/split`) and
 **move** (`PATCH /api/storages/{storage_id}/inventory-batches/{id}`) picker
 on `products.html`'s batch list (`06`, built for `#145`) has the identical

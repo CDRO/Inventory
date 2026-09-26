@@ -8,6 +8,12 @@
 --   docker compose -f docker-compose.e2e.yml exec -T db \
 --     psql -U e2e -d e2e -f /fixtures/restore-roundtrip.sql
 --
+-- No `-p inventory-e2e` on that command, deliberately: it is the CI line
+-- verbatim, and a runner has no `.env`, so docker-compose.e2e.yml's own
+-- `name:` already makes the project `inventory-e2e`. Running it by hand from a
+-- checkout whose `.env` sets COMPOSE_PROJECT_NAME needs the flag added, for
+-- the reason that file's `name:` comment gives (#190).
+--
 -- Why it exists. The round trip asserts that every table's row count survives
 -- a backup, a `down -v` and a restore, and admin_audit_log and settings are
 -- the two tables on that list seed.sql leaves empty. A count assertion over

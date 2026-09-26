@@ -44,8 +44,10 @@
       * Either way, a project with a container in a directory OUTSIDE the
         requested worktrees is not claimed: one container inside a worktree
         is not enough when another of the same project lives elsewhere.
-        (docker-compose.e2e.yml pins one project name for every worktree, so
-        a live E2E stack of another worktree could otherwise be swept.) A
+        (A machine has ONE E2E project, inventory-e2e, whichever checkout
+        brought it up - docker-compose.e2e.yml's `name:` comment, #190 - so
+        without this a live E2E stack could be swept out from under the
+        checkout running it.) A
         container carrying the project label but no working_dir label at all
         vetoes in the same way - it cannot be placed, so it is no evidence of
         ownership - and is reported as unplaceable rather than as "outside".
@@ -391,9 +393,10 @@ foreach ($c in $containers) {
 
 # A project with a container in a directory outside the requested worktrees is
 # not this wave's to remove, even when another of its containers does live in
-# one (#140 item 2). docker-compose.e2e.yml pins ONE project name for every
-# worktree, so without this a wave that ran the E2E suite would take a live E2E
-# stack of another worktree with it - the exact thing the name rule's own
+# one (#140 item 2). A machine has exactly ONE E2E project, inventory-e2e, no
+# matter which checkout brought it up (#190), so without this a wave that ran
+# the E2E suite would take a live E2E stack of the main checkout - or of a
+# worktree outside this wave - with it, the exact thing the name rule's own
 # $foreignDir veto already refuses to do.
 #
 # Applied AFTER the whole container pass, not inside it: the container that

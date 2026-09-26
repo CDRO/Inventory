@@ -249,6 +249,51 @@ func TestE2EAppMountsTheUploadsTheRoundTripDestroys(t *testing.T) {
 		"imagecache is not in a backup archive, so the E2E stack has no reason to hold one")
 }
 
+// TestE2EComposeFilePinsItsProjectName — the E2E stack is one Compose project
+// per machine, `inventory-e2e` (#190, and that file's own `name:` comment).
+// Locally every documented command passes `-p inventory-e2e`, because a
+// checkout's COMPOSE_PROJECT_NAME beats a file's `name:`. CI passes no `-p` at
+// all: a runner has no `.env`, so this one line is the whole of the separation
+// there, across some forty invocations in .github/workflows/e2e.yml.
+//
+// Which makes it the rare line whose removal breaks nothing visibly. Delete or
+// rename it and every suite stays green — no Go code reads it, neither
+// PowerShell suite loads the file, and CI's own E2E job still passes, because a
+// fresh runner has no dev stack for the E2E project to collide with. What it
+// reopens is #190's original failure on a developer machine: this file would
+// share the default `inventory` project with docker-compose.yml, and `db` would
+// come up on the dev stack's own container and data directory instead of a
+// disposable one. That was measured, not theorized — in a checkout where the
+// two shared a project, `psql -U e2e` answered `role "e2e" does not exist`
+// because the data directory had already been initialized under the dev role.
+//
+// The companion fact — that the documented sequence in that file's header
+// carries `-p inventory-e2e` — is deliberately not asserted here. It lives in
+// prose that is meant to be reworded, and composeService strips comments for
+// exactly that reason. This is a value, so it can be pinned.
+func TestE2EComposeFilePinsItsProjectName(t *testing.T) {
+	t.Parallel()
+
+	normalized := strings.ReplaceAll(repoFile(t, "docker-compose.e2e.yml"), "\r\n", "\n")
+
+	// An exact line match, the way composeService finds a service key: column 0
+	// is what distinguishes the project name from a `name:` nested inside some
+	// service, and every other mention of `inventory-e2e` in this file is
+	// inside a `#` comment, which a substring match would happily accept.
+	// Scanned rather than asserted with Contains over the whole file so that a
+	// failure prints the message below instead of two hundred lines of YAML.
+	pinned := false
+	for _, line := range strings.Split(normalized, "\n") {
+		if line == "name: inventory-e2e" {
+			pinned = true
+			break
+		}
+	}
+
+	assert.True(t, pinned,
+		"docker-compose.e2e.yml must pin the project name at the top level: CI passes no -p, so without this line the E2E stack shares the default project with docker-compose.yml and db reuses the dev stack's data directory (#190)")
+}
+
 // TestBackupArchivesAreNotCommittable — an archive holds the whole database
 // and every photo in it. The service writes them into the clone, so the only
 // thing standing between a backup and the repository is this line.

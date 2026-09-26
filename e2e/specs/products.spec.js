@@ -49,6 +49,7 @@ const DOUBLE_CLICK_MOVE_PRODUCT = "00000000-0000-7000-8000-00000000009c";
 const DOUBLE_CLICK_MOVE_BATCH = "00000000-0000-7000-8000-00000000009d";
 const EMPTY_SUBMIT_BATCH = "00000000-0000-7000-8000-0000000000b4";
 const NESTED_LOCATION_BATCH = "00000000-0000-7000-8000-0000000000b8";
+const EMPTY_SUBMIT_MOVE_BATCH = "00000000-0000-7000-8000-0000000000fd";
 
 // "E2E Other Household" (...011) — Alice's, not Bob's — and its own Garage
 // location, used only as a target_location_id/location_id from *another*
@@ -547,6 +548,40 @@ test("submitting the split form with an empty quantity and no target is blocked 
 
   await form.locator('button[type="submit"]').click();
   expect(await form.locator("input").evaluate((el) => el.validity.valid)).toBe(false);
+  expect(await form.locator("select").evaluate((el) => el.validity.valid)).toBe(false);
+  await expect(form).toBeVisible(); // still open — the submit never went through
+
+  expect(requestSeen).toBe(false);
+});
+
+// #224: the split test above proves native validation blocks an empty
+// submit, but only for splitQuantity/splitTarget. moveTarget carries the
+// same `required` (products.js) yet the move form has no quantity field and,
+// more importantly, moveBatch's own no-op-on-same-location guard
+// (internal/store/batches.go) means an empty-target submit that *did* reach
+// the server would look just like one the guard silently absorbed — a
+// request-absence check alone can't tell those two cases apart. Asserting
+// moveTarget.validity.valid directly is what actually distinguishes "native
+// validation blocked this" from "the server no-op'd it".
+test("submitting the move form with no target is blocked by native validation, not a silent no-op", async ({
+  page,
+}) => {
+  await logIn(page);
+  await openProduct(page, "E2E Empty Submit Move Source");
+
+  const row = batchRow(page, EMPTY_SUBMIT_MOVE_BATCH);
+  await expect(row).toContainText("4 × Pantry");
+  await row.locator('[data-role="move-toggle"]').click();
+
+  const form = row.locator('[data-role="move-form"]');
+  await expect(form).toBeVisible();
+
+  let requestSeen = false;
+  page.on("request", (req) => {
+    if (req.url().includes("/inventory-batches/") && req.method() !== "GET") requestSeen = true;
+  });
+
+  await form.locator('button[type="submit"]').click();
   expect(await form.locator("select").evaluate((el) => el.validity.valid)).toBe(false);
   await expect(form).toBeVisible(); // still open — the submit never went through
 
