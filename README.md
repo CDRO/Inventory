@@ -361,7 +361,9 @@ docker compose -f docker-compose.yml up -d              # 4.
 tested never and trusted always. Going back after a bad upgrade means
 restoring the backup taken in step 1.
 
-Skipping step 3 is loud rather than weird: the server refuses to start and
-prints the command. On the operator's Synology NAS, steps 2 to 4 are
+Skipping step 3 is loud rather than weird: the server refuses to start, names
+the fix and exits `78`. It prints no command of its own — the right one
+differs by deployment variant, so the message points back here, to step 3
+above. On the operator's Synology NAS, steps 2 to 4 are
 `sh deploy/synology/update`; step 1 is still yours, since the script takes no
 backup.
