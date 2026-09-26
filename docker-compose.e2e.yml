@@ -7,32 +7,45 @@
 # Build, migrate, then start — in that order. `serve` refuses to start against
 # a schema behind the binary (docs/specs/18-operations-and-observability.md),
 # so an `app` container brought up before `migrate up` exits immediately and
-# the suite has nothing to talk to:
+# the suite has nothing to talk to. `-p inventory-e2e` is part of every
+# command rather than decoration: in a checkout whose .env sets
+# COMPOSE_PROJECT_NAME — every agent worktree — it is the only thing that
+# keeps this stack out of that checkout's dev project, because `name:` below
+# loses to it. See `name:`'s own comment for the measurements (#190).
 #
-#   docker compose -f docker-compose.e2e.yml build
-#   docker compose -f docker-compose.e2e.yml run --rm app migrate up
-#   docker compose -f docker-compose.e2e.yml up -d
-#   docker compose -f docker-compose.e2e.yml exec -T db \
+#   docker ps --filter label=com.docker.compose.project=inventory-e2e \
+#     --format '{{.Names}} {{.Label "com.docker.compose.project.working_dir"}}'
+#   docker compose -p inventory-e2e -f docker-compose.e2e.yml build
+#   docker compose -p inventory-e2e -f docker-compose.e2e.yml run --rm app migrate up
+#   docker compose -p inventory-e2e -f docker-compose.e2e.yml up -d
+#   docker compose -p inventory-e2e -f docker-compose.e2e.yml exec -T db \
 #     psql -U e2e -d e2e -f /fixtures/seed.sql
-#   docker compose -f docker-compose.e2e.yml run --rm e2e
-#   docker compose -f docker-compose.e2e.yml down -v
+#   docker compose -p inventory-e2e -f docker-compose.e2e.yml run --rm e2e
+#   docker compose -p inventory-e2e -f docker-compose.e2e.yml down -v
+#
+# The first command is a pre-flight check, not part of the gate: there is
+# exactly ONE E2E project on a machine, so if it prints a container whose
+# working_dir is not this checkout, another checkout is running the gate right
+# now — wait for it. Continuing would not fail; the `up` would take that
+# stack's containers over silently (`name:` below spells out why).
 #
 # The `backup` service below belongs to the second thing this file drives: the
 # backup/restore round trip (docs/specs/15-backup-restore-and-export.md, issue
 # #133), run by the `restore-round-trip` job in .github/workflows/e2e.yml. It
 # destroys this project's volumes half way through, on purpose, so it must
-# never run beside another session's E2E stack — `name:` below is one project
-# for every worktree on a machine, and a `down -v` here takes that other stack
-# with it. On CI each job gets its own runner, so the two are already
-# isolated; locally, run one or the other, never both at once.
+# never run beside another session's E2E stack — a machine has a single E2E
+# project, shared by every checkout on it (`name:` below), and a `down -v` here
+# takes that other stack with it. On CI each job gets its own runner, so the
+# two are already isolated; locally, run one or the other, never both at once.
 #
 # One more local caveat, which is about the worktrees rather than about this
-# file: an agent worktree's .env sets COMPOSE_PROJECT_NAME, and that takes
-# precedence over `name:` below — so in such a checkout this file and
-# docker-compose.yml share one project, and the `uploads` volume both declare
-# is one volume. A round trip run there therefore also destroys the dev
-# stack's uploads. On CI, where there is no .env, `name:` stands and the two
-# are separate. (Whether E2E is isolated per worktree at all is issue #140.)
+# file: an agent worktree's .env sets COMPOSE_PROJECT_NAME, and that beats
+# `name:` below — so a command that omits `-p inventory-e2e` there puts this
+# file and docker-compose.yml in one project, and the `uploads` volume both
+# declare is then one volume, so a round trip destroys the dev stack's uploads
+# along with its own. With `-p inventory-e2e`, which every documented command
+# above passes, the two are separate volumes in separate projects, exactly as
+# they always are on CI, where there is no .env at all.
 #
 # This does not violate the no-host-toolchain rule
 # (docs/specs/01-architecture-and-deployment.md): the Playwright image is
@@ -45,14 +58,51 @@
 # in the repository calls any of them. A local fake for that arrives with
 # specs 06/07, which are what actually need one.
 #
-# `name:` below pins an isolated Compose project. Without it this file shares
-# the default "inventory" project with docker-compose.yml/override.yml, and
-# Compose recreates containers by name across configs — `db` here would reuse
-# the dev stack's own `inventory-db-1` and its data directory instead of
-# starting fresh, silently defeating the "disposable by definition" anonymous
-# volume below. Confirmed live: running the dev stack first, then this file
-# without an isolated name, left the `e2e` Postgres role missing because the
-# dev volume's data directory was already initialized under a different role.
+# `name:` below pins an isolated Compose project — but only where nothing else
+# names the project, which is why every command above also passes
+# `-p inventory-e2e`. Compose's precedence is `-p`, then COMPOSE_PROJECT_NAME
+# from the environment or an auto-loaded `.env`, then a file's `name:`, then
+# the directory name; and `.env` is read from the project directory whatever
+# `-f` says. So what this file is named depends on the checkout it runs from.
+# Measured with real `up`s rather than `config` (#190):
+#
+#   * Main checkout, or any clone with no `.env`: `inventory-e2e`. `name:`
+#     stands, and it is load bearing — without it this file would share the
+#     default "inventory" project with docker-compose.yml/override.yml, and
+#     Compose recreates containers by name across configs, so `db` here would
+#     reuse the dev stack's own `inventory-db-1` and its data directory
+#     instead of starting fresh, silently defeating the "disposable by
+#     definition" anonymous volume below.
+#   * An agent worktree, whose `.env` sets COMPOSE_PROJECT_NAME
+#     (scripts/wellen-orchestrator.ps1, Set-WorktreeEnvOverrides): `name:`
+#     LOSES, and the stack lands in that worktree's own dev project. Not
+#     merely a naming wart — the collision above is then live in the place
+#     the suite is most often run from. Reproduced: with the worktree's dev
+#     `db` container present (every `docker compose run --rm app go test`
+#     leaves one behind), `up -d db` from this file recreated it and carried
+#     the dev `pgdata` volume onto the new container, so the data directory
+#     was already initialized under the dev role and `psql -U e2e` answered
+#     `role "e2e" does not exist`.
+#   * Either checkout with `-p inventory-e2e`: `inventory-e2e`, a fresh
+#     anonymous data directory, and the checkout's own dev stack untouched.
+#
+# The deliberate answer is therefore: ONE E2E project per machine, always
+# named `inventory-e2e`. It is not isolated per worktree and is not meant to
+# be — `-p` makes the name the same everywhere instead, and `name:` covers the
+# checkouts that pass no `-p` and set no COMPOSE_PROJECT_NAME (CI above all),
+# where it is the whole of the separation.
+#
+# One project per machine means two checkouts may NEVER run the E2E suite at
+# the same time. That is a rule, not a preference, and it is only half
+# mechanical: `traefik` publishes host 8443 with no variable, so a second
+# stack under a *different* name dies on `Bind for 0.0.0.0:8443 failed: port
+# is already allocated` (verified), but under the one shared name the second
+# `up` does not fail at all — it recreates the first stack's containers and
+# takes it over silently, and a `down -v` then destroys a run that is still
+# in progress. Inside a sequential wave only one session runs at a time and
+# this is automatic; a wave with `"sequential": false` has several at once,
+# and the pre-flight `docker ps` at the top of this header is the only thing
+# between them.
 name: inventory-e2e
 
 services:
@@ -132,6 +182,17 @@ services:
     # container instead of persisting — reusing a stale fixture across runs,
     # or colliding with the dev pgdata volume, would both be worse than
     # losing the data on every `down`.
+    #
+    # `down` is what makes that true, though, not `up`: when Compose recreates
+    # a container in place it carries the previous one's volume over at a
+    # mount point the new definition does not declare. So a bare `up` after an
+    # earlier run — or from a second checkout, since the project name is the
+    # same one everywhere (see the header) — inherits that run's data
+    # directory rather than starting fresh; measured, same anonymous volume id
+    # before and after. Beginning the documented sequence with `down -v` is
+    # what actually guarantees a clean database, and it is the same reason
+    # re-running the suite without one is not idempotent
+    # (docs/specs/01-architecture-and-deployment.md, "Running the E2E suite").
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U e2e -d e2e"]
       interval: 5s
