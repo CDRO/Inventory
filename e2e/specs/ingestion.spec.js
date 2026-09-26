@@ -441,6 +441,63 @@ test("closing the location modal while its create POST is still in flight still 
   await expect(first.locator('[data-role="location"] option:checked')).toContainText("Cellar Rack");
 });
 
+// #154 item 2, round 2: pendingMutation is a single slot, so a *second*
+// create POST started while Done is already waiting on the first one must
+// not be dropped when the first settles — tree-modal.js has to keep waiting
+// for whichever one is still outstanding, not just the one requestClose
+// originally latched onto.
+test("closing the location modal while two creates overlap waits for both before resolving", async ({ page }) => {
+  await logInAsBob(page);
+  await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOCATION_MODAL_JOB}`);
+  const first = page.locator("#rows .review-row").first();
+
+  await first.locator('[data-role="location-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(dialog).toBeVisible();
+
+  // Each POST this test creates is held open independently, released in an
+  // order the test controls below.
+  const releases = [];
+  await page.route(`**/api/storages/${HOUSEHOLD}/locations`, async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    await new Promise((resolve) => releases.push(resolve));
+    await route.continue();
+  });
+
+  const addRoot = async (name) => {
+    await dialog.getByRole("button", { name: "Add top-level location" }).click();
+    await dialog.locator('input[aria-label="Name of the new top-level location"]').fill(name);
+    await dialog.locator("#location-modal-add-root-form button[type=submit]").click();
+  };
+
+  // The add-root form removes itself the instant it's submitted (before its
+  // POST returns), so a second one can be opened and submitted while the
+  // first create is still in flight — exactly what makes the two overlap.
+  await addRoot("Attic Bin");
+  await addRoot("Basement Nook");
+
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeVisible();
+
+  await expect.poll(() => releases.length).toBe(2);
+
+  // The first create settles; the second is still outstanding, so the
+  // dialog must still be waiting rather than resolving createdIds one id
+  // short.
+  releases[0]();
+  await expect(dialog).toBeVisible();
+
+  releases[1]();
+  await page.unroute(`**/api/storages/${HOUSEHOLD}/locations`);
+
+  await expect(dialog).toBeHidden();
+  await expect(first.locator('[data-role="location"] option', { hasText: "Attic Bin" })).toHaveCount(1);
+  await expect(first.locator('[data-role="location"] option', { hasText: "Basement Nook" })).toHaveCount(1);
+});
+
 // docs/specs/26-location-quick-create.md's first acceptance criterion, for
 // `06` review specifically: "in a storage with zero locations ... the user
 // opens the modal, creates a root location, closes the modal, and that

@@ -140,7 +140,11 @@ export function openTreeManager(storageId, { kind }) {
     });
     pendingMutation = attempt;
     await attempt;
-    pendingMutation = null;
+    // Only clear the slot if nothing newer has already claimed it — a second
+    // mutation started while this one was still in flight (the add-root form
+    // reopens the instant it's submitted, before its POST returns) owns the
+    // slot now, and this settling first must not clobber that.
+    if (pendingMutation === attempt) pendingMutation = null;
     await reload();
   }
 
@@ -224,11 +228,38 @@ export function openTreeManager(storageId, { kind }) {
   // request so the user actually sees showError's message rather than it
   // landing in a dialog already removed; dismissing again (Done or Esc, with
   // nothing pending this time) closes it.
+  //
+  // pendingMutation is single-slot: nothing stops a second mutation from
+  // starting while this function is already waiting on a first one (the
+  // add-root form reopens the moment it's submitted, before its POST
+  // returns). Comparing the settled attempt against the current
+  // pendingMutation, rather than finalizing once any attempt settles, is
+  // what tells "nothing else started meanwhile" from "a newer mutation is
+  // now the one to wait for" — finalizing on the first case only would
+  // resolve createdIds without whatever that newer mutation is still in the
+  // middle of creating, one level up from the exact race this function
+  // exists to close.
   function requestClose() {
-    if (pendingMutation) {
-      pendingMutation.then(() => {
-        if (!pendingMutationFailed) dialog.close();
-      });
+    const attempt = pendingMutation;
+    if (!attempt) {
+      finalize();
+      return;
+    }
+    attempt.then(() => {
+      if (pendingMutation === attempt) finalize();
+      else requestClose();
+    });
+  }
+
+  // A failed mutation keeps the dialog open on the request that discovers
+  // it, so the user actually sees showError's message instead of it landing
+  // in a dialog already removed — but only once: consuming the flag here
+  // means a further dismissal (the user having now seen it, or an unrelated
+  // later click) actually closes, rather than every subsequent Done/Esc
+  // finding the same stale failure and never closing at all.
+  function finalize() {
+    if (pendingMutationFailed) {
+      pendingMutationFailed = false;
       return;
     }
     dialog.close();
