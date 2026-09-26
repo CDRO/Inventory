@@ -170,12 +170,20 @@ async function loadProducts() {
   );
 }
 
+/**
+ * reload re-reads the sheet and reports whether that succeeded, so a caller
+ * that wants to follow up with its own message — confirm()'s success notice
+ * below — knows whether reload() already left one of its own visible.
+ *
+ * @returns {Promise<boolean>}
+ */
 async function reload() {
   clearError();
   try {
     const sheet = await get(`/api/storages/${storageId}/locations/${locationId}/stocktake`);
     chooserSection.hidden = true;
     render(sheet);
+    return true;
   } catch (err) {
     sheetSection.hidden = true;
     if (err instanceof ApiError && err.status === 404) {
@@ -187,11 +195,12 @@ async function reload() {
       statusLine.hidden = true;
       showMessage(t("stocktake.notFound"));
       await renderChooser();
-      return;
+      return false;
     }
     statusLine.hidden = false;
     statusLine.textContent = t("stocktake.loadFailed");
     showError(err);
+    return false;
   }
 }
 
@@ -456,9 +465,12 @@ async function confirm() {
     // otherwise hide this notice in the same tick it was shown in, since
     // nothing here yields to the browser between the two calls — confirmed
     // live, this was a pre-existing bug that left every successful confirm
-    // with no visible feedback at all.
-    await reload();
-    showNotice(summarize(result));
+    // with no visible feedback at all. But only when reload() succeeded:
+    // the write already committed by this point, so a location deleted or
+    // moved out from under it between the POST and this GET is real news —
+    // reload()'s own 404/error message must survive, not be stomped by a
+    // bare "recorded" notice that hides it in the same tick.
+    if (await reload()) showNotice(summarize(result));
   } catch (err) {
     showError(err);
     if (err instanceof ApiError && err.status === 422) {

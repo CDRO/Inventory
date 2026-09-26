@@ -47,6 +47,7 @@ const DOUBLE_CLICK_BATCH = "00000000-0000-7000-8000-00000000009a";
 const DOUBLE_CLICK_MOVE_PRODUCT = "00000000-0000-7000-8000-00000000009c";
 const DOUBLE_CLICK_MOVE_BATCH = "00000000-0000-7000-8000-00000000009d";
 const EMPTY_SUBMIT_BATCH = "00000000-0000-7000-8000-0000000000b4";
+const NESTED_LOCATION_BATCH = "00000000-0000-7000-8000-0000000000b8";
 
 // "E2E Other Household" (...011) — Alice's, not Bob's — and its own Garage
 // location, used only as a target_location_id/location_id from *another*
@@ -515,4 +516,17 @@ test("submitting the split form with an empty quantity and no target is blocked 
   await expect(form).toBeVisible(); // still open — the submit never went through
 
   expect(requestSeen).toBe(false);
+});
+
+// #174 item 2: locationPathFor joins a batch's full ancestor path with " › ",
+// but every other batch row in this file sits at root-level Pantry or Fridge
+// — a bug in the join order (child-first instead of root-first) or in the
+// separator would pass every other test here. "Door Bin" is two levels below
+// Fridge (e2e/fixtures/seed.sql), so this is the one row that can catch it.
+test("a batch two locations deep renders its full path, root first", async ({ page }) => {
+  await logIn(page);
+  await openProduct(page, "E2E Nested Location Source");
+
+  const row = batchRow(page, NESTED_LOCATION_BATCH);
+  await expect(row).toContainText("6 × Fridge › Door Bin");
 });
