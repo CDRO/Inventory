@@ -22,12 +22,18 @@ import (
 	"golang.org/x/image/math/fixed"
 )
 
-// requireLiveGemini skips the test unless a real key is available, so the
-// suite stays hermetic by default and only reaches the network when someone
-// deliberately asks it to.
+// requireLiveGemini skips the test unless it has been explicitly asked to run
+// the real Gemini API. That ask is GEMINI_LIVE_TEST=1, deliberately separate
+// from GEMINI_API_KEY: the key is ordinary app config, present in any
+// environment where the vision feature actually works, and `go test ./...`
+// must not spend a paid API call just because that key happens to be set —
+// only when someone deliberately opts in to exercising this specific test.
 func requireLiveGemini(t *testing.T) (key, model string) {
 	t.Helper()
 
+	if os.Getenv("GEMINI_LIVE_TEST") != "1" {
+		t.Skip("GEMINI_LIVE_TEST not set to 1; go test ./... does not reach the live Gemini API by default")
+	}
 	key = os.Getenv("GEMINI_API_KEY")
 	if key == "" {
 		t.Skip("GEMINI_API_KEY not set; export it to exercise the real Gemini API")
