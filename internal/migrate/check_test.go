@@ -54,10 +54,15 @@ func TestCheckPassesWhenTheSchemaMatchesTheBinary(t *testing.T) {
 // TestCheckRefusesADatabaseBehindTheBinary is the acceptance criterion: `serve`
 // refuses to start, with the documented message, when migrations are pending.
 //
-// The count and both commands are asserted because the message *is* the
-// remediation — an operator reading `docker compose logs app` has nothing else
-// to go on, and "schema mismatch" without the command to fix it is a message
-// that makes somebody open a search engine.
+// The count is asserted because the message *is* the remediation — an
+// operator reading `docker compose logs app` has nothing else to go on, and
+// "schema mismatch" without the fix is a message that makes somebody open a
+// search engine. Neither step names a compose invocation: "docker compose -f
+// docker-compose.yml run --rm app migrate up" (missing the NAS's second -f
+// layer) silently migrates a throwaway database instead of the operator's
+// own Synology NAS variant's real one (migrations/README.md), and "docker
+// compose -f docker-compose.yml up -d" starts Traefik there, which is wrong
+// because DSM already holds port 80.
 func TestCheckRefusesADatabaseBehindTheBinary(t *testing.T) {
 	dsn := newTestDatabase(t)
 
@@ -79,8 +84,9 @@ func TestCheckRefusesADatabaseBehindTheBinary(t *testing.T) {
 
 	message := err.Error()
 	assert.Contains(t, message, "Database schema is 2 migrations behind this binary.")
-	assert.Contains(t, message, "docker compose -f docker-compose.yml run --rm app migrate up")
-	assert.Contains(t, message, "docker compose -f docker-compose.yml up -d")
+	assert.Contains(t, message, "migrate up")
+	assert.Contains(t, message, "README.md", "the hint must point somewhere for the actual commands, not just decline to name them")
+	assert.NotContains(t, message, "docker compose", "the hint must not name a compose invocation: both steps are wrong on the Synology NAS variant")
 }
 
 // TestCheckRefusesADatabaseAheadOfTheBinary — a restored newer dump, or a

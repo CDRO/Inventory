@@ -861,7 +861,7 @@ over SSH, and the UI is only good for looking at running containers.
 **First start.** The stack does not migrate on its own, and since
 [`18-operations-and-observability.md`](18-operations-and-observability.md) it
 does not pretend to either: without `migrate up` the app refuses to start,
-naming the command, and exits with the same non-retryable code as the
+naming the fix, and exits with the same non-retryable code as the
 missing-`.env` check. (It used to start and then log
 `relation "jobs" does not exist` from every background sweep while serving
 nothing useful.) The bind-mounted `./pgdata` starts empty, so this applies to
