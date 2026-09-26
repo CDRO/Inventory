@@ -183,3 +183,56 @@ test("a storage with no locations at all shows the chooser's empty state, linkin
     new RegExp(`/locations\\.html\\?storage=${EMPTY_STORAGE}`),
   );
 });
+
+// #174 item 1: confirm()'s success path must not let its own showNotice()
+// stomp a message reload() already put up on failure — the scenario the
+// issue names is a housemate deleting the location between the confirm POST
+// succeeding and the immediately-following reload() GET. The location itself
+// is left alone here; only that one GET is intercepted, so the POST still
+// goes through for real and this proves the write survives while the UI
+// keeps showing the not-found message instead of a bare "recorded" notice.
+// Reverting stocktake.js's `if (await reload()) showNotice(...)` guard back
+// to an unconditional showNotice() would fail this test's #notice assertion.
+test("a location vanishing between a successful confirm and its reload leaves the not-found message showing, not a bare success notice", async ({
+  page,
+}) => {
+  await logIn(page);
+  await page.goto(`/stocktake.html?location=${FRIDGE}&storage=${STORAGE}`);
+  await expect(page.locator("#sheet")).toBeVisible();
+
+  await page.route(`**/api/storages/${STORAGE}/locations/${FRIDGE}/stocktake`, async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 404,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "not_found", message: "not found" } }),
+    });
+  });
+
+  // Both requests, not just the POST: confirm()'s own await chain (POST, then
+  // reload()'s GET) runs on the page after the click resolves here, so
+  // waiting on the POST alone and then unrouting immediately races the page's
+  // own GET — observed live, that race let the real server answer the GET
+  // before the interception ever applied, defeating the whole test.
+  const [postResponse, getResponse] = await Promise.all([
+    page.waitForResponse(
+      (res) => res.url().endsWith(`/locations/${FRIDGE}/stocktake`) && res.request().method() === "POST",
+    ),
+    page.waitForResponse(
+      (res) => res.url().endsWith(`/locations/${FRIDGE}/stocktake`) && res.request().method() === "GET",
+    ),
+    page.locator("#confirm").click(),
+  ]);
+  expect(postResponse.status()).toBe(200); // the write itself succeeded
+  expect(getResponse.status()).toBe(404); // the intercepted reload
+
+  await page.unroute(`**/api/storages/${STORAGE}/locations/${FRIDGE}/stocktake`);
+
+  await expect(page.locator("#error")).toContainText("could not be found");
+  await expect(page.locator("#notice")).toBeHidden();
+  await expect(page.locator("#sheet")).toBeHidden();
+  await expect(page.locator("#chooser")).toBeVisible();
+});
