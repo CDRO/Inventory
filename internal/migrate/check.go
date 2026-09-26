@@ -46,9 +46,20 @@ func (e *SchemaMismatchError) Behind() bool { return e.Pending > 0 }
 // the whole instruction, and prefixing it would bury the first line.
 func (e *SchemaMismatchError) Error() string {
 	if e.Behind() {
+		// Neither line names a compose invocation, and each is wrong on the
+		// operator's own Synology NAS variant for a different reason: "docker
+		// compose -f docker-compose.yml run --rm app migrate up" (missing the
+		// NAS's second -f layer) resolves `db` to a throwaway named volume
+		// instead of the NAS's bind-mounted ./pgdata, and reports success
+		// while the real database stays untouched (migrations/README.md);
+		// "docker compose -f docker-compose.yml up -d" starts Traefik, which
+		// is wrong because DSM already holds port 80
+		// (docs/specs/01-architecture-and-deployment.md, "Synology NAS
+		// variant"). README.md names the right two commands for every
+		// variant.
 		return fmt.Sprintf(`Database schema is %d migration%s behind this binary.
-Run:  docker compose -f docker-compose.yml run --rm app migrate up
-Then: docker compose -f docker-compose.yml up -d`, e.Pending, plural(e.Pending))
+Run:  apply the pending migrations (migrate up) the way you deploy it (see README.md).
+Then: start the stack the same way.`, e.Pending, plural(e.Pending))
 	}
 	return fmt.Sprintf(`Database schema (version %d) is newer than this binary (version %d).
 This image is older than the database it was pointed at — a restored dump from a
