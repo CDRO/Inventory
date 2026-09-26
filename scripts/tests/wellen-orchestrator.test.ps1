@@ -423,6 +423,62 @@ Write-Output "Done: 1 container(s), 0 network(s), 1 volume(s), 0 image tag(s) pr
     Remove-Item -Force -Path $script:LogFile -ErrorAction SilentlyContinue
 }
 
+Write-Host "== Get-PackagePrompt / Get-ConsolidationPrompt: plan.conventions reaches both =="
+
+# #255 and #246 were both hazards a consolidation session hit that
+# plan.conventions was supposed to warn it about - and it turned out
+# Get-ConsolidationPrompt never referenced $Plan.conventions at all, only
+# Get-PackagePrompt did. That bug shipped with a fully green test suite,
+# because nothing here called either prompt builder. A marker string is
+# enough: if $Plan.conventions is ever dropped from either prompt again,
+# this fails immediately instead of silently shipping the same class of gap
+# a second time.
+#
+# [pscustomobject], not a Hashtable: Get-Field's existence check
+# ($Object.PSObject.Properties[$Name]) only works against the shape
+# ConvertFrom-Json actually produces (which the real orchestrator always
+# passes) - a Hashtable silently fails it and Get-Field always returns the
+# default, which would make this test pass even with the interpolation
+# missing.
+$conventionsPlan = [pscustomobject]@{
+    name       = 'Test Plan'
+    planIssue  = 999
+    conventions = 'CONVENTIONS-MARKER-9f3a'
+}
+$conventionsStandards = [pscustomobject]@{
+    roundLimitPackage       = 2
+    roundLimitConsolidation = 4
+}
+$conventionsWave = [pscustomobject]@{
+    number            = 7
+    waveIssue         = 231
+    integrationBranch = 'integration/x'
+    dockerCleanup     = $true
+}
+$conventionsPackage = [pscustomobject]@{
+    spec       = 'Issue 1: test'
+    specIssue  = 1
+    slug       = 'w7-test'
+    branch     = 'followups/w7-test'
+    focus      = 'Do the thing.'
+}
+
+$packagePrompt = Get-PackagePrompt -Plan $conventionsPlan -Standards $conventionsStandards -Wave $conventionsWave -Package $conventionsPackage
+Assert ($packagePrompt -match 'CONVENTIONS-MARKER-9f3a') 'Get-PackagePrompt still carries plan.conventions'
+
+$consolidationPrompt = Get-ConsolidationPrompt -Plan $conventionsPlan -Standards $conventionsStandards -Wave $conventionsWave -NextWave $null
+Assert ($consolidationPrompt -match 'CONVENTIONS-MARKER-9f3a') 'Get-ConsolidationPrompt carries plan.conventions too (#255, #246)'
+
+# Empty conventions must not leave a stray double space or an empty sentence
+# behind in either prompt - both builders guard this the same way
+# ("if ($conventions) { $conventions = "$conventions " }"), so one shared
+# check for the artifact is enough.
+$emptyPlan = [pscustomobject]@{ name = 'Test Plan'; planIssue = 999; conventions = '' }
+$packagePromptEmpty = Get-PackagePrompt -Plan $emptyPlan -Standards $conventionsStandards -Wave $conventionsWave -Package $conventionsPackage
+$consolidationPromptEmpty = Get-ConsolidationPrompt -Plan $emptyPlan -Standards $conventionsStandards -Wave $conventionsWave -NextWave $null
+Assert ($packagePromptEmpty -notmatch '  ') 'empty plan.conventions leaves no double space in Get-PackagePrompt'
+Assert ($consolidationPromptEmpty -notmatch '  ') 'empty plan.conventions leaves no double space in Get-ConsolidationPrompt'
+
 Write-Host ""
 if ($script:failures -gt 0) {
     Write-Host "$($script:failures) assertion(s) FAILED" -ForegroundColor Red

@@ -593,6 +593,14 @@ function Get-ConsolidationPrompt {
     param($Plan, $Standards, $Wave, $NextWave)
     $limit = Get-Field $Standards 'roundLimitConsolidation' 4
     $branch = $Wave.integrationBranch
+    # Package sessions get plan.conventions via Get-PackagePrompt; a
+    # consolidation session needs it too - it is the one that opens the
+    # wave -> main PR and writes that PR's body, and is the audience for
+    # any convention specifically about consolidation behaviour (e.g. how
+    # to word a PR body, or how to leave a shared stack before review-tests
+    # runs against it).
+    $conventions = Get-Field $Plan 'conventions' ''
+    if ($conventions) { $conventions = "$conventions " }
     # A session must not clean Docker up itself: it runs in the main checkout,
     # whose own stack and shared images are not the wave's to remove.
     $dockerNote = if ([bool](Get-Field $Wave 'dockerCleanup' $false)) {
@@ -606,7 +614,7 @@ function Get-ConsolidationPrompt {
     return @"
 /pickup
 
-Start the consolidation of wave $($Wave.number) of $($Plan.name) (wave issue #$($Wave.waveIssue), wave plan #$($Plan.planIssue)). First check: every package of this wave is merged and no PR against $branch is still open. Then merge origin/main into $branch (a merge commit, no rebase, no force-push), note every conflict resolution, run both suites, and open the PR $branch -> main, with Closes for every spec issue in this wave. Then the review loop with round limit $limit instead of 2: all THREE reviewers (review-go, review-tests, review-docs) get the full diff main...$branch and the list of package PRs. Merge with a merge commit once all three approve in the same round and the suite is green. Whatever is still open after round $limit becomes an issue and is named with its risk in the report. ${dockerNote}$tail Stop and report if you hit the round limit ($limit).
+Start the consolidation of wave $($Wave.number) of $($Plan.name) (wave issue #$($Wave.waveIssue), wave plan #$($Plan.planIssue)). First check: every package of this wave is merged and no PR against $branch is still open. Then merge origin/main into $branch (a merge commit, no rebase, no force-push), note every conflict resolution, run both suites, and open the PR $branch -> main, with Closes for every spec issue in this wave. ${conventions}Then the review loop with round limit $limit instead of 2: all THREE reviewers (review-go, review-tests, review-docs) get the full diff main...$branch and the list of package PRs. Merge with a merge commit once all three approve in the same round and the suite is green. Whatever is still open after round $limit becomes an issue and is named with its risk in the report. ${dockerNote}$tail Stop and report if you hit the round limit ($limit).
 "@
 }
 

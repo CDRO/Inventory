@@ -252,7 +252,7 @@ Before the orchestrator can work through a wave, these must exist:
   "plan": {
     "name": "Extended core (specs 12-20)", // appears in every prompt: "wave N of <name>"
     "planIssue": 97,                        // wave-plan issue number
-    "conventions": "Keep to the …"          // optional; sentence inserted into every package prompt
+    "conventions": "Keep to the …"          // optional; sentence inserted into every package AND consolidation prompt
   },
   "standards": {                            // defaults, overridable per wave/package
     "model": "claude-sonnet-5",             // model for package sessions
