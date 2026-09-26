@@ -88,8 +88,8 @@ func main() {
 // from "crashed, worth restarting". Which of the two it was is in the message,
 // and the three cases differ in how specific that message can be:
 //   - migrate.SchemaMismatchError, schema behind: no exact command, only
-//     "apply the pending migrations the way you deploy it (see README.md)",
-//     because the right invocation differs by deployment variant.
+//     "apply the pending migrations (migrate up) the way you deploy it (see
+//     README.md)", because the right invocation differs by deployment variant.
 //   - migrate.SchemaMismatchError, schema ahead: also no exact command —
 //     there is no down path to run — pointing instead at
 //     docs/specs/15-backup-restore-and-export.md for restoring the backup
