@@ -111,6 +111,36 @@ test("formatDate and formatNumber render German Intl conventions when de is acti
   expect(number).toBe("1.234,5"); // German decimal comma + thousands dot, vs. English "1,234.5"
 });
 
+// formatAudited (web/static/js/audited.js) switched Intl.RelativeTimeFormat
+// from the browser's default locale to getLanguage(), the resolved app
+// language, in the same PR that introduced getLanguage() — a real behaviour
+// change with no test asserting the German phrasing actually renders (#169).
+// Exercised through a real page (locations.html) rather than a dynamic
+// import like the formatDate/formatNumber test above: audited.js builds its
+// one `relative` Intl.RelativeTimeFormat instance at module-load time, so a
+// fresh import that runs before the language override is read would not
+// prove anything about a page that loaded it after.
+test("a location's audited state renders the German relative-time phrase once de is active", async ({
+  page,
+}) => {
+  const login = await page.request.post("/api/auth/login", {
+    data: { username: "e2e-alice", password: PASSWORD },
+  });
+  expect(login.status()).toBe(200);
+
+  await page.goto("/index.html");
+  await page.evaluate(() => localStorage.setItem("inventory.language", "de"));
+
+  await page.goto(`/locations.html?storage=${HOUSEHOLD}`);
+  await expect(page.locator("html")).toHaveAttribute("lang", "de");
+
+  // "E2E Audited Shelf" (e2e/fixtures/seed.sql), last_audited_at 5 days ago.
+  const AUDITED_SHELF = "00000000-0000-7000-8000-0000000000ba";
+  const detail = page.locator(`.tree-node[data-id="${AUDITED_SHELF}"] .muted`);
+  await expect(detail).toHaveText("geprüft vor 5 Tagen");
+  await expect(detail).not.toContainText("days ago");
+});
+
 // apiErrorMessage (web/static/js/i18n.js) is likewise exercised directly: a
 // real server round trip would only prove one status/code combination per
 // UI action found to trigger it, whereas this pins the actual boundary the
