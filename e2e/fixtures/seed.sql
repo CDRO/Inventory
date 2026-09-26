@@ -16,8 +16,12 @@
 -- Applied directly to the disposable E2E database after migrations, NOT
 -- through the application layer, so fixed ids can be referenced by name from
 -- the test files. Run via
---   docker compose -f docker-compose.e2e.yml exec -T db \
+--   docker compose -p inventory-e2e -f docker-compose.e2e.yml exec -T db \
 --     psql -U e2e -d e2e -f /fixtures/seed.sql
+-- (`-p inventory-e2e` for the reason docker-compose.e2e.yml's `name:` comment
+-- gives: locally, a checkout's own COMPOSE_PROJECT_NAME would otherwise win
+-- and seed the wrong stack. On CI there is no `.env` and the workflow omits
+-- it.)
 --
 -- The admin row usually already exists by then. `migrate up` and `serve` both
 -- bootstrap the initial admin from ADMIN_INITIAL_USERNAME/PASSWORD

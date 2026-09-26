@@ -55,14 +55,20 @@
     already done. It runs a bare `docker compose down`, no `-f`, so it only
     ever selects the default files (docker-compose.yml/override.yml) -
     never docker-compose.e2e.yml, which Compose loads only via an explicit
-    `-f` or COMPOSE_FILE that this call does not pass. That E2E stack pins
-    its own project name in the file, but a worktree's own COMPOSE_PROJECT_NAME
-    (from its .env, which Compose auto-loads regardless of -f) overrides a
-    file's `name:` - confirmed live - so what that stack is actually named,
-    and whether it is safe to blindly tear down at all, is genuinely unclear
-    and is #190's question, not answered here. (#190 was split out of #140
-    item 2, which is closed: #140 gave the wave cleanup a veto that makes it
-    safe whatever the project is called, but did not settle the naming.)
+    `-f` or COMPOSE_FILE that this call does not pass. Nor does it reach the
+    E2E stack the other way round: that stack is one project per machine,
+    `inventory-e2e`, and every documented command brings it up with
+    `-p inventory-e2e`, which beats the worktree's own COMPOSE_PROJECT_NAME
+    and so lands it outside this worktree's project entirely - settled and
+    measured in docker-compose.e2e.yml's own `name:` comment (#190, split out
+    of #140 item 2). An E2E stack brought up as documented therefore survives
+    this teardown, including its `--remove-orphans` pass; the wave cleanup
+    below is what removes a leftover one, and #140's veto is what stops it
+    doing so while another checkout is mid-run. Nothing here enforces the
+    flag, though - a session that omits it puts its E2E stack in this very
+    project, where this step sweeps it. What is NOT safe either way is running
+    the E2E suite in two checkouts at once - one machine has one E2E stack,
+    and the second `up` silently takes the first's containers over.
 
     Per wave, for a wave with "dockerCleanup": true, the script also runs
     wellen-docker-cleanup.ps1 once the wave's consolidation is done (its wave
@@ -803,17 +809,18 @@ function Invoke-Wave {
 # worktree is single-purpose and its own data is not meant to outlive it.
 # Deliberately a bare `docker compose down`, no `-f`: this command only ever
 # LOADS docker-compose.yml/override.yml, never docker-compose.e2e.yml (which
-# needs an explicit `-f` or COMPOSE_FILE). That is not the same as "never
-# touched", though: `--remove-orphans` removes any container already in the
-# loaded PROJECT whose service is not in the loaded FILES, so an E2E stack
-# that landed in this same project would be swept as an orphan, not skipped.
-# Whether it CAN land in this project depends on naming this function does
-# not control: docker-compose.e2e.yml pins `name: inventory-e2e`, but a
-# worktree's own COMPOSE_PROJECT_NAME overrides a file's `name:` - confirmed
-# live - so whether an E2E run from inside this worktree ends up isolated or
-# shares this project is genuinely unclear. Real isolation for it is #190's
-# job, not answered here. Best-effort and non-fatal: a package that
-# never brought anything up simply has nothing to remove.
+# needs an explicit `-f` or COMPOSE_FILE). `--remove-orphans` still reaches an
+# E2E stack that landed in this same project - it removes any container already
+# in the loaded PROJECT whose service is not in the loaded FILES - and whether
+# one lands here is decided at the E2E call site, not by anything this function
+# can enforce: the E2E stack is one project per machine, `inventory-e2e`, and
+# every documented command passes `-p inventory-e2e`, which beats this
+# worktree's COMPOSE_PROJECT_NAME (measured, #190; docker-compose.e2e.yml's
+# `name:` comment has the numbers). Brought up as documented, it is in another
+# project and survives this teardown; brought up without the flag, it is in
+# this one and this `-v` sweep takes it - which is why the flag is in every
+# documented command and not optional. Best-effort and non-fatal: a package
+# that never brought anything up simply has nothing to remove.
 function Stop-PackageStack {
     param([string]$WorktreePath, [string]$Slug)
     if ($DryRun) {

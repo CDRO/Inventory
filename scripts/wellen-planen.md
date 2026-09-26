@@ -80,13 +80,18 @@ frees the host ports; it is unconditional (it does not depend on
 is always safe to tear down on its own. It runs a bare `docker compose down`,
 no `-f`, so it only ever selects the default files — never
 `docker-compose.e2e.yml`, which Compose loads only via an explicit `-f` or
-`COMPOSE_FILE`. That file pins its own project name, but a worktree's own
-`COMPOSE_PROJECT_NAME` overrides a file's `name:` (confirmed live), so what
-that stack actually runs as, and whether it is even shared across worktrees
-in practice, is genuinely unclear — real isolation for it is #190's job, not
-answered here. (#190 was split out of #140 item 2 when that closed: #140 gave
-the per-wave cleanup a veto that makes it safe whatever the E2E project ends up
-being called, but it did not settle what the name actually is.)
+`COMPOSE_FILE`. The E2E stack stays out of its reach the other way round too:
+it is **one project per machine**, `inventory-e2e`, brought up with
+`-p inventory-e2e` — which beats the worktree's own `COMPOSE_PROJECT_NAME`, so
+it is not in the project this teardown loads and its `--remove-orphans` cannot
+sweep it. That is settled and measured now (#190, split out of #140 item 2);
+`docker-compose.e2e.yml`'s own `name:` comment carries the measurements. What
+planning a wave does have to respect is the other half of that answer: one
+machine has one E2E stack, so **two packages may never run the E2E suite at
+the same time.** In a `"sequential": true` wave that is automatic. In a wave
+with `"sequential": false`, nothing enforces it — the second `up` does not
+fail, it silently recreates the first's containers — so do not put two
+packages that each need a full E2E run in the same unsequential wave.
 
 **Per wave**, a wave with `"dockerCleanup": true` additionally gets what the
 per-package step cannot reach removed **after its consolidation has

@@ -51,10 +51,17 @@
 #
 # It is a separate job rather than more steps on the one above, and that is
 # load bearing: each GitHub job gets its own runner, so its `down -v` cannot
-# reach the suite's stack. Both jobs use docker-compose.e2e.yml, which pins a
-# single Compose project name for the whole machine — so locally the two must
-# never run at the same time, and neither may run beside another worktree's
-# E2E stack. On CI the separate runners make that automatic.
+# reach the suite's stack. Both jobs use docker-compose.e2e.yml, and a machine
+# has exactly one of its stacks — so locally the two must never run at the same
+# time, and neither may run beside another checkout's E2E stack. On CI the
+# separate runners make that automatic.
+#
+# The steps below deliberately do NOT pass the `-p inventory-e2e` that
+# docker-compose.e2e.yml's header prescribes for local runs, and that is not an
+# oversight: a runner has no `.env`, so nothing sets COMPOSE_PROJECT_NAME, the
+# file's own `name:` stands, and the project already is `inventory-e2e`. The
+# flag exists for checkouts whose `.env` would otherwise win (#190). Adding it
+# to every command here would change no behaviour.
 name: e2e
 
 on:

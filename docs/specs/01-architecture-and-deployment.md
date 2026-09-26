@@ -87,18 +87,18 @@ build or the dev loop, but **required to pass before deploying**. See
 
 ### Running the E2E suite
 
-`docker compose -f docker-compose.e2e.yml run --rm e2e` alone is **not** the
-gate, and running it as a single command fails all tests: the `e2e` service's
-own `depends_on` starts only `app` and `db`, so Traefik never comes up, and
-the suite's `BASE_URL=https://traefik` then fails every test at DNS
-resolution before the browser suite runs anything real.
+`docker compose -p inventory-e2e -f docker-compose.e2e.yml run --rm e2e` alone
+is **not** the gate, and running it as a single command fails all tests: the
+`e2e` service's own `depends_on` starts only `app` and `db`, so Traefik never
+comes up, and the suite's `BASE_URL=https://traefik` then fails every test at
+DNS resolution before the browser suite runs anything real.
 
 The correct sequence — build, migrate, start, seed, run, tear down — is
 documented once, in `docker-compose.e2e.yml`'s own header comment; run it
 from there rather than copying the commands here, so there is exactly one
 place they can go stale.
 
-Two things the sequence alone doesn't make obvious:
+Three things the sequence alone doesn't make obvious:
 
 - **The suite is not idempotent.** Nothing resets state between runs.
   Re-running `run --rm e2e` against a stack that already ran once fails
@@ -111,6 +111,21 @@ Two things the sequence alone doesn't make obvious:
 - **On Git Bash on Windows**, the seed step needs `MSYS_NO_PATHCONV=1` in
   front of it, or MSYS rewrites the container path `/fixtures/seed.sql` into
   a host path and `psql` fails with "No such file or directory".
+- **There is exactly one E2E stack per machine, `inventory-e2e`, and every
+  command carries `-p inventory-e2e`.** The E2E stack is the one documented
+  exception to "isolation comes from `.env`, no flag needed" below: a
+  checkout's `COMPOSE_PROJECT_NAME` beats a compose file's `name:`, so without
+  the flag an agent worktree's E2E run lands in that worktree's *dev* project
+  and Compose recreates the dev `db` container — measured, with the dev
+  `pgdata` volume carried onto it, so `psql -U e2e` answers `role "e2e" does
+  not exist`. The flag is not about per-worktree isolation; it deliberately
+  makes the name identical everywhere, which is why **two checkouts may never
+  run the suite at the same time.** Traefik publishes host 8443 with no
+  variable, so a second stack under a different name is refused the port, but
+  a second one under this same name is not refused anything: it recreates the
+  first's containers and takes the run over silently. Inside a sequential wave
+  that cannot happen; with `"sequential": false` the pre-flight `docker ps`
+  at the top of the compose header is the only guard.
 
 ## Continuous integration
 
@@ -216,6 +231,14 @@ three per package worktree, deterministically, so two package sessions
 running `docker compose up -d` at the same time — or a crashed session's
 containers left running — never collide on a host port or a container name.
 
+**The E2E stack is the exception, on purpose.** Everything above is about the
+*dev* stack, which really is isolated per checkout by `.env` alone.
+`docker-compose.e2e.yml` goes the other way: it is one stack per machine,
+always `inventory-e2e`, which needs `-p inventory-e2e` on every invocation
+precisely *because* a checkout's `COMPOSE_PROJECT_NAME` would otherwise pull
+it into that checkout's dev project. Only one E2E run may exist on a machine
+at a time. See "Running the E2E suite" above and that file's own header.
+
 **Removing what a worktree leaves behind.** Every such checkout leaves, per
 Compose project, a database container, a network, three named volumes
 (`pgdata`, `uploads`, `imagecache`) and the images it built. Two things remove
@@ -257,8 +280,9 @@ whose containers are already gone). A slug never claims a longer sibling
 (`w5-barcode` does not claim `<repo>-w5-barcode-hot-cache`), and under *either*
 rule a project with a container outside the wave's worktrees is not claimed at
 all — one container inside a worktree is not enough when another of the same
-project sits elsewhere, which is what keeps a project name pinned in a Compose
-file (`docker-compose.e2e.yml` pins one for every worktree) from being swept. A
+project sits elsewhere, which is what keeps a project shared by several
+checkouts (`inventory-e2e`, the one E2E stack a machine has) from being swept
+out from under whichever checkout is currently running it. A
 container carrying the project label but no `working_dir` label at all vetoes
 the same way, since nothing places it in a worktree either.
 It removes those projects' containers, networks and volumes, and of their images

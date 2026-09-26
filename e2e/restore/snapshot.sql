@@ -9,6 +9,12 @@
 --   docker compose -f docker-compose.e2e.yml exec -T db \
 --     psql -U e2e -d e2e -tAX -v ON_ERROR_STOP=1 < e2e/restore/snapshot.sql
 --
+-- No `-p inventory-e2e` on that command, deliberately: it is the CI line
+-- verbatim, and a runner has no `.env`, so docker-compose.e2e.yml's own
+-- `name:` already makes the project `inventory-e2e`. Running it by hand from a
+-- checkout whose `.env` sets COMPOSE_PROJECT_NAME needs the flag added, for
+-- the reason that file's `name:` comment gives (#190).
+--
 -- Piped in on stdin rather than mounted: this file is an assertion, not a
 -- fixture, and has no business in the /fixtures mount the db service gives
 -- e2e/fixtures.
