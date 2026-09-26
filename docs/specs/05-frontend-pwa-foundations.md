@@ -52,15 +52,26 @@ web/static/
 │   ├── review.js              # shared proposal-review component
 │   ├── tree.js                # shared tree view (locations + categories)
 │   ├── dom.js                 # small helpers: el(), render templates, escape
+│   ├── i18n.js                # loads the active catalog, translates data-i18n (19)
 │   ├── nav.js                 # shared navigation bar + logout (34)
 │   ├── photo-picker.js        # library-or-camera photo picker + selection list (36)
 │   ├── camera.js              # in-page viewfinder; falls back to the picker (37)
 │   └── pages/                 # one module per HTML page, imported by that page
+├── i18n/
+│   ├── en.json                # English catalog (19)
+│   └── de.json                # German catalog (19)
 ├── vendor/                    # single-file vendored libraries (see 11)
 ├── icons/                     # PWA icons (192, 512)
 ├── manifest.json
 └── sw.js                      # hand-written service worker
 ```
+
+- *Amended by [`19-localization.md`](19-localization.md):* every page
+  imports `js/i18n.js` before rendering anything of its own, the same way
+  every page already imports `js/register-sw.js` first. `js/i18n.js`
+  fetches the active catalog from `i18n/en.json` or `i18n/de.json` and
+  translates every `data-i18n` element already on the page. Nothing else
+  above changes.
 
 ## Routing: plain multi-page, no client-side router
 
