@@ -18,7 +18,10 @@ and reviewers" below.
 
 > **There is more than one plan file now.** `scripts/wellen.json` is the
 > Extended-core plan (#97, complete — kept as its record, not extended);
-> `scripts/wellen-followups.json` is the deferred-follow-ups plan (#176). A
+> `scripts/wellen-followups.json` is the deferred-follow-ups plan (#176);
+> `scripts/wellen-harness.json` is the harness optimization plan (#293,
+> `docs/plans/2026-09-harness-optimization.md`), which starts only after
+> #176's last wave has closed. A
 > finished plan's file stays where it is rather than being emptied, so **every
 > command that names a wave or a slug needs `-WaveFile` unless it means
 > `wellen.json`** — that default is silent, and a bare `-Wave 2` against the

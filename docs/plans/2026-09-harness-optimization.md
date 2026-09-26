@@ -1,6 +1,6 @@
 # Harness optimization — deliver more with the same resources
 
-**Status:** proposed · **Central issue:** #PLAN_ISSUE · **Wave plan:** `scripts/wellen-harness.json` · **Author:** Claude (Fable 5.1), 2026-09-26, for Tizian's review
+**Status:** proposed · **Central issue:** #293 · **Wave plan:** `scripts/wellen-harness.json` · **Author:** Claude (Fable 5.1), 2026-09-26, for Tizian's review
 
 This plan covers the *harness* around the product: GitHub Actions, the
 three-reviewer ship loop, the wave orchestrator, local test tooling, and the
@@ -270,8 +270,14 @@ is a comment line the review-go agent is told to look for on every migration
 in a diff, so the decision is made in review, by a human-readable line, not
 at 03:00 on the NAS. `inventory migrate plan` is the single place that reads
 it: it lists pending migrations, prints `rolling` or `classic`, and its exit
-code lets the update script branch without parsing text. Spec 38 fixes the
-exact syntax (decision D3).
+code lets the update script branch without parsing text. Decision D3 fixed
+the syntax spec 38 will carry: the marker is the exact line
+`-- +inventory:classic` as the first non-blank line after `-- +goose Up`;
+`migrate plan` exits 0 for rolling and nothing-pending, 3 for classic, 1 on
+error (a marker anywhere else in the file is an error), 78 on config or
+schema errors; an annotated tag whose message contains the line
+`deploy: classic` forces classic, read through the GitHub API rather than a
+checkout; nothing in a tag can force rolling over a marker.
 
 ### 3.4 Agent runtime container and doctor
 
@@ -325,10 +331,14 @@ over the next 30 runs.
 round-trip on a cadence.** `e2e.yml`: a `build` job builds the production
 image once and hands it to both jobs (`docker save` artifact or BuildKit
 cache — the package measures both and keeps the faster); `e2e/node_modules`
-cached by `package-lock.json` hash; `restore-round-trip` runs per decision D8
-instead of on every push; concurrency group per ref; timeouts tightened.
-*Expected:* ~6 billed min per push to `main` → ~3. *Measure:* billed minutes
-per `e2e` run.
+cached by `package-lock.json` hash; `restore-round-trip` moves into its own
+`restore.yml` (decision D8: path-filtered to the files that can break it,
+plus `v*` tags, a weekly schedule and dispatch — path filters are per
+workflow, so a job-level check would still bill a minute); concurrency group
+per ref; timeouts tightened. The same package wires H3's
+`docker-compose.ci.yml` into the workflows through `COMPOSE_FILE` (decision
+D5). *Expected:* ~6 billed min per push to `main` → ~3. *Measure:* billed
+minutes per `e2e` run.
 
 **A3 · H17 (part) — release gate reuses green runs.** `release.yml` looks up
 successful `test` and `e2e` runs for the tag's commit before running anything;
@@ -354,14 +364,16 @@ of a spreadsheet.
 
 **B1 · H3 `h3-test-db-speed` — Postgres flags on throwaway databases.**
 `synchronous_commit=off`, `fsync=off`, `full_page_writes=off` on the `db`
-service of the E2E stack and the CI test stack; the local dev override per
-decision D5 (a developer's staging data lives on that volume). The package
-measures `internal/store` and `internal/migrate` before and after and records
-both numbers in its PR. *Expected:* `store` 20 s → under 10 s, `migrate`
-8 s → under 4 s, cutting the "touched store" ship-loop iteration from ~28 s
-to ~12 s. *Not done:* tmpfs for the data directory locally (it would discard
-dev data on every `down`); it is applied in CI where the database is
-disposable anyway.
+service of both `docker-compose.e2e.yml` and `docker-compose.override.yml`
+(decision D5: the measured cost is in the local loop, and the flags trade
+only crash durability of a volume the spec already calls recreatable). A
+new `docker-compose.ci.yml` adds a tmpfs data directory for runners that are
+destroyed anyway, selected through `COMPOSE_FILE` so the documented command
+stays byte-identical; the developer's volume keeps its data across `down`.
+The package measures `internal/store` and `internal/migrate` before and after
+and records both numbers in its PR. *Expected:* `store` 20 s → under 10 s,
+`migrate` 8 s → under 4 s, cutting the "touched store" ship-loop iteration
+from ~28 s to ~12 s.
 
 **B2 · H1 `h1-dev-dispatcher` — `scripts/dev`, the one command agents run.**
 A POSIX `sh` dispatcher (`scripts/dev <command>`) over `scripts/dev.d/<command>`
@@ -392,8 +404,8 @@ body, issue body, the spec sections the issue names (with their acceptance
 criteria) rather than the whole spec, `git diff --stat`, the diff, the list
 of exported identifiers added or changed and whether they carry a doc
 comment, test files changed, and the current CI status by SHA. The three
-reviewer prompts start with "read the packet"; their `maxTurns` drop per
-decision D2. *Expected:* 4–8 fewer turns per reviewer per round and a
+reviewer prompts start with "read the packet"; their `maxTurns` drop to
+20 (go), 25 (tests) and 15 (docs) per decision D2. *Expected:* 4–8 fewer turns per reviewer per round and a
 smaller context per call; measured with `scripts/dev agent-usage` on the
 reviewer transcripts before and after.
 
@@ -449,10 +461,15 @@ the socket's group, auth via `CLAUDE_CODE_OAUTH_TOKEN` and `GH_TOKEN` or
 mounted config directories, entrypoint runs the doctor), then the loop
 (`scripts/agent-loop.sh`: next unblocked issue → one headless `claude -p`
 session per issue with `--max-turns`, structured output logged, stop on a
-usage-limit response and resume after the window; per decision D10 either a
-`-Headless` switch on the PowerShell orchestrator or a Linux-side entry point
-over the same wave JSON). PC first; the image is `linux/amd64` so the DS923+
-can run it later (slower tests, no PC needed overnight).
+usage-limit response and resume after the window). Decision D10 made the
+loop a separate Linux-side entry point over the same wave JSON — no
+`-Headless` switch on the PowerShell orchestrator, whose job is opening
+visible windows on Windows — with the package prompt extracted into a
+template both scripts fill, and fixed the invocation: `--permission-mode
+dontAsk --permission-prompts none --max-turns 400 --output-format
+stream-json`, non-root, never `--dangerously-skip-permissions`. PC first;
+the image is `linux/amd64` so the DS923+ can run it later (slower tests, no
+PC needed overnight).
 
 ### E — Deployment
 
@@ -467,7 +484,8 @@ existing guarantees, restated per phase); the going-private checklist (read-
 only deploy key on the NAS for `git fetch`, Actions permissions, runner
 group, secrets none); rollback (restore the pre-upgrade backup — spec 18's
 rule, now taken automatically). Specs 00, 01 ("Deployment model", "Continuous
-integration") and 18 ("Upgrades") are amended to point at it;
+integration", "Synology NAS variant") and 18 ("Upgrades") are amended to point
+at it, `CLAUDE.md`'s numbering line marks 38 as taken (decision D6), and
 `migrations/README.md` gets the marker section.
 
 **E2 · H14 `h14-migrate-plan` — the backend piece.** `inventory migrate plan`
@@ -489,10 +507,13 @@ can put in its job summary. Every path gets a case in `update_test.go`
 data.
 
 **E4 · H16 `h16-runner-container` — the listener.** `deploy/synology/runner/
-Dockerfile`, `docker-compose.runner.yml`, README: registration per decision
-D4, labels `self-hosted,nas,inventory`, one job at a time, restart policy,
-state directory, exact mounts, and a smoke test (`docker-compose config`,
-`git --version`, socket reachable) the image runs at start. Built in CI only
+Dockerfile`, `docker-compose.runner.yml`, README: persistent registration
+with a one-hour token minted from the PC, credentials in a bind-mounted state
+directory, labels `self-hosted,nas,synology`, the container running as root
+because DSM's socket is root-owned and any socket client is root on the host
+anyway (decision D4, with the residual risk written into spec 38), one job at
+a time, restart policy, exact mounts, and a smoke test (`docker-compose
+config`, `git --version`, socket reachable) the image runs at start. Built in CI only
 when its files change (path filter), so it costs nothing on ordinary pushes.
 
 **E5 · H17 `h17-release-workflow` — the trigger.** `.github/workflows/
@@ -547,7 +568,7 @@ them.
 |---|---|
 | A self-hosted runner on a still-public repository executes untrusted code | Only `release.yml` targets the runner; it triggers on tag pushes only (forks cannot push tags to this repository); it checks repository and actor; Actions setting "allow selected actions" and fork-PR approval are part of the going-private checklist; the runner is `linux/amd64` in a container with nothing but the clone and the socket — which is still root-equivalent on the NAS, so the socket mount is the accepted risk, stated in spec 38 |
 | `fsync=off` corrupts a developer's staging database | Applied to CI and E2E unconditionally; the local dev override per D5 (`synchronous_commit=off` alone loses only the last transactions on a crash, never integrity) |
-| Path filters skip a test run that mattered | Ignore list is short and explicit (`docs/**`, `**/*.md`, `.claude/**`, `scripts/*.ps1`, `scripts/tests/**`, `scripts/*.json`); `deploy/**` and every Go, SQL, compose, Dockerfile and `web/**` change still runs; `cmd/inventory/compose_test.go` and `deploy/synology/update_test.go` read files that stay on the run list |
+| Path filters skip a test run that mattered | Ignore list is short and explicit (decision D7: `docs/**`, `**.md`, `.claude/**`, `LICENSE` — nothing under `scripts/`); `deploy/**` and every Go, SQL, compose, Dockerfile and `web/**` change still runs; `cmd/inventory/compose_test.go` and `deploy/synology/update_test.go` read files that stay on the run list; no required status check exists, so a skipped run can never leave a PR pending |
 | Delta review misses a regression the round-2 fix introduced elsewhere | Per D9: review-go re-reads the full diff when the delta touches routing, middleware or store transactions; the test reviewer always runs the whole suite |
 | Cheaper reviewer models miss real findings | Replay on six past PRs before the tuning ships (H12); revert is a frontmatter edit |
 | `migrate plan` says rolling but the old binary cannot serve | The marker rule is reviewed on every migration diff (review-go checklist); the tag override exists for the case a human knows better; the rolling update's own health check removes a new instance that fails, and the pre-upgrade backup is the rollback |
@@ -559,10 +580,12 @@ them.
 
 ## 8. Execution — the wave plan
 
-`scripts/wellen-harness.json` (plan issue #PLAN_ISSUE). Standards: Sonnet 5 /
+`scripts/wellen-harness.json` (plan issue #293). Standards: Sonnet 5 /
 high for packages, Opus 5 / xhigh for consolidation; per package overrides
-where the file is `risk:high`; advisor per decision D1; round limit 2 per
-package, 4 per consolidation; `dockerCleanup: true` on every wave.
+where the file is `risk:high`; advisor off by default and on only for H4
+(the allowlist that guards headless sessions), H15, H16, H17, H18, H19 and
+every consolidation (decision D1); round limit 2 per package, 4 per
+consolidation; `dockerCleanup: true` on every wave.
 
 ```mermaid
 flowchart LR
@@ -616,23 +639,23 @@ flowchart LR
 |---|---|---|---|---|---|
 | 1 | H1 dev dispatcher | `h1-dev-dispatcher` | `scripts/dev`, `scripts/dev.d/{test,vet,ci-status,ci-usage}`, ship skill §3 | Sonnet / high | — |
 | 1 | H2 CI cache | `h2-ci-cache` | `.github/workflows/test.yml`, spec 01 "Continuous integration" | Sonnet / high | — |
-| 1 | H3 test DB speed | `h3-test-db-speed` | `docker-compose.override.yml` (db), `docker-compose.e2e.yml` (db), spec 01 override section | Sonnet / high | — |
+| 1 | H3 test DB speed | `h3-test-db-speed` | `docker-compose.override.yml` (db), `docker-compose.e2e.yml` (db), `docker-compose.ci.yml` (new), `compose_test.go` assertions, spec 01 override section | Sonnet / high | — |
 | 1 | H4 attention | `h4-attention` | `.claude/settings.json`, `scripts/hooks/*`, `scripts/wellen-planen.md` (hooks note) | Sonnet / high | — |
 | 2 | H5 verdict gate | `h5-verdict-gate` | `scripts/dev.d/gate`, reviewer prompts (Output section), ship skill §6 | Sonnet / high | — |
 | 2 | H6 pre-gate | `h6-pre-gate` | `scripts/dev.d/check`, Dockerfile dev stage, `test.yml` (one step), ship skill §3 (one line), `internal/config` parity test | Sonnet / high | — |
 | 2 | H7 review packet | `h7-review-packet` | `scripts/dev.d/packet`, reviewer prompts (Task section), ship skill §5 | Sonnet / high | — |
-| 2 | H8 e2e workflow | `h8-e2e-workflow` | `.github/workflows/e2e.yml`, `docker-compose.e2e.yml` (e2e service), spec 01 E2E paragraph | Sonnet / high | — |
+| 2 | H8 e2e workflow | `h8-e2e-workflow` | `.github/workflows/e2e.yml`, `.github/workflows/restore.yml` (new), `test.yml` (`env:` block only), `docker-compose.e2e.yml` (e2e service), spec 01 E2E paragraph | Sonnet / high | — |
 | 2 | H9 agent usage | `h9-agent-usage` | `scripts/dev.d/agent-usage`, this plan §1.4 | Sonnet / high | — |
 | 2 | H10 doctor | `h10-doctor` | `scripts/doctor`, `scripts/dev.d/doctor`, README section | Sonnet / high | — |
 | 3 | H11 orchestrator attention | `h11-orchestrator-attention` | `scripts/wellen-orchestrator.ps1`, its test, `scripts/wellen-planen.md` | Sonnet / high | — |
 | 3 | H12 reviewer tuning | `h12-reviewer-tuning` | reviewer prompts (frontmatter + round rule), ship skill §7, this plan (replay table) | Opus / xhigh | judgement |
-| 3 | H13 spec 38 | `h13-spec-38` | `docs/specs/38-*.md`, specs 00/01/18 pointers, `migrations/README.md` | Opus / xhigh | contract |
+| 3 | H13 spec 38 | `h13-spec-38` | `docs/specs/38-*.md`, specs 00/01/18 pointers, `CLAUDE.md` numbering line, `migrations/README.md`, `.env.example` | Opus / xhigh | contract |
 | 4 | H14 migrate plan | `h14-migrate-plan` | `cmd/inventory/main.go`, `internal/migrate/*`, `review-go.md` (one line) | Sonnet / high | — |
 | 4 | H15 update --auto | `h15-update-auto` | `deploy/synology/update`, `update_test.go`, `deploy/synology/README.md` | Opus / xhigh | `risk:high` |
 | 4 | H16 runner container | `h16-runner-container` | `deploy/synology/runner/*`, `test.yml` (path-filtered build job) | Opus / xhigh | `risk:high` |
 | 5 | H17 release workflow | `h17-release-workflow` | `.github/workflows/release.yml`, `scripts/dev.d/release`, README runbook, spec 38 acceptance | Opus / xhigh | `risk:high` |
 | 6 | H18 agent image | `h18-agent-image` | `deploy/agent/*` | Sonnet / high | — |
-| 6 | H19 agent loop | `h19-agent-loop` | `scripts/agent-loop.sh`, orchestrator (`-Headless`, per D10), `wellen-planen.md` | Sonnet / high | — |
+| 6 | H19 agent loop | `h19-agent-loop` | `scripts/agent-loop.sh`, `scripts/package-prompt.template`, orchestrator (`Get-PackagePrompt` reads the template, nothing else), `wellen-planen.md` | Sonnet / high | — |
 
 No package adds a migration; no migration number is reserved. Wave 6 is
 sequential (H19 builds on H18). Every other wave runs its packages in
@@ -654,7 +677,66 @@ Decisions that were not settled with Tizian directly were put to a Fable
 advisor with the context above and are recorded here verbatim for review.
 Overruling one is an edit to the corresponding issue before its wave starts.
 
-DECISION_RECORD
+The advisor (Claude Fable 5.1, run as a separate read-only session on
+2026-09-27 with the baseline, the settled points and the ten questions as
+its brief) flagged four claims it could not verify and that a reviewer
+should check before the corresponding package starts: the exact environment
+variable name for a `claude setup-token` token (`CLAUDE_CODE_OAUTH_TOKEN`),
+the exact result subtype of a usage-limit stop in headless mode, whether
+`--max-budget-usd` applies under subscription auth, and whether branch
+rulesets are available on a Free-plan private repository (believed to need
+Pro). Where a decision names a value the issues use (labels, concurrency
+group, exit codes, the marker line), the issues carry that value verbatim.
+
+### D1 — Advisor policy for the harness waves
+**Decision:** (b) with an explicit list — advisor on (same model as the session) only for the packages tagged `risk:high`: wave 1 permission allowlist + hooks, wave 4 `update --auto --backup --ref` and the runner container, wave 5 `release.yml`, wave 6 agent container + headless loop, and every consolidation; off for everything else, set per package via the existing `advisor: false` field in `scripts/wellen-harness.json`.
+**Rationale:** The advisor is a second model call on the same subscription, and the named constraints are the 5 h / weekly caps, so it has to be spent where a wrong line is expensive rather than everywhere. The expensive lines in this plan are shell that runs as root on the production NAS (`deploy/synology/update` already documents that it runs from `sudo -i`), the runner that holds the Docker socket, the release workflow that triggers it, and the allowlist that becomes the only guard once sessions run unattended in wave 6 — those are the packages that get it. Dev dispatcher, CI cache, Postgres flags, lint pre-gate, packet builder, token accounting, `scripts/doctor`, `migrate plan` and the heartbeat are testable Go, YAML or scripts on the owner's machine, and the three reviewers already read every PR. `scripts/wellen-planen.md` already ties stronger model/effort to `risk:high`, so this is the same rule applied to the advisor, not a new one. Wave 2's token accounting gives the advisor's real share; revisit after it reports.
+**Reversal cost:** low — one boolean per package in the wave JSON, no code, and a running orchestrator picks it up on restart.
+
+### D2 — Reviewer model/effort/maxTurns once the pre-gate and packet exist
+**Decision:** review-go Sonnet/high maxTurns 20; review-tests Sonnet/high maxTurns 25; review-docs Haiku 4.5/high maxTurns 15 — each conditional on a replay of six past PRs, falling back one step (Haiku→Sonnet, high→xhigh) for any reviewer that fails it.
+**Rationale:** The pre-gate takes the deterministic findings (gofmt, vet, staticcheck, missing exported doc comments — the `Nits` example in `review-go.md` and the first "must be documented" rule in `review-docs.md`) out of the reviewers' work, and the packet removes the four to six turns each currently spends on `gh pr view`, `gh issue view`, `gh pr diff` and spec reads, so lower effort and fewer turns are removing work that no longer exists rather than cutting judgment. review-go keeps Sonnet because its remaining job is the cross-file invariant list (404-not-403, `is_admin` re-query, paired `inventory_logs` rows), which needs reasoning over context, not pattern matching; review-tests keeps Sonnet because "would this test fail if the code were broken" is the same kind of judgment, and its turn budget stays highest because it runs the suite and may poll CI. review-docs is the candidate for Haiku because what remains after the lint is grep-and-compare work (stale statements, `.env.example` vs spec 01), and it is the reviewer whose findings are cheapest to miss and re-catch later. Validation: replay each reviewer under the new frontmatter against six closed PRs with `gh pr comment` swapped for a file write — PR #274 (round-1 BLOCKs from docs and tests, both fixed in commits 9605749 and 8c0df3d) plus, from the 40 measured PRs, the two most recent round-1 BLOCKs per reviewer whose finding was fixed rather than disputed, and three round-1 APPROVEs with no regression since; a configuration fails if it misses any of those accepted blocking findings, raises a new BLOCK on an APPROVE PR that the owner judges not real, or exits on maxTurns (a reviewer that posts nothing costs a whole round, because a missing comment is not an approval). I could not list the verdict history myself (no `gh` here), so the selection beyond #274 is a rule, not a list; if the CLI rejects `effort` for Haiku, the frontmatter simply omits it.
+**Reversal cost:** low — three frontmatter lines per agent file; `ship/SKILL.md`'s "do not pass a model argument" rule already keeps the frontmatter authoritative.
+
+### D3 — Classic-deploy signalling syntax
+**Decision:** (i) the exact line `-- +inventory:classic` as the first non-blank line after `-- +goose Up`; (ii) `inventory migrate plan` prints one first line `migrate plan: rolling|classic|nothing pending (<n> pending: 00015_x.sql, …)` then one line per pending file, exits 0 for rolling and nothing-pending, 3 for classic, 1 on error, 78 (`config.ExitConfig`) on config/DB-schema errors as today; (iii) an annotated tag whose message contains the line `deploy: classic` forces classic, read by `release.yml` through `gh api .../git/tags/<sha>`; (iv) the marker is required when the previous release's binary cannot run correctly against the migrated schema — a drop/rename of a column, table or enum value it reads or writes, a NOT NULL column without default, a constraint or trigger its writes would violate, or a backfill that must not race live writes; additive changes need none; (v) yes, review-go checks every `migrations/**` hunk against rule (iv) — missing marker is blocking, unneeded marker is should-fix.
+**Rationale:** A prefix outside the `-- +goose` namespace is a plain SQL comment to goose v3.22.1 (pinned per `internal/migrate/migrate_test.go:298`), so the marker can never be misread as a directive, and pinning its position lets `migrate plan` be a strict parser that rejects a marker anywhere else (exit 1) instead of guessing. Exit codes rather than stdout words because the consumer is `deploy/synology/update` under `set -eu` via `docker-compose run`, which propagates the container's exit code, while stdout would need parsing past Compose output; 3 avoids 1 (generic), 2 (shell misuse) and 78 (already `EX_CONFIG` in `internal/config/config.go:22`), and "nothing pending" is rolling because there is nothing for the old binary to break on. The tag keyword lives in the message, not the tag name, so a forced classic does not rename the version; reading it through the API rather than the runner's checkout avoids `actions/checkout` fetching annotated tags peeled (actions/checkout#290 — from memory, verify); a lightweight tag simply has no keyword and the plan decides, and nothing in a tag can force rolling over a marker. Rule (iv) is the contract the rolling update already states in spec 01 lines 1019–1020 ("the old app runs on the migrated schema until it is retired"), and migration 00014's grace-claim block is the worked example of staying rolling on purpose. review-go must check it because tests cannot: a migration test runs against the new binary only, so an old-binary incompatibility passes green.
+**Reversal cost:** medium — the marker only matters in pending files (applied history is never re-read) and nothing persists in the database, but the exit-code contract is shared by `migrate plan`, `update` and `release.yml`, so a later change touches three places and spec 38.
+
+### D4 — Runner registration and privilege
+**Decision:** Persistent registration (`config.sh --replace --unattended --labels self-hosted,nas,synology`, `.runner`/`.credentials` in a bind-mounted state dir, `restart: unless-stopped`), registered once by hand with a one-hour registration token minted from the owner's machine; the container runs as root with `RUNNER_ALLOW_RUNASROOT=1` and the socket bind-mounted; one runner instance, `concurrency: {group: nas-deploy}` in `release.yml`, and the update script's own lock as the last line.
+**Rationale:** `--ephemeral` de-registers after one job, so every job needs a fresh registration token, and minting one needs a classic PAT with `repo` scope or a GitHub App credential stored on the NAS (verified against the REST docs: `repo` scope, token expires after one hour) — a broader credential sitting permanently on the NAS to protect against a threat (job-to-job residue on a shared runner) that a single-repo, single-purpose runner does not have. The runner's own credentials can only take jobs for this repository, and the state dir plus `restart: unless-stopped` is what survives a DSM reboot without anyone touching it. Non-root with the socket's GID is not a privilege reduction here: DSM's `docker.sock` is root-owned with no group to hand over, a `chgrp` is undone by DSM updates, and any process that can talk to the socket is root on the host anyway, so root-in-container is honest about what the job already is (`deploy/synology/README.md` already runs everything from `sudo -i`, and the clone stays root-owned, which keeps `git pull` free of `safe.directory` complaints). One job at a time is inherent to a single runner process; the `concurrency` group makes two tags queue instead of interleave. The unfixable part must be written into spec 38: on a private repo without runner groups, any workflow on any branch can name `runs-on: self-hosted`, so the runner mounts nothing beyond the clone and the socket and `release.yml` is the only workflow that names it.
+**Reversal cost:** medium — re-registering is minutes, but moving to ephemeral later adds a token-minting sidecar and a PAT, and moving to non-root means DSM socket-group work outside the repo.
+
+### D5 — Postgres speed flags scope
+**Decision:** `fsync=off`, `synchronous_commit=off`, `full_page_writes=off` on the `db` service in both `docker-compose.e2e.yml` and `docker-compose.override.yml` (via `command: postgres -c …`), plus a tmpfs data dir for CI only through a `docker-compose.ci.yml` selected with `COMPOSE_FILE` in the workflows; the dev override keeps its persistent volume.
+**Rationale:** The measured cost is in the local loop, not CI: `internal/store` 19.7 s and `internal/migrate` 7.8 s are database-bound and run on every ship iteration and every reviewer run (the suite migrates throwaway databases on the override's `db`, per the comment in `docker-compose.override.yml:69–72`), so flags that stay out of the override miss most of the runs. The three flags trade durability across a host crash for write speed; on `docker compose down`, container restart or a Postgres process crash `synchronous_commit=off` loses at most the last commit window and `fsync=off` loses nothing, and the override's volume is by the spec's own framing dev/staging data that a backup (spec 15) or a re-seed recreates. tmpfs is the one setting that deletes data on every container stop, which is right for a runner that is destroyed anyway and wrong for the volume a developer keeps. A separate CI file selected through `COMPOSE_FILE` keeps the documented command `docker compose run --rm app go test ./...` byte-identical in `test.yml`, which is what `review-tests.md` and the workflow header promise. Production is untouched: `docker-compose.yml` and `docker-compose.nas.yml` pin the base file explicitly.
+**Reversal cost:** low — one `command:` line per file; a developer who wants durability back deletes it, and the only data at risk was declared recreatable.
+
+### D6 — Where the plan lives and whether to write spec 38
+**Decision:** (a) — `docs/plans/2026-09-harness-optimization.md` (new folder with a README stating it is not a contract, like `docs/explanations/`), containing this decision record, plus a new `docs/specs/38-release-pipeline-and-nas-runner.md` as the contract for the deploy work, with specs 01 ("Synology NAS variant") and 18 ("Upgrades") amended to point at it and `CLAUDE.md`'s numbering line updated.
+**Rationale:** The three reviewers review against `docs/specs/` and `review-docs.md` blocks on any doc that "now says something that is no longer true"; wave 4 and 5 change what spec 01 lines 995–1011 and spec 18 currently guarantee (a root shell on the NAS, backup-first, `--classic` as a manual choice), so without a spec the deploy PRs would be held to the text they are replacing. The marker syntax, `migrate plan` exit codes, the tag keyword, the runner's trust boundary and the rollback rule are operations guarantees an operator will look up, which is exactly what a numbered spec is for, and 38 is the first free number per `CLAUDE.md`. The plan itself — waves, budgets, the 1150-minute baseline, these ten decisions — decays as it executes and must not become something reviewers hold code to, so it stays outside the contract. `docs/explanations/` is product narrative and `scripts/` is tooling how-to; neither is the place for a dated plan with measurements. Amending only 01 and 18 (b) would spread one pipeline across two specs that exist for other things, and the cross-references are cheaper than the split.
+**Reversal cost:** medium — a spec, once accepted, is what every later PR is reviewed against; retiring it means re-amending 01 and 18 and touching the CLAUDE.md numbering.
+
+### D7 — Required-check strategy after going private with path filters
+**Decision:** (a) — no required status checks; `paths-ignore: [docs/**, '**.md', .claude/**, LICENSE]` on `test.yml`; the ship gate treats "no checks reported" as satisfied only when `git diff --name-only <base>...HEAD` matches the ignore list entirely and the test reviewer's `**Suite:**` line shows a local run, and as a failure that dispatches a run otherwise.
+**Rationale:** There is no branch protection today and none is available on a Free-plan private repository (branch rules and rulesets on private repos need Pro — from memory, verify), so the loop's gate in `ship/SKILL.md` step 6 is the merge gate already; adding a required check would only add the pending-forever failure mode on docs-only PRs. The real test signal is the reviewer's local suite (`review-tests.md` step 4), and CI on PRs to `main` is the backstop for sessions without a daemon, so skipping it for a docs-only diff loses nothing that the gate checks. Options (b) and (c) buy a green tick nobody requires at about a billed minute per PR against a 2000-minute cap. The ignore list stays narrow on purpose: `scripts/backup`, the compose files and `deploy/**` are read by tests (`docker-compose.override.yml:74–95`) and `.github/workflows/**` must trigger itself. If the account is ever Pro, add a ruleset requiring a PR and blocking force-push on `main` — still without a required status check.
+**Reversal cost:** low — a `paths-ignore` block and one paragraph in the ship skill; nothing is configured on GitHub that would have to be undone.
+
+### D8 — `restore-round-trip` cadence
+**Decision:** (a) plus a weekly schedule — move the job into its own `.github/workflows/restore.yml` triggered on `push` to `main` filtered to `scripts/backup`, `docker-compose*.yml`, `migrations/**`, `e2e/restore/**`, `e2e/fixtures/**`, `Dockerfile`; on `v*` tags; `schedule` weekly; and `workflow_dispatch`.
+**Rationale:** The round trip proves the backup script, the compose volume layout, the migration-after-restore step and the fixtures, and only changes to those files can break it, so the path filter is the exact set of causes; at ~1.6 min it drops from ~140 to a few minutes a month on a cap of 2000. Path filters are per workflow (`on.push.paths`), not per job, so the job has to leave `e2e.yml` — a job-level changed-files check would still boot a runner and bill a minute. Tags keep it as the deployment gate spec 18 calls "the only rollback", running on GitHub-hosted runners before the NAS deploy job. The weekly run costs ~7 min a month and catches what no path filter can see: drift in the `postgres` and Playwright images that the compose files reference by tag rather than digest. The `e2e.yml` header, which currently explains why the job lives there, must be updated in the same PR or review-docs will block.
+**Reversal cost:** low — trigger blocks in one workflow file; the job's steps do not change.
+
+### D9 — Delta review for round 2
+**Decision:** Amend and accept — round 2 reviews `git diff <round-1 sha>..HEAD` with each reviewer marking every round-1 blocking finding resolved/open with `file:line`, subject to: review-tests always runs the whole suite; review-go re-reads the full PR diff when the delta touches `internal/httpapi/router.go`, any middleware, `internal/store` transaction code or `migrations/`, or when the packet builder finds a merge commit in `<round-1 sha>..HEAD`; review-docs keeps its global stale-doc grep; the full round-2 diff is referenced in the packet by path, not inlined.
+**Rationale:** 48 % of PRs go to round 2 and each round-2 run today re-reads the whole diff plus spec, so the delta is where the reviewer cost per PR actually is. A fix that regresses elsewhere is caught first by the whole suite — that is the one whole-tree check in the loop and it is cheap and deterministic, so review-tests never narrows it. The files where a regression would be silent rather than red are the ones `CLAUDE.md` lists as failing silently (routing, handlers, store transactions) and migrations (D3), so those force a full re-read; everything else is covered by review-go's own rule 4 of reading the surrounding context of a hunk. A merge from the base branch between rounds turns a two-dot delta into upstream noise, so the packet builder detects it and falls back rather than trusting the range. Requiring per-finding resolved/open status is what makes a delta review auditable from the PR comment alone, which is what the gate reads.
+**Reversal cost:** low — packet builder logic and a paragraph in each agent prompt; round 1 is unchanged.
+
+### D10 — Agent runtime container scope
+**Decision:** (i) three issues, with `scripts/doctor` (host + `--container` mode) landing in wave 2 as planned and wave 6 holding two PRs, `deploy/agent/Dockerfile` and `scripts/agent-loop.sh`; (ii) `claude -p "<package prompt>" --model … --effort … [--advisor …] --permission-mode dontAsk --permission-prompts none --max-turns 400 --output-format stream-json --verbose` as a non-root user with the project allowlist extended for edits (`Edit`, `Write`) and everything the ship loop runs, not `--dangerously-skip-permissions`; one session per issue, done = the issue closed on GitHub (same signal the orchestrator uses), the JSONL log kept per session, `session_id` read from the final `result` line, a stop with `is_error` after `system/api_retry` events carrying `error: rate_limit` (or a result text matching usage-limit wording) treated as paused and resumed with `claude -p "continue" --resume <session_id>` after the reset time or a capped back-off, `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` set; auth via `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` passed as a secret file, never baked into the image; not `--bare`; (iii) a separate Linux entry point over the same wave JSON, no `-Headless` switch, with the package-prompt template extracted to a file both scripts fill.
+**Rationale:** Verified against the CLI reference and headless docs: `--permission-mode` accepts `dontAsk`, which denies rather than prompts (the right failure for an unattended run — it stops, it does not hang), `--permission-prompts none` (v2.1.259+) makes the denial final, `--max-turns` and `--output-format stream-json` are print-mode flags, the `result` line carries `session_id` and `--resume <id>` continues it from any directory, `system/api_retry` events carry an `error` category including `rate_limit`, `claude setup-token` exists for CI tokens, and `--dangerously-skip-permissions` is refused as root on Linux with the exception only for "a recognized sandbox" — which is why non-root plus the allowlist is the shape, and why wave 1's allowlist package must be written for this use. `--bare` is documented as the scripted-mode recommendation but skips CLAUDE.md, skills, agents and OAuth login, all of which the ship loop needs, so it is out. Three issues because the image is verifiable alone (`claude --version`, `claude auth status`) and the loop alone (against a stub `claude`), and doctor is already a wave 2 package. A separate Linux entry point because the PowerShell orchestrator's job is opening visible windows on the owner's Windows machine, and teaching it to `docker run` Linux sessions would mean re-implementing its restart-safety and Docker-cleanup rules for containers; sharing the wave JSON and a prompt template file keeps one plan and one prompt. Not verified: the exact env var name `CLAUDE_CODE_OAUTH_TOKEN` (absent from the truncated env-vars page I fetched), the exact result subtype or text of a usage-limit stop, whether `--max-budget-usd` applies under subscription auth, and what "recognized sandbox" means — so `--max-turns` is a runaway guard and the two-round cap stays the real budget.
+**Reversal cost:** medium — flags and the resume logic are lines in one script, but the entry-point choice means two implementations of prompt building and polling, and folding the loop into PowerShell later would be a rewrite of that logic rather than an edit.
 
 ---
 
@@ -690,7 +772,7 @@ DECISION_RECORD
    the collision rules missed.
 4. Check the deployment sequence (section 3.2) against how you actually
    operate the NAS: paths, the compose prefix, Task Scheduler, the sidecar.
-5. Anything you want added is a new sub-issue under #PLAN_ISSUE; anything
+5. Anything you want added is a new sub-issue under #293; anything
    you want dropped is a close with a comment — the wave file is regenerated
    from the issue list.
 

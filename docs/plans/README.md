@@ -18,4 +18,4 @@ are the record.
 
 | Plan | Central issue | Status |
 |---|---|---|
-| [2026-09 Harness optimization](2026-09-harness-optimization.md) | see the plan's header | proposed |
+| [2026-09 Harness optimization](2026-09-harness-optimization.md) | #293 | proposed |
