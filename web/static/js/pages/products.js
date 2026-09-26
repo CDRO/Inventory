@@ -356,6 +356,11 @@ function renderPicture(product) {
           storageId,
           query: product.name,
           keyPrefix: "products.pictures",
+          // This product may already have a picture, and removing it must not
+          // depend on an image provider being reachable — without this the
+          // only way to clear one would be a suggestion list that happened to
+          // come back non-empty.
+          clearable: true,
           onPick: (hash) => setPicture(product, hash, current, status),
         });
       },
@@ -399,6 +404,11 @@ async function setPicture(product, hash, current, status) {
     status.textContent = hash ? t("products.picture.saved") : t("products.picture.cleared");
   } catch (err) {
     status.textContent = apiErrorMessage(err, t("products.error.network"));
+    // Rethrown so the picker rolls its selection back: the message above says
+    // the write failed, and a button still marked as chosen would say it did
+    // not. A picked suggestion can legitimately fail — the server refuses a
+    // hash whose cache entry has been evicted since the list was drawn.
+    throw err;
   }
 }
 

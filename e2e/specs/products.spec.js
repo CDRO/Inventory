@@ -589,6 +589,7 @@ const PICTURE_CLEAR_PRODUCT = "00000000-0000-7000-8000-0000000000fb";
 // id from *another* storage. Bob is not a member there, so the image route
 // must answer exactly as it does for an id that does not exist at all.
 const FOREIGN_PRODUCT = "00000000-0000-7000-8000-000000000042";
+const FOREIGN_STORAGE = "00000000-0000-7000-8000-000000000011";
 
 test("the product detail view offers a picture change that reaches the suggestions endpoint", async ({
   page,
@@ -642,12 +643,118 @@ test("the image route answers 404 for a product in another storage, not 403", as
     data: { image: null, icon_name: null },
   });
 
-  // 404, never 403: an inaccessible product must be indistinguishable from one
-  // that does not exist (docs/specs/03-auth-and-multi-tenancy.md). The page
-  // never reimplements this — it is the handler's, and this is the deployed
-  // stack saying so.
+  // Same-storage validation: the session IS a member of the storage in the
+  // path, and the product simply belongs to a different one. 404, never 403,
+  // and never a leak that the product exists elsewhere. The page never
+  // reimplements this — it is the handler's, and this is the deployed stack
+  // saying so (docs/specs/03-auth-and-multi-tenancy.md).
   expect(res.status()).toBe(404);
   const body = await res.json();
   expect(body.error.code).toBe("not_found");
   expect(body.error.debug_reason).toBeUndefined(); // APP_ENV=prod in this stack
 });
+
+// The other half of the same invariant, which the test above does not reach:
+// there the storage was the session's own. Here it is not, so this is the
+// inaccessible-storage case — and it has to be answered exactly as an
+// unknown storage id is, or membership becomes discoverable by probing.
+test("the image route answers 404 for a storage the session is not a member of", async ({ page }) => {
+  await logIn(page); // e2e-bob, a member of "E2E Household" only
+
+  const inaccessible = await page.request.patch(
+    `/api/storages/${FOREIGN_STORAGE}/products/${FOREIGN_PRODUCT}/image`,
+    { data: { image: null, icon_name: null } },
+  );
+  const unknown = await page.request.patch(
+    `/api/storages/00000000-0000-7000-8000-0000000000ee/products/${FOREIGN_PRODUCT}/image`,
+    { data: { image: null, icon_name: null } },
+  );
+
+  expect(inaccessible.status()).toBe(404);
+  expect(unknown.status()).toBe(404);
+  // Identical either way, body included: anything that differed would say
+  // "this storage exists, you just cannot see it".
+  expect(await inaccessible.json()).toEqual(await unknown.json());
+});
+
+// The picker's own click path, for both of the module's callers. Without a
+// provider this stack returns no suggestions at all, so the suggestion list is
+// mocked at the browser — the same page.route technique analyze-again.spec.js
+// and inbox-discard-all.spec.js use for responses this deployment cannot
+// produce on demand. What is NOT mocked is the picker: the buttons, the
+// selection state and the hash it extracts from a suggestion URL are the real
+// module, which is the part a bad extraction would break.
+const SUGGESTION_HASH_A = "b".repeat(64);
+const SUGGESTION_HASH_B = "c".repeat(64);
+
+async function mockSuggestions(page, suggestions) {
+  // A predicate, not a glob: Playwright treats "?" in a URL pattern as a
+  // single-character wildcard, so "**/image-suggestions?*" would not mean
+  // "with a query string".
+  await page.route(
+    (url) => url.pathname.endsWith("/image-suggestions"),
+    (route) => route.fulfill({ json: { suggestions } }),
+  );
+}
+
+test("picking a suggestion sends that suggestion's hash to the image route", async ({ page }) => {
+  await logIn(page);
+  await mockSuggestions(page, [
+    { url: `/api/storages/${STORAGE_ID}/images/${SUGGESTION_HASH_A}`, type: "photo" },
+    { url: `/api/storages/${STORAGE_ID}/images/${SUGGESTION_HASH_B}`, type: "icon" },
+  ]);
+
+  let sent = null;
+  await page.route(`**/products/${PICTURE_PICKER_PRODUCT}/image`, async (route) => {
+    sent = route.request().postDataJSON();
+    await route.fulfill({ json: { image_url: "/api/storages/x/product-images/p.jpg", icon_name: null } });
+  });
+
+  await openProduct(page, "E2E Picture Picker Source");
+  await page.locator('[data-role="change-picture"]').click();
+
+  const choices = page.locator('[data-role="picture-suggestion"]');
+  await expect(choices).toHaveCount(2);
+
+  // The second one, so a picker that always sends the first would fail here.
+  await choices.nth(1).click();
+  await expect.poll(() => sent).not.toBeNull();
+
+  // The hash of the picked suggestion, never its URL: a URL would let a
+  // caller point this household's product at a server of their choosing.
+  expect(sent).toEqual({ image: SUGGESTION_HASH_B, icon_name: null });
+  await expect(choices.nth(1)).toHaveAttribute("aria-pressed", "true");
+  await expect(choices.nth(0)).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator('[data-role="picture-none"]')).toHaveAttribute("aria-pressed", "false");
+});
+
+// The regression test for the round-1 Go review's blocking finding: the clear
+// button used to be built only in the branch where suggestions loaded and came
+// back non-empty, so a product that already had a picture could not be cleared
+// whenever the provider was down or returned nothing — which is this stack's
+// own default state, and therefore the likeliest state of a real deployment
+// with no SerpAPI key.
+for (const [name, fulfil] of [
+  ["the provider is unreachable", (route) => route.fulfill({ status: 503, json: { error: { code: "upstream_failed" } } })],
+  ["no pictures are found", (route) => route.fulfill({ json: { suggestions: [] } })],
+]) {
+  test(`a picture can still be removed when ${name}`, async ({ page }) => {
+    await logIn(page);
+    await page.route((url) => url.pathname.endsWith("/image-suggestions"), fulfil);
+
+    let sent = null;
+    await page.route(`**/products/${PICTURE_CLEAR_PRODUCT}/image`, async (route) => {
+      sent = route.request().postDataJSON();
+      await route.fulfill({ json: { image_url: null, icon_name: null } });
+    });
+
+    await openProduct(page, "E2E Picture Clear Source");
+    await page.locator('[data-role="change-picture"]').click();
+
+    const clear = page.locator('[data-role="picture-none"]');
+    await expect(clear).toBeVisible();
+    await clear.click();
+
+    await expect.poll(() => sent).toEqual({ image: null, icon_name: null });
+  });
+}

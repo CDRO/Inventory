@@ -36,7 +36,7 @@ import { t } from "./i18n.js";
  * Labels come from the caller's own catalog section rather than a shared one,
  * because the surrounding sentence differs per page: the shopping list offers
  * to "continue without one", while the product screen is changing a picture
- * that may already exist. `keyPrefix` names that section; the six leaf keys
+ * that may already exist. `keyPrefix` names that section; the leaf keys used
  * below must exist under it in every catalog (docs/specs/19-localization.md).
  *
  * @param {Element} container - emptied first; the picker is rendered into it.
@@ -44,16 +44,76 @@ import { t } from "./i18n.js";
  * @param {string} options.storageId - the storage whose suggestions to ask for.
  * @param {string} options.query - what to find pictures of.
  * @param {string} options.keyPrefix - i18n section, e.g. "shoppingList.pictures".
- * @param {(hash: string|null) => void} options.onPick - called on every click,
- *   with the picked suggestion's cache hash, or null for the "no picture"
- *   choice. Never called during rendering: a caller that writes on pick must
- *   not be made to write merely because the picker opened.
+ * @param {boolean} [options.clearable] - true when the thing being changed may
+ *   already have a picture, so removing it is one of the choices. See the
+ *   clear button below: it is what decides that the choice survives a
+ *   provider outage, and it uses `<keyPrefix>.removePicture` instead of
+ *   `<keyPrefix>.noPicture`.
+ * @param {(hash: string|null) => (void|Promise<void>)} options.onPick - called
+ *   on every click, with the picked suggestion's cache hash, or null for the
+ *   clear choice. Never called during rendering: a caller that writes on pick
+ *   must not be made to write merely because the picker opened. If it returns
+ *   a promise that rejects, the selection is rolled back to what it was.
  */
-export async function renderImagePicker(container, { storageId, query, keyPrefix, onPick }) {
+export async function renderImagePicker(
+  container,
+  { storageId, query, keyPrefix, onPick, clearable = false },
+) {
   clearChildren(container);
 
   const status = el("span", { class: "empty-state" }, [text(t(`${keyPrefix}.loading`))]);
   container.append(status);
+
+  const row = el("div", { class: "row" });
+
+  // Writing is asynchronous for at least one caller, and two things follow
+  // from that. A second click while the first write is still in flight would
+  // race two writes whose order the server decides, so it is refused; and a
+  // write that fails must not leave a button claiming to be the current
+  // choice, so the selection rolls back to whatever it was.
+  let settling = false;
+  async function choose(button, value) {
+    if (settling) return;
+    settling = true;
+    const previous = row.querySelector(".btn--selected");
+    markChosen(row, button);
+    try {
+      await onPick(value);
+    } catch {
+      // The caller reports the failure in its own words; this only has to
+      // stop the selection from contradicting it.
+      if (previous) markChosen(row, previous);
+      else unmarkAll(row);
+    } finally {
+      settling = false;
+    }
+  }
+
+  // The clear choice. For a caller changing a picture that may already exist
+  // it is the only way to remove one, so it is rendered in every state below
+  // — including the two where no suggestion ever arrives, which is the
+  // ordinary case whenever no image provider is configured. For a caller
+  // choosing a picture for something that has none yet, it is instead the
+  // pre-selected default and only means anything beside real suggestions.
+  const clearButton = el(
+    "button",
+    {
+      type: "button",
+      class: clearable ? "btn btn--ghost" : "btn btn--ghost btn--selected",
+      "aria-pressed": clearable ? "false" : "true",
+      "data-role": "picture-none",
+      onclick: (event) => choose(event.currentTarget, null),
+    },
+    [text(t(clearable ? `${keyPrefix}.removePicture` : `${keyPrefix}.noPicture`))],
+  );
+
+  function degradeTo(message) {
+    status.textContent = message;
+    if (clearable) {
+      row.append(clearButton);
+      container.append(row);
+    }
+  }
 
   let suggestions = [];
   try {
@@ -62,31 +122,17 @@ export async function renderImagePicker(container, { storageId, query, keyPrefix
     );
     suggestions = body.suggestions || [];
   } catch {
-    status.textContent = t(`${keyPrefix}.unavailable`);
+    degradeTo(t(`${keyPrefix}.unavailable`));
     return;
   }
 
   if (suggestions.length === 0) {
-    status.textContent = t(`${keyPrefix}.none`);
+    degradeTo(t(`${keyPrefix}.none`));
     return;
   }
 
   status.textContent = t(`${keyPrefix}.pick`);
-  const row = el("div", { class: "row" });
-  const none = el(
-    "button",
-    {
-      type: "button",
-      class: "btn btn--ghost btn--selected",
-      "aria-pressed": "true",
-      onclick: (event) => {
-        markChosen(row, event.currentTarget);
-        onPick(null);
-      },
-    },
-    [text(t(`${keyPrefix}.noPicture`))],
-  );
-  row.append(none);
+  row.append(clearButton);
 
   for (const suggestion of suggestions) {
     const hash = suggestion.url.split("/").pop();
@@ -97,11 +143,9 @@ export async function renderImagePicker(container, { storageId, query, keyPrefix
           type: "button",
           class: "btn btn--ghost",
           "aria-pressed": "false",
+          "data-role": "picture-suggestion",
           "aria-label": t(`${keyPrefix}.useThis`, { type: suggestion.type }),
-          onclick: (event) => {
-            markChosen(row, event.currentTarget);
-            onPick(hash);
-          },
+          onclick: (event) => choose(event.currentTarget, hash),
         },
         [el("img", { src: suggestion.url, alt: "", width: 72, height: 72, loading: "lazy" })],
       ),
@@ -116,10 +160,14 @@ export async function renderImagePicker(container, { storageId, query, keyPrefix
  * move together or the visual and the announced selection drift apart.
  */
 export function markChosen(container, button) {
+  unmarkAll(container);
+  button.classList.add("btn--selected");
+  button.setAttribute("aria-pressed", "true");
+}
+
+function unmarkAll(container) {
   for (const other of container.querySelectorAll("button")) {
     other.classList.remove("btn--selected");
     other.setAttribute("aria-pressed", "false");
   }
-  button.classList.add("btn--selected");
-  button.setAttribute("aria-pressed", "true");
 }

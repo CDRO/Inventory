@@ -162,7 +162,7 @@
   "products.pictures.unavailable": "Picture search is unavailable right now. Try again later.",
   "products.pictures.none": "No pictures found for this product.",
   "products.pictures.pick": "Pick a picture, or remove the current one.",
-  "products.pictures.noPicture": "No picture",
+  "products.pictures.removePicture": "Remove picture",
   "products.pictures.useThis": "Use this {type}",
   "products.edit.name": "Name",
   "products.edit.category": "Category",
