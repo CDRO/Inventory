@@ -56,8 +56,11 @@ plain clone" below).
 
 **`migrate up` comes before `up -d`, always.** The server compares the
 database's schema version against the migrations its own binary ships and
-refuses to start when they disagree, naming the command that fixes it. Both
-that and the missing-`.env` check exit with code `78`, which is how
+refuses to start when they disagree, naming the fix — without naming a
+compose invocation, for the same reason the missing-`.env` hint above
+doesn't: the right command differs by deployment variant (see above and
+"Deploying to a plain clone" below). Both that and the
+missing-`.env` check exit with code `78`, which is how
 `docker compose logs app` tells "this deployment needs a person" apart from
 "crashed, worth restarting".
 
@@ -358,7 +361,9 @@ docker compose -f docker-compose.yml up -d              # 4.
 tested never and trusted always. Going back after a bad upgrade means
 restoring the backup taken in step 1.
 
-Skipping step 3 is loud rather than weird: the server refuses to start and
-prints the command. On the operator's Synology NAS, steps 2 to 4 are
+Skipping step 3 is loud rather than weird: the server refuses to start, names
+the fix and exits `78`. It prints no command of its own — the right one
+differs by deployment variant, so the message points back here, to step 3
+above. On the operator's Synology NAS, steps 2 to 4 are
 `sh deploy/synology/update`; step 1 is still yours, since the script takes no
 backup.

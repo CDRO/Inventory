@@ -94,7 +94,7 @@ func TestASchemaMismatchIsFatalAndNonRetryable(t *testing.T) {
 	assert.Equal(t, behind.Error(), errorMessage(behind),
 		"the remediation block reaches the operator unprefixed")
 	assert.Contains(t, behind.Error(), "migrate up",
-		"and names the command that fixes it")
+		"and names the operation to apply, though deliberately not a compose invocation")
 
 	// The distinction that makes the code meaningful at all: a database that is
 	// merely unreachable is worth retrying, and must not be reported as a

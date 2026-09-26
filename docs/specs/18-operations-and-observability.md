@@ -127,13 +127,23 @@ To make skipping step 3 loud instead of weird: **on startup, `serve`
 compares the database's goose version against the migrations the binary
 ships.** If migrations are pending, it exits fatally — same
 non-retryable pattern as the missing-`.env` check in
-`01-architecture-and-deployment.md` — naming the exact command:
+`01-architecture-and-deployment.md` — naming the fix:
 
 ```
 Database schema is 5 migrations behind this binary.
-Run:  docker compose -f docker-compose.yml run --rm app migrate up
-Then: docker compose -f docker-compose.yml up -d
+Run:  apply the pending migrations (migrate up) the way you deploy it (see README.md).
+Then: start the stack the same way.
 ```
+
+Neither line names a compose invocation, and each is wrong on the operator's
+own Synology NAS variant for a different reason: `docker compose -f
+docker-compose.yml run --rm app migrate up` (missing the NAS's second `-f`
+layer) resolves `db` to a throwaway named volume instead of the NAS's
+bind-mounted `./pgdata`, and reports success while the real database stays
+untouched (`migrations/README.md`); `docker compose -f docker-compose.yml up
+-d` starts Traefik, which is wrong because DSM already holds port 80
+(`01-architecture-and-deployment.md`, "Synology NAS variant"). README.md
+names the right two commands for every variant.
 
 A database **newer** than the binary (a restore of a newer dump, or a
 rolled-back image) is likewise a fatal, named error rather than

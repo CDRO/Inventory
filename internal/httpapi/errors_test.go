@@ -3,6 +3,7 @@ package httpapi_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -249,6 +250,65 @@ func TestFromStoreErrorMapsDomainErrors(t *testing.T) {
 	assert.Nil(t, httpapi.FromStoreError(nil, ""), "no error is not a failure")
 }
 
+// TestFromStoreErrorResyncReasonIsTheSentinelsOwnText pins #202: the resync
+// branch's Reason must be store.ErrResyncRequired's own fixed sentence,
+// never the matched error's text, so that a future delta path wrapping the
+// sentinel (fmt.Errorf("...: %w", store.ErrResyncRequired)) cannot leak its
+// own wrapping text as debug_reason. errors.Is matches through wrapping, so
+// this has to be exercised with a wrapped error, not the bare sentinel, or
+// the two cases would be indistinguishable.
+func TestFromStoreErrorResyncReasonIsTheSentinelsOwnText(t *testing.T) {
+	t.Parallel()
+
+	wrapped := fmt.Errorf("products delta for storage 018f: %w", store.ErrResyncRequired)
+
+	for name, err := range map[string]error{"bare sentinel": store.ErrResyncRequired, "wrapped": wrapped} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			failure := httpapi.FromStoreError(err, "some reason")
+			require.NotNil(t, failure)
+			assert.Equal(t, http.StatusConflict, failure.Status)
+			assert.Equal(t, httpapi.CodeResyncRequired, failure.Code)
+			assert.Equal(t, store.ErrResyncRequired.Error(), failure.Reason,
+				"the disclosed reason must be the sentinel's own sentence, not the wrapping layer's")
+			assert.NotContains(t, failure.Reason, "storage 018f",
+				"a wrapping layer's own text must not reach Reason")
+		})
+	}
+}
+
+// TestFromStoreErrorDefaultBranchCarriesNoDebugReason pins #203's second
+// gap: FromStoreError's default branch is the package's second producer of
+// a 500 (Internal() directly is the first), and nothing pinned that it
+// carries the same no-debug_reason, no-cause-text guarantee.
+func TestFromStoreErrorDefaultBranchCarriesNoDebugReason(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New(`pq: relation "storage_members" does not exist`)
+
+	for _, dev := range []bool{false, true} {
+		name := "prod"
+		if dev {
+			name = "dev"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			failure := httpapi.FromStoreError(cause, "some reason")
+			require.NotNil(t, failure)
+			require.Equal(t, http.StatusInternalServerError, failure.Status)
+
+			rec := writeFailure(dev, failure)
+			require.Equal(t, http.StatusInternalServerError, rec.Code)
+			assert.NotContains(t, errorObject(t, rec), "debug_reason",
+				"FromStoreError's default branch is a second producer of a 500; it must not disclose either")
+			assert.NotContains(t, rec.Body.String(), "storage_members",
+				"nor any trace of the underlying error's text")
+		})
+	}
+}
+
 // TestInternalErrorDoesNotLeakItsCause — the cause goes to the log; a caller
 // gets a fixed message. Database errors quote table and column names.
 func TestInternalErrorDoesNotLeakItsCause(t *testing.T) {
@@ -340,6 +400,40 @@ func TestInternalCarriesNoDebugReason(t *testing.T) {
 		assert.Contains(t, errorObject(t, disclosed), "debug_reason",
 			"dev must still disclose the reason of a failure that has one")
 	})
+}
+
+// TestUpstreamFailedCarriesNoDebugReason pins #203's first gap: UpstreamFailed
+// carries Err and no Reason by design (its doc comment points at Internal()
+// for the reasoning), but unlike Internal() nothing asserted the resulting
+// response shape. The provider's own error is exactly the kind of
+// third-party text the documented rule exists to keep out of Reason, so a
+// future change that set Reason from it should fail here.
+func TestUpstreamFailedCarriesNoDebugReason(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("gemini: 503 model overloaded, retry after 30s")
+
+	for _, dev := range []bool{false, true} {
+		name := "prod"
+		if dev {
+			name = "dev"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			rec := writeFailure(dev, httpapi.UpstreamFailed(cause))
+
+			require.Equal(t, http.StatusBadGateway, rec.Code)
+			fields := errorObject(t, rec)
+			assert.NotContains(t, fields, "debug_reason",
+				"UpstreamFailed names no check, so it must carry no debug_reason in either environment")
+			assert.ElementsMatch(t, []string{"code", "message"}, keysOf(fields),
+				"an UpstreamFailed response carries a code and a message, nothing else")
+			assert.Equal(t, "upstream_failed", fields["code"])
+			assert.NotContains(t, rec.Body.String(), "model overloaded",
+				"and no trace of the provider's own error text")
+		})
+	}
 }
 
 // errorObject decodes the envelope and returns the "error" object, so a test

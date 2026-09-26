@@ -86,7 +86,8 @@ func main() {
 // policies do not discriminate on exit code, so the distinct code is what lets
 // an operator (and the logs) tell "the deployment is wrong, stop trying" apart
 // from "crashed, worth restarting". Which of the two it was is in the message,
-// which names the exact command that fixes it.
+// which names the fix and points at README.md rather than an exact command,
+// because the right invocation differs by deployment variant.
 //
 // **A database that is merely unreachable is not one of them.** That is an
 // ordinary error and gets the generic 1, because it is genuinely worth
@@ -260,7 +261,7 @@ func serve() error {
 	// started, then failed whichever query first met a missing column — a
 	// 500 with a driver message, minutes or hours later, from a component
 	// unrelated to the actual mistake. It is a fatal, named refusal instead,
-	// with the exact command in the message, and a distinct exit code so the
+	// with the remediation in the message, and a distinct exit code so the
 	// restart policy's retries are visibly pointless rather than silently so.
 	//
 	// It runs before store.Open because it is the deploy order that is wrong,
