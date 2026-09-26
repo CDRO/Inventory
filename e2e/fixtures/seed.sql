@@ -1,5 +1,17 @@
--- E2E fixture: a known admin, two ordinary users, and two storages with small
--- inventories of their own (docs/specs/05-frontend-pwa-foundations.md).
+-- E2E fixture: fourteen user rows (two of them admins) across thirteen
+-- storages (docs/specs/05-frontend-pwa-foundations.md).
+--
+-- It began as "a known admin, two ordinary users, and two storages with small
+-- inventories of their own", and those first two storages — "E2E Household"
+-- and "E2E Other Household" — are still what most journeys run against. The
+-- other eleven exist because of the rule spec 05 states and every block below
+-- follows: a journey that writes state another journey would observe gets its
+-- **own** seeded user and storage, because the suite runs files in parallel.
+-- That is why this file grows by a block rather than by a row.
+--
+-- Count the inserts rather than trusting this sentence if the number matters.
+-- It was stale for six waves before anyone noticed, which is the failure mode
+-- a comment stating a total always has.
 --
 -- Applied directly to the disposable E2E database after migrations, NOT
 -- through the application layer, so fixed ids can be referenced by name from
@@ -176,8 +188,15 @@ INSERT INTO storages (id, name) VALUES
   -- one-time barcode_prompt_seen_at. Asserting that needs a user whose
   -- seen_at is still NULL, which "E2E Barcode Household" cannot provide —
   -- Dana's seen_at is no longer NULL by the time that file reaches this
-  -- assertion, since every earlier test there has already shown her the
-  -- offer at least once.
+  -- assertion, because the two tests that actually render the offer
+  -- (barcode-recall.spec.js's "the capture-time offer presents exactly three
+  -- actions" and "a product that already has a barcode is never offered
+  -- another") run before it under that file's
+  -- test.describe.configure({ mode: "serial" }). It is those two
+  -- specifically, not "every earlier test": the ones before them are
+  -- page.request API calls and a decode-fallback check that render no offer
+  -- at all. Dana stays unusable here either way, but stating which tests do
+  -- it keeps the reason checkable if the file leaves serial mode.
   ('00000000-0000-7000-8000-00000000001c', 'E2E Barcode First')
 ON CONFLICT (id) DO NOTHING;
 
@@ -216,6 +235,13 @@ INSERT INTO storage_members (storage_id, user_id, start_page) VALUES
   ('00000000-0000-7000-8000-000000000019', '00000000-0000-7000-8000-00000000000b', 'locations')  -- e2e-start-multi: E2E Start Two
 ON CONFLICT (storage_id, user_id) DO UPDATE SET start_page = EXCLUDED.start_page;
 
+-- "E2E Household" (...010) has THREE root locations, not the two below:
+-- "E2E Audited Shelf" (...ba) is a third, added further down for #169. Do not
+-- add a count- or index-based assertion over this storage's location tree —
+-- no test in the repo has one today (every household location assertion is
+-- name-scoped), and the ...ba block's own comment explains why it was safe to
+-- add a root here at all. If you need a tree you can count, seed your own
+-- storage; several blocks below already do.
 INSERT INTO locations (id, storage_id, name, description) VALUES
   ('00000000-0000-7000-8000-000000000020', '00000000-0000-7000-8000-000000000010', 'Pantry', 'Kitchen pantry shelf'),
   ('00000000-0000-7000-8000-000000000021', '00000000-0000-7000-8000-000000000010', 'Fridge', 'Kitchen fridge')
@@ -238,12 +264,28 @@ ON CONFLICT (id) DO NOTHING;
 -- formatAudited()'s relative-time phrase (web/static/js/audited.js) at all.
 -- Computed relative to now() rather than hardcoded, like the E2E Stocktake
 -- block below, so the fixture never goes stale. Read-only here, so it is
--- safe alongside every other suite that reads this storage's tree. ...ba is
--- the next free id after ...b9 (this file's own Nested Location Source
--- range, below).
+-- safe alongside every other suite that reads this storage's tree — and it is
+-- a new ROOT of the shared storage, which the "child of Fridge rather than a
+-- new root" reasoning on ...b6 above deliberately avoided: that block needed
+-- a nested path and had a Fridge to hang it from, while an audited-state
+-- phrase has to be the tree's own top-level row to be rendered by
+-- locations.html at all. See the warning on the Pantry/Fridge insert above
+-- for what that costs. ...ba is the next free id after ...b9 (this file's own
+-- Nested Location Source range, below).
+--
+-- DO UPDATE, not DO NOTHING, and this one is load-bearing: the interval is
+-- evaluated when the seed runs, and #169's test asserts the exact phrase
+-- "geprüft vor 5 Tagen". formatAudited buckets with Math.floor(elapsed / ms),
+-- so a row left frozen at a previous seed's timestamp renders "vor 6 Tagen"
+-- a day later and "vor 1 Woche" two days later, failing a test nothing has
+-- touched. The documented sequence in docker-compose.e2e.yml re-seeds on
+-- every run, but ON CONFLICT DO NOTHING would silently keep the stale row on
+-- a database volume that outlives one run — which is exactly how this stack
+-- is operated, since a wave's consolidation leaves it up for the
+-- orchestrator. Re-seeding must therefore refresh this timestamp.
 INSERT INTO locations (id, storage_id, name, description, last_audited_at) VALUES
   ('00000000-0000-7000-8000-0000000000ba', '00000000-0000-7000-8000-000000000010', 'E2E Audited Shelf', 'Audited a few days ago', now() - interval '5 days')
-ON CONFLICT (id) DO NOTHING;
+ON CONFLICT (id) DO UPDATE SET last_audited_at = EXCLUDED.last_audited_at;
 
 INSERT INTO categories (id, storage_id, name, default_shelf_life_days) VALUES
   ('00000000-0000-7000-8000-000000000030', '00000000-0000-7000-8000-000000000010', 'Canned Goods', 730)
@@ -385,7 +427,13 @@ ON CONFLICT (id) DO NOTHING;
 -- create-then-complete-the-move test in this same file, so reusing it here
 -- would race that test under fullyParallel — same one-product-per-scenario
 -- reasoning as every other block in this file. ...bb/...bc/...bd are the
--- next free ids after ...b7-...b9 (the #174 nested-location fixture).
+-- next free ids after ...ba, which #169's "E2E Audited Shelf" location took
+-- (above); ...b7-...b9 before it were the #174 nested-location fixture. Two
+-- blocks of this wave both derived "next free" from ...b9 at first, which
+-- would have collided — and ON CONFLICT DO NOTHING swallows a duplicate id
+-- silently rather than erroring, so the symptom would have been a fixture
+-- that simply is not there. State the immediate predecessor, not the last
+-- one you happen to remember.
 INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
   ('00000000-0000-7000-8000-0000000000bb', '00000000-0000-7000-8000-000000000010', 'E2E Quick-Create Move Cancel Source', NULL, 'non_perishable', 0)
 ON CONFLICT (id) DO NOTHING;

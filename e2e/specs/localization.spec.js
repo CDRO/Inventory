@@ -279,7 +279,13 @@ test.describe("a batch expiry date under a non-UTC browser timezone", () => {
     await page.fill("#found-expiry", "2030-01-01");
     await page.click("#add-found button[type=submit]");
 
-    const item = page.locator("#found").filter({ hasText: "Greek Yogurt" });
+    // Scoped to the ROW, not to #found itself: renderFound appends one
+    // div.row.row--between per entry (web/static/js/pages/stocktake.js:399),
+    // and filtering #found — a single container div — by its own subtree
+    // resolves back to the whole list. With one entry that passes either way,
+    // but the day the list holds two, a correct date on one row would satisfy
+    // the assertion for the other. There are no <li>s here; .row is the row.
+    const item = page.locator("#found .row").filter({ hasText: "Greek Yogurt" });
     await expect(item).toContainText("1/1/2030");
     await expect(item).not.toContainText("12/31/2029");
   });
