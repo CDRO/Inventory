@@ -110,8 +110,9 @@ case "$1" in
       *Config.Env*)    echo "HTTP_PORT=${STUB_APP_PORT:-8000}" ;;
     esac
     exit 0 ;;
-  stop) exit ${STUB_DOCKER_STOP_RC:-0} ;;
-  rm)   exit ${STUB_DOCKER_RM_RC:-0} ;;
+  stop)  exit ${STUB_DOCKER_STOP_RC:-0} ;;
+  rm)    exit ${STUB_DOCKER_RM_RC:-0} ;;
+  image) exit ${STUB_PRUNE_RC:-0} ;;
 esac
 exit 0
 `
@@ -536,6 +537,23 @@ func TestNothingIsPrunedWithoutTheFlag(t *testing.T) {
 		t.Fatalf("expected exit 0, got %d", r.exit)
 	}
 	mustNotContain(t, r.calls, "image prune", "the calls")
+}
+
+// Issue #197: a successful update must not be reported as a failure just
+// because the cleanup at the very end of it could not run. All four exit
+// paths funnel through maybe_prune, so the rolling path here stands for all
+// of them.
+func TestFailingPruneDoesNotFailTheUpdate(t *testing.T) {
+	env := rollingEnv()
+	env["STUB_PRUNE_RC"] = "1"
+
+	r := run(t, env, "--no-pull", "--prune")
+
+	if r.exit != 0 {
+		t.Fatalf("a failed prune must not fail an otherwise successful update, got exit %d", r.exit)
+	}
+	mustContain(t, r.calls, "docker image prune -f", "the prune")
+	mustContain(t, r.stderr, "could not prune dangling images", "stderr")
 }
 
 // Nit: the container name sits on the same line as its status, and Compose's
