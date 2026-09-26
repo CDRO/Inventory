@@ -473,21 +473,36 @@ test("closing the location modal while two creates overlap waits for both before
     await dialog.locator("#location-modal-add-root-form button[type=submit]").click();
   };
 
-  // The add-root form removes itself the instant it's submitted (before its
-  // POST returns), so a second one can be opened and submitted while the
-  // first create is still in flight — exactly what makes the two overlap.
+  // The first create starts, then Done is clicked while only it is pending —
+  // requestClose captures *that* attempt. Only then does the second create
+  // start (the add-root form removes itself the instant it's submitted,
+  // before its own POST returns, so it's free to reopen while the first is
+  // still in flight and while Done is already waiting on it). This is the
+  // interleaving that actually distinguishes the fix: latching onto "the
+  // pending attempt at the moment Done was clicked" and waiting on it
+  // unconditionally (submitting both creates before Done, then waiting on
+  // whichever is current) exercises the same code path old and new code
+  // already agreed on, and would pass against either.
   await addRoot("Attic Bin");
-  await addRoot("Basement Nook");
 
   await dialog.getByRole("button", { name: "Done" }).click();
   await expect(dialog).toBeVisible();
 
+  await addRoot("Basement Nook");
   await expect.poll(() => releases.length).toBe(2);
 
-  // The first create settles; the second is still outstanding, so the
-  // dialog must still be waiting rather than resolving createdIds one id
-  // short.
+  // The first create — the one requestClose actually latched onto — settles;
+  // the second, started after Done was already clicked, is still
+  // outstanding. The dialog must still be waiting on it rather than treating
+  // the first settling as license to finalize. Waiting for the first
+  // create's own effect to actually land (its reload redrawing the dialog's
+  // tree) — rather than just checking visibility the instant releases[0] is
+  // called — is what actually gives a premature close time to happen if the
+  // fix is missing: an immediate visibility check would still read "visible"
+  // even under the bug, since the real close only follows a moment later,
+  // after the network round trip.
   releases[0]();
+  await expect(dialog).toContainText("Attic Bin");
   await expect(dialog).toBeVisible();
 
   releases[1]();
