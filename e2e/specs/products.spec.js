@@ -42,6 +42,7 @@ const CANCEL_PRODUCT = "00000000-0000-7000-8000-000000000092";
 const CANCEL_BATCH = "00000000-0000-7000-8000-000000000093";
 const MOVE_QUICK_CREATE_PRODUCT = "00000000-0000-7000-8000-000000000096";
 const MOVE_QUICK_CREATE_BATCH = "00000000-0000-7000-8000-000000000097";
+const MOVE_CANCEL_BATCH = "00000000-0000-7000-8000-0000000000bc";
 const DOUBLE_CLICK_PRODUCT = "00000000-0000-7000-8000-000000000099";
 const DOUBLE_CLICK_BATCH = "00000000-0000-7000-8000-00000000009a";
 const DOUBLE_CLICK_MOVE_PRODUCT = "00000000-0000-7000-8000-00000000009c";
@@ -323,6 +324,40 @@ test("cancelling the location modal from the split picker leaves the in-progress
     await dismiss();
     await expect(page.getByRole("dialog", { name: "Locations" })).toBeHidden();
     await expect(form.locator("input")).toHaveValue("3");
+    await expect(form.locator("select")).toHaveValue(FRIDGE);
+  }
+});
+
+// Same cancel criterion as above, against the *move* form's own trigger.
+// splitLocationAdd and moveLocationAdd (web/static/js/pages/products.js) are
+// two independent closures, each with its own openedSelect — the split
+// form's cancel wiring proven above says nothing about the move form's own.
+// The move form has no quantity field, so the only in-progress state to
+// assert is the selected location; it still has to be a non-default value
+// (a real target rather than the placeholder), same reasoning as above.
+// Deliberately its own dedicated batch (MOVE_CANCEL_BATCH) rather than
+// MOVE_QUICK_CREATE_BATCH: that fixture is read and mutated by the
+// create-then-complete-the-move test below, and this test runs
+// fullyParallel with it.
+test("cancelling the location modal from the move picker leaves the in-progress selected location untouched", async ({
+  page,
+}) => {
+  await logIn(page);
+  await openProduct(page, "E2E Quick-Create Move Cancel Source");
+
+  const row = batchRow(page, MOVE_CANCEL_BATCH);
+  await expect(row).toContainText("7 × Pantry");
+  await row.locator('[data-role="move-toggle"]').click();
+
+  const form = row.locator('[data-role="move-form"]');
+  await expect(form).toBeVisible();
+  await form.locator("select").selectOption(FRIDGE);
+
+  for (const dismiss of [() => page.keyboard.press("Escape"), () => page.mouse.click(5, 5)]) {
+    await form.locator('[data-role="location-add"]').click();
+    await expect(page.getByRole("dialog", { name: "Locations" })).toBeVisible();
+    await dismiss();
+    await expect(page.getByRole("dialog", { name: "Locations" })).toBeHidden();
     await expect(form.locator("select")).toHaveValue(FRIDGE);
   }
 });

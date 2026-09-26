@@ -378,6 +378,26 @@ INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, create
   ('00000000-0000-7000-8000-0000000000b9', '00000000-0000-7000-8000-0000000000b7', '00000000-0000-7000-8000-0000000000b8', 6, 'purchase', '00000000-0000-7000-8000-000000000003')
 ON CONFLICT (id) DO NOTHING;
 
+-- One more product, dedicated to #163: cancelling the location quick-create
+-- modal from the *move* picker's own trigger. The existing cancel scenario
+-- above (...92/...93) only opens the split form's trigger; the existing
+-- move-quick-create fixture (...96/...97) is read and mutated by the
+-- create-then-complete-the-move test in this same file, so reusing it here
+-- would race that test under fullyParallel — same one-product-per-scenario
+-- reasoning as every other block in this file. ...bb/...bc/...bd are the
+-- next free ids after ...b7-...b9 (the #174 nested-location fixture).
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
+  ('00000000-0000-7000-8000-0000000000bb', '00000000-0000-7000-8000-000000000010', 'E2E Quick-Create Move Cancel Source', NULL, 'non_perishable', 0)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_date, expiration_source) VALUES
+  ('00000000-0000-7000-8000-0000000000bc', '00000000-0000-7000-8000-0000000000bb', '00000000-0000-7000-8000-000000000020', 7, NULL, 'derived')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
+  ('00000000-0000-7000-8000-0000000000bd', '00000000-0000-7000-8000-0000000000bb', '00000000-0000-7000-8000-0000000000bc', 7, 'purchase', '00000000-0000-7000-8000-000000000003')
+ON CONFLICT (id) DO NOTHING;
+
 -- "E2E Other Household" (...011), Alice's second storage. It held nothing at
 -- all until now, which was enough for journey 8's non-disclosure check — Bob
 -- is refused it whether or not it has contents — but not for two others:
