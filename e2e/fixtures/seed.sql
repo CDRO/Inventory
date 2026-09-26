@@ -233,6 +233,18 @@ INSERT INTO locations (id, storage_id, parent_id, name, description) VALUES
   ('00000000-0000-7000-8000-0000000000b6', '00000000-0000-7000-8000-000000000010', '00000000-0000-7000-8000-000000000021', 'Door Bin', 'A bin in the fridge door')
 ON CONFLICT (id) DO NOTHING;
 
+-- A root location whose last_audited_at is in the past, dedicated to #169:
+-- Pantry and Fridge above have never been audited, so neither exercises
+-- formatAudited()'s relative-time phrase (web/static/js/audited.js) at all.
+-- Computed relative to now() rather than hardcoded, like the E2E Stocktake
+-- block below, so the fixture never goes stale. Read-only here, so it is
+-- safe alongside every other suite that reads this storage's tree. ...ba is
+-- the next free id after ...b9 (this file's own Nested Location Source
+-- range, below).
+INSERT INTO locations (id, storage_id, name, description, last_audited_at) VALUES
+  ('00000000-0000-7000-8000-0000000000ba', '00000000-0000-7000-8000-000000000010', 'E2E Audited Shelf', 'Audited a few days ago', now() - interval '5 days')
+ON CONFLICT (id) DO NOTHING;
+
 INSERT INTO categories (id, storage_id, name, default_shelf_life_days) VALUES
   ('00000000-0000-7000-8000-000000000030', '00000000-0000-7000-8000-000000000010', 'Canned Goods', 730)
 ON CONFLICT (id) DO NOTHING;
