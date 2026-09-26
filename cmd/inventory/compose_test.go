@@ -276,10 +276,21 @@ func TestE2EComposeFilePinsItsProjectName(t *testing.T) {
 
 	normalized := strings.ReplaceAll(repoFile(t, "docker-compose.e2e.yml"), "\r\n", "\n")
 
-	// Leading newline prepended so the match also holds if `name:` is the
-	// file's first line; anchoring at column 0 is what distinguishes the
-	// project name from a `name:` nested inside some service.
-	assert.Contains(t, "\n"+normalized, "\nname: inventory-e2e\n",
+	// An exact line match, the way composeService finds a service key: column 0
+	// is what distinguishes the project name from a `name:` nested inside some
+	// service, and every other mention of `inventory-e2e` in this file is
+	// inside a `#` comment, which a substring match would happily accept.
+	// Scanned rather than asserted with Contains over the whole file so that a
+	// failure prints the message below instead of two hundred lines of YAML.
+	pinned := false
+	for _, line := range strings.Split(normalized, "\n") {
+		if line == "name: inventory-e2e" {
+			pinned = true
+			break
+		}
+	}
+
+	assert.True(t, pinned,
 		"docker-compose.e2e.yml must pin the project name at the top level: CI passes no -p, so without this line the E2E stack shares the default project with docker-compose.yml and db reuses the dev stack's data directory (#190)")
 }
 
