@@ -840,4 +840,22 @@ INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock, i
   ('00000000-0000-7000-8000-0000000000fb', '00000000-0000-7000-8000-000000000010', 'E2E Picture Clear Source',  NULL, 'non_perishable', 0, 'noto:cheese-wedge')
 ON CONFLICT (id) DO NOTHING;
 
+-- #224: the move form's own empty-submit native-validation test, mirroring
+-- ...b3/...b4/...b5 above (the split form's equivalent) but for moveTarget.
+-- A dedicated product rather than reusing ...b3: that fixture's split form is
+-- read by the split scenario above, and this suite runs fullyParallel.
+-- ...fc/...fd/...fe are the next free ids after ...fb, the last one this file
+-- uses.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
+  ('00000000-0000-7000-8000-0000000000fc', '00000000-0000-7000-8000-000000000010', 'E2E Empty Submit Move Source', NULL, 'non_perishable', 0)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_date, expiration_source) VALUES
+  ('00000000-0000-7000-8000-0000000000fd', '00000000-0000-7000-8000-0000000000fc', '00000000-0000-7000-8000-000000000020', 4, NULL, 'derived')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
+  ('00000000-0000-7000-8000-0000000000fe', '00000000-0000-7000-8000-0000000000fc', '00000000-0000-7000-8000-0000000000fd', 4, 'purchase', '00000000-0000-7000-8000-000000000003')
+ON CONFLICT (id) DO NOTHING;
+
 COMMIT;
