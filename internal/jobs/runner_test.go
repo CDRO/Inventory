@@ -784,6 +784,34 @@ func TestResubmitAnalysesAFinishedJobAgain(t *testing.T) {
 	}
 }
 
+// cancelledContext returns a context that is already done, for tests that
+// need a stmtCtx cancelled before any lease method is called.
+func cancelledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
+// syncLog is a bytes.Buffer safe for a background goroutine (RunLeases, via
+// slog) to write into while the test goroutine reads it back — the same
+// pattern as capturedLog in internal/httpapi/requestlog_test.go.
+type syncLog struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncLog) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncLog) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
 // TestFakeStoreLeaseMethodsHonourCancellationWhenAsked is issue #219: none of
 // the three lease methods above inspected the context they were handed, so no
 // test could exercise what RunLeases does when a cancelled stmtCtx reaches
@@ -794,8 +822,7 @@ func TestFakeStoreLeaseMethodsHonourCancellationWhenAsked(t *testing.T) {
 
 	s := newFakeStore()
 	s.honourContext = true
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	ctx := cancelledContext()
 
 	_, err := s.RenewJobLeases(ctx, store.JobLease{})
 	assert.ErrorIs(t, err, context.Canceled)
@@ -813,22 +840,22 @@ func TestFakeStoreLeaseMethodsHonourCancellationWhenAsked(t *testing.T) {
 // done. With context.Background() in production (cmd/inventory/main.go),
 // stmtCtx.Err() is never non-nil, so this test is the only coverage of what
 // happens if a future caller ever hands RunLeases a cancellable context — a
-// misuse of the API, per issue #219. This test asserts the guard's current,
-// reviewed behaviour (silence) rather than changing it: review-go checked this
-// exact guard in PR #218 round 2 and found it correct, and whether misuse
-// deserves a warning of its own instead of silence is an open question this
-// PR argues rather than resolves in code (see the PR description).
+// misuse of the API, per issue #219. This test asserts the guard's current
+// behaviour (silence) rather than changing it: PR #218 round 2 settled that
+// the guard should read stmtCtx.Err() rather than r.base.Err(), but not
+// whether misuse deserves a warning of its own instead of silence — that is a
+// separate, still-open question this PR argues rather than resolves in code
+// (see the PR description).
 func TestRunLeasesStaysSilentWhenItsStatementContextIsCancelled(t *testing.T) {
 	t.Parallel()
 
 	s := newFakeStore()
 	s.honourContext = true
-	var log bytes.Buffer
-	r := New(s, slog.New(slog.NewTextHandler(&log, nil)))
+	log := &syncLog{}
+	r := New(s, slog.New(slog.NewTextHandler(log, nil)))
 	r.leaseInterval = 5 * time.Millisecond
 
-	stmtCtx, cancelStmt := context.WithCancel(context.Background())
-	cancelStmt()
+	stmtCtx := cancelledContext()
 	go r.RunLeases(stmtCtx)
 	defer func() { _ = r.Shutdown(context.Background()) }()
 
