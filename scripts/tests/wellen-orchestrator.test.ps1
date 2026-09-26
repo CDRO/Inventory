@@ -424,6 +424,52 @@ Write-Output "Done: 1 container(s), 0 network(s), 1 volume(s), 0 image tag(s) pr
     Remove-Item -Force -Path $script:LogFile -ErrorAction SilentlyContinue
 }
 
+Write-Host "== Resolve-WaveFilePath (#283): a relative -WaveFile must survive Start-Job's own cwd =="
+
+# Invoke-WaveDockerCleanup hands $WaveFile to Start-Job, which runs in its own
+# working directory - a relative path resolves fine in the caller's location
+# but not there, so cleanup silently no-op'd on every wave (#283). The fix
+# resolves once, at startup, before the value can ever reach a job.
+$planDir283 = Join-Path $env:TEMP "wotest-283-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Force -Path $planDir283 | Out-Null
+$planFile283 = Join-Path $planDir283 'wellen.json'
+Set-Content -Path $planFile283 -Value '{}' -Encoding ASCII
+try {
+    $absolute = (Get-Item -LiteralPath $planFile283).FullName
+    Assert ((Resolve-WaveFilePath -Path $absolute) -eq $absolute) 'an already-absolute path resolves to itself'
+
+    Push-Location $planDir283
+    try {
+        $resolvedFromRelative = Resolve-WaveFilePath -Path '.\wellen.json'
+        Assert ([System.IO.Path]::IsPathRooted($resolvedFromRelative)) 'a relative -WaveFile resolves to an absolute path'
+        Assert ($resolvedFromRelative -eq $absolute) 'the resolved relative path matches the resolved absolute path'
+    } finally {
+        Pop-Location
+    }
+
+    $threw = $false
+    try { Resolve-WaveFilePath -Path (Join-Path $planDir283 'does-not-exist.json') | Out-Null } catch { $threw = $true }
+    Assert $threw 'a missing wave file fails fast at startup, not silently inside a later Start-Job'
+
+    # The actual #283 failure mode: prove Invoke-WaveDockerCleanup's Start-Job
+    # only ever receives the resolved, absolute form - never whatever relative
+    # spelling the caller originally passed as -WaveFile - by having the stub
+    # report back what it actually received.
+    $jobDir = Join-Path $env:TEMP "wotest-283-job-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Force -Path $jobDir | Out-Null
+    $script:DockerCleanupScript = New-Stub 'echoes-wavefile' 'Write-Output "WAVEFILE=$WaveFile"'
+    $savedWaveFile = $script:WaveFile
+    $script:WaveFile = $absolute
+    Reset-Log
+    try { Invoke-WaveDockerCleanup -Wave (New-TestWave) } finally { $script:WaveFile = $savedWaveFile }
+    $log = Get-LogText
+    Assert ($log -match [regex]::Escape("WAVEFILE=$absolute")) 'Invoke-WaveDockerCleanup passes the resolved, absolute WaveFile into the job'
+} finally {
+    Remove-Item -Recurse -Force -Path $planDir283 -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force -Path $jobDir -ErrorAction SilentlyContinue
+    Remove-Item -Force -Path $script:LogFile -ErrorAction SilentlyContinue
+}
+
 Write-Host "== Get-PackagePrompt / Get-ConsolidationPrompt: plan.conventions reaches both =="
 
 # #255 and #246 were both hazards a consolidation session hit that
