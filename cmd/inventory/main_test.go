@@ -1,19 +1,31 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/CDRO/Inventory/internal/config"
+	"github.com/CDRO/Inventory/internal/imagesearch"
+	"github.com/CDRO/Inventory/internal/jobs"
 	"github.com/CDRO/Inventory/internal/migrate"
+	"github.com/CDRO/Inventory/internal/notify"
+	"github.com/CDRO/Inventory/internal/store"
 )
 
 // TestExitCodeForConfigFailure is the guard on the "fatal, non-retryable exit
@@ -243,5 +255,206 @@ func TestNextMondayOnMondayAfterMidnightIsNextWeek(t *testing.T) {
 	for _, now := range cases {
 		next := nextMonday(now)
 		assert.Equal(t, time.Date(2026, time.March, 16, 0, 0, 0, 0, time.UTC), next, "now=%s", now)
+	}
+}
+
+// discardLogger is a *slog.Logger that never writes anywhere, for
+// constructors below that require one.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// fakeCacheStore satisfies imagesearch.CacheStore without a database, so
+// TestBackgroundLoopsCoversAllSix can enter imageCache.RunSweeps for real.
+type fakeCacheStore struct{}
+
+func (fakeCacheStore) CachedImageByHash(context.Context, string) (*store.CachedImage, error) {
+	return nil, nil
+}
+func (fakeCacheStore) PutCachedImage(context.Context, store.CachedImage) error { return nil }
+func (fakeCacheStore) TouchCachedImage(context.Context, string, time.Duration) error {
+	return nil
+}
+func (fakeCacheStore) CachedImageBytes(context.Context) (int64, error) { return 0, nil }
+func (fakeCacheStore) LeastRecentlyUsedImages(context.Context, int) ([]store.CachedImage, error) {
+	return nil, nil
+}
+func (fakeCacheStore) DeleteCachedImage(context.Context, string) error { return nil }
+func (fakeCacheStore) CachedImageHashes(context.Context) (map[string]struct{}, error) {
+	return map[string]struct{}{}, nil
+}
+
+// fakeJobsStore satisfies jobs.Store without a database, so
+// TestBackgroundLoopsCoversAllSix can enter and stop jobRunner.RunLeases for
+// real.
+type fakeJobsStore struct{}
+
+func (fakeJobsStore) CreateJob(context.Context, store.NewJob) (*store.Job, error) { return nil, nil }
+func (fakeJobsStore) RequeueJob(context.Context, uuid.UUID, uuid.UUID, store.JobLease) error {
+	return nil
+}
+func (fakeJobsStore) CompleteJob(context.Context, uuid.UUID, json.RawMessage) error { return nil }
+func (fakeJobsStore) FailJob(context.Context, uuid.UUID, string) error              { return nil }
+func (fakeJobsStore) FailOrphanedJobs(context.Context, uuid.UUID) (int64, error)    { return 0, nil }
+func (fakeJobsStore) RenewJobLeases(context.Context, store.JobLease) (int64, error) { return 0, nil }
+func (fakeJobsStore) ReleaseJobLeases(context.Context, uuid.UUID) (int64, error)    { return 0, nil }
+
+// fakeSweepStore satisfies storeSweeper without a database, and counts calls
+// so a test can tell runStoreSweeps actually reached them rather than merely
+// returning without panicking.
+type fakeSweepStore struct{ calls atomic.Int32 }
+
+func (f *fakeSweepStore) SweepSessions(context.Context) (int64, error) {
+	f.calls.Add(1)
+	return 0, nil
+}
+func (f *fakeSweepStore) SweepPairingCodes(context.Context) (int64, error) {
+	f.calls.Add(1)
+	return 0, nil
+}
+func (f *fakeSweepStore) SweepIdempotencyRecords(context.Context, time.Time) (int64, error) {
+	f.calls.Add(1)
+	return 0, nil
+}
+func (f *fakeSweepStore) SweepTombstones(context.Context, time.Time) (int64, error) {
+	f.calls.Add(1)
+	return 0, nil
+}
+
+// fakeNotifyStore satisfies notify.Store without a database. Its methods are
+// never expected to run in the tests below, since runExpiryNotifications
+// checks ctx.Done() before ever reaching them — this fake exists only so
+// notify.New has something to hold.
+type fakeNotifyStore struct{}
+
+func (fakeNotifyStore) ClaimDueNotifications(context.Context, time.Time, time.Time) ([]store.NotificationSettings, error) {
+	return nil, nil
+}
+func (fakeNotifyStore) ExpiringBatchesBefore(context.Context, uuid.UUID, time.Time) ([]store.DigestItem, error) {
+	return nil, nil
+}
+func (fakeNotifyStore) RecordNotificationResult(context.Context, uuid.UUID, string) error {
+	return nil
+}
+
+// TestStartBackgroundLoopsEntersEveryLoop is the generic half of issue #214's
+// fix: the launcher itself must start every loop handed to it, even one whose
+// own body only checks ctx.Done() and would otherwise look skipped rather
+// than merely quick to return.
+func TestStartBackgroundLoopsEntersEveryLoop(t *testing.T) {
+	t.Parallel()
+
+	const n = 6
+	var wg sync.WaitGroup
+	wg.Add(n)
+	loops := make([]backgroundLoop, n)
+	for i := range loops {
+		loops[i] = backgroundLoop{
+			name: fmt.Sprintf("loop-%d", i),
+			run:  func(context.Context) { wg.Done() },
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	startBackgroundLoops(ctx, loops)
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("startBackgroundLoops did not enter every loop")
+	}
+}
+
+// TestBackgroundLoopsCoversAllSix is the concrete half of issue #214's fix:
+// serve() must wire up exactly the six loops the issue names, and each one
+// must actually be reachable when started — not just present as a line of
+// code. Deleting any entry from backgroundLoops, or breaking how one of them
+// enters, fails this test; each loop's own package tests call it directly and
+// so cannot notice serve() failing to start it.
+func TestBackgroundLoopsCoversAllSix(t *testing.T) {
+	t.Parallel()
+
+	log := discardLogger()
+	imageCache := imagesearch.NewCache(t.TempDir(), fakeCacheStore{}, nil, log)
+	jobRunner := jobs.New(fakeJobsStore{}, log)
+	notifier := notify.New(fakeNotifyStore{}, log)
+	sweepDB := &fakeSweepStore{}
+
+	// gamificationDB is nil on purpose: runGamificationRecompute and
+	// runWeeklyGamificationJobs both check ctx.Done() before ever touching
+	// their *store.Store argument, so entering them with an already-cancelled
+	// context below never dereferences it.
+	loops := backgroundLoops(imageCache, jobRunner, sweepDB, nil, nil, notifier)
+
+	wantNames := []string{
+		"image suggestion cache sweep",
+		"job lease keeper",
+		"store retention sweep",
+		"nightly gamification recompute",
+		"weekly gamification jobs",
+		"expiry notifications",
+	}
+	gotNames := make([]string, len(loops))
+	for i, l := range loops {
+		gotNames[i] = l.name
+	}
+	assert.ElementsMatch(t, wantNames, gotNames,
+		"serve() must start all six loops issue #214 names — deleting one keeps `go test ./...` green everywhere else")
+
+	// The lease keeper is deliberately excluded here (issue #121/#219): it
+	// ignores the context handed to it and stops only when the runner itself
+	// shuts down, so cancelling ctx below proves nothing about it. It is
+	// exercised on its own just after this block.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var wg sync.WaitGroup
+	for _, l := range loops {
+		if l.name == "job lease keeper" {
+			continue
+		}
+		l := l
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			assert.NotPanics(t, func() { l.run(ctx) }, "%s must be safely enterable", l.name)
+		}()
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a background loop did not return promptly for a cancelled context")
+	}
+	assert.GreaterOrEqual(t, sweepDB.calls.Load(), int32(1),
+		"store retention sweep must actually reach the store, not just return")
+
+	var leaseRun func(context.Context)
+	for _, l := range loops {
+		if l.name == "job lease keeper" {
+			leaseRun = l.run
+		}
+	}
+	require.NotNil(t, leaseRun)
+
+	leaseDone := make(chan struct{})
+	go func() {
+		leaseRun(context.Background())
+		close(leaseDone)
+	}()
+	// Give the goroutine above a chance to actually start running before
+	// shutting the runner down, so a leaseRun that silently did nothing
+	// cannot be mistaken for one that entered and then stopped.
+	runtime.Gosched()
+	require.NoError(t, jobRunner.Shutdown(context.Background()))
+	select {
+	case <-leaseDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("job lease keeper did not stop after the runner shut down")
 	}
 }
