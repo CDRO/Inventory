@@ -235,7 +235,7 @@ INSERT INTO storage_members (storage_id, user_id, start_page) VALUES
   ('00000000-0000-7000-8000-000000000019', '00000000-0000-7000-8000-00000000000b', 'locations')  -- e2e-start-multi: E2E Start Two
 ON CONFLICT (storage_id, user_id) DO UPDATE SET start_page = EXCLUDED.start_page;
 
--- "E2E Household" (...010) has THREE root locations, not the two below:
+-- "E2E Household" (...010) has THREE root locations, not just the two below:
 -- "E2E Audited Shelf" (...ba) is a third, added further down for #169. Do not
 -- add a count- or index-based assertion over this storage's location tree —
 -- no test in the repo has one today (every household location assertion is
@@ -428,12 +428,14 @@ ON CONFLICT (id) DO NOTHING;
 -- would race that test under fullyParallel — same one-product-per-scenario
 -- reasoning as every other block in this file. ...bb/...bc/...bd are the
 -- next free ids after ...ba, which #169's "E2E Audited Shelf" location took
--- (above); ...b7-...b9 before it were the #174 nested-location fixture. Two
--- blocks of this wave both derived "next free" from ...b9 at first, which
--- would have collided — and ON CONFLICT DO NOTHING swallows a duplicate id
--- silently rather than erroring, so the symptom would have been a fixture
--- that simply is not there. State the immediate predecessor, not the last
--- one you happen to remember.
+-- (above); ...b7-...b9 before it were the #174 nested-location fixture. These
+-- three ids are free either way — but this comment originally derived them
+-- from ...b9 and never mentioned ...ba, leaving the one link in this file's
+-- id chain that a reader cannot follow. State your immediate predecessor, not
+-- the last one you happen to remember: the next block that computes "next
+-- free after ...b9" lands on ...ba, and ON CONFLICT DO NOTHING drops a
+-- duplicate id silently rather than erroring, so the symptom is not a
+-- duplicate-key failure but a fixture that simply is not there.
 INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
   ('00000000-0000-7000-8000-0000000000bb', '00000000-0000-7000-8000-000000000010', 'E2E Quick-Create Move Cancel Source', NULL, 'non_perishable', 0)
 ON CONFLICT (id) DO NOTHING;
