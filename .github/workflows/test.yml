@@ -98,6 +98,23 @@ jobs:
           SERPAPI_API_KEY=
           EOF
 
+      # docker-compose.override.yml's `go-build-cache` volume is declared
+      # `external: true` (docker-compose.override.yml's own comment explains
+      # why: so a package worktree's own `docker compose down -v` - which
+      # Stop-PackageStack in scripts/wellen-orchestrator.ps1 runs the moment
+      # its issue closes - never deletes it). Compose refuses to start at all
+      # against a missing external volume rather than creating one, and a
+      # GitHub-hosted runner is a fresh VM with no volumes on it — so this
+      # step exists purely so `docker compose run` doesn't fail before
+      # reaching a single test. `docker volume create` is idempotent: it
+      # succeeds if the volume already exists (it never does here; noted for
+      # anyone who copies this step elsewhere). This buys CI nothing across
+      # runs — the whole VM is destroyed when the job ends — the actual
+      # cache benefit is for the local dev loop and the wave orchestrator's
+      # own worktrees, which persist on one machine across many invocations.
+      - name: Create the external Go build-cache volume
+        run: docker volume create inventory-go-build-cache
+
       - name: go vet
         run: docker compose run --rm app go vet ./...
 

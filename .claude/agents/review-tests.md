@@ -68,7 +68,7 @@ You have **no ability to edit files**, by design.
 
    ```bash
    HEAD_BRANCH=$(gh pr view <PR> --json headRefName -q .headRefName)
-   SHA=$(gh pr view <PR> --json headRefSha -q .headRefSha)
+   SHA=$(gh pr view <PR> --json headRefOid -q .headRefOid)
    gh workflow run test.yml --ref "$HEAD_BRANCH"
    RUN_ID=""
    for i in $(seq 1 10); do

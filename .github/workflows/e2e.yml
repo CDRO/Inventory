@@ -7,14 +7,15 @@
 # slow (a full stack plus a real browser), and review-tests
 # (.claude/agents/review-tests.md) already treats E2E journeys as "not
 # verified here" rather than requiring them per PR. `test.yml` (go vet + go
-# test) no longer runs automatically on a PR either, for a different reason —
-# see its own header — so neither workflow is an automatic PR check any more;
-# both run after every push to main (confirming what is about to be deployed)
-# and on
-# `workflow_dispatch` for an explicit pre-deploy or debugging run. If a PR
-# ever needs its own E2E signal, that is a deliberate `workflow_dispatch`
-# call against the PR branch, per the dispatch/poll recipe below — never an
-# automatic, merge-blocking run.
+# test) DOES run automatically on a PR whose base is `main` (a wave
+# consolidation PR, or any other PR merging straight to main) — see its own
+# header for why that one is narrower than "never" — but this workflow stays
+# off `pull_request` entirely, for either kind of PR, for the reason above,
+# not that one. Both run after every push to main (confirming what is about
+# to be deployed) and on `workflow_dispatch` for an explicit pre-deploy or
+# debugging run. If a PR ever needs its own E2E signal, that is a deliberate
+# `workflow_dispatch` call against the PR branch, per the dispatch/poll
+# recipe below — never an automatic, merge-blocking run.
 #
 # Same reasoning as test.yml for why this exists at all: this project is
 # docker-only (docs/specs/01-architecture-and-deployment.md), and some
