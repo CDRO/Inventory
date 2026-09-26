@@ -22,6 +22,23 @@ import (
 	"golang.org/x/image/math/fixed"
 )
 
+// liveGeminiGate decides, from the two env vars alone, whether a live Gemini
+// test may proceed. It exists apart from requireLiveGemini so this decision
+// has its own hermetic regression test: every environment this project's
+// tooling actually runs in (CI, local sessions) leaves GEMINI_API_KEY blank,
+// so a test that only exercises requireLiveGemini via t.Skip could regress
+// the GEMINI_LIVE_TEST check itself — deleted, inverted, whatever — and every
+// run would still skip for the older "no key" reason, green either way.
+func liveGeminiGate(liveTestFlag, key string) (skipReason string, ok bool) {
+	if liveTestFlag != "1" {
+		return "GEMINI_LIVE_TEST not set to 1; go test ./... does not reach the live Gemini API by default", false
+	}
+	if key == "" {
+		return "GEMINI_API_KEY not set; export it to exercise the real Gemini API", false
+	}
+	return "", true
+}
+
 // requireLiveGemini skips the test unless it has been explicitly asked to run
 // the real Gemini API. That ask is GEMINI_LIVE_TEST=1, deliberately separate
 // from GEMINI_API_KEY: the key is ordinary app config, present in any
@@ -31,18 +48,44 @@ import (
 func requireLiveGemini(t *testing.T) (key, model string) {
 	t.Helper()
 
-	if os.Getenv("GEMINI_LIVE_TEST") != "1" {
-		t.Skip("GEMINI_LIVE_TEST not set to 1; go test ./... does not reach the live Gemini API by default")
-	}
 	key = os.Getenv("GEMINI_API_KEY")
-	if key == "" {
-		t.Skip("GEMINI_API_KEY not set; export it to exercise the real Gemini API")
+	if reason, ok := liveGeminiGate(os.Getenv("GEMINI_LIVE_TEST"), key); !ok {
+		t.Skip(reason)
 	}
 	model = os.Getenv("GEMINI_MODEL")
 	if model == "" {
 		model = config.DefaultGeminiModel
 	}
 	return key, model
+}
+
+// TestLiveGeminiGateRequiresExplicitOptIn is the hermetic regression test for
+// liveGeminiGate: it runs unconditionally, with no network and independent of
+// whatever GEMINI_API_KEY happens to be set to in the process environment, so
+// it still catches a regression in CI, where GEMINI_API_KEY is always blank
+// and would otherwise mask one. The case that matters most is the second:
+// a key present without the opt-in must still be refused, since that is
+// exactly the exposure #196 closes — an environment with Gemini configured
+// for the app must not make go test ./... reach the network.
+func TestLiveGeminiGateRequiresExplicitOptIn(t *testing.T) {
+	tests := []struct {
+		name         string
+		liveTestFlag string
+		key          string
+		wantOK       bool
+	}{
+		{"neither set", "", "", false},
+		{"key set without the opt-in flag", "", "fake-key", false},
+		{"opt-in flag set without a key", "1", "", false},
+		{"both set", "1", "fake-key", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, ok := liveGeminiGate(tt.liveTestFlag, tt.key)
+			assert.Equal(t, tt.wantOK, ok)
+		})
+	}
 }
 
 // labeledProductPhoto renders a plain package label as a PNG, so the live
