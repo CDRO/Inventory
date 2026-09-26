@@ -56,8 +56,11 @@ plain clone" below).
 
 **`migrate up` comes before `up -d`, always.** The server compares the
 database's schema version against the migrations its own binary ships and
-refuses to start when they disagree, naming the command that fixes it. Both
-that and the missing-`.env` check exit with code `78`, which is how
+refuses to start when they disagree, naming the fix — without naming a
+compose invocation, for the same reason the missing-`.env` hint above
+doesn't: the right command differs by deployment variant (see above and
+"Deploying to a plain clone" below). Both that and the
+missing-`.env` check exit with code `78`, which is how
 `docker compose logs app` tells "this deployment needs a person" apart from
 "crashed, worth restarting".
 
