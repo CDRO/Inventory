@@ -513,6 +513,91 @@ test("closing the location modal while two creates overlap waits for both before
   await expect(first.locator('[data-role="location"] option', { hasText: "Basement Nook" })).toHaveCount(1);
 });
 
+// #221: the test above releases its two creates in *start* order, so the
+// single-slot pendingMutation is always cleared by whichever attempt
+// requestClose is currently latched onto. Nothing orders POST responses by
+// request order, though, and a single slot only ever names "the most
+// recently started mutation" — not the set of ones still outstanding. This
+// test is that test with the release order reversed, which is the case a
+// single slot cannot survive:
+//
+//   A starts, B starts (so the slot now names B), Done is clicked (so
+//   requestClose latches onto B), then B settles *before* A. runMutation(B)
+//   finds the slot still naming B and nulls it, requestClose wakes to an
+//   empty slot and finalizes — while A's POST is still in flight. A's id
+//   never reaches createdIds and its late answer lands in a dialog already
+//   removed, which is exactly what #154 item 2 was filed to close.
+//
+// Note the deliberate difference from the test above, whose comment warns
+// that submitting both creates before Done "would pass against either"
+// implementation: that warning is about the *round-2* fix (latching onto a
+// stale attempt), which both-before-Done genuinely cannot distinguish. It is
+// not an objection to this interleaving, which needs both creates in flight
+// before Done precisely so the slot can be overwritten and then cleared by
+// the wrong one.
+test("closing the location modal resolves both creates even when they settle out of start order", async ({
+  page,
+}) => {
+  await logInAsBob(page);
+  await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOCATION_MODAL_JOB}`);
+  const first = page.locator("#rows .review-row").first();
+
+  await first.locator('[data-role="location-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(dialog).toBeVisible();
+
+  const releases = [];
+  await page.route(`**/api/storages/${HOUSEHOLD}/locations`, async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    await new Promise((resolve) => releases.push(resolve));
+    await route.continue();
+  });
+
+  const addRoot = async (name) => {
+    await dialog.getByRole("button", { name: "Add top-level location" }).click();
+    await dialog.locator('input[aria-label="Name of the new top-level location"]').fill(name);
+    await dialog.locator("#location-modal-add-root-form button[type=submit]").click();
+  };
+
+  // Both creates start before Done, so the slot ends up naming the *second*
+  // one — and releases[0] is the first-started POST, releases[1] the second.
+  //
+  // These two names are new roots in the *shared* "E2E Household", so they
+  // have to be unique to this test and must not collide with any other
+  // spec's assertions on that tree — including the negative ones:
+  // e2e/specs/storage-switching.spec.js proves storage isolation by asserting
+  // this tree never contains "Garage", so a name like "Garage Crate" would
+  // fail that file rather than this one. Creating new rows here is the right
+  // pattern (nothing else reads these two), but pick names no other spec
+  // mentions in either direction.
+  await addRoot("Boiler Nook");
+  await addRoot("Utility Closet");
+  await expect.poll(() => releases.length).toBe(2);
+
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeVisible();
+
+  // The second-started create settles first. Its reload redrawing the tree is
+  // what gives a premature close time to actually happen: checking visibility
+  // the instant releases[1] is called would read "visible" even under the bug,
+  // since the real close only follows a network round trip later.
+  releases[1]();
+  await expect(dialog).toContainText("Utility Closet");
+  await expect(dialog).toBeVisible();
+
+  releases[0]();
+  await page.unroute(`**/api/storages/${HOUSEHOLD}/locations`);
+
+  await expect(dialog).toBeHidden();
+  // The first-started create is the one a single slot drops. Both ids have to
+  // reach createdIds for both options to be here.
+  await expect(first.locator('[data-role="location"] option', { hasText: "Boiler Nook" })).toHaveCount(1);
+  await expect(first.locator('[data-role="location"] option', { hasText: "Utility Closet" })).toHaveCount(1);
+});
+
 // docs/specs/26-location-quick-create.md's first acceptance criterion, for
 // `06` review specifically: "in a storage with zero locations ... the user
 // opens the modal, creates a root location, closes the modal, and that

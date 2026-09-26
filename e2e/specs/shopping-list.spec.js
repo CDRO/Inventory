@@ -581,6 +581,18 @@ test("a location dialog and a category dialog never stack: the second trigger is
   const locationDialog = page.getByRole("dialog", { name: "Locations" });
   await expect(locationDialog).toBeVisible();
 
+  // #227: a refused trigger has to be a *complete* no-op, not just a
+  // dialogless one. openCategoryField used to ignore openTreeManager's
+  // answer and carry on into its own categories GET and option refresh, so a
+  // click the application had deliberately decided to ignore still hit the
+  // network — and a hiccup on that incidental request put a network-error
+  // banner in front of the user for an action that never happened.
+  let categoryGets = 0;
+  await page.route(`**/api/storages/${OTHER_HOUSEHOLD}/categories`, async (route) => {
+    if (route.request().method() === "GET") categoryGets += 1;
+    await route.continue();
+  });
+
   // Refused, not queued: openTreeManager resolves this immediately with
   // nothing created, so the category trigger re-enables itself right away
   // rather than waiting for the location dialog to close.
@@ -593,6 +605,14 @@ test("a location dialog and a category dialog never stack: the second trigger is
   await locationDialog.getByRole("button", { name: "Done" }).click();
   await expect(locationDialog).toBeHidden();
   await expect(page.locator("dialog")).toHaveCount(0);
+
+  // Asserted only here, at the end: closing the location dialog puts a full
+  // locations round trip between the refused click and this line, so a
+  // categories GET the refusal wrongly started has had more than enough time
+  // to be counted. Nothing else on this screen refetches categories — the
+  // new-product form's own options were loaded before this route was
+  // installed — so any count above zero is the refused click's.
+  expect(categoryGets).toBe(0);
 });
 
 // docs/specs/26-location-quick-create.md: in a storage with zero locations,

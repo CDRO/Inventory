@@ -106,9 +106,12 @@ export function refreshLocationOptions(select, locations, keepValue = select.val
  * @param {Object} args
  * @param {string} args.storageId
  * @param {HTMLButtonElement} args.trigger - disabled for the duration of the
- *   modal. Without this, a second click before the first dialog closes would
- *   open a second one stacked on top of it — openTreeManager returns a
- *   promise the caller never awaits before the user can click again.
+ *   modal, so a second click on *this* trigger is inert rather than queued
+ *   behind the dialog it already opened. Stacking a location dialog under a
+ *   *category* dialog is a different question, and not one a per-trigger flag
+ *   can answer, since neither caller knows about the other kind's trigger:
+ *   js/tree-modal.js's own guard is what refuses that, and `opened` below is
+ *   how this function hears about it.
  * @param {HTMLSelectElement} args.openedSelect - the field whose trigger this
  *   is; preselected once resolved, but only when exactly one location was
  *   created (docs/specs/26-location-quick-create.md).
@@ -123,12 +126,18 @@ export function refreshLocationOptions(select, locations, keepValue = select.val
 export async function openLocationField({ storageId, trigger, openedSelect, getOpenSelects, onError }) {
   if (trigger.disabled) return; // a dialog for this trigger is already open
   trigger.disabled = true;
+  let opened;
   let createdIds;
   try {
-    ({ createdIds } = await openTreeManager(storageId, { kind: "locations" }));
+    ({ opened, createdIds } = await openTreeManager(storageId, { kind: "locations" }));
   } finally {
     trigger.disabled = false;
   }
+  // Refused because a dialog of either kind was already open (#227). The
+  // click was deliberately a no-op, so it stays one: fetching the tree here
+  // would turn it into a network request whose failure shows onError a
+  // message for something the application chose not to do.
+  if (!opened) return;
 
   let locations;
   try {
