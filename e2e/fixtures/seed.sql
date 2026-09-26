@@ -173,9 +173,11 @@ INSERT INTO storages (id, name) VALUES
   ('00000000-0000-7000-8000-00000000001b', 'E2E Stocktake Empty'),
   -- "E2E Barcode First" (...01c), e2e-barcode-first's alone, for #157: a
   -- product that already carries a barcode must never burn this user's
-  -- one-time barcode_prompt_seen_at, and asserting that needs a storage (and
-  -- product) "E2E Barcode Household" cannot offer, since Dana's seen_at is no
-  -- longer NULL by the time that file reaches this assertion.
+  -- one-time barcode_prompt_seen_at. Asserting that needs a user whose
+  -- seen_at is still NULL, which "E2E Barcode Household" cannot provide —
+  -- Dana's seen_at is no longer NULL by the time that file reaches this
+  -- assertion, since every earlier test there has already shown her the
+  -- offer at least once.
   ('00000000-0000-7000-8000-00000000001c', 'E2E Barcode First')
 ON CONFLICT (id) DO NOTHING;
 
