@@ -994,14 +994,15 @@ func TestHotBarcodesCapsAtFiveHundred(t *testing.T) {
 	s := requireDB(t)
 	ctx := context.Background()
 
-	catalog, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{DisplayName: "Hot Cache Bulk Product"})
+	catalog, err := s.InsertCatalogProduct(ctx, store.NewCatalogProduct{DisplayName: "Hot Cache Bulk Product " + randomSuffix()})
 	require.NoError(t, err)
 
 	const bulkCount = 501
+	runTag := randomSuffix()
 	_, err = testPool.Exec(ctx, `
 		INSERT INTO catalog_barcodes (barcode, catalog_id)
-		SELECT '9' || lpad(gs::text, 12, '0') || 'h', $1
-		  FROM generate_series(1, $2) AS gs`, catalog.ID, bulkCount)
+		SELECT '9' || lpad(gs::text, 12, '0') || $3, $1
+		  FROM generate_series(1, $2) AS gs`, catalog.ID, bulkCount, runTag)
 	require.NoError(t, err)
 
 	rows, err := s.HotBarcodes(ctx)
