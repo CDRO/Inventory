@@ -4,7 +4,8 @@
     Tests for the Docker-facing pieces of wellen-orchestrator.ps1:
     Get-SanitizedProjectName / Set-WorktreeEnvOverrides (#115),
     Stop-PackageStack, Invoke-WaveDockerCleanup and the wave file's
-    "dockerCleanup" validation (#140 item 9).
+    "dockerCleanup" validation (#140 item 9) - plus Invoke-Wave's parallel
+    polling loop's teardown ordering (#188), which touches no Docker at all.
 
 .DESCRIPTION
     The script under test is a top-to-bottom orchestrator, not a module - its
@@ -485,12 +486,22 @@ Write-Host "== Invoke-Wave (parallel branch): teardown follows ACTUAL close orde
 # ($pending.Count -gt 0)` loop inside Invoke-Wave) was never exercised: this
 # drives the real Invoke-Wave with two fake packages where the SECOND-listed
 # one ('iw-b') closes FIRST, and asserts Stop-PackageStack fires in that
-# close order, not file order. Test-IssueClosed, Stop-PackageStack,
-# Invoke-Package and Start-Sleep are shadowed per the deferred review's own
-# suggestion; Invoke-Native is shadowed too, purely so the surrounding
-# consolidation step it also runs (a `git ls-remote` and a `gh pr list`) never
-# makes a real call - it is made to look like a PR is already open, so
-# Invoke-Wave logs and skips instead of starting a second session.
+# close order, not file order. Two concrete regressions this has to catch:
+# dropping the `$pending = $stillPending` reassignment (already-torn-down
+# packages keep getting re-checked and the loop never shrinks or exits), and
+# swapping the closed/open branches so $stillPending is added to on the
+# CLOSED condition instead of the OPEN one (tears every package down on every
+# poll instead of once, when it actually closes). Test-IssueClosed,
+# Stop-PackageStack, Invoke-Package and Start-Sleep are shadowed per the
+# deferred review's own suggestion; Invoke-Native is shadowed too, purely so
+# the surrounding consolidation step it also runs (a `git ls-remote` and a
+# `gh pr list`) never makes a real call - it is made to look like a PR is
+# already open, so Invoke-Wave logs and skips instead of starting a second
+# session. That skip means the marker-file branch (Set-Content) is never
+# taken either; the one real-path touch left is the unconditional
+# `Remove-Item $marker -ErrorAction SilentlyContinue` at the end of
+# Invoke-Wave, which is a no-op here since nothing in this test ever creates
+# that file.
 $stopOrder = [System.Collections.Generic.List[string]]::new()
 $closed = @{}
 $pkgA = [pscustomobject]@{ spec = 'A'; specIssue = 1; slug = 'iw-a' }
