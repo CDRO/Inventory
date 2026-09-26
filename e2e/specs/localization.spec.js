@@ -230,4 +230,27 @@ test.describe("a batch expiry date under a non-UTC browser timezone", () => {
     await expect(row).toContainText("1/1/2030");
     await expect(row).not.toContainText("12/31/2029");
   });
+
+  // renderFound's found-on-shelf list (stocktake.js:239) is a third call
+  // site with the identical fix, exercised through the found-item form
+  // rather than a fixture row: addFound() renders the list purely from what
+  // was typed, with no round trip to the server, so this needs no seed data
+  // beyond a product that already exists in this storage.
+  const GREEK_YOGURT = "00000000-0000-7000-8000-000000000041";
+
+  test("the found-on-shelf list also survives the same non-UTC timezone", async ({ page }) => {
+    const login = await page.request.post("/api/auth/login", {
+      data: { username: "e2e-alice", password: PASSWORD },
+    });
+    expect(login.status()).toBe(200);
+
+    await page.goto(`/stocktake.html?location=${FRIDGE_LOCATION}&storage=${HOUSEHOLD_STORAGE}`);
+    await page.selectOption("#found-product", GREEK_YOGURT);
+    await page.fill("#found-expiry", "2030-01-01");
+    await page.click("#add-found button[type=submit]");
+
+    const item = page.locator("#found").filter({ hasText: "Greek Yogurt" });
+    await expect(item).toContainText("1/1/2030");
+    await expect(item).not.toContainText("12/31/2029");
+  });
 });
