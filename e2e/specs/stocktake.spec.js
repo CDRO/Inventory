@@ -30,9 +30,15 @@ const BATCH = "00000000-0000-7000-8000-0000000000f8";
 // to prove a foreign id 404s exactly like one that was never real.
 const FOREIGN_LOCATION = "00000000-0000-7000-8000-0000000000b0";
 
-async function logIn(page) {
+// "E2E Stocktake Empty" / e2e-stocktake-empty (e2e/fixtures/seed.sql), its own
+// dedicated storage with zero locations — #174 item 3. Not "E2E Stocktake"
+// above: every location in this file's own fixture exists precisely so the
+// stalest-first and single-location scenarios have something to walk.
+const EMPTY_STORAGE = "00000000-0000-7000-8000-00000000001b";
+
+async function logIn(page, username = "e2e-stocktake") {
   const res = await page.request.post("/api/auth/login", {
-    data: { username: "e2e-stocktake", password: "e2e-fixture-password" },
+    data: { username, password: "e2e-fixture-password" },
   });
   expect(res.status(), "fixture login").toBe(200);
 }
@@ -155,4 +161,78 @@ test("Cancel returns to the page the walk was started from, or to locations.html
   await page.goto(`/stocktake.html?location=${FRIDGE}&storage=${STORAGE}`);
   await page.locator("#cancel").click();
   await expect(page).toHaveURL(new RegExp(`/locations\\.html\\?storage=${STORAGE}`));
+});
+
+// #174 item 3: docs/specs/35-stocktake-entry-points.md — "If a storage has no
+// locations at all, the page shows an empty state that links to
+// locations.html." Implemented in renderChooser and #chooser-empty, but with
+// no dedicated fixture or test in #173.
+test("a storage with no locations at all shows the chooser's empty state, linking to locations.html", async ({ page }) => {
+  await logIn(page, "e2e-stocktake-empty");
+
+  await page.goto(`/stocktake.html?storage=${EMPTY_STORAGE}`);
+  await expect(page.locator("#chooser")).toBeVisible();
+  await expect(page.locator("#sheet")).toBeHidden();
+
+  await expect(page.locator("#chooser-empty")).toBeVisible();
+  await expect(page.locator("#chooser-tree")).toBeEmpty();
+  await expect(page.locator("#stalest")).toBeEmpty();
+
+  await expect(page.locator("#chooser-empty-link")).toHaveAttribute(
+    "href",
+    new RegExp(`/locations\\.html\\?storage=${EMPTY_STORAGE}`),
+  );
+});
+
+// #174 item 1: confirm()'s success path must not let its own showNotice()
+// stomp a message reload() already put up on failure — the scenario the
+// issue names is a housemate deleting the location between the confirm POST
+// succeeding and the immediately-following reload() GET. The location itself
+// is left alone here; only that one GET is intercepted, so the POST still
+// goes through for real and this proves the write survives while the UI
+// keeps showing the not-found message instead of a bare "recorded" notice.
+// Reverting stocktake.js's `if (await reload()) showNotice(...)` guard back
+// to an unconditional showNotice() would fail this test's #notice assertion.
+test("a location vanishing between a successful confirm and its reload leaves the not-found message showing, not a bare success notice", async ({
+  page,
+}) => {
+  await logIn(page);
+  await page.goto(`/stocktake.html?location=${FRIDGE}&storage=${STORAGE}`);
+  await expect(page.locator("#sheet")).toBeVisible();
+
+  await page.route(`**/api/storages/${STORAGE}/locations/${FRIDGE}/stocktake`, async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 404,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "not_found", message: "not found" } }),
+    });
+  });
+
+  // Both requests, not just the POST: confirm()'s own await chain (POST, then
+  // reload()'s GET) runs on the page after the click resolves here, so
+  // waiting on the POST alone and then unrouting immediately races the page's
+  // own GET — observed live, that race let the real server answer the GET
+  // before the interception ever applied, defeating the whole test.
+  const [postResponse, getResponse] = await Promise.all([
+    page.waitForResponse(
+      (res) => res.url().endsWith(`/locations/${FRIDGE}/stocktake`) && res.request().method() === "POST",
+    ),
+    page.waitForResponse(
+      (res) => res.url().endsWith(`/locations/${FRIDGE}/stocktake`) && res.request().method() === "GET",
+    ),
+    page.locator("#confirm").click(),
+  ]);
+  expect(postResponse.status()).toBe(200); // the write itself succeeded
+  expect(getResponse.status()).toBe(404); // the intercepted reload
+
+  await page.unroute(`**/api/storages/${STORAGE}/locations/${FRIDGE}/stocktake`);
+
+  await expect(page.locator("#error")).toContainText("could not be found");
+  await expect(page.locator("#notice")).toBeHidden();
+  await expect(page.locator("#sheet")).toBeHidden();
+  await expect(page.locator("#chooser")).toBeVisible();
 });

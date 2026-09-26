@@ -45,11 +45,6 @@ let list = null;
 // backgroundRemoval is the job's own word on whether a picture's background
 // can be removed right now. Without it no such control is shown at all.
 let backgroundRemoval = false;
-// locations is this storage's flat tree as of the initial render, used only
-// to seed each row's location field once. A "+ New location" trigger's own
-// refresh (location-options.js's openLocationField) fetches its own fresh
-// copy directly into the affected <select>s rather than updating this one.
-let locations = [];
 /**
  * cutout is the background-removed picture made for the row, if any: which
  * source it was cut from, and its id for the confirm.
@@ -144,7 +139,11 @@ async function load() {
 }
 
 async function render(job) {
-  let categories, products;
+  // locations is this storage's flat tree as of this render, used only to
+  // seed each row's location field once. A "+ New location" trigger's own
+  // refresh (location-options.js's openLocationField) fetches its own fresh
+  // copy directly into the affected <select>s rather than updating this one.
+  let locations, categories, products;
   try {
     [locations, categories, products] = await Promise.all([
       fetchLocations(storageId),
