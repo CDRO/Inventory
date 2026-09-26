@@ -243,6 +243,75 @@ func bootstrapAdmin(ctx context.Context, db *store.Store, cfg *config.Config) er
 // disappears on the next deploy.
 const suggestionCacheDir = "/data/cache/imagesearch"
 
+// backgroundLoop names a goroutine serve() starts before it opens the
+// listener, so a test can assert each one is actually reached without
+// waiting for what it does (issue #214: each was previously a bare `go`
+// statement, and deleting one kept `go test ./...` green because every
+// loop's own package tests call it directly rather than through serve()).
+type backgroundLoop struct {
+	name string
+	run  func(context.Context)
+}
+
+// startBackgroundLoops launches every loop in its own goroutine.
+func startBackgroundLoops(ctx context.Context, loops []backgroundLoop) {
+	for _, loop := range loops {
+		go loop.run(ctx)
+	}
+}
+
+// backgroundLoops names the six loops serve() runs before it opens the
+// listener (issue #214). Building them apart from serve() itself is what
+// lets a test invoke each one directly with fakes and a cancelled context,
+// asserting it is actually entered rather than trusting that a bare `go`
+// statement survives the next edit.
+func backgroundLoops(
+	imageCache *imagesearch.Cache,
+	jobRunner *jobs.Runner,
+	sweepDB storeSweeper,
+	gamificationDB *store.Store,
+	ingestSweep func(context.Context, time.Time) (int, error),
+	notifier *notify.Service,
+) []backgroundLoop {
+	return []backgroundLoop{
+		// Cap enforcement and orphan collection for the suggestion-image cache
+		// (docs/specs/07-shopping-list-reconciliation.md). Started before the
+		// listener so a crash's leftovers are cleaned at boot rather than up
+		// to an hour later.
+		{"image suggestion cache sweep", imageCache.RunSweeps},
+
+		// Renews this process's claims on the jobs it is working, and fails
+		// the ones whose owner stopped renewing. A goroutine like the sweeps
+		// here, not a second job runner: it starts no work and calls no
+		// provider. It is what recovers an instance that was killed while the
+		// other kept serving, which no start-up will ever look at again.
+		//
+		// Background rather than ctx, on purpose: ctx is cancelled the
+		// instant SIGTERM arrives, but this process keeps working its
+		// in-flight jobs for up to shutdownGrace after that, and the keeper
+		// has to go on renewing their claims for as long as it does. Shutdown
+		// is what stops it, by cancelling the runner's own context after the
+		// work has been told to stop and just before the claims are released
+		// (issue #121, #218, #219).
+		{"job lease keeper", func(context.Context) { jobRunner.RunLeases(context.Background()) }},
+
+		// Expired sessions, pairing codes, idempotency records, tombstones,
+		// and — when photo ingestion is enabled — reviewed job photos.
+		{"store retention sweep", func(ctx context.Context) { runStoreSweeps(ctx, sweepDB, ingestSweep) }},
+
+		// Nightly gamification recompute and storage achievements
+		// (docs/specs/51-gamification-scoring.md).
+		{"nightly gamification recompute", func(ctx context.Context) { runGamificationRecompute(ctx, gamificationDB) }},
+
+		// Weekly quest generation and zero_waste_week evaluation
+		// (docs/specs/52-gamification-quests-and-ui.md).
+		{"weekly gamification jobs", func(ctx context.Context) { runWeeklyGamificationJobs(ctx, gamificationDB) }},
+
+		// Hourly expiry digest delivery (docs/specs/17-expiry-notifications.md).
+		{"expiry notifications", func(ctx context.Context) { runExpiryNotifications(ctx, notifier) }},
+	}
+}
+
 func serve() error {
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
@@ -296,10 +365,6 @@ func serve() error {
 		slog.Default(),
 	)
 
-	// Cap enforcement and orphan collection. Started before the listener so a
-	// crash's leftovers are cleaned at boot rather than up to an hour later.
-	go imageCache.RunSweeps(ctx)
-
 	// Non-fatal here, unlike in `migrate up`.
 	//
 	// Since the schema check above, a users table that does not exist is no
@@ -323,20 +388,6 @@ func serve() error {
 	if err := jobRunner.Recover(ctx); err != nil {
 		slog.Warn("could not recover interrupted jobs", slog.Any("err", err))
 	}
-
-	// Renews this process's claims on the jobs it is working, and fails the ones
-	// whose owner stopped renewing. A goroutine like the sweeps below, not a
-	// second job runner: it starts no work and calls no provider. It is what
-	// recovers an instance that was killed while the other kept serving, which
-	// no start-up will ever look at again.
-	//
-	// Background rather than ctx, on purpose: ctx is cancelled the instant
-	// SIGTERM arrives, but this process keeps working its in-flight jobs for up
-	// to shutdownGrace after that, and the keeper has to go on renewing their
-	// claims for as long as it does. Shutdown is what stops it, by cancelling
-	// the runner's own context after the work has been told to stop and just
-	// before the claims are released.
-	go jobRunner.RunLeases(context.Background())
 
 	// The matching service is shared with specs 06, 07 and 09; it is
 	// constructed once here so all of them use the same thresholds.
@@ -391,17 +442,20 @@ func serve() error {
 		}
 	}
 
-	go runStoreSweeps(ctx, db, ingestSweep)
-	go runGamificationRecompute(ctx, db)
-	go runWeeklyGamificationJobs(ctx, db)
-
 	// Expiry notifications (docs/specs/17-expiry-notifications.md). The
 	// service is constructed unconditionally: it has no provider, no key and
 	// no volume to be missing, and with the table empty — which is the state
 	// of every deployment that has not opted in — its hourly tick claims
 	// nothing and posts nothing.
 	notifier := notify.New(db, slog.Default())
-	go runExpiryNotifications(ctx, notifier)
+
+	// Every loop started here runs for as long as the process serves.
+	// backgroundLoops names all six in one place, so deleting one is a change
+	// to that function's return value rather than the disappearance of a bare
+	// `go` statement — covered by TestBackgroundLoopsCoversAllSix in
+	// main_test.go, since each loop's own package tests call it directly and
+	// so cannot notice serve() failing to start it.
+	startBackgroundLoops(ctx, backgroundLoops(imageCache, jobRunner, db, db, ingestSweep, notifier))
 
 	srv := &http.Server{
 		Addr: net.JoinHostPort("", cfg.HTTPPort),
@@ -486,12 +540,22 @@ func serve() error {
 // and hourly is plenty.
 const sweepInterval = time.Hour
 
+// storeSweeper is the slice of *store.Store that runStoreSweeps writes,
+// narrow enough that a wiring test can exercise the sweep with a fake instead
+// of a live database.
+type storeSweeper interface {
+	SweepSessions(ctx context.Context) (int64, error)
+	SweepPairingCodes(ctx context.Context) (int64, error)
+	SweepIdempotencyRecords(ctx context.Context, now time.Time) (int64, error)
+	SweepTombstones(ctx context.Context, now time.Time) (int64, error)
+}
+
 // runStoreSweeps deletes rows past their retention: expired sessions and
 // pairing codes, idempotency records older than their 7-day replay window
 // (docs/specs/12-client-api-contract.md), old tombstones, and — when photo
 // ingestion is enabled — the photos of jobs reviewed more than 30 days ago.
 // Once at start, then every sweepInterval until ctx ends.
-func runStoreSweeps(ctx context.Context, db *store.Store, ingestSweep func(context.Context, time.Time) (int, error)) {
+func runStoreSweeps(ctx context.Context, db storeSweeper, ingestSweep func(context.Context, time.Time) (int, error)) {
 	sweep := func() {
 		now := time.Now()
 		if ingestSweep != nil {
