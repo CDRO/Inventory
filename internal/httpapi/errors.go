@@ -28,7 +28,9 @@ const (
 	CodeInternal         = "internal_error"
 )
 
-// debug_reason values, named in docs/specs/03-auth-and-multi-tenancy.md.
+// debug_reason values. The first six are named in
+// docs/specs/03-auth-and-multi-tenancy.md; the last two are this package's
+// own, not spec 03's — see the comment above them.
 const (
 	ReasonSessionMissing   = "session_missing"
 	ReasonSessionExpired   = "session_expired"
@@ -359,11 +361,10 @@ func UpstreamFailed(err error) *Failure {
 //     outside spec 03's list;
 //   - ModelUnavailable's "configured model not offered by the provider: …",
 //     which interpolates a model name this deployment configured;
-//   - the sentence ResyncRequired carries, which FromStoreError passes from
-//     err.Error() — safe only because the single store path returning
-//     store.ErrResyncRequired never wraps it, so the text is always that one
-//     sentinel. That is the closest thing here to serializing a layer's own
-//     output, and it is worth knowing rather than being surprised by.
+//   - the sentence ResyncRequired carries, which FromStoreError reads
+//     straight from store.ErrResyncRequired.Error() rather than from the
+//     matched err — so it stays this one fixed sentence even if a future
+//     delta path wraps the sentinel before returning it.
 //
 // That list is this file's helpers and nothing more. It is deliberately not a
 // census of the package: handlers also build Failure values directly, and set
@@ -439,7 +440,14 @@ func FromStoreError(err error, reason string) *Failure {
 		// handler that forgot this case would turn "your cache is too old"
 		// into a 500 — an error the client retries forever instead of the
 		// instruction it needed.
-		return ResyncRequired(err.Error())
+		//
+		// The sentinel's own text, not err.Error(): errors.Is matches through
+		// wrapping, so a future delta path that wrapped the sentinel with
+		// fmt.Errorf would otherwise leak its own wrapping text as
+		// debug_reason. Reading the sentinel directly means what reaches a
+		// dev client is always this package's own fixed sentence, regardless
+		// of how the store wraps it on the way here.
+		return ResyncRequired(store.ErrResyncRequired.Error())
 	default:
 		return Internal(err)
 	}
