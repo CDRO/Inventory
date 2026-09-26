@@ -50,6 +50,7 @@ web/static/
 │   ├── storage-switcher.js    # header control
 │   ├── jobs.js                # background-job polling helper
 │   ├── review.js              # shared proposal-review component
+│   ├── image-picker.js        # shared picture-suggestion picker (07, 16)
 │   ├── tree.js                # shared tree view (locations + categories)
 │   ├── dom.js                 # small helpers: el(), render templates, escape
 │   ├── i18n.js                # loads the active catalog, translates data-i18n (19)
