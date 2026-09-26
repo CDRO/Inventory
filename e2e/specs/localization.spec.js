@@ -231,7 +231,7 @@ test.describe("a batch expiry date under a non-UTC browser timezone", () => {
     await expect(row).not.toContainText("12/31/2029");
   });
 
-  // renderFound's found-on-shelf list (stocktake.js:239) is a third call
+  // renderFound's found-on-shelf list (stocktake.js:414) is a third call
   // site with the identical fix, exercised through the found-item form
   // rather than a fixture row: addFound() renders the list purely from what
   // was typed, with no round trip to the server, so this needs no seed data
