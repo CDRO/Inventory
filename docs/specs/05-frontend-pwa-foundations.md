@@ -289,11 +289,11 @@ while developing without being imposed on every save.
   deliberately belong to **no** storage, which is the starting position
   `29-first-run-admin-guidance.md` is about. A journey that writes state
   other journeys would observe gets its **own** seeded user and storage,
-  because the suite runs files in parallel — specs `32`–`35` were the
-  first to add such a dedicated fixture, and the fixture has kept growing
-  by that same rule since. `e2e/fixtures/seed.sql`'s own header counts the
-  current total; it is not restated here, because a count kept in two
-  places only ever agrees on the day it was written.
+  because the suite runs files in parallel — specs `32`–`35` each add such
+  a dedicated fixture, and the fixture has kept growing by that same rule
+  ever since, both before and after them. `e2e/fixtures/seed.sql`'s own
+  header counts the current total; it is not restated here, because a
+  count kept in two places only ever agrees on the day it was written.
 - The runner is a **pre-built browser-automation image pulled from a
   registry** (e.g. the official Playwright image), used as a throwaway
   test container. This does not violate the no-toolchain rule in
