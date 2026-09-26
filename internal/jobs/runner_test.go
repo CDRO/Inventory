@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -48,6 +49,37 @@ type fakeStore struct {
 	mu     sync.Mutex
 	jobs   map[uuid.UUID]*store.Job
 	claims map[uuid.UUID]claim
+
+	// honourContext makes the three lease methods below return ctx.Err() when
+	// the context passed to them is already done, instead of ignoring it like
+	// the rest of this fake. Off by default so every other test's use of
+	// context.Background() is unaffected; a test sets it directly to cover
+	// what RunLeases does when a cancelled stmtCtx reaches a lease statement.
+	honourContext  bool
+	cancelledCalls int
+}
+
+// cancelledCallCount reports how many times a lease method short-circuited on
+// a done context, for tests that must confirm the statement actually ran
+// against the cancelled context rather than merely never being reached.
+func (f *fakeStore) cancelledCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cancelledCalls
+}
+
+// ctxErr is the honourContext check shared by the three lease methods.
+func (f *fakeStore) ctxErr(ctx context.Context) error {
+	if !f.honourContext {
+		return nil
+	}
+	err := ctx.Err()
+	if err != nil {
+		f.mu.Lock()
+		f.cancelledCalls++
+		f.mu.Unlock()
+	}
+	return err
 }
 
 func newFakeStore() *fakeStore {
@@ -104,7 +136,10 @@ func (f *fakeStore) finish(id uuid.UUID, status store.JobStatus, payload json.Ra
 // FailOrphanedJobs mirrors the store's predicate: pending, not claimed by the
 // caller itself, and either never claimed or claimed by a process that stopped
 // renewing.
-func (f *fakeStore) FailOrphanedJobs(_ context.Context, owner uuid.UUID) (int64, error) {
+func (f *fakeStore) FailOrphanedJobs(ctx context.Context, owner uuid.UUID) (int64, error) {
+	if err := f.ctxErr(ctx); err != nil {
+		return 0, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var n int64
@@ -121,7 +156,10 @@ func (f *fakeStore) FailOrphanedJobs(_ context.Context, owner uuid.UUID) (int64,
 	return n, nil
 }
 
-func (f *fakeStore) RenewJobLeases(_ context.Context, lease store.JobLease) (int64, error) {
+func (f *fakeStore) RenewJobLeases(ctx context.Context, lease store.JobLease) (int64, error) {
+	if err := f.ctxErr(ctx); err != nil {
+		return 0, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var n int64
@@ -134,7 +172,10 @@ func (f *fakeStore) RenewJobLeases(_ context.Context, lease store.JobLease) (int
 	return n, nil
 }
 
-func (f *fakeStore) ReleaseJobLeases(_ context.Context, owner uuid.UUID) (int64, error) {
+func (f *fakeStore) ReleaseJobLeases(ctx context.Context, owner uuid.UUID) (int64, error) {
+	if err := f.ctxErr(ctx); err != nil {
+		return 0, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var n int64
@@ -741,4 +782,89 @@ func TestResubmitAnalysesAFinishedJobAgain(t *testing.T) {
 		t.Fatal("work for a refused Resubmit ran")
 	default:
 	}
+}
+
+// cancelledContext returns a context that is already done, for tests that
+// need a stmtCtx cancelled before any lease method is called.
+func cancelledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
+// syncLog is a bytes.Buffer safe for a background goroutine (RunLeases, via
+// slog) to write into while the test goroutine reads it back — the same
+// pattern as capturedLog in internal/httpapi/requestlog_test.go.
+type syncLog struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncLog) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncLog) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// TestFakeStoreLeaseMethodsHonourCancellationWhenAsked is issue #219: none of
+// the three lease methods above inspected the context they were handed, so no
+// test could exercise what RunLeases does when a cancelled stmtCtx reaches
+// one of them. honourContext opts a test into a fake that behaves the way a
+// real store call would against a context that is already done.
+func TestFakeStoreLeaseMethodsHonourCancellationWhenAsked(t *testing.T) {
+	t.Parallel()
+
+	s := newFakeStore()
+	s.honourContext = true
+	ctx := cancelledContext()
+
+	_, err := s.RenewJobLeases(ctx, store.JobLease{})
+	assert.ErrorIs(t, err, context.Canceled)
+
+	_, err = s.FailOrphanedJobs(ctx, uuid.New())
+	assert.ErrorIs(t, err, context.Canceled)
+
+	_, err = s.ReleaseJobLeases(ctx, uuid.New())
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+// TestRunLeasesStaysSilentWhenItsStatementContextIsCancelled pins down the
+// guard at runner.go's RunLeases: `if stmtCtx.Err() == nil { r.log.Warn(...) }`
+// swallows exactly the case where the statement context handed to RunLeases is
+// done. With context.Background() in production (cmd/inventory/main.go),
+// stmtCtx.Err() is never non-nil, so this test is the only coverage of what
+// happens if a future caller ever hands RunLeases a cancellable context — a
+// misuse of the API, per issue #219. This test asserts the guard's current
+// behaviour (silence) rather than changing it: PR #218 round 2 settled that
+// the guard should read stmtCtx.Err() rather than r.base.Err(), but not
+// whether misuse deserves a warning of its own instead of silence — that is a
+// separate, still-open question this PR argues rather than resolves in code
+// (see the PR description).
+func TestRunLeasesStaysSilentWhenItsStatementContextIsCancelled(t *testing.T) {
+	t.Parallel()
+
+	s := newFakeStore()
+	s.honourContext = true
+	log := &syncLog{}
+	r := New(s, slog.New(slog.NewTextHandler(log, nil)))
+	r.leaseInterval = 5 * time.Millisecond
+
+	stmtCtx := cancelledContext()
+	go r.RunLeases(stmtCtx)
+	defer func() { _ = r.Shutdown(context.Background()) }()
+
+	require.Eventually(t, func() bool { return s.cancelledCallCount() >= 2 }, 5*time.Second, 5*time.Millisecond,
+		"both lease statements must actually run against the cancelled context, not be skipped")
+
+	time.Sleep(20 * r.leaseInterval)
+	assert.NotContains(t, log.String(), "renewing job leases failed",
+		"stmtCtx.Err() != nil suppresses the renewal warning")
+	assert.NotContains(t, log.String(), "sweeping orphaned jobs failed",
+		"stmtCtx.Err() != nil suppresses the sweep warning too")
 }
