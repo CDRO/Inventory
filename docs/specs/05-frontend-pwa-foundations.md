@@ -124,8 +124,9 @@ link is always sufficient to describe where the user is.
 
 ## Shared job polling (`js/jobs.js`)
 
-One helper used by every photo-driven feature (`06`, `07`, `09`) — not
-three implementations:
+One helper used by both photo-driven features that poll a job (`06`, `09`)
+— not two implementations. (`07`'s shopping-list resolution has no photo
+input yet — `shopping-list.html` says so — so it does not use this helper.)
 
 ```js
 // pollJob(storageId, jobId, { onUpdate }) -> Promise<payload>
