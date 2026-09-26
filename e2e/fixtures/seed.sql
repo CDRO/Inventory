@@ -94,7 +94,13 @@ INSERT INTO users (id, username, password_hash, display_name, is_admin) VALUES
   -- rest of the run; reading either one for "still zero" would depend on
   -- test-scheduling order against that write. A dedicated storage this suite
   -- never writes to sidesteps the race instead of hoping to win it.
-  ('00000000-0000-7000-8000-00000000000d', 'e2e-stocktake-empty', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Stocktake Empty User', false)
+  ('00000000-0000-7000-8000-00000000000d', 'e2e-stocktake-empty', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Stocktake Empty User', false),
+  -- e2e-barcode-first belongs only to "E2E Barcode First" (below), dedicated
+  -- to #157: it needs barcode_prompt_seen_at to still be NULL, which e2e-dana
+  -- no longer guarantees once barcode-recall.spec.js's earlier tests have
+  -- shown her the offer. Nothing else in this suite may log in as this user,
+  -- or its seen_at would advance before #157's assertion runs.
+  ('00000000-0000-7000-8000-00000000000e', 'e2e-barcode-first', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Barcode First User', false)
 ON CONFLICT DO NOTHING;
 
 -- Two storages, so the "member of storage A gets 404 for storage B"
@@ -164,7 +170,15 @@ INSERT INTO storages (id, name) VALUES
   -- "E2E Stocktake Empty" (...01b), e2e-stocktake-empty's alone, holds no
   -- locations at all — see that user's own fixture comment for why this
   -- needs a storage no other suite's location-quick-create test can touch.
-  ('00000000-0000-7000-8000-00000000001b', 'E2E Stocktake Empty')
+  ('00000000-0000-7000-8000-00000000001b', 'E2E Stocktake Empty'),
+  -- "E2E Barcode First" (...01c), e2e-barcode-first's alone, for #157: a
+  -- product that already carries a barcode must never burn this user's
+  -- one-time barcode_prompt_seen_at. Asserting that needs a user whose
+  -- seen_at is still NULL, which "E2E Barcode Household" cannot provide —
+  -- Dana's seen_at is no longer NULL by the time that file reaches this
+  -- assertion, since every earlier test there has already shown her the
+  -- offer at least once.
+  ('00000000-0000-7000-8000-00000000001c', 'E2E Barcode First')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO storage_members (storage_id, user_id) VALUES
@@ -177,7 +191,8 @@ INSERT INTO storage_members (storage_id, user_id) VALUES
   ('00000000-0000-7000-8000-000000000015', '00000000-0000-7000-8000-000000000008'), -- e2e-inbox: E2E Inbox, and nothing else
   ('00000000-0000-7000-8000-000000000016', '00000000-0000-7000-8000-000000000009'), -- e2e-inventory: E2E Inventory, and nothing else
   ('00000000-0000-7000-8000-00000000001a', '00000000-0000-7000-8000-00000000000c'), -- e2e-stocktake: E2E Stocktake, and nothing else
-  ('00000000-0000-7000-8000-00000000001b', '00000000-0000-7000-8000-00000000000d')  -- e2e-stocktake-empty: E2E Stocktake Empty, and nothing else
+  ('00000000-0000-7000-8000-00000000001b', '00000000-0000-7000-8000-00000000000d'), -- e2e-stocktake-empty: E2E Stocktake Empty, and nothing else
+  ('00000000-0000-7000-8000-00000000001c', '00000000-0000-7000-8000-00000000000e')  -- e2e-barcode-first: E2E Barcode First, and nothing else
 ON CONFLICT DO NOTHING;
 
 -- The start-page memberships (docs/specs/34-navigation-and-start-page.md),
@@ -500,6 +515,19 @@ INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) V
   -- cache degrades to spec 20 unchanged" test scans with nothing seeded.
   ('00000000-0000-7000-8000-000000000051', '00000000-0000-7000-8000-000000000014', 'Hot Cache Preview Beans',  NULL, 'long_shelf_life', 0),
   ('00000000-0000-7000-8000-000000000052', '00000000-0000-7000-8000-000000000014', 'Hot Cache Fallback Beans', NULL, 'long_shelf_life', 0)
+ON CONFLICT (id) DO NOTHING;
+
+-- Two products in "E2E Barcode First" (...01c), for #157: no location, since
+-- associating a barcode and calling offerBarcodeCapture need none. The test
+-- attaches a code to "Pre-coded" itself via the API, the same way "Pre-coded
+-- Beans" above does for Dana's version of the same check; "Control" stays
+-- codeless, so the same test can also show that a real first showing (not a
+-- short-circuited one) does advance barcode_prompt_seen_at — without that,
+-- the pre-coded assertion alone could not tell "correctly guarded" from
+-- "the whole offer is broken and never marks anything shown".
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
+  ('00000000-0000-7000-8000-000000000054', '00000000-0000-7000-8000-00000000001c', 'First-Timer Pre-coded Beans', NULL, 'long_shelf_life', 0),
+  ('00000000-0000-7000-8000-000000000055', '00000000-0000-7000-8000-00000000001c', 'First-Timer Control Beans',   NULL, 'long_shelf_life', 0)
 ON CONFLICT (id) DO NOTHING;
 
 -- One consumption proposal (docs/specs/09-consumption-logging.md), in the
