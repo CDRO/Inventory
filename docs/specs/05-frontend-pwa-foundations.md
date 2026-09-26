@@ -137,9 +137,11 @@ and a retry affordance on `failed`.
 
 ## Shared review component (`js/review.js`)
 
-`06`, `07`, and `09` all follow the same shape: upload → job → AI proposal
+`06` and `09` follow the same shape: upload → job → AI proposal
 → editable list → explicit confirm → only then does the server write
-inventory. Implement that list once:
+inventory. Implement that list once. (`07`'s shopping-list resolution UI is
+its own page module, `js/pages/shopping-list.js`, and does not use this
+component.)
 
 - Rows are cloned from a `<template>` in the page's HTML, populated via
   small DOM helpers — no string-concatenated HTML for user- or AI-supplied
