@@ -43,7 +43,8 @@ becomes `js/tree-modal.js`, and its exported function becomes:
 // js/tree.js renders inside the <dialog>. Never navigates the page.
 ```
 
-`js/review.js`'s existing location-field call site becomes
+The existing location-field call site, `openLocationField`
+(`web/static/js/location-options.js`), becomes
 `openTreeManager(storageId, {kind: "locations"})`. A new call site is added
 beside every `category_id` field in the manual-correction / New Item UI,
 using `{kind: "categories"}`. A screen with both a location field and a

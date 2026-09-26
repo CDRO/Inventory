@@ -6,6 +6,14 @@
 // is shown by indentation in the option's text, so the picker stays a native
 // control — keyboard, screen reader and phone wheel all work — rather than a
 // custom widget.
+//
+// This module also owns the location-quick-create modal trigger,
+// openLocationField (docs/specs/26-location-quick-create.md): opening
+// js/tree-modal.js beside a location field and refreshing that field's
+// options on resolve. Every page module that renders a location field wires
+// its own trigger to it — the ingestion review row and shopping-list's
+// resolution UI (both `26`), and the batch picker above (`28`) — there is no
+// single shared call site that holds this for all of them.
 
 import { get } from "./api.js";
 import { openTreeManager } from "./tree-modal.js";

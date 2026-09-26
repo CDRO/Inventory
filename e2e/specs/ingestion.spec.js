@@ -368,15 +368,161 @@ test("a location can be created from the review screen without leaving it, refre
   }
 });
 
+// #154 item 1: .card puts its padding on the <dialog> element itself
+// (css/components.css), so event.target === dialog is also true for a click
+// that never left the dialog's own box. tree-modal.js must tell that apart
+// from an actual backdrop click, or a misclick this close to the edge closes
+// the modal and loses whatever the user was mid-typing in the add-root form.
+test("a click inside the location modal's own padding does not close it or lose an unsubmitted root name", async ({
+  page,
+}) => {
+  await logInAsBob(page);
+  await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOCATION_MODAL_JOB}`);
+  const first = page.locator("#rows .review-row").first();
+
+  await first.locator('[data-role="location-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByRole("button", { name: "Add top-level location" }).click();
+  const input = dialog.locator('input[aria-label="Name of the new top-level location"]');
+  await input.fill("Garage Shelf");
+
+  // Two pixels in from the dialog's own top-left corner: still inside its
+  // rendered box (--space-5 padding is 24px, css/tokens.css), on no child
+  // element, so event.target is the <dialog> itself — the exact shape of a
+  // click on the padding rather than the backdrop.
+  const box = await dialog.boundingBox();
+  await page.mouse.click(box.x + 2, box.y + 2);
+
+  await expect(dialog).toBeVisible();
+  await expect(input).toHaveValue("Garage Shelf");
+});
+
+// #154 item 2: close() must wait for a create POST that's still in flight
+// before resolving createdIds, or Done/Esc pressed early loses the new
+// location from that resolve and the caller's own refresh races the commit.
+test("closing the location modal while its create POST is still in flight still preselects the new location", async ({
+  page,
+}) => {
+  await logInAsBob(page);
+  await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOCATION_MODAL_JOB}`);
+  const first = page.locator("#rows .review-row").first();
+
+  await first.locator('[data-role="location-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(dialog).toBeVisible();
+
+  // Held open until released below, so Done can be clicked while the create
+  // POST this test cares about is still unresolved.
+  let releasePost;
+  const postHeld = new Promise((resolve) => {
+    releasePost = resolve;
+  });
+  await page.route(`**/api/storages/${HOUSEHOLD}/locations`, async (route) => {
+    if (route.request().method() === "POST") await postHeld;
+    await route.continue();
+  });
+
+  await dialog.getByRole("button", { name: "Add top-level location" }).click();
+  await dialog.locator('input[aria-label="Name of the new top-level location"]').fill("Cellar Rack");
+  await dialog.locator("#location-modal-add-root-form button[type=submit]").click();
+
+  // Done, clicked before the POST above returns: the dialog must stay open
+  // rather than resolving createdIds without the id that POST will carry.
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeVisible();
+
+  releasePost();
+  await page.unroute(`**/api/storages/${HOUSEHOLD}/locations`);
+
+  await expect(dialog).toBeHidden();
+  await expect(first.locator('[data-role="location"] option', { hasText: "Cellar Rack" })).toHaveCount(1);
+  await expect(first.locator('[data-role="location"] option:checked')).toContainText("Cellar Rack");
+});
+
+// #154 item 2, round 2: pendingMutation is a single slot, so a *second*
+// create POST started while Done is already waiting on the first one must
+// not be dropped when the first settles — tree-modal.js has to keep waiting
+// for whichever one is still outstanding, not just the one requestClose
+// originally latched onto.
+test("closing the location modal while two creates overlap waits for both before resolving", async ({ page }) => {
+  await logInAsBob(page);
+  await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOCATION_MODAL_JOB}`);
+  const first = page.locator("#rows .review-row").first();
+
+  await first.locator('[data-role="location-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(dialog).toBeVisible();
+
+  // Each POST this test creates is held open independently, released in an
+  // order the test controls below.
+  const releases = [];
+  await page.route(`**/api/storages/${HOUSEHOLD}/locations`, async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    await new Promise((resolve) => releases.push(resolve));
+    await route.continue();
+  });
+
+  const addRoot = async (name) => {
+    await dialog.getByRole("button", { name: "Add top-level location" }).click();
+    await dialog.locator('input[aria-label="Name of the new top-level location"]').fill(name);
+    await dialog.locator("#location-modal-add-root-form button[type=submit]").click();
+  };
+
+  // The first create starts, then Done is clicked while only it is pending —
+  // requestClose captures *that* attempt. Only then does the second create
+  // start (the add-root form removes itself the instant it's submitted,
+  // before its own POST returns, so it's free to reopen while the first is
+  // still in flight and while Done is already waiting on it). This is the
+  // interleaving that actually distinguishes the fix: latching onto "the
+  // pending attempt at the moment Done was clicked" and waiting on it
+  // unconditionally (submitting both creates before Done, then waiting on
+  // whichever is current) exercises the same code path old and new code
+  // already agreed on, and would pass against either.
+  await addRoot("Attic Bin");
+
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeVisible();
+
+  await addRoot("Basement Nook");
+  await expect.poll(() => releases.length).toBe(2);
+
+  // The first create — the one requestClose actually latched onto — settles;
+  // the second, started after Done was already clicked, is still
+  // outstanding. The dialog must still be waiting on it rather than treating
+  // the first settling as license to finalize. Waiting for the first
+  // create's own effect to actually land (its reload redrawing the dialog's
+  // tree) — rather than just checking visibility the instant releases[0] is
+  // called — is what actually gives a premature close time to happen if the
+  // fix is missing: an immediate visibility check would still read "visible"
+  // even under the bug, since the real close only follows a moment later,
+  // after the network round trip.
+  releases[0]();
+  await expect(dialog).toContainText("Attic Bin");
+  await expect(dialog).toBeVisible();
+
+  releases[1]();
+  await page.unroute(`**/api/storages/${HOUSEHOLD}/locations`);
+
+  await expect(dialog).toBeHidden();
+  await expect(first.locator('[data-role="location"] option', { hasText: "Attic Bin" })).toHaveCount(1);
+  await expect(first.locator('[data-role="location"] option', { hasText: "Basement Nook" })).toHaveCount(1);
+});
+
 // docs/specs/26-location-quick-create.md's first acceptance criterion, for
 // `06` review specifically: "in a storage with zero locations ... the user
 // opens the modal, creates a root location, closes the modal, and that
 // location is immediately selectable — no page reload." The test above
 // covers the *second* bullet (an already-populated tree); this one starts
-// from "E2E Admin Household", the one seeded storage with no locations at
-// all, so the placeholder-only select, the empty-tree message inside the
-// modal, and setupLocation's option handling with nothing already appended
-// are all exercised from a genuine cold start.
+// from "E2E Admin Household", which — despite the name — also has no
+// locations at all (the same as "E2E Zero-Locations Household" does), so
+// the placeholder-only select, the empty-tree message inside the modal, and
+// setupLocation's option handling with nothing already appended are all
+// exercised from a genuine cold start.
 test("a location can be created from the review screen in a storage with zero locations", async ({ page }) => {
   const login = await page.request.post("/api/auth/login", {
     data: { username: "e2e-admin-2", password: "e2e-fixture-password" },
