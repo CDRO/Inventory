@@ -641,3 +641,78 @@ test("a location can be created from the resolution screen, in a storage seeded 
   const tree = await reread.json();
   expect(tree.items.map((n) => n.name)).toContain("Balcony Box");
 });
+
+// The other caller of js/image-picker.js, covering the same click path
+// products.spec.js covers for the product detail view. Lifting the picker into
+// a shared module was #135's refactor, and this is the journey that would fail
+// if the extraction changed what a pick means here: the hash of the picked
+// suggestion has to reach the resolve body as new_product.image.
+//
+// The suggestion list is mocked because this stack has no image provider (see
+// the header of this file); the picker itself is not.
+test("a picked suggestion's hash reaches the resolve body as the new product's image", async ({
+  page,
+}) => {
+  const PICKED = "d".repeat(64);
+  let rawTextById = {};
+  const sent = await captureResolves(page, () => rawTextById);
+
+  // A predicate rather than a glob: "?" is a single-character wildcard in a
+  // Playwright URL pattern, not the start of a query string.
+  await page.route(
+    (url) => url.pathname.endsWith("/image-suggestions"),
+    (route) =>
+      route.fulfill({
+        json: {
+          suggestions: [
+            { url: `${BASE}/images/${"e".repeat(64)}`, type: "icon" },
+            { url: `${BASE}/images/${PICKED}`, type: "photo" },
+          ],
+        },
+      }),
+  );
+
+  const created = await pasteList(page, ["quince paste"]);
+  rawTextById = Object.fromEntries(created.items.map((item) => [item.id, item.raw_text]));
+
+  const row = page.locator("#items .item").nth(0);
+  // Nothing is known about this line, so shopping-list.js opens the
+  // new-product form — and with it the picker — by itself. "Treat as new
+  // item" belongs to the ambiguous state, which this line is not in.
+  const choices = row.locator('[data-role="picture-suggestion"]');
+  await expect(choices).toHaveCount(2);
+  // The second one, so a picker that always sent the first would fail here.
+  await choices.nth(1).click();
+  await expect(choices.nth(1)).toHaveAttribute("aria-pressed", "true");
+
+  await row.locator('[data-action="resolve"]').click();
+  await expect(row.locator('[data-field="status"]')).toHaveText("Done");
+
+  expect(sent["quince paste"].new_product.image).toBe(PICKED);
+});
+
+// "No picture" stays the pre-selected default here, unlike the product detail
+// view's "Remove picture": a line being resolved has no picture to remove, and
+// a reviewer who picks nothing must resolve without one.
+test("a line resolved without picking a picture carries no image", async ({ page }) => {
+  let rawTextById = {};
+  const sent = await captureResolves(page, () => rawTextById);
+
+  await page.route(
+    (url) => url.pathname.endsWith("/image-suggestions"),
+    (route) =>
+      route.fulfill({ json: { suggestions: [{ url: `${BASE}/images/${"f".repeat(64)}`, type: "icon" }] } }),
+  );
+
+  const created = await pasteList(page, ["damson cheese"]);
+  rawTextById = Object.fromEntries(created.items.map((item) => [item.id, item.raw_text]));
+
+  const row = page.locator("#items .item").nth(0);
+  // As above: the form, and the picker in it, open without a click.
+  await expect(row.locator('[data-role="picture-none"]')).toHaveAttribute("aria-pressed", "true");
+
+  await row.locator('[data-action="resolve"]').click();
+  await expect(row.locator('[data-field="status"]')).toHaveText("Done");
+
+  expect(sent["damson cheese"].new_product.image).toBeUndefined();
+});

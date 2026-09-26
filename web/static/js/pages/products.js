@@ -31,6 +31,7 @@ import { fetchCategories, appendCategoryOptions } from "../category-options.js";
 import { fetchLocations, appendLocationOptions, openLocationField } from "../location-options.js";
 import { clearChildren, el, text } from "../dom.js";
 import { openScanSheet } from "../barcode.js";
+import { renderImagePicker } from "../image-picker.js";
 
 // The server's bound (maxShelfLifeDays in internal/httpapi/expiry.go). The
 // input carries it so a browser flags an out-of-range number before a round
@@ -323,7 +324,54 @@ function renderBarcodeCard(product) {
   ]);
 }
 
+// renderPicture shows the product's picture and the path to changing it —
+// what docs/specs/16-product-maintenance.md means by "image (with the change
+// paths from 07 — suggestion picker, custom upload)".
+//
+// The picker is the shared js/image-picker.js, the same one the shopping-list
+// reconciliation screen uses, and the write is the PATCH that already existed
+// for it: `{"image": "<hash>"}` sets the picked suggestion,
+// `{"image": null, "icon_name": null}` clears the picture. Nothing about
+// storage scoping is decided here — the route is storage-scoped server-side,
+// and an id belonging to another storage gets the same 404 an unknown one
+// does (docs/specs/03-auth-and-multi-tenancy.md).
+//
+// Spec 07's other change path, a custom photo upload, has no route to call:
+// the only endpoints that take an image upload create an ingestion or
+// consumption *job*. It stays unreachable from here, tracked separately.
 function renderPicture(product) {
+  const current = el("div", { "data-role": "product-picture" }, [currentPicture(product)]);
+  const pickerBox = el("div", { "data-role": "picture-picker", class: "stack", hidden: true });
+  const status = el("p", { class: "muted", "data-role": "picture-status", hidden: true });
+
+  const change = el(
+    "button",
+    {
+      type: "button",
+      class: "btn btn--ghost",
+      "data-role": "change-picture",
+      onclick: async () => {
+        pickerBox.hidden = false;
+        await renderImagePicker(pickerBox, {
+          storageId,
+          query: product.name,
+          keyPrefix: "products.pictures",
+          // This product may already have a picture, and removing it must not
+          // depend on an image provider being reachable — without this the
+          // only way to clear one would be a suggestion list that happened to
+          // come back non-empty.
+          clearable: true,
+          onPick: (hash) => setPicture(product, hash, current, status),
+        });
+      },
+    },
+    [text(t("products.picture.change"))],
+  );
+
+  return el("div", { class: "stack" }, [current, change, pickerBox, status]);
+}
+
+function currentPicture(product) {
   if (product.image_url) {
     return el("img", {
       src: product.image_url,
@@ -335,6 +383,33 @@ function renderPicture(product) {
     return el("p", { class: "muted" }, [text(t("products.picture.icon", { icon: product.icon_name }))]);
   }
   return el("p", { class: "empty-state" }, [text(t("products.picture.none"))]);
+}
+
+// setPicture writes the choice and re-renders only the picture itself. The
+// whole detail view is deliberately not re-rendered: the edit form beside it
+// may hold changes somebody has typed and not saved, and a picture change
+// must not discard them.
+async function setPicture(product, hash, current, status) {
+  status.hidden = false;
+  status.textContent = t("products.picture.saving");
+  try {
+    const updated = await patch(`${basePath()}/${product.id}/image`, {
+      image: hash,
+      icon_name: null,
+    });
+    product.image_url = updated.image_url ?? null;
+    product.icon_name = updated.icon_name ?? null;
+    clearChildren(current);
+    current.append(currentPicture(product));
+    status.textContent = hash ? t("products.picture.saved") : t("products.picture.cleared");
+  } catch (err) {
+    status.textContent = apiErrorMessage(err, t("products.error.network"));
+    // Rethrown so the picker rolls its selection back: the message above says
+    // the write failed, and a button still marked as chosen would say it did
+    // not. A picked suggestion can legitimately fail — the server refuses a
+    // hash whose cache entry has been evicted since the list was drawn.
+    throw err;
+  }
 }
 
 function renderEditForm(product) {

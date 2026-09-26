@@ -814,4 +814,30 @@ INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, create
   ('00000000-0000-7000-8000-0000000000f9', '00000000-0000-7000-8000-0000000000f7', '00000000-0000-7000-8000-0000000000f8', 3, 'purchase', '00000000-0000-7000-8000-00000000000c')
 ON CONFLICT (id) DO NOTHING;
 
+-- Two more products in "E2E Household", dedicated to #135: the picture-change
+-- path the product detail view gained. ...fa and ...fb are the next free ids
+-- after ...f9, the inventory_logs row of #166's "E2E Stocktake Widget"
+-- immediately above.
+--
+-- These belong in the shared Household storage rather than a block of their
+-- own, and that is the rule rather than an exception to it: e2e-bob's only
+-- membership is this storage, so a product here is what products.spec.js can
+-- open, and a second membership for him would change what the storage switcher
+-- does and break storage-switching.spec.js. What the "own user and storage"
+-- rule guards is *durable per-user state* — a start_page, a barcode prompt —
+-- which nothing here writes. A product nobody else reads is safe.
+--
+-- Two of them rather than one, because the suite runs fullyParallel and both
+-- scenarios write: one is opened in the browser and has the picker run against
+-- it, the other has its picture cleared through the API. Sharing a single row
+-- would make the order they happen to run in decide the outcome — the same
+-- one-product-per-scenario reasoning every block above gives.
+--
+-- ...fb carries an icon_name so that clearing it is observable: a product that
+-- starts with no picture would let a clear that did nothing at all pass.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock, icon_name) VALUES
+  ('00000000-0000-7000-8000-0000000000fa', '00000000-0000-7000-8000-000000000010', 'E2E Picture Picker Source', NULL, 'non_perishable', 0, NULL),
+  ('00000000-0000-7000-8000-0000000000fb', '00000000-0000-7000-8000-000000000010', 'E2E Picture Clear Source',  NULL, 'non_perishable', 0, 'noto:cheese-wedge')
+ON CONFLICT (id) DO NOTHING;
+
 COMMIT;
