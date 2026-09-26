@@ -582,10 +582,13 @@ them.
 
 `scripts/wellen-harness.json` (plan issue #293). Standards: Sonnet 5 /
 high for packages, Opus 5 / xhigh for consolidation; per package overrides
-where the file is `risk:high`; advisor off by default and on only for H4
-(the allowlist that guards headless sessions), H15, H16, H17, H18, H19 and
-every consolidation (decision D1); round limit 2 per package, 4 per
-consolidation; `dockerCleanup: true` on every wave.
+where the file is `risk:high`; advisor on for H4 (the allowlist that guards
+headless sessions), H15, H16, H17, H18, H19 and every consolidation session,
+off for the other thirteen packages (decision D1 — implemented as
+`standards.advisor: true`, which is what the orchestrator's consolidation
+sessions fall back to, plus an explicit `advisor` flag on every package);
+round limit 2 per package, 4 per consolidation; `dockerCleanup: true` on
+every wave.
 
 ```mermaid
 flowchart LR
@@ -652,7 +655,7 @@ flowchart LR
 | 3 | H13 spec 38 | `h13-spec-38` | `docs/specs/38-*.md`, specs 00/01/18 pointers, `CLAUDE.md` numbering line, `migrations/README.md`, `.env.example` | Opus / xhigh | contract |
 | 4 | H14 migrate plan | `h14-migrate-plan` | `cmd/inventory/main.go`, `internal/migrate/*`, `review-go.md` (one line) | Sonnet / high | — |
 | 4 | H15 update --auto | `h15-update-auto` | `deploy/synology/update`, `update_test.go`, `deploy/synology/README.md` | Opus / xhigh | `risk:high` |
-| 4 | H16 runner container | `h16-runner-container` | `deploy/synology/runner/*`, `test.yml` (path-filtered build job) | Opus / xhigh | `risk:high` |
+| 4 | H16 runner container | `h16-runner-container` | `deploy/synology/runner/*`, `test.yml` (path-filtered build job), `deploy/synology/README.md` (one row in its file table — H15 owns the rest of that file) | Opus / xhigh | `risk:high` |
 | 5 | H17 release workflow | `h17-release-workflow` | `.github/workflows/release.yml`, `scripts/dev.d/release`, README runbook, spec 38 acceptance | Opus / xhigh | `risk:high` |
 | 6 | H18 agent image | `h18-agent-image` | `deploy/agent/*` | Sonnet / high | — |
 | 6 | H19 agent loop | `h19-agent-loop` | `scripts/agent-loop.sh`, `scripts/package-prompt.template`, orchestrator (`Get-PackagePrompt` reads the template, nothing else), `wellen-planen.md` | Sonnet / high | — |
