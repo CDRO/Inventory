@@ -530,6 +530,15 @@ function renderStockCard(product) {
  * therefore the only thing that actually knows (docs/specs/28 supersedes the
  * "linking to 06/08/13" reading of docs/specs/16).
  *
+ * That row lock is not the same guarantee as "one click, one request",
+ * though (#161): it serializes two concurrent splits against each other, but
+ * each still re-validates against whatever quantity it finds once it gets
+ * the lock, so two rapid clicks can each legitimately succeed in turn. The
+ * split and move submit handlers below guard against that with their own
+ * disabled/`finally` pattern (matching `openLocationField`'s `trigger`
+ * guard in js/location-options.js) — a defense against a duplicate
+ * *request*, not a validity check the server already owns.
+ *
  * @param {Object} batch
  * @param {HTMLSelectElement[]} locationSelects - every batch row's target-
  *   location field on the currently rendered product, shared so the "+ New
