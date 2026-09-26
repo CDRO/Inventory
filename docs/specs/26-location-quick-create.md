@@ -136,6 +136,13 @@ Each page module calls it from a field's trigger — `openLocationField`
 - If `createdIds` is empty (the user only looked, renamed, or reorganized),
   every field gets the refreshed tree with selections untouched — a no-op
   from the user's point of view besides the option list being current.
+- If the modal was **refused** rather than dismissed — `opened: false` in
+  `27`'s signature, because a dialog of either kind was already open —
+  nothing is fetched and no field is touched at all. That is a different
+  case from the empty-`createdIds` one above, even though both carry no
+  created ids: re-fetching on a refusal would turn a click the application
+  deliberately ignored into a network request, and a hiccup on that request
+  into an error message for something that never happened (#227).
 
 Opening or closing the modal never reloads the page, never re-fetches the
 job/list being reviewed, and never touches any other field's in-progress
