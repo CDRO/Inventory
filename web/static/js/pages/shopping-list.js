@@ -29,9 +29,10 @@ import { renderNav, startPageFor } from "../nav.js";
 import { initGamification } from "../gamification.js";
 import { fetchLocations, appendLocationOptions, openLocationField } from "../location-options.js";
 import { fetchCategories, appendCategoryOptions, openCategoryField } from "../category-options.js";
-import { get, post, ApiError } from "../api.js";
+import { post, ApiError } from "../api.js";
 import { el, text, clearChildren, qs } from "../dom.js";
 import { offerBarcodeCapture } from "../barcode-offer.js";
+import { renderImagePicker, markChosen } from "../image-picker.js";
 import { t, apiErrorMessage, applyI18n } from "../i18n.js";
 
 const switcherContainer = qs("#storage-switcher");
@@ -343,83 +344,29 @@ function renderCatalogCard(node, catalog) {
 }
 
 // renderPictureChoices asks the server for pictures and lets the reviewer pick
-// one. Every URL rendered is on this origin; a picked picture is sent back by
-// its cache hash, and the server copies it into permanent storage.
+// one. The picker itself is js/image-picker.js, shared with the product detail
+// view of docs/specs/16-product-maintenance.md; what stays here is the part
+// that is this page's own — which query to search for, and where the answer is
+// recorded on the line.
+//
+// The reset to null is deliberately on this side of the call. The picker never
+// reports a choice that nobody made, so a line whose picker is still loading —
+// or whose provider is down — is a line with no picture, which is what the
+// resolve body must say.
 async function renderPictureChoices(node, item) {
-  const container = field(node, "pictures");
-  clearChildren(container);
   node.picture = null;
-
-  const status = el("span", { class: "empty-state" }, [text(t("shoppingList.pictures.loading"))]);
-  container.append(status);
-
-  const query = field(node, "name").value.trim() || lineName(item);
-  let suggestions = [];
-  try {
-    const body = await get(`/api/storages/${storageId}/image-suggestions?query=${encodeURIComponent(query)}`);
-    suggestions = body.suggestions || [];
-  } catch {
-    // A provider being unreachable must not block the line: the spec's own
-    // degradation rule, carried through to the UI.
-    status.textContent = t("shoppingList.pictures.unavailable");
-    return;
-  }
-
-  if (suggestions.length === 0) {
-    status.textContent = t("shoppingList.pictures.none");
-    return;
-  }
-
-  status.textContent = t("shoppingList.pictures.pick");
-  const row = el("div", { class: "row" });
-  const none = el(
-    "button",
-    {
-      type: "button",
-      class: "btn btn--ghost btn--selected",
-      "aria-pressed": "true",
-      onclick: (event) => {
-        node.picture = null;
-        markChosen(row, event.currentTarget);
-      },
+  await renderImagePicker(field(node, "pictures"), {
+    storageId,
+    query: field(node, "name").value.trim() || lineName(item),
+    keyPrefix: "shoppingList.pictures",
+    onPick: (hash) => {
+      node.picture = hash;
     },
-    [text(t("shoppingList.pictures.noPicture"))],
-  );
-  row.append(none);
-
-  for (const suggestion of suggestions) {
-    const hash = suggestion.url.split("/").pop();
-    row.append(
-      el(
-        "button",
-        {
-          type: "button",
-          class: "btn btn--ghost",
-          "aria-pressed": "false",
-          "aria-label": t("shoppingList.pictures.useThis", { type: suggestion.type }),
-          onclick: (event) => {
-            node.picture = hash;
-            markChosen(row, event.currentTarget);
-          },
-        },
-        [el("img", { src: suggestion.url, alt: "", width: 72, height: 72, loading: "lazy" })],
-      ),
-    );
-  }
-  container.append(row);
+  });
 }
 
 function escapeButton(label, onclick) {
   return el("button", { type: "button", class: "btn btn--ghost", onclick }, [text(label)]);
-}
-
-function markChosen(container, button) {
-  for (const other of container.querySelectorAll("button")) {
-    other.classList.remove("btn--selected");
-    other.setAttribute("aria-pressed", "false");
-  }
-  button.classList.add("btn--selected");
-  button.setAttribute("aria-pressed", "true");
 }
 
 // buildResolve turns the line's choice and fields into the resolve body, or

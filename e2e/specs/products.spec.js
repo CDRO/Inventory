@@ -565,3 +565,89 @@ test("a batch two locations deep renders its full path, root first", async ({ pa
   const row = batchRow(page, NESTED_LOCATION_BATCH);
   await expect(row).toContainText("6 × Fridge › Door Bin");
 });
+
+// --- #135: the picture-change path ------------------------------------------
+//
+// docs/specs/16-product-maintenance.md describes the detail view as showing
+// the image "with the change paths from 07 — suggestion picker, custom
+// upload". Spec 16 shipped the edit surface without them; these cover the
+// half that has a route to call.
+//
+// What is deliberately NOT asserted is a picture actually arriving. This
+// stack configures no SerpAPI key and no Iconify reachability
+// (docker-compose.e2e.yml: "external services are not stubbed here yet"), so
+// the suggestion list is empty or the provider is unreachable, and pinning a
+// specific one of the picker's three terminal states would pin this stack's
+// provider configuration rather than the wiring. What these prove is the
+// wiring itself: the button reaches the suggestions endpoint, and the PATCH
+// behind the picker's own choices does what the picker asks of it.
+
+const PICTURE_PICKER_PRODUCT = "00000000-0000-7000-8000-0000000000fa";
+const PICTURE_CLEAR_PRODUCT = "00000000-0000-7000-8000-0000000000fb";
+
+// A product of Alice's "E2E Other Household" (...011), used only as a product
+// id from *another* storage. Bob is not a member there, so the image route
+// must answer exactly as it does for an id that does not exist at all.
+const FOREIGN_PRODUCT = "00000000-0000-7000-8000-000000000042";
+
+test("the product detail view offers a picture change that reaches the suggestions endpoint", async ({
+  page,
+}) => {
+  await logIn(page);
+  await openProduct(page, "E2E Picture Picker Source");
+
+  const picker = page.locator('[data-role="picture-picker"]');
+  await expect(picker).toBeHidden(); // closed until asked for
+
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (res) => res.url().includes("/image-suggestions?query=") && res.request().method() === "GET",
+    ),
+    page.locator('[data-role="change-picture"]').click(),
+  ]);
+
+  // The query is the product's own name, and it is the *storage-scoped* route
+  // that answers — the scoping the server does, not something re-derived here.
+  expect(decodeURIComponent(new URL(response.url()).search)).toContain("query=E2E Picture Picker Source");
+  expect(new URL(response.url()).pathname).toBe(`/api/storages/${STORAGE_ID}/image-suggestions`);
+
+  await expect(picker).toBeVisible();
+});
+
+test("clearing a product's picture goes through the image route and shows on the page", async ({
+  page,
+}) => {
+  await logIn(page);
+
+  const before = await fetchProduct(page, PICTURE_CLEAR_PRODUCT);
+  expect(before.icon_name).toBe("noto:cheese-wedge"); // the fixture must start out set
+
+  // Exactly the body the picker's "No picture" button sends.
+  const res = await page.request.patch(`${BASE}/products/${PICTURE_CLEAR_PRODUCT}/image`, {
+    data: { image: null, icon_name: null },
+  });
+  expect(res.status()).toBe(200);
+
+  const after = await fetchProduct(page, PICTURE_CLEAR_PRODUCT);
+  expect(after.icon_name).toBeNull();
+
+  await openProduct(page, "E2E Picture Clear Source");
+  await expect(page.locator('[data-role="product-picture"]')).toContainText("No picture yet.");
+});
+
+test("the image route answers 404 for a product in another storage, not 403", async ({ page }) => {
+  await logIn(page);
+
+  const res = await page.request.patch(`${BASE}/products/${FOREIGN_PRODUCT}/image`, {
+    data: { image: null, icon_name: null },
+  });
+
+  // 404, never 403: an inaccessible product must be indistinguishable from one
+  // that does not exist (docs/specs/03-auth-and-multi-tenancy.md). The page
+  // never reimplements this — it is the handler's, and this is the deployed
+  // stack saying so.
+  expect(res.status()).toBe(404);
+  const body = await res.json();
+  expect(body.error.code).toBe("not_found");
+  expect(body.error.debug_reason).toBeUndefined(); // APP_ENV=prod in this stack
+});
