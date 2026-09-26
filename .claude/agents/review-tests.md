@@ -47,23 +47,50 @@ You have **no ability to edit files**, by design.
    the underlying cause varies by sandbox. Fall back to the `test` GitHub
    Actions workflow (`.github/workflows/test.yml`), which runs the identical
    `docker compose run --rm app go test ./...` command on a runner that has a
-   working daemon:
+   working daemon.
+
+   `test.yml` triggers automatically on a PR only when its **base** is
+   `main` (a wave consolidation PR, or any other PR merging straight to
+   `main`). A **package PR** (a feature branch against an integration
+   branch, not `main`) gets no automatic run at all, to keep CI off the
+   common case where a local Docker daemon already answers this for the
+   many package PRs a single wave opens. Check the base first:
 
    ```bash
-   gh pr checks <PR> --watch --interval 15
+   BASE=$(gh pr view <PR> --json baseRefName -q .baseRefName)
    ```
 
-   `--watch` blocks and re-polls until every check completes — do not judge on
-   a pending check by reading it only once. If the `test` check failed,
-   `gh run view <run-id> --log-failed` to see why, and report that as you
-   would a local failure. A **passing** `test` check is equivalent evidence to
-   a local green run; cite the run URL in your `**Suite:**` line instead of an
-   exit code. A **local suite that ran and failed** is always a blocking
-   finding regardless of what CI shows — local execution, when it works, is
-   not overridden by a stale or differently-scoped CI run.
+   If `$BASE` is `main`, `gh pr checks <PR> --watch --interval 15` finds the
+   automatic run exactly as before. Otherwise, dispatch one yourself against
+   the PR's own head branch, then poll for the exact commit rather than "the
+   newest run" (a dispatch can take a few seconds to appear, and the list
+   can briefly still show only an older run from the same branch):
 
-   If neither a local run nor a CI check is available at all (workflow file
-   missing, no checks reported), that is a blocking finding and you say why.
+   ```bash
+   HEAD_BRANCH=$(gh pr view <PR> --json headRefName -q .headRefName)
+   SHA=$(gh pr view <PR> --json headRefOid -q .headRefOid)
+   gh workflow run test.yml --ref "$HEAD_BRANCH"
+   RUN_ID=""
+   for i in $(seq 1 10); do
+     RUN_ID=$(gh run list --workflow=test.yml --branch "$HEAD_BRANCH" --event workflow_dispatch \
+       --limit 5 --json databaseId,headSha -q ".[] | select(.headSha == \"$SHA\") | .databaseId" | head -1)
+     [ -n "$RUN_ID" ] && break
+     sleep 3
+   done
+   gh run watch "$RUN_ID" --exit-status
+   ```
+
+   If the run failed, `gh run view "$RUN_ID" --log-failed` to see why, and
+   report that as you would a local failure. A **passing** dispatched run is
+   equivalent evidence to a local green run; cite the run URL in your
+   `**Suite:**` line instead of an exit code. A **local suite that ran and
+   failed** is always a blocking finding regardless of what CI shows — local
+   execution, when it works, is not overridden by a stale or
+   differently-scoped CI run.
+
+   If neither a local run nor a dispatched CI run is available at all
+   (workflow file missing, `gh workflow run` itself fails), that is a
+   blocking finding and you say why.
 5. Post your review with `gh pr comment`.
 
 ## What makes a test meaningless

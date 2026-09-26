@@ -31,7 +31,37 @@ services:
     environment:
       - APP_ENV=dev
       - STATIC_DIR=/src/web/static
+      # Explicit rather than relying on the golang image's own default
+      # ($HOME/.cache/go-build, which happens to resolve to this too for the
+      # root user golang:1-alpine runs as) - a future base-image change that
+      # altered $HOME would otherwise silently stop caching anything, with no
+      # error, just a slow suite again.
+      - GOCACHE=/root/.cache/go-build
     volumes:
+      # A NAMED, EXTERNAL volume, not a bind mount and not the plain
+      # `go-build-cache:` shorthand: every worktree's own copy of this file
+      # (git worktree, not a symlink) resolves the same fixed name regardless
+      # of COMPOSE_PROJECT_NAME, so every package worktree of a wave - and
+      # every wave after it - shares one cache instead of each starting cold.
+      # `external: true` (below, in the top-level `volumes:` key) is what
+      # keeps it that way: `docker compose down -v`, which
+      # Stop-PackageStack (scripts/wellen-orchestrator.ps1) runs in a
+      # finished package's own worktree the moment its issue closes, only
+      # ever removes volumes a compose file DECLARES (non-external) - an
+      # external volume is Compose's for read/write, never its to delete.
+      # Created once per machine: `docker volume create inventory-go-build-cache`.
+      # Go's own build cache is documented safe for concurrent access, so
+      # parallel packages in the same wave sharing it is fine - contention
+      # costs a wait, never corruption.
+      #
+      # `go test ./...` in an ephemeral `run --rm` container has nowhere else
+      # to keep this: without a persisted GOCACHE, every single invocation -
+      # every ship-loop iteration, every reviewer's own independent run,
+      # every wave's worth of packages - recompiles the entire dependency
+      # tree and every unchanged package from scratch. This is what actually
+      # makes "run the whole suite" and "run only what changed" cost close to
+      # the same thing, without narrowing what gets tested.
+      - go-build-cache:/root/.cache/go-build
       - ./web:/src/web          # edit frontend files, just refresh the browser
       - ./internal:/src/internal
       - ./cmd:/src/cmd
@@ -73,3 +103,14 @@ services:
     # single ordinary checkout working unchanged.
     ports:
       - "${HTTP_PORT:-8000}:${HTTP_PORT:-8000}"
+
+volumes:
+  # external: true is the whole point - see the mount's own comment above.
+  # Create once per machine: `docker volume create inventory-go-build-cache`.
+  # Compose fails `docker compose run`/`up` outright if an external volume
+  # does not exist yet, rather than silently starting an unnamed one, so a
+  # machine that has never run this needs that command once before the dev
+  # override works at all.
+  go-build-cache:
+    name: inventory-go-build-cache
+    external: true
