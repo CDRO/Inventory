@@ -268,9 +268,10 @@ unit-testable logic lives in Go and is covered there
 | `docker compose build` / the image build | **No.** E2E needs a live stack with a database, which a build stage does not have. |
 | **Deploying** (promoting an image to the NAS / cutting a release) | **Yes — must pass first.** A failing E2E run blocks the deployment. |
 
-Running them is explicit and on-demand in dev (`docker compose -f
-docker-compose.e2e.yml run --rm e2e`), so the suite can be used while
-developing without being imposed on every save.
+Running them is explicit and on-demand in dev — not a single command; see
+"Running the E2E suite" in `01-architecture-and-deployment.md` for the
+correct sequence and its two operational traps — so the suite can be used
+while developing without being imposed on every save.
 
 ### How they run
 
