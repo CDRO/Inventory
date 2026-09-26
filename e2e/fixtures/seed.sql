@@ -83,7 +83,18 @@ INSERT INTO users (id, username, password_hash, display_name, is_admin) VALUES
   -- stocktakes, which writes quantities and last_audited_at — the same
   -- write-vs-read-only reasoning e2e-inventory's fixture comment gives, in
   -- reverse: this one is dedicated because it writes, not because it reads.
-  ('00000000-0000-7000-8000-00000000000c', 'e2e-stocktake', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Stocktake User', false)
+  ('00000000-0000-7000-8000-00000000000c', 'e2e-stocktake', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Stocktake User', false),
+  -- e2e-stocktake-empty belongs only to "E2E Stocktake Empty", dedicated to
+  -- #174 item 3: the stocktake chooser's zero-locations empty state
+  -- (docs/specs/35-stocktake-entry-points.md) has no e2e coverage. The two
+  -- storages that are already genuinely empty of locations — "E2E
+  -- Zero-Locations Household" and "E2E Admin Household" — are each raced by
+  -- exactly one other suite's location-quick-create test, which creates a
+  -- location for real the first time it runs and leaves it there for the
+  -- rest of the run; reading either one for "still zero" would depend on
+  -- test-scheduling order against that write. A dedicated storage this suite
+  -- never writes to sidesteps the race instead of hoping to win it.
+  ('00000000-0000-7000-8000-00000000000d', 'e2e-stocktake-empty', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Stocktake Empty User', false)
 ON CONFLICT DO NOTHING;
 
 -- Two storages, so the "member of storage A gets 404 for storage B"
@@ -149,7 +160,11 @@ INSERT INTO storages (id, name) VALUES
   -- docs/specs/35-stocktake-entry-points.md. Confirming a stocktake writes
   -- last_audited_at, so this storage cannot be shared with e2e-inventory's
   -- read-only fixture or with any other suite's seeded quantities.
-  ('00000000-0000-7000-8000-00000000001a', 'E2E Stocktake')
+  ('00000000-0000-7000-8000-00000000001a', 'E2E Stocktake'),
+  -- "E2E Stocktake Empty" (...01b), e2e-stocktake-empty's alone, holds no
+  -- locations at all — see that user's own fixture comment for why this
+  -- needs a storage no other suite's location-quick-create test can touch.
+  ('00000000-0000-7000-8000-00000000001b', 'E2E Stocktake Empty')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO storage_members (storage_id, user_id) VALUES
@@ -161,7 +176,8 @@ INSERT INTO storage_members (storage_id, user_id) VALUES
   ('00000000-0000-7000-8000-000000000014', '00000000-0000-7000-8000-000000000007'), -- Dana: barcode household, and nothing else
   ('00000000-0000-7000-8000-000000000015', '00000000-0000-7000-8000-000000000008'), -- e2e-inbox: E2E Inbox, and nothing else
   ('00000000-0000-7000-8000-000000000016', '00000000-0000-7000-8000-000000000009'), -- e2e-inventory: E2E Inventory, and nothing else
-  ('00000000-0000-7000-8000-00000000001a', '00000000-0000-7000-8000-00000000000c')  -- e2e-stocktake: E2E Stocktake, and nothing else
+  ('00000000-0000-7000-8000-00000000001a', '00000000-0000-7000-8000-00000000000c'), -- e2e-stocktake: E2E Stocktake, and nothing else
+  ('00000000-0000-7000-8000-00000000001b', '00000000-0000-7000-8000-00000000000d')  -- e2e-stocktake-empty: E2E Stocktake Empty, and nothing else
 ON CONFLICT DO NOTHING;
 
 -- The start-page memberships (docs/specs/34-navigation-and-start-page.md),
@@ -188,6 +204,18 @@ ON CONFLICT (storage_id, user_id) DO UPDATE SET start_page = EXCLUDED.start_page
 INSERT INTO locations (id, storage_id, name, description) VALUES
   ('00000000-0000-7000-8000-000000000020', '00000000-0000-7000-8000-000000000010', 'Pantry', 'Kitchen pantry shelf'),
   ('00000000-0000-7000-8000-000000000021', '00000000-0000-7000-8000-000000000010', 'Fridge', 'Kitchen fridge')
+ON CONFLICT (id) DO NOTHING;
+
+-- A location two levels deep, dedicated to #174 item 2:
+-- js/pages/products.js's locationPathFor joins a location's full ancestor
+-- path with " › ", and every existing batch in this fixture — this file's
+-- own included — sits at a single-segment root location, so no test in the
+-- repo would catch a join-order or separator bug past one segment. A child
+-- of Fridge rather than a new root: append-only, and it does not touch any
+-- assertion that already reads Fridge itself. ...b6 is the next free id
+-- after ...b5 (this block's own products.spec.js batch/log range, below).
+INSERT INTO locations (id, storage_id, parent_id, name, description) VALUES
+  ('00000000-0000-7000-8000-0000000000b6', '00000000-0000-7000-8000-000000000010', '00000000-0000-7000-8000-000000000021', 'Door Bin', 'A bin in the fridge door')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO categories (id, storage_id, name, default_shelf_life_days) VALUES
@@ -304,6 +332,23 @@ INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, create
   ('00000000-0000-7000-8000-00000000009b', '00000000-0000-7000-8000-000000000099', '00000000-0000-7000-8000-00000000009a', 5, 'purchase', '00000000-0000-7000-8000-000000000003'),
   ('00000000-0000-7000-8000-00000000009e', '00000000-0000-7000-8000-00000000009c', '00000000-0000-7000-8000-00000000009d', 3, 'purchase', '00000000-0000-7000-8000-000000000003'),
   ('00000000-0000-7000-8000-0000000000b5', '00000000-0000-7000-8000-0000000000b3', '00000000-0000-7000-8000-0000000000b4', 4, 'purchase', '00000000-0000-7000-8000-000000000003')
+ON CONFLICT (id) DO NOTHING;
+
+-- One more product, dedicated to #174 item 2: a batch at "Door Bin" (...b6
+-- above, two levels below Fridge), so products.spec.js has a row whose
+-- rendered location is a multi-segment path — every other row in this file
+-- sits at root-level Pantry or Fridge. ...b7/...b8/...b9 are the next free
+-- ids after ...b6.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
+  ('00000000-0000-7000-8000-0000000000b7', '00000000-0000-7000-8000-000000000010', 'E2E Nested Location Source', NULL, 'non_perishable', 0)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_date, expiration_source) VALUES
+  ('00000000-0000-7000-8000-0000000000b8', '00000000-0000-7000-8000-0000000000b7', '00000000-0000-7000-8000-0000000000b6', 6, NULL, 'derived')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
+  ('00000000-0000-7000-8000-0000000000b9', '00000000-0000-7000-8000-0000000000b7', '00000000-0000-7000-8000-0000000000b8', 6, 'purchase', '00000000-0000-7000-8000-000000000003')
 ON CONFLICT (id) DO NOTHING;
 
 -- "E2E Other Household" (...011), Alice's second storage. It held nothing at

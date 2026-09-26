@@ -30,9 +30,15 @@ const BATCH = "00000000-0000-7000-8000-0000000000f8";
 // to prove a foreign id 404s exactly like one that was never real.
 const FOREIGN_LOCATION = "00000000-0000-7000-8000-0000000000b0";
 
-async function logIn(page) {
+// "E2E Stocktake Empty" / e2e-stocktake-empty (e2e/fixtures/seed.sql), its own
+// dedicated storage with zero locations — #174 item 3. Not "E2E Stocktake"
+// above: every location in this file's own fixture exists precisely so the
+// stalest-first and single-location scenarios have something to walk.
+const EMPTY_STORAGE = "00000000-0000-7000-8000-00000000001b";
+
+async function logIn(page, username = "e2e-stocktake") {
   const res = await page.request.post("/api/auth/login", {
-    data: { username: "e2e-stocktake", password: "e2e-fixture-password" },
+    data: { username, password: "e2e-fixture-password" },
   });
   expect(res.status(), "fixture login").toBe(200);
 }
@@ -155,4 +161,25 @@ test("Cancel returns to the page the walk was started from, or to locations.html
   await page.goto(`/stocktake.html?location=${FRIDGE}&storage=${STORAGE}`);
   await page.locator("#cancel").click();
   await expect(page).toHaveURL(new RegExp(`/locations\\.html\\?storage=${STORAGE}`));
+});
+
+// #174 item 3: docs/specs/35-stocktake-entry-points.md — "If a storage has no
+// locations at all, the page shows an empty state that links to
+// locations.html." Implemented in renderChooser and #chooser-empty, but with
+// no dedicated fixture or test in #173.
+test("a storage with no locations at all shows the chooser's empty state, linking to locations.html", async ({ page }) => {
+  await logIn(page, "e2e-stocktake-empty");
+
+  await page.goto(`/stocktake.html?storage=${EMPTY_STORAGE}`);
+  await expect(page.locator("#chooser")).toBeVisible();
+  await expect(page.locator("#sheet")).toBeHidden();
+
+  await expect(page.locator("#chooser-empty")).toBeVisible();
+  await expect(page.locator("#chooser-tree")).toBeEmpty();
+  await expect(page.locator("#stalest")).toBeEmpty();
+
+  await expect(page.locator("#chooser-empty-link")).toHaveAttribute(
+    "href",
+    new RegExp(`/locations\\.html\\?storage=${EMPTY_STORAGE}`),
+  );
 });
