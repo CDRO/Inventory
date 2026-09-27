@@ -172,18 +172,24 @@ test("removing a photo acts on File identity, not filename — two rows can shar
   ]);
   await expect(rows).toHaveCount(2);
 
-  // Removing the first "shelf.jpg" row: a name-keyed implementation cannot
-  // tell the two apart and could remove either, both, or neither. Its
-  // accessible name is itself proof identity is in play — "1 of 2" and
-  // "2 of 2" differ even though the visible filename does not.
-  await rows.nth(0).getByRole("button", { name: "Remove photo 1 of 2, shelf.jpg", exact: true }).click();
+  // Removing the *second* "shelf.jpg" row on purpose, not the first: a
+  // regression to name-keyed removal (e.g. `findIndex(f => f.name ===
+  // file.name)`) finds the first match regardless of which row's button was
+  // clicked, so asking it to remove row 2 would silently remove row 1
+  // instead and this test would still see "one row left, named shelf.jpg" —
+  // indistinguishable from correct behaviour unless the survivor's actual
+  // content is checked below. Its accessible name is itself proof identity
+  // is in play — "1 of 2" and "2 of 2" differ even though the visible
+  // filename does not.
+  await rows.nth(1).getByRole("button", { name: "Remove photo 2 of 2, shelf.jpg", exact: true }).click();
   await expect(rows).toHaveCount(1);
   await expect(rows.first()).toContainText("shelf.jpg");
   await expect(rows.first().getByRole("button")).toHaveAccessibleName("Remove photo 1 of 1, shelf.jpg");
 
-  // The strongest proof: uploading now sends the surviving File's own bytes
-  // (the PNG) rather than the removed one's (the JPEG) — not just "a row
-  // named shelf.jpg is gone", but "the right underlying File is gone".
+  // The strongest proof: uploading now sends the surviving (first-picked)
+  // File's own bytes — the JPEG — rather than the removed second one's — the
+  // PNG. A name-keyed regression that removed row 1 instead would upload the
+  // PNG here, which the assertions below would catch.
   let request = null;
   await page.route("**/ingest/shelf-photos", async (route) => {
     request = route.request();
@@ -194,8 +200,8 @@ test("removing a photo acts on File identity, not filename — two rows can shar
 
   expect(request, "expected the surviving photo to upload").not.toBeNull();
   const body = request.postDataBuffer().toString("latin1");
-  expect(body).toContain("Content-Type: image/png");
-  expect(body).not.toContain("Content-Type: image/jpeg");
+  expect(body).toContain("Content-Type: image/jpeg");
+  expect(body).not.toContain("Content-Type: image/png");
 
   await page.unroute("**/ingest/shelf-photos");
 });
