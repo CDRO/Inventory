@@ -130,7 +130,8 @@ Three things the sequence alone doesn't make obvious:
 ## Continuous integration
 
 A GitHub Actions workflow (`.github/workflows/test.yml`) runs on every push
-to `main`, confirming what is about to be deployed. It runs both documented
+to `main` that touches more than documentation (see the `paths-ignore` list
+below), confirming what is about to be deployed. It runs both documented
 commands as one container invocation —
 `docker compose run --rm app sh -c 'go vet ./... && go test ./...'` — against
 an ephemeral `.env` generated at the start of the job (throwaway credentials,
