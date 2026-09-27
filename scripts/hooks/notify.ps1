@@ -28,8 +28,9 @@
     Testable without a real Windows toast backend: scripts/tests/hooks.test.ps1
     dot-sources everything above this script's entry-point marker to call
     the functions directly, and separately runs this script end-to-end with
-    $env:CLAUDE_NOTIFY_TEST_BACKEND set to "ok" or "throw", which makes
-    Send-Toast substitute a fake backend instead of BurntToast/NotifyIcon.
+    $env:CLAUDE_NOTIFY_TEST_BACKEND set to "ok", "throw", or "hang" (a 30s
+    sleep, proving the Wait-Job -Timeout below actually bounds it), which
+    makes Send-Toast substitute a fake backend instead of BurntToast/NotifyIcon.
 #>
 [CmdletBinding()]
 param(
