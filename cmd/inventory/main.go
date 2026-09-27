@@ -95,9 +95,17 @@ func main() {
 //     docs/specs/15-backup-restore-and-export.md for restoring the backup
 //     taken before the upgrade.
 //   - config.MissingError: does name an exact command, "docker compose run
-//     --rm setup", because that step is identical across every deployment
-//     variant; only the following start-the-stack step defers to README.md,
-//     for the same reason the other two cases do.
+//     --rm setup", and defers only the following start-the-stack step to
+//     README.md, for the same reason the other two cases do. Naming it is not
+//     a claim that it is universal, because it is not: on the operator's
+//     Synology NAS the two-file form applies instead
+//     ("docker-compose -p inventory -f docker-compose.yml -f
+//     docker-compose.nas.yml run --rm setup", deploy/synology/README.md), and
+//     README.md's "First run" section opens by saying that every command in
+//     it — "including the ones the app itself suggests when .env is missing
+//     or changed" — is wrong on that NAS. That banner is what an operator on
+//     that variant reads first, which is why naming the ordinary command here
+//     is still worth more than naming none.
 //
 // **A database that is merely unreachable is not one of them.** That is an
 // ordinary error and gets the generic 1, because it is genuinely worth
