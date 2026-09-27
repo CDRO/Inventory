@@ -44,7 +44,11 @@ exit 0
 // the case the dispatch-and-poll recipe exists for. The --jq expressions the
 // real gh would evaluate are ignored: the stub prints what they would have
 // produced, one line per run ("<id>\t<name>") or per job
-// ("<started>\t<completed>").
+// ("<started>\t<completed>\t<labels>"). That is the one thing this file
+// cannot prove: that those field projections name the right JSON keys. They
+// carry no logic on purpose - every decision ci-usage makes (a job still
+// running, a self-hosted job, the rounding, the projection) happens in awk
+// on those lines, which the fixtures below reach.
 const ghStub = `#!/bin/sh
 printf 'gh %s\n' "$*" >> "$STUB_LOG"
 case "$*" in
@@ -240,6 +244,23 @@ func TestHelpExitsZero(t *testing.T) {
 	mustContain(t, r.stdout, "commands (scripts/dev.d/):", "stdout")
 }
 
+// A command's --help is its header comment and nothing after it: a fixed line
+// range would leak the first line of code (`set -u`) the moment the header
+// grows or shrinks by a line.
+func TestCommandHelpIsTheHeaderAndNothingElse(t *testing.T) {
+	for _, c := range []string{"ci-status", "ci-usage"} {
+		r := run(t, nil, c, "--help")
+		if r.exit != 0 {
+			t.Errorf("%s --help: expected exit 0, got %d", c, r.exit)
+		}
+		mustContain(t, r.stdout, "scripts/dev "+c, c+" --help names its own usage")
+		mustNotContain(t, r.stdout, "set -u", c+" --help must not leak code")
+		if r.calls != "" {
+			t.Errorf("%s --help must not call gh, but called:\n%s", c, r.calls)
+		}
+	}
+}
+
 // --- test -----------------------------------------------------------------
 
 const redLog = ` Container probe-db-1  Running
@@ -362,13 +383,27 @@ func TestCiStatusMatchesAnAbbreviatedSHAByPrefix(t *testing.T) {
 }
 
 func TestCiStatusRejectsSomethingThatIsNotASHA(t *testing.T) {
-	for _, bad := range []string{"main", "abc", "687184d;rm"} {
+	for _, bad := range []string{"main", "abc", "687184d;rm", fullSHA + "0"} {
 		r := run(t, nil, "ci-status", bad)
 		if r.exit != 2 {
 			t.Errorf("%q: expected exit 2, got %d", bad, r.exit)
 		}
+		mustContain(t, r.stderr, "is not a commit SHA", bad+": stderr")
 		if r.calls != "" {
 			t.Errorf("%q: must not call gh, but called:\n%s", bad, r.calls)
+		}
+	}
+}
+
+func TestCiStatusAttemptsMustBeANumber(t *testing.T) {
+	for _, bad := range []string{"many", "", "2x"} {
+		r := run(t, nil, "ci-status", fullSHA, "--attempts", bad)
+		if r.exit != 2 {
+			t.Errorf("--attempts %q: expected exit 2, got %d", bad, r.exit)
+		}
+		mustContain(t, r.stderr, "--attempts wants a number", "stderr")
+		if r.calls != "" {
+			t.Errorf("--attempts %q: must not call gh, but called:\n%s", bad, r.calls)
 		}
 	}
 }
@@ -428,9 +463,9 @@ func TestCiStatusUsageErrors(t *testing.T) {
 func TestCiUsageBillsEachJobRoundedUp(t *testing.T) {
 	env := map[string]string{
 		"STUB_RUNS":   "1\ttest\n2\te2e\n3\ttest",
-		"STUB_JOBS_1": "2026-08-01T10:00:00Z\t2026-08-01T10:01:10Z",
-		"STUB_JOBS_2": "2026-08-02T10:00:00Z\t2026-08-02T10:03:10Z\n2026-08-02T10:00:00Z\t2026-08-02T10:01:35Z",
-		"STUB_JOBS_3": "2026-08-03T23:59:30Z\t2026-08-04T00:00:29Z",
+		"STUB_JOBS_1": "2026-08-01T10:00:00Z\t2026-08-01T10:01:10Z\tubuntu-latest",
+		"STUB_JOBS_2": "2026-08-02T10:00:00Z\t2026-08-02T10:03:10Z\tubuntu-latest\n2026-08-02T10:00:00Z\t2026-08-02T10:01:35Z\tubuntu-latest",
+		"STUB_JOBS_3": "2026-08-03T23:59:30Z\t2026-08-04T00:00:29Z\t",
 	}
 	r := run(t, env, "ci-usage", "--month", "2026-08")
 	if r.exit != 0 {
@@ -439,11 +474,59 @@ func TestCiUsageBillsEachJobRoundedUp(t *testing.T) {
 	if !r.called("actions/runs?created=2026-08-01..2026-08-31&per_page=100") {
 		t.Errorf("expected the month's inclusive date range, got calls:\n%s", r.calls)
 	}
-	for _, want := range []string{`(?m)^test\s+2\s+3$`, `(?m)^e2e\s+1\s+6$`, `(?m)^total\s+3\s+9$`, `projected 9 of 2000 minutes`} {
+	for _, want := range []string{`(?m)^test\s+2\s+3$`, `(?m)^e2e\s+1\s+6$`, `(?m)^total\s+3\s+9$`, `31 of 31 days -> projected 9 of 2000 minutes`} {
 		if !regexp.MustCompile(want).MatchString(r.stdout) {
 			t.Errorf("stdout should match %s, got:\n%s", want, r.stdout)
 		}
 	}
+}
+
+// A job on a self-hosted runner is not billed, and a job that has not
+// finished has no completed_at yet (jq prints "null"); both must be left out,
+// or the NAS deploy job of the release pipeline would inflate the number.
+func TestCiUsageSkipsSelfHostedAndUnfinishedJobs(t *testing.T) {
+	env := map[string]string{
+		"STUB_RUNS": "1\trelease\n2\ttest",
+		// gate on a hosted runner (2 min), deploy on the NAS (must not count)
+		"STUB_JOBS_1": "2026-08-05T10:00:00Z\t2026-08-05T10:01:30Z\tubuntu-latest\n2026-08-05T10:02:00Z\t2026-08-05T10:20:00Z\tself-hosted,nas,synology",
+		// one finished job (1 min) and one still running
+		"STUB_JOBS_2": "2026-08-06T10:00:00Z\t2026-08-06T10:00:50Z\tubuntu-latest\n2026-08-06T10:01:00Z\tnull\tubuntu-latest",
+	}
+	r := run(t, env, "ci-usage", "--month", "2026-08")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d\n%s", r.exit, r.stderr)
+	}
+	for _, want := range []string{`(?m)^release\s+1\s+2$`, `(?m)^test\s+1\s+1$`, `(?m)^total\s+2\s+3$`} {
+		if !regexp.MustCompile(want).MatchString(r.stdout) {
+			t.Errorf("stdout should match %s, got:\n%s", want, r.stdout)
+		}
+	}
+}
+
+// The projection is the number the plan's cap is tracked against: for the
+// current month it scales the billed total to the month's length by the days
+// elapsed. DEV_TODAY pins "today" so the branch is reachable from a test.
+func TestCiUsageProjectsTheCurrentMonth(t *testing.T) {
+	env := map[string]string{
+		"DEV_TODAY":   "2026-08-10",
+		"STUB_RUNS":   "1\ttest",
+		"STUB_JOBS_1": "2026-08-01T10:00:00Z\t2026-08-01T10:08:30Z\tubuntu-latest", // 9 min
+	}
+	// No --month: the month comes from DEV_TODAY.
+	r := run(t, env, "ci-usage")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d\n%s", r.exit, r.stderr)
+	}
+	if !r.called("actions/runs?created=2026-08-01..2026-08-31") {
+		t.Errorf("expected the month to come from DEV_TODAY, got calls:\n%s", r.calls)
+	}
+	// 9 minutes in 10 of 31 days -> 9 * 31 / 10 = 27.9 -> 28
+	mustContain(t, r.stdout, "month 2026-08: 10 of 31 days -> projected 28 of 2000 minutes (1%)", "stdout")
+
+	// On the last day the projection is the total itself.
+	env["DEV_TODAY"] = "2026-08-31"
+	r = run(t, env, "ci-usage")
+	mustContain(t, r.stdout, "31 of 31 days -> projected 9 of 2000 minutes", "stdout")
 }
 
 func TestCiUsageSaysSoWhenTheMonthIsEmpty(t *testing.T) {

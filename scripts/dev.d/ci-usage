@@ -14,13 +14,19 @@
 # Output: one line per workflow (runs, billed minutes), a total, and - for
 # the current month - a straight-line projection to the month's end against
 # 2000 minutes. For a past month the projection equals the total.
+#
+# DEV_TODAY=YYYY-MM-DD overrides "today" for the projection (the test uses
+# it to pin a day inside the month); nothing else reads it.
 set -u
 
-month=$(date -u +%Y-%m)
+help() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
+
+today=${DEV_TODAY:-$(date -u +%Y-%m-%d)}
+month=${today%-*}
 while [ $# -gt 0 ]; do
   case "$1" in
     --month) [ $# -ge 2 ] || { echo "ci-usage: --month needs YYYY-MM" >&2; exit 2; }; month=$2; shift 2 ;;
-    -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) help; exit 0 ;;
     *) echo "ci-usage: unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -46,8 +52,8 @@ from=$(printf '%04d-%02d-01' "$y" "$m")
 to=$(printf '%04d-%02d-%02d' "$y" "$m" "$days")
 
 elapsed=$days
-if [ "$month" = "$(date -u +%Y-%m)" ]; then
-  elapsed=$(date -u +%d); elapsed=${elapsed#0}
+if [ "$month" = "${today%-*}" ]; then
+  elapsed=${today##*-}; elapsed=${elapsed#0}
 fi
 
 # One line per run: "<id>\t<workflow name>". --paginate walks every page.
@@ -59,15 +65,15 @@ if [ -z "$runs" ]; then
   exit 0
 fi
 
-# One line per billed job: "<workflow name>\t<seconds>". Jobs still running
-# (no completed_at) and self-hosted jobs are skipped.
+# One line per job: "<workflow name>\t<started_at>\t<completed_at>\t<labels>".
+# The --jq here only projects fields - every decision (a job still running,
+# a self-hosted job, the rounding) is made in the awk below, where the test
+# can reach it with fixture lines; jq prints "null" for a missing timestamp.
 jobs=$(printf '%s\n' "$runs" | while IFS="$(printf '\t')" read -r id name; do
   [ -n "$id" ] || continue
   gh api "repos/{owner}/{repo}/actions/runs/$id/jobs?per_page=100" \
-    --jq '.jobs[] | select(.started_at != null and .completed_at != null)
-                  | select(((.labels // []) | index("self-hosted")) == null)
-                  | "\(.started_at)\t\(.completed_at)"' 2>/dev/null \
-    | awk -v n="$name" -F '\t' '{ print n "\t" $1 "\t" $2 }'
+    --jq '.jobs[] | "\(.started_at)\t\(.completed_at)\t\((.labels // []) | join(","))"' 2>/dev/null \
+    | awk -v n="$name" -F '\t' '{ print n "\t" $1 "\t" $2 "\t" $3 }'
 done)
 
 printf '%s\n' "$runs" "---" "$jobs" | awk -F '\t' -v month="$month" -v elapsed="$elapsed" -v days="$days" '
@@ -78,10 +84,19 @@ printf '%s\n' "$runs" "---" "$jobs" | awk -F '\t' -v month="$month" -v elapsed="
     if (M <= 2) { Y--; M += 12 }
     return (365 * Y + int(Y / 4) - int(Y / 100) + int(Y / 400) + int(30.6001 * (M + 1)) + D - 719591) * 86400 + h * 3600 + mi * 60 + se
   }
+  function selfhosted(labels,  parts, n, i) {
+    n = split(labels, parts, ",")
+    for (i = 1; i <= n; i++) if (parts[i] == "self-hosted") return 1
+    return 0
+  }
   BEGIN { section = "runs" }
   section == "runs" && $0 == "---" { section = "jobs"; next }
   section == "runs" && NF >= 2 { runs[$2]++; next }
   section == "jobs" && NF >= 3 {
+    # A job that has not finished has no completed_at ("null" from jq); a
+    # job on a self-hosted runner is not billed. Neither counts.
+    if ($2 == "" || $2 == "null" || $3 == "" || $3 == "null") next
+    if (selfhosted($4)) next
     sec = epoch($3) - epoch($2)
     if (sec < 0) sec = 0
     min[$1] += int((sec + 59) / 60)

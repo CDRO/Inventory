@@ -16,17 +16,24 @@
 #   --attempts   polls, three seconds apart, before giving up (default 20)
 #
 # Exit codes: the run's own conclusion via `gh run watch --exit-status`
-# (0 success, non-zero failure); 2 usage; 3 no run exists for the SHA and
-# none was dispatched - the message names --dispatch.
+# (0 success, non-zero failure); 2 usage; 3 no run for the SHA was found
+# within --attempts polls - either none was dispatched (the message then
+# names --dispatch) or the dispatched run had not appeared in time.
 set -u
+
+help() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
 
 sha=""; wf=test.yml; branch=""; attempts=20
 while [ $# -gt 0 ]; do
   case "$1" in
     --workflow) [ $# -ge 2 ] || { echo "ci-status: --workflow needs a value" >&2; exit 2; }; wf=$2; shift 2 ;;
     --dispatch) [ $# -ge 2 ] || { echo "ci-status: --dispatch needs a branch" >&2; exit 2; }; branch=$2; shift 2 ;;
-    --attempts) [ $# -ge 2 ] || { echo "ci-status: --attempts needs a number" >&2; exit 2; }; attempts=$2; shift 2 ;;
-    -h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --attempts)
+      case "${2:-}" in
+        ''|*[!0-9]*) echo "ci-status: --attempts wants a number, got '${2:-}'" >&2; exit 2 ;;
+      esac
+      attempts=$2; shift 2 ;;
+    -h|--help) help; exit 0 ;;
     -*) echo "ci-status: unknown option $1" >&2; exit 2 ;;
     *)
       if [ -n "$sha" ]; then echo "ci-status: one SHA only" >&2; exit 2; fi
@@ -37,11 +44,11 @@ if [ -z "$sha" ]; then
   echo "usage: scripts/dev ci-status <sha> [--workflow test.yml] [--dispatch <branch>] [--attempts 20]" >&2
   exit 2
 fi
-case "$sha" in
-  *[!0-9a-fA-F]*|?|??|???|????|?????|??????)
-    echo "ci-status: '$sha' is not a commit SHA (7 to 40 hex characters)" >&2
-    exit 2 ;;
-esac
+case "$sha" in *[!0-9a-fA-F]*) hex=0 ;; *) hex=1 ;; esac
+if [ "$hex" -eq 0 ] || [ ${#sha} -lt 7 ] || [ ${#sha} -gt 40 ]; then
+  echo "ci-status: '$sha' is not a commit SHA (7 to 40 hex characters)" >&2
+  exit 2
+fi
 
 if [ -n "$branch" ]; then
   gh workflow run "$wf" --ref "$branch" || exit $?
