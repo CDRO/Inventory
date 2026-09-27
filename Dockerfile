@@ -33,14 +33,16 @@ RUN go test ./... \
 
 # ---- dev stage (used by docker-compose.override.yml) ----
 FROM golang:1-alpine AS dev
-RUN apk add --no-cache ca-certificates tzdata git
+RUN apk add --no-cache ca-certificates tzdata
 # The pre-gate's linters (scripts/dev.d/check, H6, docs/plans/2026-09-harness-
 # optimization.md). Pinned versions, installed before go.mod is even copied in:
 # `go install pkg@version` builds against its own module's go.sum and does not
 # touch this project's module graph, so putting it here means a go.sum change
 # never invalidates this layer, and this layer never invalidates go.sum's own
-# `go mod download` cache below. git is required by `go install` to fetch
-# these modules' source. The builder/prod stages never see either tool.
+# `go mod download` cache below. No git needed: a tagged public module comes
+# from the proxy (proxy.golang.org) as a zip; a VCS client is only needed on a
+# proxy miss, which a released version tag never causes. The builder/prod
+# stages never see either tool.
 RUN go install honnef.co/go/tools/cmd/staticcheck@v0.8.1 \
  && go install github.com/mgechev/revive@v1.17.0
 WORKDIR /src

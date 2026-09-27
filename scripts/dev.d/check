@@ -37,8 +37,9 @@ docker compose run --rm app sh -c '
   set -u
   status=0
 
-  gofmt_out=$(gofmt -l .)
-  if [ -n "$gofmt_out" ]; then
+  gofmt_out=$(gofmt -l . 2>&1)
+  gofmt_rc=$?
+  if [ -n "$gofmt_out" ] || [ "$gofmt_rc" -ne 0 ]; then
     printf "%s\n" "$gofmt_out"
     echo "gofmt: FAIL"
     status=1
