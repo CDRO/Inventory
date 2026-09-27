@@ -80,6 +80,10 @@ test("the two-control picker appends photos from both sources into one list, dra
   await expect(cameraInput).toHaveAttribute("accept", "image/*");
   await expect(cameraInput).toHaveAttribute("capture", "environment");
   expect(await cameraInput.getAttribute("multiple")).toBeNull();
+  // "There is no visible bare <input type='file'>" — the acceptance
+  // criterion is about what a person can see, not just that the two named
+  // ids exist; both real inputs carry the `hidden` attribute.
+  await expect(page.locator('input[type="file"]:not([hidden])')).toHaveCount(0);
 
   await expect(uploadButton).toBeDisabled();
 
@@ -98,8 +102,9 @@ test("the two-control picker appends photos from both sources into one list, dra
   expect(await cameraInput.evaluate((el) => el.files.length)).toBe(0);
 
   // Removing the middle row (shelf-b.jpg) leaves shelf-a.jpg and shelf-c.jpg,
-  // in that order.
-  await rows.nth(1).getByRole("button", { name: "Remove" }).click();
+  // in that order. The exact accessible name — not a "Remove" substring —
+  // pins the position-and-name contract ("Remove photo 2 of 3, shelf-b.jpg").
+  await rows.nth(1).getByRole("button", { name: "Remove photo 2 of 3, shelf-b.jpg", exact: true }).click();
   await expect(rows).toHaveCount(2);
 
   // #205 item 10, first half: both controls meet the 44x44 CSS-pixel minimum
@@ -140,6 +145,57 @@ test("the two-control picker appends photos from both sources into one list, dra
     return match ? match[1] : null;
   });
   expect(filenames).toEqual(["shelf-a.jpg", "shelf-c.jpg"]);
+
+  await page.unroute("**/ingest/shelf-photos");
+});
+
+// docs/specs/36-photo-source-picker.md and issue #206's own "Watch for"
+// section both call this out by name: "Rows are keyed by File identity,
+// never by name" — iOS hands out generic filenames, so two rows can share
+// one. The main journey above never exercises this because its three fixture
+// files all have distinct names; a regression to name-keyed removal (finding
+// by `.indexOf`/`.filter` on `file.name` instead of the `File` reference) would
+// pass every assertion there while silently removing the wrong photo, or
+// both, or neither, whenever two picks happen to share a name.
+test("removing a photo acts on File identity, not filename — two rows can share a name", async ({ page }) => {
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  const libraryInput = page.locator("#photos-library");
+  const rows = page.locator("#photo-list li");
+
+  // Same name, different bytes (a JPEG and a PNG) — indistinguishable by
+  // filename, easy to tell apart by content once uploaded.
+  await libraryInput.setInputFiles([
+    { name: "shelf.jpg", mimeType: "image/jpeg", buffer: TINY_JPEG },
+    { name: "shelf.jpg", mimeType: "image/png", buffer: TINY_PNG },
+  ]);
+  await expect(rows).toHaveCount(2);
+
+  // Removing the first "shelf.jpg" row: a name-keyed implementation cannot
+  // tell the two apart and could remove either, both, or neither. Its
+  // accessible name is itself proof identity is in play — "1 of 2" and
+  // "2 of 2" differ even though the visible filename does not.
+  await rows.nth(0).getByRole("button", { name: "Remove photo 1 of 2, shelf.jpg", exact: true }).click();
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toContainText("shelf.jpg");
+  await expect(rows.first().getByRole("button")).toHaveAccessibleName("Remove photo 1 of 1, shelf.jpg");
+
+  // The strongest proof: uploading now sends the surviving File's own bytes
+  // (the PNG) rather than the removed one's (the JPEG) — not just "a row
+  // named shelf.jpg is gone", but "the right underlying File is gone".
+  let request = null;
+  await page.route("**/ingest/shelf-photos", async (route) => {
+    request = route.request();
+    await route.fulfill({ json: { job_id: "00000000-0000-7000-8000-0000000000ac" } });
+  });
+  await page.getByRole("button", { name: "Upload" }).click();
+  await expect(page.locator("#uploads .card")).toHaveCount(1);
+
+  expect(request, "expected the surviving photo to upload").not.toBeNull();
+  const body = request.postDataBuffer().toString("latin1");
+  expect(body).toContain("Content-Type: image/png");
+  expect(body).not.toContain("Content-Type: image/jpeg");
 
   await page.unroute("**/ingest/shelf-photos");
 });

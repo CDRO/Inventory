@@ -42,7 +42,9 @@ function cameraIcon() {
 
 /**
  * mountPhotoPicker(container, opts) renders the two-control picker into
- * `container` and returns a handle to its selection.
+ * `container` and returns a handle to its selection. It replaces whatever
+ * `container` already held — call it once per container, into an
+ * otherwise-empty element.
  *
  * @param {Element} container
  * @param {{multiple?: boolean, onChange?: (files: File[]) => void, onCameraTap?: (openOsCamera: () => void) => void}} [opts]
@@ -151,6 +153,12 @@ export function mountPhotoPicker(container, { multiple = true, onChange = () => 
     if (newFiles.length === 0) return;
     if (multiple) {
       for (const file of newFiles) {
+        // Guards `add()` (docs/specs/37-in-page-camera.md's viewfinder calls
+        // it with a freshly captured File, but a caller handing back the
+        // same object twice must not orphan its first object URL or render
+        // it as two rows) as much as `handleChange` above, which cannot hit
+        // this in practice — a picked File is never the same object twice.
+        if (urlByFile.has(file)) continue;
         urlByFile.set(file, URL.createObjectURL(file));
         selection.push(file);
       }
