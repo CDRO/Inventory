@@ -27,6 +27,7 @@ import { el, fromTemplate, qs, qsa, text } from "../dom.js";
 import { openScanSheet } from "../barcode.js";
 import { ensureHotBarcodesFresh, lookupHotBarcode } from "../barcodes.js";
 import { t, tCount, apiErrorMessage } from "../i18n.js";
+import { mountPhotoPicker } from "../photo-picker.js";
 
 // The endpoint each mode uploads to (docs/specs/09-consumption-logging.md's
 // capture-mode table) and, for the ones docs/specs/06-vision-shelf-ingestion.md
@@ -42,7 +43,11 @@ const DEFAULT_MODE = "shelf_scan";
 
 const form = qs("#upload-form");
 const submitButton = qs("#submit");
-const photosInput = qs("#photos");
+const photoPicker = mountPhotoPicker(qs("#photo-picker-field"), {
+  onChange: (files) => {
+    submitButton.disabled = files.length === 0;
+  },
+});
 const locationField = qs("#location-field");
 const locationSelect = qs("#location");
 const uploadsList = qs("#uploads");
@@ -155,7 +160,7 @@ async function onSubmit(event) {
   event.preventDefault();
   clearError();
 
-  const files = [...photosInput.files];
+  const files = photoPicker.files();
   if (files.length === 0) return;
 
   const mode = currentMode();
@@ -169,7 +174,8 @@ async function onSubmit(event) {
     const card = addUploadCard(file.name);
     await upload(card, endpoint, file, hint, mode);
   }
-  submitButton.disabled = false;
+  photoPicker.clear();
+  submitButton.disabled = true;
   form.reset();
   setUpModeSelector();
 }
@@ -372,7 +378,7 @@ function onUnknownCode(code) {
   pendingScanCode = code;
   errorBox.textContent = t("ingest.barcode.unknownCode");
   errorBox.hidden = false;
-  photosInput.focus();
+  qs('[data-role="pick-camera"]', qs("#photo-picker-field")).focus();
 }
 
 async function onCatalogHit(code, card) {

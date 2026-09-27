@@ -39,6 +39,33 @@ export function el(tag, attrs = {}, children = []) {
   return node;
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/**
+ * svgEl(tag, attrs, children) is el()'s counterpart for SVG elements.
+ * document.createElement always returns an HTML element, even for a tag
+ * spelled "svg" or "path" — it renders as an inert, invisible
+ * HTMLUnknownElement instead of an SVG shape — so an inline icon
+ * (docs/specs/05-frontend-pwa-foundations.md's no-icon-font, no-CDN rule)
+ * needs the SVG namespace via createElementNS.
+ *
+ * @param {string} tag
+ * @param {Object<string, string>} [attrs]
+ * @param {Array<Node>} [children]
+ * @returns {SVGElement}
+ */
+export function svgEl(tag, attrs = {}, children = []) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value == null || value === false) continue;
+    node.setAttribute(key, value === true ? "" : String(value));
+  }
+  for (const child of children) {
+    node.append(child);
+  }
+  return node;
+}
+
 /**
  * text(value) returns a text node. A thin wrapper so callers never have to
  * choose between this and a raw string when building an `el()` children
