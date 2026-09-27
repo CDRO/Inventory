@@ -158,6 +158,8 @@
   "products.picture.saving": "Saving the picture…",
   "products.picture.saved": "Picture updated.",
   "products.picture.cleared": "Picture removed.",
+  "products.picture.upload": "Upload a photo",
+  "products.picture.uploading": "Uploading the photo…",
   "products.pictures.loading": "Looking for pictures…",
   "products.pictures.unavailable": "Picture search is unavailable right now. Try again later.",
   "products.pictures.none": "No pictures found for this product.",

@@ -1,8 +1,12 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
+	"image/jpeg"
+	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -352,4 +356,193 @@ func TestSetImageReportsNotFoundFromTheStore(t *testing.T) {
 
 	rec := f.do(http.MethodPatch, f.base()+"/products/"+uuid.NewString()+"/image", `{"icon_name":"box"}`)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// --- #248: the custom-upload change path ------------------------------------
+//
+// POST on the same address SetImage patches, which is the address
+// docs/specs/07-shopping-list-reconciliation.md names for it. Every assertion
+// below is about what reaches product storage and the store, not about the
+// picker's half of the path.
+
+// TestUploadImageStoresAnUprightStrippedPhoto is the invariant CLAUDE.md lists
+// as failing silently, asserted where it actually matters: images.Strip being
+// correct is worth nothing if this handler does not run the photo through it.
+//
+// The fixture is 8 wide, 4 tall and tagged "rotate 90", so the bytes that land
+// in product storage must decode as 4x8 — the rotation baked into the pixels —
+// and must carry no EXIF afterwards. A handler that stripped first and rotated
+// never, or that wrote the original bytes, fails on one of the two.
+func TestUploadImageStoresAnUprightStrippedPhoto(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	productID := uuid.New()
+	contentType, body := multipartImage(t, "image", jpegWithEXIF(t, 8, 4, 6))
+
+	rec := f.upload(http.MethodPost, f.base()+"/products/"+productID.String()+"/image", contentType, body)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, f.storageID, f.products.lastStorageID)
+	assert.Equal(t, productID, f.products.lastProductID)
+	assert.Equal(t, f.user.ID, f.products.lastActingUserID)
+	// A photo replaces an icon rather than sitting beside one, exactly as the
+	// picker's own PATCH body does.
+	assert.Nil(t, f.products.lastIconName)
+
+	require.NotNil(t, f.products.lastImageURL)
+	prefix := f.base() + "/product-images/"
+	require.True(t, strings.HasPrefix(*f.products.lastImageURL, prefix), *f.products.lastImageURL)
+
+	stored := f.pictures.files[strings.TrimPrefix(*f.products.lastImageURL, prefix)]
+	require.NotEmpty(t, stored, "the product must record a file that was actually written")
+	assert.NotContains(t, string(stored), "Exif\x00\x00",
+		"no photo may reach permanent storage with its metadata intact")
+
+	cfg, err := jpeg.DecodeConfig(bytes.NewReader(stored))
+	require.NoError(t, err)
+	assert.Equal(t, 4, cfg.Width, "the orientation must be applied to the pixels before stripping")
+	assert.Equal(t, 8, cfg.Height)
+}
+
+// TestUploadImageNeverTakesTheNameOrURLTheCallerSupplied — the filename is
+// generated from the bytes' own format, and no form field can talk this route
+// into recording an address of the caller's choosing. The same guarantee
+// TestSetImageNeverRecordsACallerSuppliedURL makes for the picker's PATCH.
+func TestUploadImageNeverTakesTheNameOrURLTheCallerSupplied(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	part, err := writer.CreateFormFile("image", "../../../etc/passwd.jpg")
+	require.NoError(t, err)
+	_, err = part.Write(jpegWithEXIF(t, 4, 4, 1))
+	require.NoError(t, err)
+	require.NoError(t, writer.WriteField("image_url", "https://tracker.example/pixel.png"))
+	require.NoError(t, writer.WriteField("icon_name", "box"))
+	require.NoError(t, writer.Close())
+
+	rec := f.upload(http.MethodPost, f.base()+"/products/"+uuid.NewString()+"/image",
+		writer.FormDataContentType(), buf.Bytes())
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotNil(t, f.products.lastImageURL)
+	assert.True(t, strings.HasPrefix(*f.products.lastImageURL, f.base()+"/product-images/"),
+		"got %q — the recorded address is generated, never supplied", *f.products.lastImageURL)
+	assert.NotContains(t, *f.products.lastImageURL, "tracker.example")
+	assert.NotContains(t, *f.products.lastImageURL, "passwd")
+	assert.NotContains(t, *f.products.lastImageURL, "..")
+	// A form field named like the PATCH's JSON body must not set an icon
+	// either: this route takes one thing, the file.
+	assert.Nil(t, f.products.lastIconName)
+
+	for name := range f.pictures.files {
+		assert.NotContains(t, name, "passwd", "the file on disk is named by the server")
+		assert.NotContains(t, name, "/")
+	}
+}
+
+// TestUploadImageGoesStraightToPermanentStorage — spec 07 says a custom photo
+// "goes straight to permanent storage", and that unlike a provider image it is
+// never written to a catalog entry. The suggestion cache is the tier a provider
+// image arrives through and the only place a provider source URL — the value a
+// catalog entry could record — comes from, so a custom upload that never
+// touches it cannot reach one.
+func TestUploadImageGoesStraightToPermanentStorage(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	contentType, body := multipartImage(t, "image", jpegWithEXIF(t, 4, 4, 1))
+
+	rec := f.upload(http.MethodPost, f.base()+"/products/"+uuid.NewString()+"/image", contentType, body)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Len(t, f.pictures.files, 1, "the photo lands in permanent product storage")
+	assert.Empty(t, f.imageData.fetched, "and never in the suggestion cache")
+	assert.Empty(t, f.imageData.touched)
+	assert.Empty(t, f.photos.files, "nor in the ingest area, which backs review jobs")
+}
+
+// TestUploadImageReportsNotFoundFromTheStoreAndKeepsNoFile — a product in
+// another storage and one that does not exist are the same store.ErrNotFound
+// and therefore the same 404 (docs/specs/03-auth-and-multi-tenancy.md). The
+// file written before that row was refused must not survive it.
+func TestUploadImageReportsNotFoundFromTheStoreAndKeepsNoFile(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	f.products.setImageErr = store.ErrNotFound
+	contentType, body := multipartImage(t, "image", jpegWithEXIF(t, 4, 4, 1))
+
+	rec := f.upload(http.MethodPost, f.base()+"/products/"+uuid.NewString()+"/image", contentType, body)
+
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Equal(t, "not_found", errorCode(t, rec))
+	assert.Empty(t, f.pictures.files, "a refused write must leave no orphaned photo behind")
+}
+
+// TestUploadImageAnswers404ForAMalformedProductID — refused before the body is
+// read at all, and with the same 404 every other malformed id in this package
+// gets rather than a 422 that would say the id was at least examined.
+func TestUploadImageAnswers404ForAMalformedProductID(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	contentType, body := multipartImage(t, "image", jpegWithEXIF(t, 4, 4, 1))
+
+	rec := f.upload(http.MethodPost, f.base()+"/products/not-a-uuid/image", contentType, body)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Empty(t, f.pictures.files)
+}
+
+// TestUploadImageRefusesWhatIsNotAJPEGOrPNG — the format comes from the bytes,
+// so a text file named .jpg is refused on field `image` and nothing is written.
+func TestUploadImageRefusesWhatIsNotAJPEGOrPNG(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	contentType, body := multipartImage(t, "image", []byte("this is not an image at all"))
+
+	rec := f.upload(http.MethodPost, f.base()+"/products/"+uuid.NewString()+"/image", contentType, body)
+
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+	assert.NotEmpty(t, errorFields(t, rec)["image"])
+	assert.Empty(t, f.pictures.files)
+	assert.Nil(t, f.products.lastImageURL, "and the store is never reached")
+}
+
+// TestUploadImageRefusesAMissingFile — a multipart form with no `image` part is
+// the caller's mistake, reported on the field that is missing.
+func TestUploadImageRefusesAMissingFile(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	contentType, body := multipartImage(t, "not-the-image", jpegWithEXIF(t, 4, 4, 1))
+
+	rec := f.upload(http.MethodPost, f.base()+"/products/"+uuid.NewString()+"/image", contentType, body)
+
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+	assert.NotEmpty(t, errorFields(t, rec)["image"])
+	assert.Empty(t, f.pictures.files)
+}
+
+// TestUploadImageIsRefusedWithoutASession — the route is inside the
+// session-and-membership group, so it is refused before any photo is read.
+func TestUploadImageIsRefusedWithoutASession(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	contentType, body := multipartImage(t, "image", jpegWithEXIF(t, 4, 4, 1))
+
+	req := httptest.NewRequest(http.MethodPost, f.base()+"/products/"+uuid.NewString()+"/image",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", contentType)
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assert.Empty(t, f.pictures.files)
 }
