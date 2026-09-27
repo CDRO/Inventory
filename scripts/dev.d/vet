@@ -1,0 +1,22 @@
+#!/bin/sh
+# Run go vet in the dev container; prints vet's findings (nothing on a clean tree) and exit=<code>.
+#
+#   scripts/dev vet
+#
+# `docker compose run --rm app go vet ./...` as documented in
+# docs/specs/01-architecture-and-deployment.md, minus Compose's own container
+# status lines (" Container ... Running"), which are noise in a session's
+# context. The full output is in .claude/last-vet.log. Exit code is vet's.
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root" || exit 1
+mkdir -p .claude
+log=.claude/last-vet.log
+
+docker compose run --rm app go vet ./... > "$log" 2>&1
+code=$?
+
+grep -v -E '^ Container |^ Network |^ Volume ' "$log"
+echo "exit=$code"
+exit "$code"

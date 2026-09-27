@@ -36,7 +36,8 @@
 # terminal (every agent session): it requires an explicit run id, and the run
 # list can briefly still show only an older run from the same branch right
 # after dispatch — so poll by the exact commit SHA under test, not just "the
-# newest run", until a match for it shows up —
+# newest run", until a match for it shows up (`scripts/dev ci-status <sha>
+# --dispatch <branch>` is this recipe as a command) —
 #
 #   git push -u origin <branch>
 #   gh workflow run test.yml --ref <branch>
@@ -54,16 +55,30 @@
 # possible end to end without a working local daemon.
 #
 # Nothing here bypasses the no-host-toolchain rule: every command still goes
-# through `docker compose`, exactly as documented. No Go, Node, or Postgres is
-# installed on the runner directly.
+# through `docker compose`, exactly as documented. `docker buildx` and
+# `actions/cache` below are runner-side tooling, not a host toolchain — they
+# move bytes into caches, they don't compile or run anything themselves. No
+# Go, Node, or Postgres is installed on the runner directly.
 name: test
 
 on:
   push:
     branches: [main]
+    paths-ignore: [docs/**, "**.md", .claude/**, LICENSE]
   pull_request:
     branches: [main]
+    paths-ignore: [docs/**, "**.md", .claude/**, LICENSE]
   workflow_dispatch:
+
+# A push to the same PR within a minute cancels the still-running job for the
+# earlier push — nobody is waiting on a superseded diff. `main` is excluded
+# from cancellation (cancel-in-progress is keyed off the pull_request event
+# only): a push there is either the deploy backstop or a wave consolidation
+# merge, and cancelling either mid-run would leave the last real signal on
+# `main` incomplete.
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -71,9 +86,85 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Restores the Go build object cache from a previous run, keyed on
+      # go.sum plus the exact commit so every run's primary key is unique
+      # (the save below always runs) while restore-keys fall back to the
+      # nearest go.sum match, then to any cache for this OS. The path is a
+      # plain runner directory, not the named Docker volume itself —
+      # actions/cache only knows how to save/restore a filesystem path — so
+      # the next step turns that same directory into the volume
+      # docker-compose.override.yml already mounts at
+      # /root/.cache/go-build, and neither the override file nor the test
+      # commands below have to know caching exists.
+      #
+      # `runner.temp`, not a path under the repo checkout: the dev image's
+      # build (below) sends the whole build context (repo root, `COPY . .`)
+      # to buildx, and `.dockerignore` does not exclude a `.cache/` directory
+      # — a cache under the checkout would ship hundreds of MB of compiled
+      # object files into the image and into its own GitHub Actions layer
+      # cache every run, the opposite of what this step is for. The issue
+      # this package implements names `$PWD/.cache/go-build`; this deviates
+      # to `runner.temp` for that reason, noted in the PR body.
+      - name: Restore Go build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-build-${{ runner.os }}-${{ hashFiles('go.sum') }}-
+            go-build-${{ runner.os }}-
+
+      # docker-compose.override.yml's `go-build-cache` volume is declared
+      # `external: true` (its own comment explains why: so a package
+      # worktree's own `docker compose down -v` - which Stop-PackageStack in
+      # scripts/wellen-orchestrator.ps1 runs the moment its issue closes -
+      # never deletes it). Compose refuses to start at all against a missing
+      # external volume rather than creating one, and a GitHub-hosted runner
+      # is a fresh VM with no volumes on it — so this step has to create it
+      # every run, unlike a persistent machine where it is created once.
+      # It is created as a *bind* mount onto the directory actions/cache just
+      # restored into, rather than a plain Docker-managed volume: a bind is
+      # nothing more than a directory Docker mounts by reference, so
+      # whatever `go test` writes under it during this job is already sitting
+      # in that directory for actions/cache's own post-job save step to pick
+      # up — no separate `docker run ... tar` copy step in or out of the
+      # volume, and docker-compose.override.yml's mount line is unchanged
+      # between a developer's machine (a real named volume) and here.
+      - name: Create the external Go build-cache volume (bind-mounted for actions/cache)
+        run: |
+          mkdir -p "${{ runner.temp }}/go-build"
+          docker volume create --driver local \
+            --opt type=none --opt o=bind \
+            --opt device="${{ runner.temp }}/go-build" \
+            inventory-go-build-cache
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Builds the same `dev` target docker-compose.override.yml builds, but
+      # through buildx with BuildKit's GitHub Actions cache backend instead
+      # of compose's own builder, and loads the result into the runner's
+      # local Docker so `docker compose run` below finds an image already
+      # tagged `inventory-app-dev:latest` and skips its own build entirely.
+      # What the cache actually saves is the `go mod download` layer in the
+      # Dockerfile's `dev` stage — `go.sum` unchanged means that layer
+      # restores from the GitHub Actions cache instead of re-downloading the
+      # whole module graph. `mode=max` caches every layer, not just the
+      # final one, which is what makes that specific layer restorable on its
+      # own even though later layers (the source `COPY`) always change.
+      - name: Build the dev image (BuildKit layer cache via GitHub Actions)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: dev
+          tags: inventory-app-dev:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       # Non-interactive stand-in for `docker compose run --rm setup`, which
       # needs a TTY. Values are throwaway, generated fresh per run, and never
@@ -98,28 +189,13 @@ jobs:
           SERPAPI_API_KEY=
           EOF
 
-      # docker-compose.override.yml's `go-build-cache` volume is declared
-      # `external: true` (docker-compose.override.yml's own comment explains
-      # why: so a package worktree's own `docker compose down -v` - which
-      # Stop-PackageStack in scripts/wellen-orchestrator.ps1 runs the moment
-      # its issue closes - never deletes it). Compose refuses to start at all
-      # against a missing external volume rather than creating one, and a
-      # GitHub-hosted runner is a fresh VM with no volumes on it — so this
-      # step exists purely so `docker compose run` doesn't fail before
-      # reaching a single test. `docker volume create` is idempotent: it
-      # succeeds if the volume already exists (it never does here; noted for
-      # anyone who copies this step elsewhere). This buys CI nothing across
-      # runs — the whole VM is destroyed when the job ends — the actual
-      # cache benefit is for the local dev loop and the wave orchestrator's
-      # own worktrees, which persist on one machine across many invocations.
-      - name: Create the external Go build-cache volume
-        run: docker volume create inventory-go-build-cache
-
-      - name: go vet
-        run: docker compose run --rm app go vet ./...
-
-      - name: go test
-        run: docker compose run --rm app go test ./...
+      # One container invocation instead of a separate `run` for `go vet` and
+      # for `go test`: each `docker compose run` starts its own copy of the
+      # stack and waits on `db`'s healthcheck (docker-compose.yml's
+      # `depends_on: db: condition: service_healthy`), so two invocations
+      # paid for that wait twice.
+      - name: go vet && go test
+        run: docker compose run --rm app sh -c 'go vet ./... && go test ./...'
 
       - name: Tear down
         if: always()

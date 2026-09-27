@@ -80,6 +80,9 @@ You have **no ability to edit files**, by design.
    gh run watch "$RUN_ID" --exit-status
    ```
 
+   (`scripts/dev ci-status "$SHA" --dispatch "$HEAD_BRANCH"` is that recipe as
+   one command, with the same exit code.)
+
    If the run failed, `gh run view "$RUN_ID" --log-failed` to see why, and
    report that as you would a local failure. A **passing** dispatched run is
    equivalent evidence to a local green run; cite the run URL in your

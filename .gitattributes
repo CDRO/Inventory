@@ -16,3 +16,11 @@ scripts/backup text eol=lf
 # raw string literal, which would save it on a CRLF checkout anyway, but pinning
 # the file is the version that does not depend on knowing that.
 deploy/synology/update_test.go text eol=lf
+
+# scripts/dev and its commands run under Git Bash, under the dev image's
+# busybox sh (scripts/dev_test.go runs them there) and on a GitHub-hosted
+# runner - the same CRLF shebang problem as the NAS scripts, and the same fix.
+# dev_test.go is pinned for the reason update_test.go is.
+scripts/dev text eol=lf
+scripts/dev.d/* text eol=lf
+scripts/dev_test.go text eol=lf

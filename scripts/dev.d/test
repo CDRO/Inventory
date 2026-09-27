@@ -1,0 +1,33 @@
+#!/bin/sh
+# Run the Go suite in the dev container; full log in .claude/last-test.log, only FAIL/panic lines and the tail on stdout.
+#
+#   scripts/dev test [package ...]        default: ./...
+#
+# This is the recipe .claude/skills/ship/SKILL.md step 3 prescribes, in one
+# place. The command that runs is the documented one -
+# `docker compose run --rm app go test ./...` (docs/specs/01-architecture-and-
+# deployment.md) - and nothing about it is configurable here on purpose. What
+# this adds is the shape of the output: the complete log goes to
+# .claude/last-test.log (gitignored), and stdout carries only the lines that
+# say what failed (`--- FAIL`, `panic:`, the `file.go:NN` lines under them,
+# at most 40), the last three lines of the log, and `exit=<code>`. A green
+# suite is four lines of context instead of several hundred; a red one shows
+# the failures with their file:line. Read the log when a failure needs more.
+#
+# The exit code is the suite's. Never report a run you did not perform.
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root" || exit 1
+mkdir -p .claude
+log=.claude/last-test.log
+
+if [ $# -eq 0 ]; then set -- ./...; fi
+
+docker compose run --rm app go test "$@" > "$log" 2>&1
+code=$?
+
+grep -E '^(--- )?FAIL|^panic:|^[[:space:]]+.*\.go:[0-9]+' "$log" | head -40
+tail -3 "$log"
+echo "exit=$code"
+exit "$code"
