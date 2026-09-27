@@ -621,12 +621,20 @@ test("a batch two locations deep renders its full path, root first", async ({ pa
 
 const PICTURE_PICKER_PRODUCT = "00000000-0000-7000-8000-0000000000fa";
 const PICTURE_CLEAR_PRODUCT = "00000000-0000-7000-8000-0000000000fb";
+const EDIT_FORM_SYNC_PRODUCT = "00000000-0000-7000-8000-000000000101";
 
 // A product of Alice's "E2E Other Household" (...011), used only as a product
 // id from *another* storage. Bob is not a member there, so the image route
 // must answer exactly as it does for an id that does not exist at all.
 const FOREIGN_PRODUCT = "00000000-0000-7000-8000-000000000042";
 const FOREIGN_STORAGE = "00000000-0000-7000-8000-000000000011";
+
+// A product id that is never seeded, in the same spirit as the unknown
+// storage id used below: it has to stay unseeded for the tests that use it to
+// mean anything, so do not give this id a fixture row. Shared by the
+// product-dimension 404 tests for both the image route (below) and the
+// upload route (further down this file).
+const UNKNOWN_PRODUCT = "00000000-0000-7000-8000-0000000000ed";
 
 test("the product detail view offers a picture change that reaches the suggestions endpoint", async ({
   page,
@@ -673,6 +681,49 @@ test("clearing a product's picture goes through the image route and shows on the
   await expect(page.locator('[data-role="product-picture"]')).toContainText("No picture yet.");
 });
 
+// The regression test for #251: the edit form's `icon` input used to be
+// seeded from product.icon_name once, at render, and never resynced when the
+// picture block cleared it — so an unrelated-field Save right after a clear
+// silently reinstated the icon by diffing against that stale DOM value.
+// Its own dedicated product: the suite runs fullyParallel and this scenario
+// both clears the picture and saves, like the other picture scenarios above.
+test("clearing a picture through the UI does not leave the edit form's icon stale for the next Save", async ({
+  page,
+}) => {
+  await logIn(page);
+  // No provider key in this stack; mocked the same way the picker's own
+  // "can still be removed" tests above are, so the clear button's presence
+  // does not depend on a live provider.
+  await page.route((url) => url.pathname.endsWith("/image-suggestions"), (route) =>
+    route.fulfill({ json: { suggestions: [] } }),
+  );
+
+  const before = await fetchProduct(page, EDIT_FORM_SYNC_PRODUCT);
+  expect(before.icon_name).toBe("noto:cheese-wedge"); // the fixture must start out set
+
+  await openProduct(page, "E2E Picture Edit Form Sync Source");
+  await page.locator('[data-role="change-picture"]').click();
+  await page.locator('[data-role="picture-none"]').click();
+  await expect(page.locator('[data-role="picture-status"]')).toContainText("Picture removed.");
+
+  // Before the fix this still read "noto:cheese-wedge": setPicture's
+  // re-render is deliberately narrow (it must not discard unsaved edits) and
+  // never touched the form.
+  await expect(page.locator("#p-icon")).toHaveValue("");
+
+  // An unrelated-field save. Before the fix, save() diffed this stale input
+  // against product.icon_name (now null), saw a difference, and sent
+  // icon_name back to the server — resurrecting the icon the clear just
+  // removed.
+  await page.locator("#p-min-stock").fill("3");
+  await page.locator('form:has(#p-icon)').getByRole("button", { name: "Save" }).click();
+  await expect(page.locator("#status")).toContainText("Saved.");
+
+  const after = await fetchProduct(page, EDIT_FORM_SYNC_PRODUCT);
+  expect(after.icon_name).toBeNull();
+  expect(after.min_stock).toBe(3);
+});
+
 test("the image route answers 404 for a product in another storage, not 403", async ({ page }) => {
   await logIn(page);
 
@@ -689,6 +740,16 @@ test("the image route answers 404 for a product in another storage, not 403", as
   const body = await res.json();
   expect(body.error.code).toBe("not_found");
   expect(body.error.debug_reason).toBeUndefined(); // APP_ENV=prod in this stack
+
+  // The absolute shape above is not the whole invariant: a foreign product id
+  // and a genuinely nonexistent one in the SAME accessible storage must be
+  // indistinguishable, or the response becomes an oracle for which product
+  // ids exist in another storage (mirrors the storage-dimension test below).
+  const unknownRes = await page.request.patch(`${BASE}/products/${UNKNOWN_PRODUCT}/image`, {
+    data: { image: null, icon_name: null },
+  });
+  expect(unknownRes.status()).toBe(404);
+  expect(await unknownRes.json()).toEqual(body);
 });
 
 // The other half of the same invariant, which the test above does not reach:
@@ -1102,11 +1163,6 @@ test("the detail view's upload control posts the chosen photo and shows it", asy
   expect(product.image_url).not.toBeNull();
   expect(product.icon_name).toBeNull();
 });
-
-// A product id that is never seeded, in the same spirit as the unknown
-// storage id the test above uses: it has to stay unseeded for that test to
-// mean anything, so do not give this id a fixture row.
-const UNKNOWN_PRODUCT = "00000000-0000-7000-8000-0000000000ed";
 
 // The product-level half of #248's item 2, which the storage-level test above
 // does not reach: there the storage varies and the product id is held

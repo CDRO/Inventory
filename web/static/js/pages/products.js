@@ -194,11 +194,12 @@ async function showDetail(productId) {
 
 function renderDetail(product) {
   clearChildren(detailContainer);
+  const editForm = renderEditForm(product);
   detailContainer.append(
     el("div", { class: "card stack" }, [
       el("h3", {}, [text(product.name)]),
-      renderPicture(product),
-      renderEditForm(product),
+      renderPicture(product, editForm.iconInput),
+      editForm.form,
     ]),
     renderStockCard(product),
     renderBarcodeCard(product),
@@ -344,11 +345,11 @@ function renderBarcodeCard(product) {
 // deliberately built here rather than inside js/image-picker.js: the picker's
 // other caller is the shopping-list reconciliation screen, where the product
 // being given a picture does not exist yet and there is no id to post to.
-function renderPicture(product) {
+function renderPicture(product, iconInput) {
   const current = el("div", { "data-role": "product-picture" }, [currentPicture(product)]);
   const pickerBox = el("div", { "data-role": "picture-picker", class: "stack", hidden: true });
   const status = el("p", { class: "muted", "data-role": "picture-status", hidden: true });
-  const uploadBox = renderPictureUpload(product, current, status);
+  const uploadBox = renderPictureUpload(product, current, status, iconInput);
 
   const change = el(
     "button",
@@ -372,7 +373,7 @@ function renderPicture(product) {
           // only way to clear one would be a suggestion list that happened to
           // come back non-empty.
           clearable: true,
-          onPick: (hash) => setPicture(product, hash, current, status),
+          onPick: (hash) => setPicture(product, hash, current, status, iconInput),
         });
       },
     },
@@ -389,7 +390,7 @@ function renderPicture(product) {
 // module-level one would be shared by every product ever opened in this
 // session, so returning to a product while another one's upload was still in
 // flight would silently refuse it (the bug class of #249/#252 in the picker).
-function renderPictureUpload(product, current, status) {
+function renderPictureUpload(product, current, status, iconInput) {
   let uploading = false;
 
   const input = el("input", {
@@ -412,7 +413,7 @@ function renderPictureUpload(product, current, status) {
       uploading = true;
       input.disabled = true;
       try {
-        await uploadPicture(product, chosen, current, status);
+        await uploadPicture(product, chosen, current, status, iconInput);
       } finally {
         uploading = false;
         input.disabled = false;
@@ -443,8 +444,10 @@ function currentPicture(product) {
 // setPicture writes the choice and re-renders only the picture itself. The
 // whole detail view is deliberately not re-rendered: the edit form beside it
 // may hold changes somebody has typed and not saved, and a picture change
-// must not discard them.
-async function setPicture(product, hash, current, status) {
+// must not discard them. Its `icon` field is a narrow exception — applyPicture
+// resyncs it directly, because it is the one field the picture change itself
+// can make stale (#251).
+async function setPicture(product, hash, current, status, iconInput) {
   status.hidden = false;
   status.textContent = t("products.picture.saving");
   try {
@@ -452,7 +455,7 @@ async function setPicture(product, hash, current, status) {
       image: hash,
       icon_name: null,
     });
-    applyPicture(product, updated, current);
+    applyPicture(product, updated, current, iconInput);
     status.textContent = hash ? t("products.picture.saved") : t("products.picture.cleared");
   } catch (err) {
     status.textContent = apiErrorMessage(err, t("products.error.network"));
@@ -473,14 +476,14 @@ async function setPicture(product, hash, current, status) {
 // Unlike setPicture it does not rethrow. There is no selection state to roll
 // back — the file input was cleared the moment the file was read — and the
 // status line already carries the server's own words.
-async function uploadPicture(product, file, current, status) {
+async function uploadPicture(product, file, current, status, iconInput) {
   status.hidden = false;
   status.textContent = t("products.picture.uploading");
 
   const body = new FormData();
   body.append("image", file);
   try {
-    applyPicture(product, await postForm(`${basePath()}/${product.id}/image`, body), current);
+    applyPicture(product, await postForm(`${basePath()}/${product.id}/image`, body), current, iconInput);
     status.textContent = t("products.picture.saved");
   } catch (err) {
     // Deliberately not rethrown, where setPicture just above does rethrow.
@@ -495,11 +498,18 @@ async function uploadPicture(product, file, current, status) {
 // applyPicture writes what the route answered back onto the product and
 // re-renders the picture alone. Both change paths go through it, so the two
 // cannot disagree about which fields the response carries.
-function applyPicture(product, updated, current) {
+//
+// It also resyncs the edit form's `icon` input to the new `icon_name` (#251).
+// Both routes always clear icon_name — a picture change and a picked icon are
+// alternatives — so the input is reset unconditionally rather than only when
+// the value actually moved; a stale DOM value would otherwise survive into
+// the next Save and reinstate an icon the user just cleared.
+function applyPicture(product, updated, current, iconInput) {
   product.image_url = updated.image_url ?? null;
   product.icon_name = updated.icon_name ?? null;
   clearChildren(current);
   current.append(currentPicture(product));
+  iconInput.value = product.icon_name ?? "";
 }
 
 function renderEditForm(product) {
@@ -558,7 +568,7 @@ function renderEditForm(product) {
       ]),
     ],
   );
-  return form;
+  return { form, iconInput: icon };
 }
 
 function field(label, input, hint) {

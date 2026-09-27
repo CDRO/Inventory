@@ -907,4 +907,22 @@ INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock, i
   ('00000000-0000-7000-8000-0000000000ff', '00000000-0000-7000-8000-000000000010', 'E2E Picture Upload Source',    NULL, 'non_perishable', 0, NULL),
   ('00000000-0000-7000-8000-000000000100', '00000000-0000-7000-8000-000000000010', 'E2E Picture Upload UI Source', NULL, 'non_perishable', 0, NULL)
 ON CONFLICT (id) DO NOTHING;
+
+-- One more product in "E2E Household", dedicated to #251: the edit form's
+-- icon input going stale after a picture clear, and an unrelated-field Save
+-- resurrecting it. ...101 is the next free id after ...100, "E2E Picture
+-- Upload UI Source" immediately above.
+--
+-- Same reasoning as the ...fa/...fb and ...ff/...100 blocks above: the
+-- shared Household storage, because e2e-bob's only membership is this one,
+-- and nothing here writes durable per-user state. Its own row rather than
+-- reusing ...fb: that fixture's clear is already read by two scenarios
+-- above, and this suite runs fullyParallel, and this scenario additionally
+-- saves the row, which neither of those does.
+--
+-- Starts with an icon_name, like ...fb, so that clearing it — and it staying
+-- cleared through the save that follows — is observable.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock, icon_name) VALUES
+  ('00000000-0000-7000-8000-000000000101', '00000000-0000-7000-8000-000000000010', 'E2E Picture Edit Form Sync Source', NULL, 'non_perishable', 0, 'noto:cheese-wedge')
+ON CONFLICT (id) DO NOTHING;
 COMMIT;
