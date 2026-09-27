@@ -26,7 +26,8 @@ this in order:
    **Acceptance criteria** section is your checklist, every criterion needs a
    test that would catch its violation or it is a finding — the diff, the
    test files changed, CI status, and — on round ≥ 2 — your own previous
-   verdict comment.
+   verdict comment. Its `Head SHA:` line is the `headRefOid` your Output
+   marker below needs.
 2. **Run the suite yourself**, keeping the full log on disk and only the signal
    in context:
 
@@ -182,11 +183,24 @@ Post exactly this shape with `gh pr comment <PR> --body "..."`:
 ### Coverage vs acceptance criteria
 - [x] Split preserves expiration date
 - [ ] Cross-storage id returns 404  ← untested
+
+<!-- verdict: BLOCK round=1 sha=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 reviewer=tests -->
 ```
 
 The first line must be exactly `## Test Review — VERDICT: APPROVE` or
 `## Test Review — VERDICT: BLOCK`. The ship loop parses it. Always include the
 `**Suite:**` line with either the real local exit code or, when you relied on
 CI instead, the `test` workflow's run URL and conclusion. Omit empty sections.
+
+**The last line is always the machine-readable marker**, exactly
+`<!-- verdict: APPROVE|BLOCK round=<n> sha=<head sha reviewed> reviewer=tests -->`,
+verdict and round matching the header above it. `<n>` is the round you were
+given; `<head sha reviewed>` is the `headRefOid` you read in step 1 — never a
+value you recall from an earlier round or guess from the PR title.
+`scripts/dev gate <PR>` (H5) reads only this line for the merge decision
+itself, never the prose above it — with one exception: on a PR against
+`main`, it may also read this comment's own `**Suite:**` line (never a stale
+round's), which is exactly why that line's exit code or run URL has to be
+real and current every round, not carried over from the last one.
 
 After posting, report back a two-line summary: the verdict and the suite result.

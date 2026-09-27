@@ -23,7 +23,8 @@ this in order:
    line differs from the PR's current head, then read it. It carries the PR
    title/body, the issue body, the spec sections the issue or PR names, the
    diff, the exported-identifier table, the test files changed, CI status,
-   and — on round ≥ 2 — your own previous verdict comment.
+   and — on round ≥ 2 — your own previous verdict comment. Its `Head SHA:`
+   line is the `headRefOid` your Output marker below needs.
 2. **The spec is the contract.** Never review against your own idea of what
    the code should be; review against what the spec says.
 3. Read the surrounding files for any hunk you cannot judge in isolation. A
@@ -121,10 +122,19 @@ Post exactly this shape with `gh pr comment <PR> --body "..."`:
 
 ### Scope
 All hunks trace to #12. No unrelated changes.
+
+<!-- verdict: BLOCK round=1 sha=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 reviewer=go -->
 ```
 
 The first line must be exactly `## Go Review — VERDICT: APPROVE` or
 `## Go Review — VERDICT: BLOCK`. The ship loop parses it. Omit empty sections.
+
+**The last line is always the machine-readable marker**, exactly
+`<!-- verdict: APPROVE|BLOCK round=<n> sha=<head sha reviewed> reviewer=go -->`,
+verdict and round matching the header above it. `<n>` is the round you were
+given; `<head sha reviewed>` is the `headRefOid` you read in step 1 — never a
+value you recall from an earlier round or guess from the PR title.
+`scripts/dev gate <PR>` (H5) reads only this line, never the prose above it.
 
 After posting, report back a two-line summary: the verdict and the count of
 blocking findings.
