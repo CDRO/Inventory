@@ -391,6 +391,22 @@ func TestVetKeepsFindingsAndDropsComposeNoise(t *testing.T) {
 
 // --- check ------------------------------------------------------------------
 
+// TestCheckGofmtParseErrorFailsEvenWithNoListedFile covers the case
+// `gofmt -l` a nonzero exit but nothing on stdout, e.g. a file that fails to
+// parse at all: `-l` never lists it, so the only signal is the exit code.
+// Without checking it (round-1 go review nit), this would print
+// "gofmt: PASS" directly above the real error.
+func TestCheckGofmtParseErrorFailsEvenWithNoListedFile(t *testing.T) {
+	r := run(t, map[string]string{"STUB_CHECK_GOFMT_RC": "2"}, "check")
+	if r.exit != 1 {
+		t.Fatalf("expected exit 1, got %d:\n%s", r.exit, r.stdout)
+	}
+	mustContain(t, r.stdout, "gofmt: FAIL", "stdout")
+	for _, want := range []string{"go vet: PASS", "staticcheck: PASS", "revive: PASS", "TestEnvExampleParity: PASS"} {
+		mustContain(t, r.stdout, want, "stdout (proves the other tools still ran)")
+	}
+}
+
 func TestCheckAllToolsPassIsCompactAndGreen(t *testing.T) {
 	r := run(t, nil, "check")
 	if r.exit != 0 {

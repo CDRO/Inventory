@@ -155,7 +155,7 @@ below, are runner-side tooling in the same sense — they move cache bytes
 around, they never compile or run project code themselves.
 
 Before that invocation, a `scripts/dev check` step (H6, "No-host-toolchain
-constraint" below) runs the deterministic pre-gate — `gofmt`, `go vet`,
+constraint" above) runs the deterministic pre-gate — `gofmt`, `go vet`,
 `staticcheck`, `revive` and `TestEnvExampleParity` — against the same image,
 and the job fails there, without ever reaching `go vet && go test`, on any
 finding.
