@@ -612,6 +612,17 @@
   "photoPicker.count.other": "{count} Fotos ausgewählt",
   "photoPicker.empty": "Noch keine Fotos ausgewählt",
 
+  "camera.heading": "Kamera — {mode}",
+  "camera.preview": "Kameravorschau",
+  "camera.shutter": "Auslöser",
+  "camera.done": "Fertig",
+  "camera.flip": "Kamera wechseln",
+  "camera.shots.one": "1 Foto aufgenommen",
+  "camera.shots.other": "{count} Fotos aufgenommen",
+  "camera.resolutionHint": "Vorschauauflösung. Für die volle Kameraauflösung die Kamera des Telefons verwenden.",
+  "camera.usingPhoneCamera": "Die Kamera des Telefons wird verwendet.",
+  "camera.captureFailed": "Diese Aufnahme konnte nicht gespeichert werden. Versuche es erneut oder verwende die Kamera des Telefons.",
+
   "ingest.pageTitle": "Fotos scannen · Inventory",
   "ingest.title": "Fotos scannen",
   "ingest.mode.legend": "Was machst du gerade?",

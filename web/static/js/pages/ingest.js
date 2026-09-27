@@ -28,15 +28,20 @@ import { openScanSheet } from "../barcode.js";
 import { ensureHotBarcodesFresh, lookupHotBarcode } from "../barcodes.js";
 import { t, tCount, apiErrorMessage } from "../i18n.js";
 import { mountPhotoPicker } from "../photo-picker.js";
+import { handleCameraTap } from "../camera.js";
 
 // The endpoint each mode uploads to (docs/specs/09-consumption-logging.md's
 // capture-mode table) and, for the ones docs/specs/06-vision-shelf-ingestion.md
 // already defines, the location hint they accept. Using-up has neither: a
 // consumption photo decrements batches that already have a location.
+// `label` is the catalog key for the mode's own name, which
+// docs/specs/37-in-page-camera.md's viewfinder repeats in its heading so that
+// docs/specs/09-consumption-logging.md's "the current mode is always visible
+// while the camera is open" holds while a modal dialog covers the selector.
 const MODES = {
-  stocking_up: { endpoint: "ingest/product-photos", hasLocation: true },
-  using_up: { endpoint: "consume/photos", hasLocation: false },
-  shelf_scan: { endpoint: "ingest/shelf-photos", hasLocation: true },
+  stocking_up: { endpoint: "ingest/product-photos", hasLocation: true, label: "ingest.mode.stockingUp" },
+  using_up: { endpoint: "consume/photos", hasLocation: false, label: "ingest.mode.usingUp" },
+  shelf_scan: { endpoint: "ingest/shelf-photos", hasLocation: true, label: "ingest.mode.shelfScan" },
 };
 const MODE_STORAGE_KEY = "inventory:capture-mode";
 const DEFAULT_MODE = "shelf_scan";
@@ -47,6 +52,24 @@ const photoPicker = mountPhotoPicker(qs("#photo-picker-field"), {
   onChange: (files) => {
     submitButton.disabled = files.length === 0;
   },
+  // docs/specs/37-in-page-camera.md: Camera opens an in-page viewfinder where
+  // the browser can, and falls back to 36's OS-camera input where it cannot.
+  //
+  // `photoPicker` is referenced inside the handler rather than passed as a
+  // value because the two are mutually dependent — the picker needs the
+  // handler to mount, the handler needs the picker to append to. A tap can
+  // only happen after this statement has completed, so the binding is always
+  // initialised by the time the handler runs.
+  //
+  // The mode label is read per tap, not captured once: the mode is sticky and
+  // can be changed after mount, and the heading has to name the mode a shot
+  // will actually be filed under.
+  onCameraTap: (openOsCamera) =>
+    handleCameraTap({
+      picker: photoPicker,
+      modeLabel: () => t(MODES[currentMode()]?.label || MODES[DEFAULT_MODE].label),
+      openOsCamera,
+    }),
 });
 const locationField = qs("#location-field");
 const locationSelect = qs("#location");

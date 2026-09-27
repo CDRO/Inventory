@@ -52,7 +52,52 @@ export default defineConfig({
           // everything else on the page loaded fine over the same
           // self-signed certificate. This flag operates at the browser
           // process level, which service worker fetches do respect.
-          args: ["--ignore-certificate-errors"],
+          args: [
+            "--ignore-certificate-errors",
+            // A synthetic camera and an auto-granted permission, for
+            // docs/specs/37-in-page-camera.md's viewfinder journeys: no
+            // hardware, no permission prompt. Required by that spec, which
+            // also requires confirming them live rather than trusting the
+            // documentation — this file has been caught once by a documented
+            // flag that did not do what it said (see the
+            // --unsafely-treat-insecure-origin-as-secure note above).
+            //
+            // Confirmed live in this image, measured rather than assumed
+            // (Playwright v1.48.0-noble, Chromium 130.0.6723.31; the numbers
+            // are recorded in the PR that added this):
+            //   * getUserMedia({video:{facingMode:"environment"}}) resolves
+            //     with no prompt — one video track, label "fake_device_0",
+            //     640x480. getSettings() reports width and height but NO
+            //     facingMode at all, so nothing may assert on that key here.
+            //   * window.ImageCapture exists, and takePhoto() on the fake
+            //     track resolves with an **image/png** Blob (3375 bytes) —
+            //     which is why camera.js normalises every still to JPEG
+            //     rather than relabelling, and why the E2E asserting the
+            //     JPEG SOI bytes FF D8 is a real check here and not a
+            //     vacuous one: the source bytes genuinely are not JPEG.
+            //     Normalised through createImageBitmap -> canvas ->
+            //     toBlob("image/jpeg", 0.92) it came out 640x480, 10969
+            //     bytes, starting FF D8.
+            //   * video.videoWidth stays 0 for ~59 ms after srcObject is
+            //     set, so the Shutter's first-frame gate is a real state a
+            //     test can observe, not a formality. videoWidth is a
+            //     getter on HTMLVideoElement.prototype, which is what lets
+            //     a journey pin it at 0 to prove the gate holds.
+            //   * Every track's readyState is "ended" after stop().
+            //   * enumerateDevices() reports exactly ONE videoinput, so the
+            //     flip button cannot be driven here (recorded as not
+            //     verifiable in this stack, #205).
+            //   * window.BarcodeDetector is absent, so these flags do not
+            //     start docs/specs/20-barcode-recall.md's live scan in any
+            //     existing spec: supportsLiveScan() is false either way.
+            //     That matters because launchOptions is browser-wide, so
+            //     every spec now runs with a camera that resolves instead of
+            //     one that does not. Verified rather than reasoned about: the
+            //     176 specs that existed before this change all stayed green
+            //     on the first run with these flags set.
+            "--use-fake-device-for-media-stream",
+            "--use-fake-ui-for-media-stream",
+          ],
         },
       },
     },
