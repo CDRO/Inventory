@@ -1,0 +1,327 @@
+#!/bin/sh
+# Agent token accounting per model, per role (main session / subagent), per PR - from local session transcripts.
+#
+#   scripts/dev agent-usage [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--pr <n>] [--json]
+#
+# Source: ~/.claude/projects/<slug for this repo>*/**.jsonl (session
+# transcripts) and .../subagents/agent-*.jsonl (subagent transcripts), the
+# format docs/plans/2026-09-harness-optimization.md section 1.4 was measured
+# from by hand before this command existed.
+#
+# --since/--until filter on each kept call's own timestamp (UTC date, both
+# ends inclusive). --pr <n> keeps only calls whose record names the PR's head
+# branch (`gh pr view <n>`) as `gitBranch`, or - when that field is absent or
+# "HEAD" - whose `cwd` ends in the branch's last path segment; it then prints
+# only that filtered total. --json emits the same rows as one JSON object
+# instead of a table. Never prints message content: only counts.
+#
+# Three traps in these transcripts, each unit-tested against fixtures
+# (scripts/testdata/agent-usage/):
+#
+#  1. Streaming can emit an interim usage snapshot with no `output_tokens` at
+#     all before the final, complete one. A line whose (last, see #2) usage
+#     object has no `output_tokens` key is not counted.
+#  2. A line can carry more than one `"usage":{...}` object - the API's own
+#     `usage.iterations` array repeats the same keys, and the outer object is
+#     not always first once a line is long enough to wrap. The LAST
+#     `"usage":{...}` on the line is the one taken; its four token fields are
+#     each read at their first occurrence within it, which is the object's own
+#     top-level field rather than a duplicate nested inside `iterations`.
+#  3. Records are duplicated. The issue that named this trap called the key
+#     "message uuid"; in real transcripts the field that actually repeats
+#     across one streamed call is `message.id` (`msg_...`) - Claude Code
+#     writes one line per content block (thinking/text/tool_use), all sharing
+#     one id and, before the last, an incomplete usage snapshot (trap 1). The
+#     top-level `uuid` differs per line and does not by itself catch this.
+#     Keying on `message.id` and keeping only the last line that clears trap 1
+#     fixes both: a truly duplicated line collapses into the same id, and a
+#     call's block-by-block partial snapshots collapse into its final one.
+#
+# Role: the three reviewers (and any other named subagent) carry
+# `attributionAgent` directly on their records; when a subagent record has
+# none, the sibling `<transcript>.meta.json`'s `agentType` is the fallback.
+# Anything outside `subagents/` is `main`.
+#
+# POSIX sh + awk, no jq (none on this machine). This is a host command
+# (Git Bash on Windows, or a shell on Linux/macOS): it reads `~/.claude` and
+# calls `gh`, neither of which exists inside the `app` dev container, so
+# unlike `test`/`vet` it is not run through `docker compose`.
+# AGENT_USAGE_PROJECTS_DIR overrides the project root and AGENT_USAGE_REPONAME
+# the repo-name slug fragment (tests point both at fixtures, since the test
+# suite's throwaway checkout has no real `.git` common dir to read the name
+# from); AGENT_USAGE_GH overrides the `gh` binary name (tests point it at a
+# stub).
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+gh=${AGENT_USAGE_GH:-gh}
+tab=$(printf '\t')
+
+since=""
+until_=""
+pr=""
+json=0
+
+help() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --since) [ $# -ge 2 ] || { echo "agent-usage: --since needs YYYY-MM-DD" >&2; exit 2; }; since=$2; shift 2 ;;
+    --until) [ $# -ge 2 ] || { echo "agent-usage: --until needs YYYY-MM-DD" >&2; exit 2; }; until_=$2; shift 2 ;;
+    --pr) [ $# -ge 2 ] || { echo "agent-usage: --pr needs a PR number" >&2; exit 2; }; pr=$2; shift 2 ;;
+    --json) json=1; shift ;;
+    -h|--help) help; exit 0 ;;
+    *) echo "agent-usage: unknown option $1" >&2; exit 2 ;;
+  esac
+done
+for d in "$since" "$until_"; do
+  case "$d" in
+    ''|[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]) ;;
+    *) echo "agent-usage: --since/--until want YYYY-MM-DD, got '$d'" >&2; exit 2 ;;
+  esac
+done
+case "$pr" in
+  '') ;;
+  *[!0-9]*) echo "agent-usage: --pr wants a number, got '$pr'" >&2; exit 2 ;;
+esac
+
+# --- locate this repo's transcripts ---------------------------------------
+#
+# `git rev-parse --git-common-dir` resolves to the ORIGINAL checkout's .git
+# regardless of which worktree this runs in, so its parent's basename ("Inventory")
+# identifies the repo the same way from every package's worktree.
+projects_dir=${AGENT_USAGE_PROJECTS_DIR:-"$HOME/.claude/projects"}
+if [ -n "${AGENT_USAGE_REPONAME:-}" ]; then
+  reponame_lower=$(printf '%s' "$AGENT_USAGE_REPONAME" | tr '[:upper:]' '[:lower:]')
+else
+  common_dir=$(cd "$root" && git rev-parse --git-common-dir 2>/dev/null) || common_dir=""
+  if [ -n "$common_dir" ]; then
+    case "$common_dir" in
+      # Git Bash's `git` prints Windows-drive absolute paths ("C:/Users/...");
+      # plain POSIX sh only recognizes a leading "/" as absolute, so a
+      # drive-letter path here needs its own case or it gets wrongly treated
+      # as relative to $root.
+      /*|[A-Za-z]:*) repo_root=$(CDPATH= cd -- "$(dirname -- "$common_dir")" && pwd) ;;
+      *) repo_root=$(CDPATH= cd -- "$root/$(dirname -- "$common_dir")" && pwd) ;;
+    esac
+  else
+    repo_root=$root
+  fi
+  reponame_lower=$(basename "$repo_root" | tr '[:upper:]' '[:lower:]')
+fi
+
+[ -d "$projects_dir" ] || { echo "agent-usage: no transcripts at $projects_dir" >&2; exit 0; }
+
+files=$(
+  for d in "$projects_dir"/*/; do
+    [ -d "$d" ] || continue
+    name_lower=$(basename "$d" | tr '[:upper:]' '[:lower:]')
+    case "$name_lower" in
+      *-"$reponame_lower"|*-"$reponame_lower"-*) ;;
+      *) continue ;;
+    esac
+    find "$d" -name '*.jsonl' -type f
+  done
+)
+if [ -z "$files" ]; then
+  echo "agent-usage: no transcripts matched '*-$reponame_lower*' under $projects_dir" >&2
+  exit 0
+fi
+
+# --- resolve the PR's head branch, once -----------------------------------
+want_branch=""
+want_suffix=""
+if [ -n "$pr" ]; then
+  want_branch=$("$gh" pr view "$pr" --json headRefName -q .headRefName 2>/dev/null)
+  if [ $? -ne 0 ] || [ -z "$want_branch" ]; then
+    echo "agent-usage: could not resolve the head branch of PR #$pr" >&2
+    exit 1
+  fi
+  want_suffix=${want_branch##*/}
+fi
+
+# --- pass 1: one deduped, final call per line, per file -------------------
+work=$(mktemp -d) || exit 1
+trap 'rm -rf "$work"' EXIT
+
+cat > "$work/pass1.awk" <<'AWK'
+function extract_num(s, key,   at) {
+  at = index(s, key)
+  if (at == 0) return ""
+  s = substr(s, at + length(key))
+  match(s, /^[0-9]+/)
+  if (RSTART == 0) return ""
+  return substr(s, RSTART, RLENGTH) + 0
+}
+function extract_str(s, key,   at, rest, q) {
+  at = index(s, key)
+  if (at == 0) return ""
+  rest = substr(s, at + length(key))
+  q = index(rest, "\"")
+  if (q == 0) return ""
+  return substr(rest, 1, q - 1)
+}
+BEGIN { ulen = length("\"usage\":{") }
+index($0, "\"type\":\"assistant\"") == 0 { next }
+{
+  line = $0
+  # last "usage":{ on the line (trap 2)
+  last = 0; searchfrom = 1
+  while (1) {
+    p = index(substr(line, searchfrom), "\"usage\":{")
+    if (p == 0) break
+    last = searchfrom + p - 1
+    searchfrom = last + ulen
+  }
+  if (last == 0) next
+
+  objstart = last + ulen
+  depth = 1; i = objstart; n = length(line); closeidx = 0
+  while (i <= n) {
+    c = substr(line, i, 1)
+    if (c == "{") depth++
+    else if (c == "}") { depth--; if (depth == 0) { closeidx = i; break } }
+    i++
+  }
+  if (closeidx == 0) next
+  usage = substr(line, objstart, closeidx - objstart)
+
+  out = extract_num(usage, "\"output_tokens\":")
+  if (out == "") next   # interim streaming snapshot (trap 1)
+  inp = extract_num(usage, "\"input_tokens\":"); if (inp == "") inp = 0
+  cc  = extract_num(usage, "\"cache_creation_input_tokens\":"); if (cc == "") cc = 0
+  cr  = extract_num(usage, "\"cache_read_input_tokens\":"); if (cr == "") cr = 0
+
+  ts = extract_str(line, "\"timestamp\":\"")
+  date = substr(ts, 1, 10)
+  if (since != "" && date < since) next
+  if (until != "" && date > until) next
+
+  branch = extract_str(line, "\"gitBranch\":\"")
+  if (branch == "") branch = "-"
+  cwd = extract_str(line, "\"cwd\":\"")
+
+  if (wantbranch != "") {
+    okbranch = (branch == wantbranch)
+    if (!okbranch && (branch == "-" || branch == "HEAD") && wantsuffix != "" && cwd != "") {
+      cl = cwd; wl = wantsuffix
+      gsub(/\\\\/, "/", cl)
+      okbranch = (index(tolower(cl), tolower(wl)) > 0)
+    }
+    if (!okbranch) next
+  }
+
+  model = extract_str(line, "\"model\":\"")
+  if (model == "") model = "unknown"
+
+  role = extract_str(line, "\"attributionAgent\":\"")
+  if (role == "") role = rolefallback
+
+  id = extract_str(line, "\"id\":\"msg_")
+  if (id == "") id = "line-" NR   # no message id: never collapses with another line
+  else id = "msg_" id
+
+  # last qualifying (has output_tokens) line for this id wins - always the
+  # final, complete snapshot, since interim lines were already skipped above.
+  best_model[id] = model
+  best_role[id] = role
+  best_in[id] = inp
+  best_cc[id] = cc
+  best_cr[id] = cr
+  best_out[id] = out
+}
+END {
+  for (id in best_out) {
+    ctx = best_in[id] + best_cc[id] + best_cr[id] + best_out[id]
+    printf "%s\t%s\t%d\t%d\t%d\t%d\t%d\n", best_model[id], best_role[id], best_in[id], best_cc[id], best_cr[id], best_out[id], ctx
+  }
+}
+AWK
+
+pass1=$work/calls.tsv
+: > "$pass1"
+old_ifs=$IFS
+IFS='
+'
+for f in $files; do
+  IFS=$old_ifs
+  rolefallback=main
+  case "$f" in
+    */subagents/*)
+      meta=${f%.jsonl}.meta.json
+      rolefallback=""
+      if [ -f "$meta" ]; then
+        rolefallback=$(sed -n 's/.*"agentType":"\([^"]*\)".*/\1/p' "$meta" | head -1)
+      fi
+      [ -n "$rolefallback" ] || rolefallback=subagent
+      ;;
+  esac
+  awk -v since="$since" -v until="$until_" -v wantbranch="$want_branch" -v wantsuffix="$want_suffix" \
+    -v rolefallback="$rolefallback" -f "$work/pass1.awk" "$f" >> "$pass1"
+  IFS='
+'
+done
+IFS=$old_ifs
+
+# --- pass 2: sort by model, role, context; aggregate + median -------------
+sorted=$work/sorted.tsv
+sort -t "$tab" -k1,1 -k2,2 -k7,7n "$pass1" > "$sorted"
+
+cat > "$work/pass2.awk" <<'AWK'
+# Group sums are named g_* ("sin" collides with awk's builtin sine, "cos" and
+# "log" are one keystroke away too - g_/t_ prefixes on every accumulator
+# sidestep the whole class of names rather than avoiding just this one).
+function flushgrp(   mid, cnt) {
+  cnt = ctxn
+  if (cnt == 0) return
+  if (cnt % 2 == 1) med = ctxs[(cnt + 1) / 2]
+  else { mid = cnt / 2; med = (ctxs[mid] + ctxs[mid + 1]) / 2 }
+  if (json) {
+    if (rows > 0) printf ","
+    printf "\n    {\"model\":\"%s\",\"role\":\"%s\",\"calls\":%d,\"input\":%.0f,\"cache_creation\":%.0f,\"cache_read\":%.0f,\"output\":%.0f,\"max_context\":%.0f,\"median_context\":%.1f}",
+      curmodel, currole, cnt, g_in, g_cc, g_cr, g_out, ctxs[cnt], med
+  } else {
+    printf "%-20s %-14s %8d %14.0f %14.0f %14.0f %14.0f %14.0f %14.1f\n",
+      curmodel, currole, cnt, g_in, g_cc, g_cr, g_out, ctxs[cnt], med
+  }
+  rows++
+  t_in += g_in; t_cc += g_cc; t_cr += g_cr; t_out += g_out; t_calls += cnt
+  split("", ctxs); ctxn = 0
+  g_in = 0; g_cc = 0; g_cr = 0; g_out = 0
+}
+BEGIN {
+  # Every accumulator gets an explicit numeric 0 here, not just the ones a
+  # human would think to zero: busybox awk treats a global's first-ever
+  # reference as a bare string when it has not yet been assigned a number, so
+  # `ctxn == 0` in flushgrp() compared "" to "0" and was always false until
+  # this line made ctxn a real number from the start. gawk does not have this
+  # quirk, which is why this broke only under the dev image's busybox, not on
+  # a host shell - see scripts/agent_usage_test.go, TestAgentUsageJSONShapeAndTotal.
+  FS = "\t"; curmodel = ""; currole = ""; rows = 0
+  t_calls = 0; t_in = 0; t_cc = 0; t_cr = 0; t_out = 0
+  ctxn = 0; g_in = 0; g_cc = 0; g_cr = 0; g_out = 0
+  if (json) printf "{\n  \"rows\": ["
+  else printf "%-20s %-14s %8s %14s %14s %14s %14s %14s %14s\n", "model", "role", "calls", "input", "cache_creation", "cache_read", "output", "max_ctx", "median_ctx"
+}
+{
+  if ($1 != curmodel || $2 != currole) {
+    flushgrp()
+    curmodel = $1; currole = $2
+  }
+  g_in += $3; g_cc += $4; g_cr += $5; g_out += $6
+  ctxn++; ctxs[ctxn] = $7
+}
+END {
+  flushgrp()
+  if (json) {
+    printf "\n  ],\n  \"total\": {\"calls\":%d,\"input\":%.0f,\"cache_creation\":%.0f,\"cache_read\":%.0f,\"output\":%.0f}\n}\n",
+      t_calls, t_in, t_cc, t_cr, t_out
+  } else if (rows == 0) {
+    print "(no calls in range)"
+  } else {
+    printf "%-20s %-14s %8d %14.0f %14.0f %14.0f %14.0f\n", "total", "", t_calls, t_in, t_cc, t_cr, t_out
+  }
+}
+AWK
+
+awk -v json="$json" -f "$work/pass2.awk" "$sorted"

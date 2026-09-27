@@ -24,3 +24,12 @@ deploy/synology/update_test.go text eol=lf
 scripts/dev text eol=lf
 scripts/dev.d/* text eol=lf
 scripts/dev_test.go text eol=lf
+
+# agent-usage's fixtures are read as raw bytes (its awk does substring
+# extraction, not JSON parsing), so a CRLF checkout would leave a trailing \r
+# on every extracted field and break every hand-computed total in
+# agent_usage_test.go. agent_usage_test.go itself writes its gh stub from a Go
+# raw string literal - pinned for the reason update_test.go is.
+scripts/testdata/agent-usage/**/*.jsonl text eol=lf
+scripts/testdata/agent-usage/**/*.meta.json text eol=lf
+scripts/agent_usage_test.go text eol=lf
