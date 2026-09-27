@@ -256,6 +256,33 @@ from either workflow on a specific branch before it merges triggers
 `workflow_dispatch` on it explicitly, using the same dispatch-and-poll
 recipe as `test.yml`, above.
 
+`e2e.yml` builds the production image exactly once, in its own `build` job,
+and hands the result to the `e2e` job as a `docker save`/`actions/upload-
+artifact` tarball rather than a second `docker compose build` — H8
+(`docs/plans/2026-09-harness-optimization.md`) measured that against a
+shared BuildKit layer cache (`type=gha`, each job rebuilding with
+`cache-from`) and kept the faster one; the numbers are in that workflow's own
+header comment, since a number here would go stale independently of it.
+`e2e/node_modules` is cached by `actions/cache`, keyed on `e2e/package.json`
+(not a lockfile — `.gitignore` deliberately keeps `e2e/package-lock.json`
+uncommitted, the same as `node_modules` itself; `package.json` pins exact
+versions and is committed, so it invalidates the cache on a real dependency
+change), so the `e2e` service's `npm install` is a no-op on a cache hit. The
+backup/restore round trip (issue #133) used to be a second job
+in `e2e.yml`, running on every push to `main` alongside the suite; H8 moved
+it into its own workflow, `.github/workflows/restore.yml`, triggered on a
+push to `main` that touches the files that can actually break it (the backup
+script, the compose files, `migrations/**`, `e2e/restore/**`,
+`e2e/fixtures/**`, the `Dockerfile`), on every `v*` release tag
+unconditionally, on a weekly `schedule` (to catch image-tag drift no path
+filter can see), and on `workflow_dispatch` — turning a job that ran on every
+push into one that runs on a small fraction of them, without weakening it as
+the deployment gate: it still runs before every release. Both workflows carry
+a `concurrency` group keyed on `github.ref` (`e2e.yml` cancels a superseded
+`push` run; `restore.yml` has no such group, since two round trips in flight
+are already isolated by their own separate stacks per run) and tighter
+`timeout-minutes` than before.
+
 ## Running more than one instance of the stack locally
 
 Two ordinary situations need this: developing two branches side by side, and
