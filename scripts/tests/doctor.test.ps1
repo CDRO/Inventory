@@ -91,17 +91,22 @@ function Test-PathRestored {
 try {
     Write-Host "Structural: --json lists all ten checks"
     $r = Invoke-Doctor -DoctorArgs @('--json')
+    Assert ($r.Exit -eq 0) "a clean run on this machine (all ok/documented warn) exits 0, got $($r.Exit) (acceptance criterion #1)"
     $parsed = $r.Out | ConvertFrom-Json
     Assert ($parsed.Count -eq 10) "exactly ten checks, got $($parsed.Count)"
     $shapeOk = $true
+    $remediationContractOk = $true
     foreach ($c in $parsed) {
         if (-not $c.PSObject.Properties['check'] -or -not $c.PSObject.Properties['status'] -or -not $c.PSObject.Properties['remediation']) { $shapeOk = $false }
         if (@('ok', 'warn', 'FAIL') -notcontains $c.status) { $shapeOk = $false }
+        if ($c.status -eq 'ok' -and [string]$c.remediation -ne '') { $remediationContractOk = $false }
     }
     Assert $shapeOk "every check has check/status/remediation, and status is ok, warn or FAIL"
+    Assert $remediationContractOk "every 'ok' check carries remediation \"\" (the documented --json contract, scripts/doctor's own header)"
 
     Write-Host "Human output: ten numbered lines"
     $r2 = Invoke-Doctor
+    Assert ($r2.Exit -eq 0) "the human-readable run also exits 0 on this machine, got $($r2.Exit)"
     $numbered = @($r2.Out -split "`r?`n" | Where-Object { $_ -match '^\s*\d+\.' })
     Assert ($numbered.Count -eq 10) "ten numbered check lines in the human-readable output, got $($numbered.Count)"
 
@@ -118,10 +123,31 @@ case "`$1" in
   *) exit 0 ;;
 esac
 "@
-    $r = Invoke-WithShim $infoFailsShim { Invoke-Doctor -Env @{ DOCTOR_SOCKET = $sockPath } }
-    Assert ($r.Exit -eq 1) "an unwritable socket: scripts/doctor exits 1, got $($r.Exit)"
-    Assert ($r.Out -match "add the user to the socket's group") "check 1 gives the group remediation, not the generic 'daemon not running' one"
-    Assert ($r.Out -notmatch 'docker info failed - start Docker Desktop') "the generic remediation is NOT what fires when the socket is the reason"
+    # Both invocations share one shim block - Invoke-WithShim deletes its
+    # directory in its own `finally`, so a second call reusing an already-
+    # unwound shim would silently fall through to the REAL docker on PATH
+    # instead (this was caught by the --json assertions below coming back
+    # against a healthy real daemon: status "ok", not "FAIL").
+    Invoke-WithShim $infoFailsShim {
+        $r = Invoke-Doctor -Env @{ DOCTOR_SOCKET = $sockPath }
+        Assert ($r.Exit -eq 1) "an unwritable socket: scripts/doctor exits 1, got $($r.Exit)"
+        Assert ($r.Out -match "add the user to the socket's group") "check 1 gives the group remediation, not the generic 'daemon not running' one"
+        Assert ($r.Out -notmatch 'docker info failed - start Docker Desktop') "the generic remediation is NOT what fires when the socket is the reason"
+
+        # Same scenario through --json: $sockPath is a real Windows path,
+        # backslash-heavy (e.g. C:\Users\...\docker.sock), embedded verbatim in
+        # this check's remediation - the one case in the whole suite that puts
+        # a backslash through json_escape. If escaping were broken (or
+        # deleted), this is where it would show: ConvertFrom-Json would throw
+        # or come back garbled, never silently pass like the backslash-free
+        # fixtures elsewhere in this file do.
+        $rj = Invoke-Doctor -DoctorArgs @('--json') -Env @{ DOCTOR_SOCKET = $sockPath }
+        $parsedShim = [array]($rj.Out | ConvertFrom-Json)
+        Assert ($parsedShim.Count -eq 10) "the --json output is still valid, parseable JSON with a backslash-heavy path embedded in it"
+        Assert ($parsedShim[0].status -eq 'FAIL') "check 1 is FAIL in the --json output too"
+        Assert ($parsedShim[0].remediation.Contains($sockPath)) "the backslash-heavy socket path round-trips through json_escape intact: $($parsedShim[0].remediation)"
+    } | Out-Null
+
     (Get-Item $sockPath).IsReadOnly = $false
     Remove-Item -Recurse -Force $sockDir
     Test-PathRestored 'after the socket-unwritable shim'
@@ -142,6 +168,63 @@ esac
     Assert ($r.Out -match 'answers docker info but cannot start containers') "check 3 carries its own message, distinct from check 1's"
     Assert ($r.Out -notmatch 'docker daemon\s+FAIL') "check 1 (docker daemon) is NOT the one blamed - docker info itself succeeded"
     Test-PathRestored 'after the cannot-run-containers shim'
+
+    Write-Host "Compose version boundary (#309 acceptance: spec 01's Compose >= 2.24)"
+    foreach ($case in @(
+            @{ Version = '2.20.0'; Expect = 'FAIL'; What = 'below the floor (same major, minor < 24)' },
+            @{ Version = '2.24.0'; Expect = 'ok'; What = 'exactly at the floor' },
+            @{ Version = '3.1.0'; Expect = 'ok'; What = 'a newer major' }
+        )) {
+        # This machine has a real standalone docker-compose (Docker Desktop
+        # ships one) that meets the floor on its own - a shim covering only
+        # `docker` would let that real binary confirm "ok" underneath a
+        # deliberately-stale plugin version and defeat the "below the floor"
+        # case. Shimming docker-compose too, always failing, isolates the
+        # plugin path these three cases mean to exercise; the mixed-source
+        # scenario right after this loop is what tests both paths together.
+        $dir = Join-Path $env:TEMP "doctorshim-$([guid]::NewGuid().ToString('N'))"
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        [IO.File]::WriteAllText((Join-Path $dir 'docker'), (@"
+#!/bin/sh
+case "`$*" in
+  "compose version --short") echo "$($case.Version)" ;;
+  info) exit 0 ;;
+  *) exit 0 ;;
+esac
+"@ -replace "`r`n", "`n"))
+        [IO.File]::WriteAllText((Join-Path $dir 'docker-compose'), (@"
+#!/bin/sh
+exit 1
+"@ -replace "`r`n", "`n"))
+        $r = Invoke-WithShim $dir { Invoke-Doctor -DoctorArgs @('--json') }
+        $parsed = [array]($r.Out | ConvertFrom-Json)
+        Assert ($parsed[1].check -eq 'compose version') "check 2 is still 'compose version' (index assumption holds)"
+        Assert ([string]$parsed[1].status -eq $case.Expect) "compose $($case.Version) ($($case.What)): expected $($case.Expect), got $($parsed[1].status)"
+    }
+    Test-PathRestored 'after the compose-version shims'
+
+    Write-Host "Compose version: a stale bundled plugin does not shadow a newer standalone docker-compose (the Synology Container Manager case, #309 review finding)"
+    $mixedDir = Join-Path $env:TEMP "doctorshim-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Force -Path $mixedDir | Out-Null
+    [IO.File]::WriteAllText((Join-Path $mixedDir 'docker'), (@"
+#!/bin/sh
+case "`$*" in
+  "compose version --short") echo "2.20.1" ;;
+  info) exit 0 ;;
+  *) exit 0 ;;
+esac
+"@ -replace "`r`n", "`n"))
+    [IO.File]::WriteAllText((Join-Path $mixedDir 'docker-compose'), (@"
+#!/bin/sh
+case "`$*" in
+  "version --short") echo "2.31.0" ;;
+  version) exit 0 ;;
+  *) exit 0 ;;
+esac
+"@ -replace "`r`n", "`n"))
+    $r = Invoke-WithShim $mixedDir { Invoke-Doctor -DoctorArgs @('--json') }
+    $parsed = [array]($r.Out | ConvertFrom-Json)
+    Assert ([string]$parsed[1].status -eq 'ok') "a stale bundled plugin (2.20.1) alongside a newer standalone docker-compose (2.31.0) is ok, got $($parsed[1].status)"
 
     Write-Host "--fix creates the build-cache volume (an isolated one, never the real inventory-go-build-cache)"
     $testVolume = "doctor-test-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
@@ -184,6 +267,9 @@ SERPAPI_KEY=also-$marker
 "@
     $r = Invoke-Doctor -DoctorArgs @('--json') -Env @{ DOCTOR_ENV_FILE = $envFile }
     Assert ($r.Out -notmatch [regex]::Escape($marker)) "the marker secret value from .env never appears in --json output"
+    $portsParsed = [array]($r.Out | ConvertFrom-Json)
+    Assert ($portsParsed[4].check -like 'ports (*') "check 5 is still the ports check (index assumption holds)"
+    Assert ([string]$portsParsed[4].status -eq 'ok') "the two free fixture ports (18123/19123) actually got checked and reported ok, got $($portsParsed[4].status)"
     $r2 = Invoke-Doctor -Env @{ DOCTOR_ENV_FILE = $envFile }
     Assert ($r2.Out -notmatch [regex]::Escape($marker)) "the marker secret value from .env never appears in human-readable output either"
     Assert ($r2.Out -match '18123' -and $r2.Out -match '19123') "HTTP_PORT/TRAEFIK_PORT VALUES do appear - reading and displaying them is the point of the check, not a leak"

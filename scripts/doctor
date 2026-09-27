@@ -82,28 +82,45 @@ check_docker_daemon() {
   fi
 }
 
-# 2. Compose plugin or standalone docker-compose, >= 2.24.
-check_compose_version() {
-  ver=""
-  if docker compose version >/dev/null 2>&1; then
-    ver=$(docker compose version --short 2>/dev/null)
-  elif command -v docker-compose >/dev/null 2>&1 && docker-compose version >/dev/null 2>&1; then
-    ver=$(docker-compose version --short 2>/dev/null)
-  fi
-  if [ -z "$ver" ]; then
-    add_result "compose version" FAIL "install Docker Compose >= 2.24 (plugin) or docker-compose >= 2.24 (standalone)"
-    return
-  fi
-  ver=${ver#v}
-  major=${ver%%.*}
-  rest=${ver#*.}
+# 2. Compose plugin or standalone docker-compose, >= 2.24. Both are checked,
+#    not just whichever answers first: Synology's Container Manager bundles a
+#    stale compose plugin that still answers `docker compose version`
+#    successfully, and the documented fix is a newer standalone
+#    `docker-compose` on PATH (docs/specs/01-architecture-and-deployment.md) -
+#    stopping at the first implementation that merely runs would report FAIL
+#    on that exact, correctly-configured NAS.
+meets_compose_floor() {
+  v=${1#v}
+  major=${v%%.*}
+  rest=${v#*.}
   minor=${rest%%.*}
   case "$major" in ''|*[!0-9]*) major=0 ;; esac
   case "$minor" in ''|*[!0-9]*) minor=0 ;; esac
-  if [ "$major" -gt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -ge 24 ]; }; then
+  [ "$major" -gt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -ge 24 ]; }
+}
+check_compose_version() {
+  plugin_ver=""
+  standalone_ver=""
+  if docker compose version >/dev/null 2>&1; then
+    plugin_ver=$(docker compose version --short 2>/dev/null)
+  fi
+  if command -v docker-compose >/dev/null 2>&1 && docker-compose version >/dev/null 2>&1; then
+    standalone_ver=$(docker-compose version --short 2>/dev/null)
+  fi
+  if [ -z "$plugin_ver" ] && [ -z "$standalone_ver" ]; then
+    add_result "compose version" FAIL "install Docker Compose >= 2.24 (plugin) or docker-compose >= 2.24 (standalone)"
+    return
+  fi
+  ok=0
+  [ -n "$plugin_ver" ] && meets_compose_floor "$plugin_ver" && ok=1
+  [ -n "$standalone_ver" ] && meets_compose_floor "$standalone_ver" && ok=1
+  if [ "$ok" -eq 1 ]; then
     add_result "compose version" ok ""
   else
-    add_result "compose version" FAIL "Compose $ver is older than 2.24 - upgrade Docker Desktop or the compose plugin"
+    seen=""
+    [ -n "$plugin_ver" ] && seen="$seen plugin=$plugin_ver"
+    [ -n "$standalone_ver" ] && seen="$seen standalone=$standalone_ver"
+    add_result "compose version" FAIL "Compose is older than 2.24 ($seen) - upgrade Docker Desktop/the compose plugin, or put a newer standalone docker-compose first on PATH"
   fi
 }
 
@@ -134,7 +151,7 @@ check_build_cache_volume() {
   fi
   if [ "$fix" -eq 1 ]; then
     if docker volume create "$vol" >/dev/null 2>&1; then
-      add_result "build cache volume" ok "created by --fix"
+      add_result "build cache volume" ok ""
     else
       add_result "build cache volume" FAIL "docker volume create $vol failed"
     fi
@@ -146,8 +163,12 @@ check_build_cache_volume() {
 # 5. HTTP_PORT/TRAEFIK_PORT, read only with grep - never the whole file, and
 #    a port number is not a secret, so it may appear in the output.
 check_ports_free() {
-  http_port=$(grep -m1 '^HTTP_PORT=' "$DOCTOR_ENV_FILE" 2>/dev/null | cut -d= -f2-)
-  traefik_port=$(grep -m1 '^TRAEFIK_PORT=' "$DOCTOR_ENV_FILE" 2>/dev/null | cut -d= -f2-)
+  # .env is gitignored, so it carries none of .gitattributes' eol=lf pin - a
+  # value hand-edited on Windows can carry a trailing CR, which would
+  # otherwise fail the digit-only test below and skip the port silently
+  # ("nothing looked wrong" rather than a false ok).
+  http_port=$(grep -m1 '^HTTP_PORT=' "$DOCTOR_ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '\r')
+  traefik_port=$(grep -m1 '^TRAEFIK_PORT=' "$DOCTOR_ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '\r')
   [ -n "$http_port" ] || http_port=8000
   [ -n "$traefik_port" ] || traefik_port=80
   label="ports (HTTP_PORT=$http_port, TRAEFIK_PORT=$traefik_port)"
@@ -170,6 +191,12 @@ check_ports_free() {
   fi
 }
 
+# $1 = comma-separated scope list (no spaces), $2 = scope name to look for.
+# A plain `*repo*` substring match would pass a token scoped only
+# `public_repo` or `delete_repo` (both contain "repo"); wrapping in commas
+# and requiring the delimiter on both sides makes it an exact-token match.
+scope_has() { case ",$1," in *",$2,"*) return 0 ;; esac; return 1; }
+
 # 6. gh authenticated, repo scope present, rate limit has headroom.
 check_gh_auth() {
   if ! command -v gh >/dev/null 2>&1; then
@@ -180,13 +207,20 @@ check_gh_auth() {
     add_result "gh auth" FAIL "run gh auth login"
     return
   fi
-  scopes=$(gh api -i user 2>/dev/null | grep -i '^x-oauth-scopes:' | tr -d '\r')
-  case "$scopes" in
-    *repo*) : ;;
-    *)
+  # A classic PAT/OAuth token's scopes come back as this response header,
+  # comma-space separated. A fine-grained PAT or GitHub App installation
+  # token carries no such header at all - gh auth status already confirmed
+  # it authenticates, and there is no classic scope list to check against,
+  # so its absence is not treated as a missing-repo-scope failure.
+  scopes_line=$(gh api -i user 2>/dev/null | grep -i '^x-oauth-scopes:' | tr -d '\r')
+  scopes=""
+  if [ -n "$scopes_line" ]; then
+    scopes=$(printf '%s' "${scopes_line#*:}" | tr -d ' ')
+    if ! scope_has "$scopes" repo; then
       add_result "gh auth" FAIL "the token is missing the 'repo' scope - run gh auth refresh -s repo"
-      return ;;
-  esac
+      return
+    fi
+  fi
   remaining=$(gh api rate_limit --jq '.rate.remaining' 2>/dev/null)
   case "$remaining" in
     ''|*[!0-9]*)
@@ -197,10 +231,11 @@ check_gh_auth() {
     add_result "gh auth" warn "GitHub API rate limit is low ($remaining remaining) - avoid heavy gh usage until it resets"
     return
   fi
-  case "$scopes" in
-    *workflow*) add_result "gh auth" ok "" ;;
-    *) add_result "gh auth" warn "token is missing the 'workflow' scope - only needed if gh workflow run/dispatch is used (gh auth refresh -s workflow)" ;;
-  esac
+  if [ -n "$scopes_line" ] && ! scope_has "$scopes" workflow; then
+    add_result "gh auth" warn "token is missing the 'workflow' scope - only needed if gh workflow run/dispatch is used (gh auth refresh -s workflow)"
+  else
+    add_result "gh auth" ok ""
+  fi
 }
 
 # 7. git identity set; every file .gitattributes pins `text eol=lf` is
@@ -225,8 +260,12 @@ check_git_identity_and_line_endings() {
           pattern=${line%% *}
           for f in "$root"/$pattern; do
             [ -f "$f" ] || continue
-            cnt=$(grep -c "$(printf '\r')" "$f" 2>/dev/null)
-            if [ "${cnt:-0}" -gt 0 ]; then bad="$bad ${f#"$root"/}"; fi
+            # Not `grep -c "$(printf '\r')"`: Git Bash's grep runs its input
+            # through a text-mode read that silently strips CR before the
+            # pattern ever sees it, so that command reports 0 matches against
+            # a real CRLF file on the platform this check exists for. `od`
+            # reads bytes, not lines, so it is not subject to that translation.
+            if od -An -c "$f" 2>/dev/null | grep -q '\\r'; then bad="$bad ${f#"$root"/}"; fi
           done
           ;;
       esac
@@ -254,7 +293,7 @@ check_claude_cli() {
     return
   fi
   if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-    add_result "claude CLI" ok "authenticated via CLAUDE_CODE_OAUTH_TOKEN"
+    add_result "claude CLI" ok ""
     return
   fi
   add_result "claude CLI" FAIL "run claude login on the host, or pass CLAUDE_CODE_OAUTH_TOKEN into the container"
@@ -297,7 +336,7 @@ check_disk_space() {
 #     reachable outside a container; that path just reports ok.
 check_bind_mount_path() {
   if [ ! -e /.dockerenv ]; then
-    add_result "bind-mount path" ok "not in a container"
+    add_result "bind-mount path" ok ""
     return
   fi
   if [ "$docker_daemon_ok" != 1 ]; then
