@@ -28,3 +28,7 @@ scripts/dev_test.go text eol=lf
 # scripts/doctor runs directly under sh (host, dev image busybox sh, GitHub
 # runner) the same way scripts/dev does - same CRLF shebang problem.
 scripts/doctor text eol=lf
+
+# gate_test.go embeds gh/git stub scripts as raw string literals the same way
+# dev_test.go and update_test.go do - same CRLF shebang problem, same fix.
+scripts/gate_test.go text eol=lf

@@ -83,6 +83,17 @@ concurrency:
 permissions:
   contents: read
 
+# Wires H3's CI-only Postgres speed layer (docker-compose.ci.yml, decision D5
+# in docs/plans/2026-09-harness-optimization.md) into this workflow without
+# touching the documented command below: `docker compose` reads COMPOSE_FILE
+# instead of an explicit `-f` list, so `docker compose run --rm app go test
+# ./...` stays byte-identical to what a developer runs locally, and only the
+# merged config differs on a runner. docker-compose.ci.yml is override-style
+# (it only adds a tmpfs data dir to `db`) and stays a no-op anywhere this
+# variable isn't set.
+env:
+  COMPOSE_FILE: docker-compose.yml:docker-compose.override.yml:docker-compose.ci.yml
+
 jobs:
   test:
     runs-on: ubuntu-latest

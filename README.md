@@ -278,8 +278,9 @@ Notes on the steps, in the order you will wonder about them:
   salvaging.
 
 This procedure is not only written down. The `restore-round-trip` job in
-[`.github/workflows/e2e.yml`](.github/workflows/e2e.yml) executes it on every
-push to `main`: it seeds a stack, takes a backup, destroys the stack
+[`.github/workflows/restore.yml`](.github/workflows/restore.yml) executes it
+on every push to `main` that touches the files that can break it, on every
+release tag, and weekly: it seeds a stack, takes a backup, destroys the stack
 *including its volumes*, restores the archive into a database it first proves
 is empty, and then compares per-table row counts and the field values of named
 rows in more than one storage against what was there beforehand — plus a file
