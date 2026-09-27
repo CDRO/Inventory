@@ -796,6 +796,103 @@ for (const [name, fulfil] of [
   });
 }
 
+// #249 and #252: renderImagePicker's in-flight guard used to be scoped to one
+// call of the function, so it stopped a double click within one open picker
+// but not a close-and-reopen of the same logical picker. Both regression
+// tests below hold a mocked response open and release it on a schedule the
+// test controls — the same technique ingestion.spec.js uses for its own
+// overlapping-request races ("closing the location modal while two creates
+// overlap...") — rather than racing real timing, which would be flaky in
+// either direction.
+
+// #252: a reopen started before the first invocation's suggestions fetch has
+// resolved must not let that stale fetch land its own row beside the
+// reopened picker's.
+test("reopening the picker while its suggestions fetch is in flight does not duplicate the row", async ({
+  page,
+}) => {
+  await logIn(page);
+
+  // Each suggestions fetch this test triggers is held open independently,
+  // released in an order the test controls below.
+  const releases = [];
+  await page.route((url) => url.pathname.endsWith("/image-suggestions"), async (route) => {
+    await new Promise((resolve) => releases.push(resolve));
+    await route.fulfill({
+      json: {
+        suggestions: [{ url: `/api/storages/${STORAGE_ID}/images/${SUGGESTION_HASH_A}`, type: "photo" }],
+      },
+    });
+  });
+
+  await openProduct(page, "E2E Picture Picker Source");
+
+  // Invocation 1 opens the picker; its fetch starts and is held.
+  await page.locator('[data-role="change-picture"]').click();
+  await expect.poll(() => releases.length).toBe(1);
+
+  // Invocation 2 re-invokes the same picker before invocation 1's fetch has
+  // resolved — clearing the container and starting its own held fetch.
+  await page.locator('[data-role="change-picture"]').click();
+  await expect.poll(() => releases.length).toBe(2);
+
+  // Invocation 1's stale fetch resolves after invocation 2 already owns the
+  // container — the exact ordering #252 describes — then invocation 2's own
+  // fetch resolves.
+  releases[0]();
+  releases[1]();
+
+  await expect(page.locator('[data-role="picture-suggestion"]')).toHaveCount(1);
+  await expect(page.locator('[data-role="picture-none"]')).toHaveCount(1);
+});
+
+// #249: a write started by one invocation must still block a write from a
+// later reopen of the same logical picker, not just a second click inside
+// the same open picker.
+test("a suggestion click after a reopen is refused while an earlier write from the same picker is still in flight", async ({
+  page,
+}) => {
+  await logIn(page);
+  await mockSuggestions(page, [
+    { url: `/api/storages/${STORAGE_ID}/images/${SUGGESTION_HASH_A}`, type: "photo" },
+  ]);
+
+  // The first PATCH this test triggers is held open until released below. A
+  // second entry in `sent` would mean the fix let a reopened picker's click
+  // start a write while the first one was still outstanding.
+  const sent = [];
+  let releaseFirst;
+  const firstHeld = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  await page.route(`**/products/${PICTURE_PICKER_PRODUCT}/image`, async (route) => {
+    if (route.request().method() !== "PATCH") return route.fallback();
+    sent.push(route.request().postDataJSON());
+    if (sent.length === 1) await firstHeld;
+    await route.fulfill({ json: { image_url: null, icon_name: null } });
+  });
+
+  await openProduct(page, "E2E Picture Picker Source");
+  await page.locator('[data-role="change-picture"]').click();
+  await page.locator('[data-role="picture-suggestion"]').click(); // the held first PATCH
+
+  await expect.poll(() => sent.length).toBe(1);
+
+  // The "close and reopen mid-write" from #249: re-invoke the same logical
+  // picker and click its suggestion again while the first write is still
+  // unresolved.
+  await page.locator('[data-role="change-picture"]').click();
+  await page.locator('[data-role="picture-suggestion"]').click();
+
+  // The guard's refusal is synchronous, so this only gives a bug a chance to
+  // show up rather than racing the fix.
+  await page.waitForTimeout(200);
+  expect(sent.length, "the reopened picker's click must be refused, not raced").toBe(1);
+
+  releaseFirst();
+  await expect.poll(() => sent.length).toBe(1); // resolving the first write must not free a second one either
+});
+
 // #254: the picker's rollback contract. choose() (js/image-picker.js) catches
 // a failed write and undoes the optimistic selection, and setPicture
 // (js/pages/products.js) deliberately rethrows so that catch fires — every
