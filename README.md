@@ -85,6 +85,7 @@ anyone who is not an admin it is an ordinary 404
 | Build | `docker compose build` | dev |
 | Run (dev) | `docker compose up -d` | dev |
 | Unit tests | `docker compose run --rm app go test ./...` | dev |
+| Live Gemini test | `docker compose run --rm -e GEMINI_LIVE_TEST=1 app go test ./internal/vision/` | dev |
 | Lint / vet | `docker compose run --rm app go vet ./...` | dev |
 | Run (production) | `docker compose -f docker-compose.yml up -d` | prod |
 | Migrations | `docker compose -f docker-compose.yml run --rm app migrate up` | prod |
@@ -100,6 +101,15 @@ anyone who is not an admin it is an ordinary 404
 since `migrate` is a subcommand of the compiled binary that only the production
 image carries. Commands are grouped by image above so it is clear which is
 which.
+
+**The live Gemini test needs `GEMINI_API_KEY` too**, read from `.env` the same
+way the app reads it — `GEMINI_LIVE_TEST=1` is a second, deliberately separate
+gate. The key alone is ordinary app config, present in any environment already
+set up for the vision feature; `go test ./...` must not spend a paid API call
+just because that key happens to be configured, so reaching the real Gemini
+API takes an explicit further opt-in on top of it. This is why the flag is not
+in `.env.example`: `setup` prompts for every variable listed there, and this
+one only matters to `go test`, never to running the app.
 
 The frontend has no build, install, or lint command — it is plain HTML, CSS,
 and ES modules served as-is. In dev, `STATIC_DIR` points the server at
