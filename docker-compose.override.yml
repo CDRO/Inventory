@@ -89,6 +89,8 @@ services:
       - ./docker-compose.yml:/src/docker-compose.yml
       - ./docker-compose.nas.yml:/src/docker-compose.nas.yml
       - ./docker-compose.e2e.yml:/src/docker-compose.e2e.yml
+      - ./docker-compose.override.yml:/src/docker-compose.override.yml
+      - ./docker-compose.ci.yml:/src/docker-compose.ci.yml
       - ./.gitignore:/src/.gitignore
       - ./.dockerignore:/src/.dockerignore
       - ./.gitattributes:/src/.gitattributes
@@ -108,6 +110,32 @@ services:
     # single ordinary checkout working unchanged.
     ports:
       - "${HTTP_PORT:-8000}:${HTTP_PORT:-8000}"
+
+  # Speed flags for a throwaway database (docs/plans/2026-09-harness-
+  # optimization.md, decision D5; measured baseline: internal/store 19.7s,
+  # internal/migrate 7.8s on 2026-09-26). `command:` is the only thing this
+  # service needs to add - Compose merges it onto docker-compose.yml's `db`,
+  # so the image, POSTGRES_* env, healthcheck and the persistent `pgdata`
+  # volume all still come from there unchanged. A developer's dev/staging
+  # data survives `docker compose down` and a container restart; what these
+  # three flags give up is crash durability that a database nobody keeps
+  # never needed in the first place:
+  #   - fsync=off: a host crash or power loss can lose or corrupt recent
+  #     writes instead of losing nothing - a Postgres backend crash alone
+  #     loses nothing, because the OS page cache survives it. `docker compose
+  #     down` and an ordinary container restart are neither and are
+  #     unaffected.
+  #   - synchronous_commit=off: a commit returns before its WAL record is
+  #     flushed to disk, so a crash can lose the last commit window (not
+  #     corrupt anything) instead of nothing.
+  #   - full_page_writes=off: safe only because fsync is already off - it
+  #     exists solely to protect against a torn page during a crash that
+  #     fsync=off already accepts.
+  # None of this touches production (docker-compose.yml, docker-compose.nas.yml
+  # keep their defaults) or the E2E stack's own copy of these flags
+  # (docker-compose.e2e.yml).
+  db:
+    command: postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off
 
 volumes:
   # external: true is the whole point - see the mount's own comment above.
