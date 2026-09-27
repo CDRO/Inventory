@@ -16,6 +16,7 @@ import (
 // inventory_logs.reason.
 type LogReason string
 
+// LogReason values.
 const (
 	ReasonPurchase        LogReason = "purchase"
 	ReasonConsumption     LogReason = "consumption"
@@ -29,6 +30,7 @@ const (
 // docs/specs/08-expiration-and-classification.md safe.
 type ExpirationSource string
 
+// ExpirationSource values.
 const (
 	ExpirationDerived ExpirationSource = "derived"
 	ExpirationUser    ExpirationSource = "user"

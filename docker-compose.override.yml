@@ -94,6 +94,15 @@ services:
       - ./.gitignore:/src/.gitignore
       - ./.dockerignore:/src/.dockerignore
       - ./.gitattributes:/src/.gitattributes
+      # Same reason again, for scripts/dev.d/check (H6): without these two
+      # mounts, an edit to either file is invisible until the image is
+      # rebuilt — a revive.toml rule change silently keeps checking against
+      # the copy baked in at the last build, and TestEnvExampleParity reads
+      # the image's .env.example rather than the working tree's, which is
+      # exactly the "passes when the working tree is wrong" trap that file's
+      # own header comment warns an operator about.
+      - ./revive.toml:/src/revive.toml
+      - ./.env.example:/src/.env.example
       # The whole scripts tree rather than scripts/backup alone: besides
       # compose_test.go's read of scripts/backup, scripts/dev_test.go runs the
       # working tree's scripts/dev and scripts/dev.d/* under the image's sh,

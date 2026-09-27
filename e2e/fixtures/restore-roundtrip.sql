@@ -2,7 +2,7 @@
 -- e2e/fixtures/seed.sql does not seed
 -- (docs/specs/15-backup-restore-and-export.md, issue #133).
 --
--- Loaded only by the `restore-round-trip` job in .github/workflows/e2e.yml,
+-- Loaded only by the `restore-round-trip` job in .github/workflows/restore.yml,
 -- after seed.sql, and never by the browser suite — so no Playwright journey
 -- can read these rows or be disturbed by them:
 --   docker compose -f docker-compose.e2e.yml exec -T db \

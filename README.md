@@ -18,6 +18,17 @@ The version floor is real: the compose files use the long-form `env_file` with
 ignoring the key. Synology's Container Manager has shipped older versions —
 check with `docker compose version` before deploying.
 
+## Before you start
+
+In a development checkout, before a session or a wave — not a deployment
+step, and not on the NAS — run `scripts/doctor` (or `scripts/dev doctor`)
+first. It checks the daemon is reachable and can actually start containers,
+the Compose version floor above, the shared build-cache volume, that
+`HTTP_PORT`/`TRAEFIK_PORT` are free, and a few other things that otherwise
+surface as a confusing failure minutes into a session — printing one
+remediation line per problem, or `scripts/doctor --fix` to create the missing
+build-cache volume itself.
+
 ## First run
 
 > **On the operator's own Synology NAS, use the two-file command in
@@ -118,7 +129,9 @@ and ES modules served as-is. In dev, `STATIC_DIR` points the server at
 **Developer commands.** `scripts/dev <command>` wraps the recurring ones with
 compact output: `scripts/dev test [packages]` runs the unit tests above and
 prints only the failures (the full log lands in `.claude/last-test.log`),
-`scripts/dev vet` does the same for `go vet`, `scripts/dev ci-status <sha>
+`scripts/dev vet` does the same for `go vet`, `scripts/dev check` runs the
+deterministic pre-gate (`gofmt`, `go vet`, `staticcheck`, `revive` and
+`TestEnvExampleParity`) before a push, `scripts/dev ci-status <sha>
 [--dispatch <branch>]` waits for the GitHub Actions run of an exact commit, and
 `scripts/dev ci-usage [--month YYYY-MM]` reports billable Actions minutes.
 `scripts/dev` alone lists the commands; each lives in `scripts/dev.d/` as a
@@ -267,8 +280,9 @@ Notes on the steps, in the order you will wonder about them:
   salvaging.
 
 This procedure is not only written down. The `restore-round-trip` job in
-[`.github/workflows/e2e.yml`](.github/workflows/e2e.yml) executes it on every
-push to `main`: it seeds a stack, takes a backup, destroys the stack
+[`.github/workflows/restore.yml`](.github/workflows/restore.yml) executes it
+on every push to `main` that touches the files that can break it, on every
+release tag, and weekly: it seeds a stack, takes a backup, destroys the stack
 *including its volumes*, restores the archive into a database it first proves
 is empty, and then compares per-table row counts and the field values of named
 rows in more than one storage against what was there beforehand — plus a file
