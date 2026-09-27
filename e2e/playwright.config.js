@@ -84,9 +84,14 @@ export default defineConfig({
             //     getter on HTMLVideoElement.prototype, which is what lets
             //     a journey pin it at 0 to prove the gate holds.
             //   * Every track's readyState is "ended" after stop().
-            //   * enumerateDevices() reports exactly ONE videoinput, so the
-            //     flip button cannot be driven here (recorded as not
-            //     verifiable in this stack, #205).
+            //   * enumerateDevices() reports exactly ONE videoinput. That is
+            //     the measurement; it is NOT the conclusion #205 drew from it
+            //     ("the flip button cannot be driven here"). This same API is
+            //     as overridable as getUserMedia is two bullets up, so
+            //     ingestion.spec.js drives the flip logic by reporting two.
+            //     What stays device-only is whether the second stream is a
+            //     genuinely different physical camera — which no amount of
+            //     stubbing can answer.
             //   * window.BarcodeDetector is absent, so these flags do not
             //     start docs/specs/20-barcode-recall.md's live scan in any
             //     existing spec: supportsLiveScan() is false either way.

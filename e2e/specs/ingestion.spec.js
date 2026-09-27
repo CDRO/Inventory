@@ -263,13 +263,19 @@ test("the barcode scan sheet's photograph control decodes through the same looku
 // are not JPEG, so a `type: "image/jpeg"` label slapped onto them without a
 // re-encode fails here rather than downstream on a phone.
 //
-// Not verifiable in this stack, and left as #205 records them: the flip button
-// (the fake device reports exactly one videoinput), sensor resolution kept
-// through normalisation (the fake device gives 640x480 on both paths, so
-// canvas-at-bitmap-size and canvas-at-preview-size are indistinguishable),
-// EXIF orientation via `imageOrientation: "from-image"` (the fake PNG carries
-// none), and the expired-activation branch of the fallback (it cannot be
-// driven without waiting out the activation window).
+// Not verifiable in this stack, and left as #205 records them: sensor
+// resolution kept through normalisation (the fake device gives 640x480 on both
+// paths, so canvas-at-bitmap-size and canvas-at-preview-size are
+// indistinguishable), EXIF orientation via `imageOrientation: "from-image"`
+// (the fake PNG carries none), and the expired-activation branch of the
+// fallback (it cannot be driven without waiting out the activation window).
+//
+// The flip button is NOT on that list, though #205 puts it there. The fake
+// device does report one videoinput, but `enumerateDevices()` is as
+// overridable as `getUserMedia` — so the flip *logic* is driven by a journey
+// below, and only the question of whether the second stream is a genuinely
+// different physical camera is device-only. That journey's own comment says
+// which half is which.
 
 const VIEWFINDER = 'dialog[data-role="viewfinder"]';
 const PICKER_STATUS = '#photo-picker-field [data-role="status"]';
