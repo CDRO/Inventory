@@ -22,7 +22,8 @@
 # sandboxes agent sessions run in cannot start a Docker daemon locally
 # (issue #48) — so a GitHub-hosted runner, which has one, is the only place
 # this suite has ever actually executed. Dispatch and poll it the same way
-# test.yml documents:
+# test.yml documents (or `scripts/dev ci-status <sha> --workflow e2e.yml
+# --dispatch <branch>`, which is this recipe as a command):
 #
 #   git push -u origin <branch>
 #   gh workflow run e2e.yml --ref <branch>

@@ -1,0 +1,56 @@
+#!/bin/sh
+# scripts/dev - one entry point for the commands agents and people run against
+# this repository: `scripts/dev <command> [args]` runs `scripts/dev.d/<command>`.
+#
+# Why a dispatcher over a directory rather than one script with a case block:
+# a later change adds a command by adding a file, so two packages of the same
+# wave never edit this script (docs/plans/2026-09-harness-optimization.md,
+# workstream B2). Each command file starts with `#!/bin/sh` and, on its second
+# line, a `# ` comment that is its one-line description - the usage below is
+# built from those lines, so it can never drift from the files that exist.
+#
+# POSIX sh only. This runs under Git Bash on Windows, under busybox sh in the
+# dev image (which is where `go test ./...` exercises it, scripts/dev_test.go)
+# and under dash on a GitHub-hosted runner. It needs LF line endings;
+# .gitattributes pins that, as it does for scripts/backup.
+#
+# Exit codes: 2 for no command, an unknown command or a name that is not a
+# plain file name; otherwise whatever the command exits with.
+set -u
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+dir="$here/dev.d"
+
+usage() {
+  echo "usage: scripts/dev <command> [args]"
+  echo
+  echo "commands (scripts/dev.d/):"
+  for f in "$dir"/*; do
+    [ -f "$f" ] || continue
+    # The second line of every command file is its description.
+    desc=$(sed -n '2{s/^# *//;p;q}' "$f")
+    printf '  %-12s %s\n' "$(basename "$f")" "$desc"
+  done
+}
+
+cmd=${1:-}
+case "$cmd" in
+  ''|-h|--help|help)
+    usage
+    # `scripts/dev` alone is a mistake worth a non-zero exit; asking for help is not.
+    [ -z "$cmd" ] && exit 2
+    exit 0 ;;
+  */*|.*)
+    echo "scripts/dev: '$cmd' is not a command name" >&2
+    usage >&2
+    exit 2 ;;
+esac
+
+if [ ! -f "$dir/$cmd" ]; then
+  echo "scripts/dev: unknown command '$cmd'" >&2
+  usage >&2
+  exit 2
+fi
+
+shift
+exec sh "$dir/$cmd" "$@"

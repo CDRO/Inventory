@@ -36,41 +36,32 @@ Everything runs in Docker — no host toolchain
 Run it so the **full log lands on disk and only the signal enters context**:
 
 ```bash
-docker compose run --rm app go test ./... > .claude/last-test.log 2>&1
-echo "exit=$?"
-grep -E '^(--- )?FAIL|^panic:|^\s+.*\.go:[0-9]+' .claude/last-test.log | head -40
-tail -3 .claude/last-test.log
+scripts/dev test                      # docker compose run --rm app go test ./...
+scripts/dev test ./internal/store/    # one package while iterating; the full suite before pushing
 ```
 
-A green suite costs three lines instead of several hundred; a red one shows the
-failures and their file:line. The complete output stays in
-`.claude/last-test.log` (gitignored) — read it when a failure needs more than
-the excerpt. Never summarize a run you did not perform, and never report an
-exit code you did not see.
+`scripts/dev test` (`scripts/dev.d/test`) runs the documented command, writes
+the complete output to `.claude/last-test.log` (gitignored) and prints only
+the `FAIL`/`panic:` lines with their file:line, the last three lines and
+`exit=<code>` — a green suite costs four lines instead of several hundred; a
+red one shows the failures. Read the log when a failure needs more than the
+excerpt. Never summarize a run you did not perform, and never report an exit
+code you did not see.
 
 Do not push a red suite; the test reviewer will block and the round is wasted.
 
 **If this session has no working local `docker compose`** (no daemon, no
 `CAP_NET_ADMIN` — see issue #48), there is no local suite to run before the
 first push. Use the `test` GitHub Actions workflow as a pre-PR fallback
-instead of skipping this step. Two things `gh run watch` needs help with
-outside an interactive terminal — every agent session: it requires an
-explicit run id, and `gh run list` can briefly still show only an older run
-from the same branch right after dispatch, so poll by the exact commit SHA
-under test rather than trusting "the newest run in the list":
+instead of skipping this step. `scripts/dev ci-status` (`scripts/dev.d/ci-status`)
+is the dispatch-and-poll recipe as a command: it dispatches the workflow on
+the branch, finds the run by the exact commit SHA (never "the newest run in
+the list", which can briefly still be an older one right after a dispatch),
+and blocks on `gh run watch --exit-status`, so its exit code is the run's:
 
 ```bash
 git push -u origin spec/<NN>-<slug>
-gh workflow run test.yml --ref spec/<NN>-<slug>
-SHA=$(git rev-parse HEAD)
-RUN_ID=""
-for i in $(seq 1 10); do
-  RUN_ID=$(gh run list --workflow=test.yml --branch spec/<NN>-<slug> --event workflow_dispatch \
-    --limit 5 --json databaseId,headSha -q ".[] | select(.headSha == \"$SHA\") | .databaseId" | head -1)
-  [ -n "$RUN_ID" ] && break
-  sleep 3
-done
-gh run watch "$RUN_ID" --exit-status   # blocks until the run finishes; non-zero = red
+scripts/dev ci-status "$(git rev-parse HEAD)" --dispatch spec/<NN>-<slug>   # non-zero = red
 ```
 
 Slower than local Docker — each round-trip is a push and a runner boot — but

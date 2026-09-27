@@ -36,7 +36,8 @@
 # terminal (every agent session): it requires an explicit run id, and the run
 # list can briefly still show only an older run from the same branch right
 # after dispatch — so poll by the exact commit SHA under test, not just "the
-# newest run", until a match for it shows up —
+# newest run", until a match for it shows up (`scripts/dev ci-status <sha>
+# --dispatch <branch>` is this recipe as a command) —
 #
 #   git push -u origin <branch>
 #   gh workflow run test.yml --ref <branch>
