@@ -1,0 +1,30 @@
+# CI-only speed layer for the `db` service (docs/plans/2026-09-harness-
+# optimization.md, decision D5). Override-style: this file only ever adds to
+# docker-compose.yml and docker-compose.override.yml, and only touches `db`.
+#
+# Not auto-loaded. Selected explicitly in the workflows via
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.ci.yml
+#
+# so that the documented local command, `docker compose run --rm app go test
+# ./...`, stays byte-identical whether or not this file is in play - this
+# file is what changes, not the command. Wiring COMPOSE_FILE into the
+# workflows is wave 2's job (H8), not this one's; this file exists
+# unreferenced until then.
+#
+# The one thing this file adds beyond docker-compose.override.yml's own
+# fsync=off/synchronous_commit=off/full_page_writes=off (which a runner
+# picks up too, once COMPOSE_FILE includes the override) is a tmpfs data
+# directory: `db`'s data lives in memory instead of the runner's disk. That
+# trade is right for a GitHub-hosted runner, whose whole VM - `db`'s data
+# directory included - is destroyed the moment the job ends, and wrong for
+# docker-compose.override.yml's own `pgdata` volume, which is a developer's
+# to keep across `docker compose down`. Compose merges `volumes` by mount
+# target, so this replaces the base file's `pgdata` mount at
+# /var/lib/postgresql/data for the CI stack only; docker-compose.yml's own
+# `pgdata` named volume is simply not mounted anywhere in that merged config.
+services:
+  db:
+    volumes:
+      - type: tmpfs
+        target: /var/lib/postgresql/data

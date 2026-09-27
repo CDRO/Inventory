@@ -126,6 +126,12 @@ Three things the sequence alone doesn't make obvious:
   first's containers and takes the run over silently. Inside a sequential wave
   that cannot happen; with `"sequential": false` the pre-flight `docker ps`
   at the top of the compose header is the only guard.
+- **The `db` service also runs with `fsync=off`, `synchronous_commit=off` and
+  `full_page_writes=off`** (docs/plans/2026-09-harness-optimization.md,
+  decision D5), kept in step with `docker-compose.override.yml`'s own copy of
+  the same flags. This database already has no persistent volume — the
+  sequence's closing `down -v` discards it regardless — so trading crash
+  durability for speed here costs nothing the stack was keeping anyway.
 
 ## Continuous integration
 
@@ -715,6 +721,21 @@ The block above is an abridged illustration, not a second source of truth:
 reasoning in comments. Reconcile toward the real file, never the other way
 round — every mount here exists to stop a silent staleness, and deleting one
 because this excerpt is shorter reintroduces exactly the failure it prevents.
+
+The override's `db` service adds one thing beyond a merge of the base file's:
+`command: postgres -c fsync=off -c synchronous_commit=off -c
+full_page_writes=off` (docs/plans/2026-09-harness-optimization.md, decision
+D5). These three flags trade crash durability for write speed on a database
+that is entirely disposable — a developer's `pgdata` volume (still the base
+file's persistent, named one; the override does not touch it) survives an
+ordinary `docker compose down` or container restart, and the only thing a
+crash could now lose is what a re-seed or restore already recreates. Neither
+`docker-compose.yml` nor `docker-compose.nas.yml` carries any of this;
+production runs Postgres on its defaults. A third file, `docker-compose.ci.yml`
+(override-style, `db` service only), adds a `tmpfs` data directory for the
+same flags on a GitHub-hosted runner, whose whole VM is destroyed at the end
+of the job anyway; it is not auto-loaded and is picked up only where a
+workflow sets `COMPOSE_FILE` to include it.
 
 ## Deployment model
 
