@@ -120,25 +120,27 @@ number. Each posts its own PR comment and returns a short summary.
 ## 6. The gate — read verdicts back from GitHub
 
 ```bash
-gh pr view <PR> --comments
+scripts/dev gate <PR>
 ```
 
-**Decide from the posted comments, not from what the agents told you.** A
-subagent's report is not visible to the user and is easy to remember
-generously; the comment on the PR is the record, and it is what the user will
-read later. Re-read it.
+**Decide from this, not from what the agents told you.** A subagent's report
+is not visible to the user and is easy to remember generously; the verdict
+marker each reviewer posts on the PR is the record, and for the merge
+decision itself `scripts/dev gate` (`scripts/dev.d/gate`, H5) reads only
+those markers back from GitHub — never the prose above them, and never a
+comment whose `sha=` does not match the PR's current head commit, so a stale
+approval from before your last push can never count. (The one exception: on
+a PR against `main`, its documentation-only fallback also reads the current
+round's own test-reviewer comment for a `**Suite:**` line — never a stale
+one — see the command's own `--help`.)
 
-Merge only when **all** of these hold:
-
-- three `VERDICT: APPROVE` headers for the current round — one per reviewer
-- the test reviewer's `**Suite:**` line shows a passing local exit code, **or**
-  — when local `docker compose` cannot reach a daemon at all — a completed,
-  successful run of the `test` GitHub Actions workflow against the PR's head
-  commit (`.claude/agents/review-tests.md` covers when this fallback applies)
-- no unaddressed blocking finding anywhere in the current round
-
-A missing reviewer comment is not an approval. Two approvals and a silence is
-not a pass.
+It prints one line per reviewer and then exactly one of `MERGE`, `WAIT
+<reviewers>` or `BLOCK <reviewers>`, exiting 0, 3 or 4 respectively. Merge
+only on `MERGE`. `WAIT` means a reviewer has not posted a verdict for the
+current head commit yet — that is not an approval, however many times it ran
+before. On a PR against `main`, `MERGE` also depends on the `test` check
+(pending or failed keeps it from printing `MERGE`; see the command's own
+`--help` for the docs-only exception).
 
 ## 7. If anything blocks
 
@@ -147,7 +149,8 @@ not a pass.
 2. If you believe a finding is wrong, **reply to it on the PR** with your
    reasoning (`gh pr comment`) instead of ignoring it. A disputed finding that
    is argued in the open is resolved; one that is silently skipped is not.
-3. Re-run tests, push, increment the round, and re-review from step 5.
+3. Re-run tests, push, increment the round, re-review from step 5, then
+   re-run `scripts/dev gate`.
 4. **Round cap: 2.** After two review passes, stop. Do not run a third.
    Open a GitHub issue for whatever is still outstanding — the finding, its
    file and line, a reproduction if there is one, and why it was deferred —

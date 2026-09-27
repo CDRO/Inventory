@@ -35,3 +35,8 @@ scripts/dev_test.go text eol=lf
 # checkout) to pick this up — the stored blobs are already LF (autocrlf=true
 # converts on commit), so nothing in git history changes.
 *.go text eol=lf
+
+# gate_test.go embeds gh/git stub scripts as raw string literals the same way
+# dev_test.go and update_test.go do - same CRLF shebang problem, same fix.
+# (Redundant with *.go above, kept as H5 wrote it rather than reflowed.)
+scripts/gate_test.go text eol=lf

@@ -16,7 +16,7 @@ You have **no ability to edit files**, by design.
 
 ## Your task
 
-1. `gh pr view <PR> --json title,body,headRefName` and `gh issue view <ISSUE>`.
+1. `gh pr view <PR> --json title,body,headRefName,headRefOid` and `gh issue view <ISSUE>`.
 2. Read the spec file(s) from `docs/specs/` — the contract the change claims
    to implement.
 3. `gh pr diff <PR>`.
@@ -103,10 +103,19 @@ Post exactly this shape with `gh pr comment <PR> --body "..."`:
 
 ### Not verified
 - Whether the admin templates document their own routes; none in this diff.
+
+<!-- verdict: BLOCK round=1 sha=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 reviewer=docs -->
 ```
 
 The first line must be exactly `## Docs Review — VERDICT: APPROVE` or
 `## Docs Review — VERDICT: BLOCK`. The ship loop parses it. Omit empty sections.
+
+**The last line is always the machine-readable marker**, exactly
+`<!-- verdict: APPROVE|BLOCK round=<n> sha=<head sha reviewed> reviewer=docs -->`,
+verdict and round matching the header above it. `<n>` is the round you were
+given; `<head sha reviewed>` is the `headRefOid` you read in step 1 — never a
+value you recall from an earlier round or guess from the PR title.
+`scripts/dev gate <PR>` (H5) reads only this line, never the prose above it.
 
 After posting, report back a two-line summary: the verdict and the count of
 blocking findings.
