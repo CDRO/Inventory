@@ -175,9 +175,16 @@ jobs:
       # Compose synthesizes for this file's `app` service, `run`/`up` below
       # would not fail — they would just rebuild the image themselves, from
       # scratch, under the same tag, quietly throwing away everything `build`
-      # did. This step turns that mismatch into a failed job instead.
+      # did. Checking for `inventory-e2e-app:latest` by that same literal
+      # string would be a tautology (both jobs write the identical hardcoded
+      # tag by hand, so a typo in one would just as easily be repeated in the
+      # other) — this asks Compose itself what tag it will use for `app`,
+      # the same resolution `run`/`up` below actually perform, and fails loud
+      # if no image was loaded under THAT name.
       - name: Verify the image Compose will actually use is the one just loaded
-        run: docker image inspect inventory-e2e-app:latest >/dev/null
+        run: |
+          expected="$(docker compose -f docker-compose.e2e.yml config --images app)"
+          docker image inspect "$expected" >/dev/null
 
       # Migrate, then start — in that order, and not `up -d` first. Since
       # docs/specs/18-operations-and-observability.md, `serve` refuses to

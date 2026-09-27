@@ -17,8 +17,10 @@
 #     regardless of which files changed (`paths` filters are not evaluated
 #     for tag pushes, so this is unconditional on tags by construction, not
 #     by a second trigger block).
-#   - a weekly `schedule`, to catch drift in the `postgres`/Playwright images
-#     this file references by tag rather than digest — no path filter can
+#   - a weekly `schedule`, to catch drift in the `postgres:16-alpine` image
+#     this file's `db`/`backup` services reference by tag rather than digest
+#     — this workflow never touches the Playwright image, so it's the one
+#     tag-drift source this job can actually catch; no path filter can
 #     see that.
 #   - `workflow_dispatch`, the same on-demand escape hatch every other
 #     workflow here has.
