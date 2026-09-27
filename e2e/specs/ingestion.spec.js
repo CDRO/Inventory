@@ -441,11 +441,13 @@ test("closing the location modal while its create POST is still in flight still 
   await expect(first.locator('[data-role="location"] option:checked')).toContainText("Cellar Rack");
 });
 
-// #154 item 2, round 2: pendingMutation is a single slot, so a *second*
-// create POST started while Done is already waiting on the first one must
-// not be dropped when the first settles — tree-modal.js has to keep waiting
-// for whichever one is still outstanding, not just the one requestClose
-// originally latched onto.
+// #154 item 2, round 2: pendingMutation was a single slot when this test was
+// written, so a *second* create POST started while Done is already waiting on
+// the first one must not be dropped when the first settles — tree-modal.js has
+// to keep waiting for whichever one is still outstanding, not just the one
+// requestClose originally latched onto. #221 has since replaced that slot with
+// a set of every outstanding attempt; the promise this test guards is the same
+// one either way.
 test("closing the location modal while two creates overlap waits for both before resolving", async ({ page }) => {
   await logInAsBob(page);
   await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOCATION_MODAL_JOB}`);
@@ -514,26 +516,30 @@ test("closing the location modal while two creates overlap waits for both before
 });
 
 // #221: the test above releases its two creates in *start* order, so the
-// single-slot pendingMutation is always cleared by whichever attempt
-// requestClose is currently latched onto. Nothing orders POST responses by
-// request order, though, and a single slot only ever names "the most
-// recently started mutation" — not the set of ones still outstanding. This
-// test is that test with the release order reversed, which is the case a
-// single slot cannot survive:
+// single-slot pendingMutation was always cleared by whichever attempt
+// requestClose was currently latched onto. Nothing orders POST responses by
+// request order, though, and a single slot only ever named "the most recently
+// started mutation" — not the set of ones still outstanding. This test is that
+// test with the release order reversed, which is the case a single slot could
+// not survive:
 //
-//   A starts, B starts (so the slot now names B), Done is clicked (so
-//   requestClose latches onto B), then B settles *before* A. runMutation(B)
-//   finds the slot still naming B and nulls it, requestClose wakes to an
-//   empty slot and finalizes — while A's POST is still in flight. A's id
-//   never reaches createdIds and its late answer lands in a dialog already
-//   removed, which is exactly what #154 item 2 was filed to close.
+//   A starts, B starts (so the slot then named B), Done is clicked (so
+//   requestClose latched onto B), then B settles *before* A. runMutation(B)
+//   found the slot still naming B and nulled it, requestClose woke to an empty
+//   slot and finalized — while A's POST was still in flight. A's id never
+//   reached createdIds and its late answer landed in a dialog already removed,
+//   which is exactly what #154 item 2 was filed to close.
+//
+// tree-modal.js tracks the set of outstanding attempts now, so the mechanism
+// described above no longer exists; this stays as its regression guard, in the
+// past tense that says so (#282).
 //
 // Note the deliberate difference from the test above, whose comment warns
 // that submitting both creates before Done "would pass against either"
 // implementation: that warning is about the *round-2* fix (latching onto a
 // stale attempt), which both-before-Done genuinely cannot distinguish. It is
 // not an objection to this interleaving, which needs both creates in flight
-// before Done precisely so the slot can be overwritten and then cleared by
+// before Done precisely so the slot could be overwritten and then cleared by
 // the wrong one.
 test("closing the location modal resolves both creates even when they settle out of start order", async ({
   page,
@@ -562,8 +568,9 @@ test("closing the location modal resolves both creates even when they settle out
     await dialog.locator("#location-modal-add-root-form button[type=submit]").click();
   };
 
-  // Both creates start before Done, so the slot ends up naming the *second*
-  // one — and releases[0] is the first-started POST, releases[1] the second.
+  // Both creates start before Done, so a single slot would have ended up
+  // naming the *second* one — and releases[0] is the first-started POST,
+  // releases[1] the second.
   //
   // These two names are new roots in the *shared* "E2E Household", so they
   // have to be unique to this test and must not collide with any other
@@ -592,10 +599,161 @@ test("closing the location modal resolves both creates even when they settle out
   await page.unroute(`**/api/storages/${HOUSEHOLD}/locations`);
 
   await expect(dialog).toBeHidden();
-  // The first-started create is the one a single slot drops. Both ids have to
+  // The first-started create is the one a single slot dropped. Both ids have to
   // reach createdIds for both options to be here.
   await expect(first.locator('[data-role="location"] option', { hasText: "Boiler Nook" })).toHaveCount(1);
   await expect(first.locator('[data-role="location"] option', { hasText: "Utility Closet" })).toHaveCount(1);
+});
+
+// #280: #221 made requestClose wait on a *set* of outstanding mutations, but
+// runMutation deleted its attempt from that set in a `finally` that fired
+// before `await reload()` — so the set could be empty while the post-mutation
+// reload GET was still in flight, and a Done or Esc inside that window
+// finalized. The dialog was then removed from the DOM while its own reload was
+// still coming, and that reload's view.render — or its showError — landed on a
+// dialog already gone: the identical failure shape #221 fixed for the create
+// itself, one step further along.
+//
+// Holding the *reload* rather than the create is what makes this test
+// discriminating. The create POST is allowed through and settles normally, so
+// under the old ordering the attempt had already left pendingMutations by the
+// time Done is clicked, and finalize then ran synchronously inside that click —
+// the dialog was gone before the click returned. That is why an immediate
+// visibility check is enough here and no settle barrier is needed, unlike the
+// two-dismissal test below.
+test("closing the location modal while its post-create reload GET is still in flight waits for that reload", async ({
+  page,
+}) => {
+  await logInAsBob(page);
+  await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOCATION_MODAL_JOB}`);
+  const first = page.locator("#rows .review-row").first();
+
+  await first.locator('[data-role="location-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(dialog).toBeVisible();
+  // The dialog's own opening reload has rendered, so the next GET on this
+  // endpoint is unambiguously the one the create below triggers.
+  await expect(dialog).toContainText("Pantry");
+
+  let releaseReload;
+  const reloadHeld = new Promise((resolve) => {
+    releaseReload = resolve;
+  });
+  let heldReloads = 0;
+  await page.route(`**/api/storages/${HOUSEHOLD}/locations`, async (route) => {
+    if (route.request().method() === "GET" && heldReloads === 0) {
+      heldReloads = 1;
+      await reloadHeld;
+    }
+    await route.continue();
+  });
+
+  // A new root in the *shared* "E2E Household", so its name has to be unique to
+  // this test and must not be a substring or a superstring of a name any spec
+  // asserts on, in either direction: a `hasText` filter matches substrings, so
+  // "Boiler Nook Two" would break the reversed-settle test above on its own
+  // toHaveCount(1), and anything containing "Garage" is asserted *absent* from
+  // this tree by e2e/specs/storage-switching.spec.js.
+  await dialog.getByRole("button", { name: "Add top-level location" }).click();
+  await dialog.locator('input[aria-label="Name of the new top-level location"]').fill("Broom Cupboard");
+  await dialog.locator("#location-modal-add-root-form button[type=submit]").click();
+
+  // The create POST has answered — the request now held is its reload, which is
+  // exactly the window this issue is about.
+  await expect.poll(() => heldReloads).toBe(1);
+
+  // Done, clicked with nothing but that reload outstanding: the dialog has to
+  // keep waiting rather than finalizing and letting the reload land on a
+  // dialog already removed.
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeVisible();
+
+  releaseReload();
+  await page.unroute(`**/api/storages/${HOUSEHOLD}/locations`);
+
+  await expect(dialog).toBeHidden();
+  await expect(first.locator('[data-role="location"] option', { hasText: "Broom Cupboard" })).toHaveCount(1);
+  await expect(first.locator('[data-role="location"] option:checked')).toContainText("Broom Cupboard");
+});
+
+// #275: finalize's failure latch was one consume-once boolean, so of two
+// dismissals asked for before the same mutation failed, the first correctly
+// kept the dialog open and the second found the flag already cleared and closed
+// it — both inside the settle's own microtask batch, with no repaint in
+// between, so the dialog was removed without showError's message ever having
+// been painted.
+//
+// Done then Esc, both before the create answers, is that interleaving: each
+// registers its own independent waiter on the same in-flight attempt, and both
+// reach finalize when it settles. Nothing here holds the *reload* open, on
+// purpose — #280's fix alone (keeping an attempt tracked across its reload)
+// would make a held reload keep the dialog open all by itself, and this test
+// would then pass without the per-attempt failure tracking it is actually
+// about.
+test("two dismissals racing one failing create leave the location modal open with its error shown", async ({
+  page,
+}) => {
+  await logInAsBob(page);
+  await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOCATION_MODAL_JOB}`);
+  const first = page.locator("#rows .review-row").first();
+
+  await first.locator('[data-role="location-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Pantry");
+
+  // Held, then failed: the create has to still be in flight while both
+  // dismissals are asked for, and then answer with an error. An aborted
+  // request never reaches the server, so this test writes nothing at all to the
+  // shared "E2E Household" — the name below exists only in the browser.
+  let releasePost;
+  const postHeld = new Promise((resolve) => {
+    releasePost = resolve;
+  });
+  await page.route(`**/api/storages/${HOUSEHOLD}/locations`, async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    await postHeld;
+    await route.abort("failed");
+  });
+
+  await dialog.getByRole("button", { name: "Add top-level location" }).click();
+  await dialog.locator('input[aria-label="Name of the new top-level location"]').fill("Sunken Crate");
+  await dialog.locator("#location-modal-add-root-form button[type=submit]").click();
+
+  // Two independent waiters on the one in-flight attempt, neither of which can
+  // have seen an error — there is none yet to see.
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeVisible();
+
+  // The create now fails and its own reload follows. Waiting for that reload's
+  // response and then for two animation frames puts the assertions below
+  // strictly after the point at which the old latch closed the dialog: that
+  // close happened in the microtask batch right after this GET was *issued*,
+  // before its response came back and certainly before the next paint — which
+  // is the whole shape of the finding, a dialog removed before the error was
+  // ever painted.
+  const reloadDone = page.waitForResponse(
+    (response) =>
+      response.request().method() === "GET" && response.url().includes(`/api/storages/${HOUSEHOLD}/locations`),
+  );
+  releasePost();
+  await reloadDone;
+  await page.unroute(`**/api/storages/${HOUSEHOLD}/locations`);
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("alert")).toContainText("Could not reach the server");
+
+  // The failure must not trap the dialog either: a dismissal made with the
+  // banner in front of the user closes it, exactly as the second Done did
+  // under the consume-once flag.
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
 });
 
 // docs/specs/26-location-quick-create.md's first acceptance criterion, for
