@@ -130,13 +130,59 @@ Three things the sequence alone doesn't make obvious:
 ## Continuous integration
 
 A GitHub Actions workflow (`.github/workflows/test.yml`) runs on every push
-to `main`, confirming what is about to be deployed. It runs exactly the
-commands documented above — `docker compose run --rm app go vet ./...` then
-`docker compose run --rm app go test ./...` — against an ephemeral `.env`
-generated at the start of the job (throwaway credentials, never committed,
-never reused outside that run). This does not relax the no-host-toolchain
-rule: the runner has no Go, Node, or Postgres installed directly, only
-Docker; every command still goes through `docker compose`.
+to `main`, confirming what is about to be deployed. It runs both documented
+commands as one container invocation —
+`docker compose run --rm app sh -c 'go vet ./... && go test ./...'` — against
+an ephemeral `.env` generated at the start of the job (throwaway credentials,
+never committed, never reused outside that run). One invocation instead of
+two separate `docker compose run` calls means one `db` healthcheck wait
+instead of two. This does not relax the no-host-toolchain rule: the runner
+has no Go, Node, or Postgres installed directly, only Docker; every command
+still goes through `docker compose`. `docker buildx` and `actions/cache`,
+below, are runner-side tooling in the same sense — they move cache bytes
+around, they never compile or run project code themselves.
+
+The job is cached across runs on two axes. The Go build object cache
+(`docker-compose.override.yml`'s `go-build-cache` volume, normally a
+Docker-managed named volume on a developer's machine) is created on the
+runner as a *bind* volume onto a plain runner directory instead
+(`docker volume create --driver local --opt type=none --opt o=bind --opt
+device=${{ runner.temp }}/go-build inventory-go-build-cache`), and
+`actions/cache` restores and saves that same directory — a bind mount rather
+than a `docker run … tar` copy step in and out of a Docker-managed volume,
+because `actions/cache` only ever saves and restores a plain filesystem
+path, and a bind mount makes writes to the volume already be writes to that
+path, with no copy and no change to the override file's mount line. The
+directory lives under `runner.temp`, outside the repository checkout: the
+build below sends the whole checkout as the build context, and
+`.dockerignore` does not exclude a cache directory, so a cache placed inside
+the checkout would ship into the image and its own layer cache on every
+run. Its key is
+`go-build-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}`,
+with `restore-keys` falling back to the same prefix without the SHA, then to
+the OS alone. Separately, the `dev` image
+(`docker-compose.override.yml`'s `app` service target) is built through
+`docker buildx` with BuildKit's GitHub Actions cache backend
+(`cache-from`/`cache-to: type=gha`, `mode=max`) and loaded into the runner's
+local Docker before `docker compose run` starts, so compose finds
+`inventory-app-dev:latest` already built and does not rebuild it; what the
+cache actually restores is the Dockerfile's `go mod download` layer, keyed
+on `go.sum` through Docker's own layer cache rather than a workflow key.
+
+The workflow also declares a `concurrency` group
+(`test-${{ github.workflow }}-${{ github.ref }}`) with `cancel-in-progress`
+true only for `pull_request` events, so a second push to the same PR cancels
+the still-running job for the one before it, while pushes to `main` are
+never cancelled. `timeout-minutes` is 8. Both the `push` and `pull_request`
+triggers carry the same `paths-ignore`: `docs/**`, `**.md`, `.claude/**`, and
+`LICENSE` — a documentation-only change triggers no run at all. Nothing else
+is ignored: `deploy/**`, `scripts/**`, and every Go, SQL, compose, Dockerfile
+and `web/**` or `e2e/**` change still runs the job, including files under
+`scripts/` and `deploy/` that a Go test reads directly
+(`docker-compose.override.yml`'s own comments on those mount lines explain
+why). There is no required status check on this workflow — the ship loop's
+own merge gate, not a GitHub branch protection rule, is what a PR actually
+waits on.
 
 On `pull_request` it is scoped to `branches: [main]` — a wave consolidation
 PR (`integration/*` -> `main`), or any other PR that merges straight to
