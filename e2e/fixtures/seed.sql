@@ -886,4 +886,43 @@ INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, create
   ('00000000-0000-7000-8000-0000000000fe', '00000000-0000-7000-8000-0000000000fc', '00000000-0000-7000-8000-0000000000fd', 4, 'purchase', '00000000-0000-7000-8000-000000000003')
 ON CONFLICT (id) DO NOTHING;
 
+
+-- Two more products in "E2E Household", dedicated to #248: the custom-upload
+-- half of the same picture-change path #135 shipped the picker half of.
+-- ...ff and ...100 are the next free ids after ...fe, the inventory_logs row of
+-- #224's "E2E Empty Submit Move Source" immediately above — and the first ids
+-- in this file to leave the two-hex-digit tail, which is only a formatting
+-- change, not a new range with rules of its own.
+--
+-- Same reasoning as the ...fa/...fb block: the shared Household storage,
+-- because e2e-bob's only membership is this one, and nothing here writes
+-- durable per-user state. Two products rather than one because the suite runs
+-- fullyParallel and both scenarios write a picture — one through the route
+-- directly, one through the file control on the detail page — so sharing a row
+-- would let the order they run in decide the outcome.
+--
+-- Neither starts with a picture: what both assert is one arriving, and a
+-- fixture that already had one would let a route that wrote nothing pass.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock, icon_name) VALUES
+  ('00000000-0000-7000-8000-0000000000ff', '00000000-0000-7000-8000-000000000010', 'E2E Picture Upload Source',    NULL, 'non_perishable', 0, NULL),
+  ('00000000-0000-7000-8000-000000000100', '00000000-0000-7000-8000-000000000010', 'E2E Picture Upload UI Source', NULL, 'non_perishable', 0, NULL)
+ON CONFLICT (id) DO NOTHING;
+
+-- One more product in "E2E Household", dedicated to #251: the edit form's
+-- icon input going stale after a picture clear, and an unrelated-field Save
+-- resurrecting it. ...101 is the next free id after ...100, "E2E Picture
+-- Upload UI Source" immediately above.
+--
+-- Same reasoning as the ...fa/...fb and ...ff/...100 blocks above: the
+-- shared Household storage, because e2e-bob's only membership is this one,
+-- and nothing here writes durable per-user state. Its own row rather than
+-- reusing ...fb: that fixture's clear is already read by two scenarios
+-- above, and this suite runs fullyParallel, and this scenario additionally
+-- saves the row, which neither of those does.
+--
+-- Starts with an icon_name, like ...fb, so that clearing it — and it staying
+-- cleared through the save that follows — is observable.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock, icon_name) VALUES
+  ('00000000-0000-7000-8000-000000000101', '00000000-0000-7000-8000-000000000010', 'E2E Picture Edit Form Sync Source', NULL, 'non_perishable', 0, 'noto:cheese-wedge')
+ON CONFLICT (id) DO NOTHING;
 COMMIT;

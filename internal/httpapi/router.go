@@ -507,6 +507,11 @@ func NewRouter(d Deps) http.Handler {
 			sr.Get("/products/{product_id}/batches", products.Batches)
 			sr.Patch("/products/{product_id}/category", products.SetCategory)
 			sr.Patch("/products/{product_id}/image", products.SetImage)
+			// The other half of spec 07's picture-change path, at the address
+			// that spec names: the same URL as the PATCH above, under POST,
+			// taking a multipart photo instead of a picked suggestion
+			// (docs/specs/07-shopping-list-reconciliation.md).
+			sr.Post("/products/{product_id}/image", products.UploadImage)
 
 			// Product maintenance (docs/specs/16-product-maintenance.md): the
 			// detail read behind products.html, the full edit surface — which

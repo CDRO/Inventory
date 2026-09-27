@@ -115,10 +115,34 @@ export function openTreeManager(storageId, { kind }) {
   // order, so the question "is anything still outstanding?" stops having a
   // wrong answer.
   //
-  // pendingMutationFailed tracks whether an attempt ended in an error the
-  // user hasn't seen close the dialog on yet.
+  // An attempt stays in the set until its reload has redrawn the dialog too,
+  // not merely until its own mutate() has answered (#280). Membership means
+  // "this mutation is not finished with the dialog yet", and redrawing the
+  // dialog is part of being finished with it: deleting on mutate()'s settle
+  // left a window in which the set was already empty while the reload GET was
+  // still outstanding, so a Done or Esc inside it finalized and that reload's
+  // own view.render — or its showError — then landed on a dialog already
+  // removed from the DOM.
   const pendingMutations = new Set();
-  let pendingMutationFailed = false;
+
+  // unacknowledgedFailures holds one token per attempt whose error the user has
+  // not yet been given the chance to read. A set of per-attempt tokens rather
+  // than one shared boolean, for exactly the reason pendingMutations is a set:
+  // a single flag names "the current mutation" in a function that can have
+  // several in flight, and both ways that went wrong were real. A second
+  // mutation starting reset the flag and cleared the banner, so a first
+  // mutation's failure could disappear before anyone read it (#281); and
+  // finalize consumed the flag, so of two dismissals asked for before the same
+  // mutation failed, the first correctly kept the dialog open and the second
+  // found the flag already cleared and closed it — in the same microtask batch,
+  // before the error had ever been painted (#275).
+  //
+  // Nothing is ever removed from this set: a failure stops holding the dialog
+  // open not by being consumed but by appearing in the snapshot requestClose
+  // takes at the user's gesture (see requestClose), which is what tells a
+  // failure the user has had in front of them from one that appeared while
+  // their dismissal was already waiting.
+  const unacknowledgedFailures = new Set();
 
   const errorBox = el("div", { class: "alert", role: "alert", hidden: true });
   const statusBox = el("p", { class: "empty-state", role: "status", hidden: true });
@@ -169,24 +193,77 @@ export function openTreeManager(storageId, { kind }) {
   // rule on a move — so the dialog redraws from its answer rather than
   // predicting the new shape, exactly as locations.js and categories.js do.
   async function runMutation(mutate) {
-    clearMessages();
-    pendingMutationFailed = false;
-    const attempt = mutate().catch((err) => {
-      showError(err);
-      pendingMutationFailed = true;
-    });
+    // The status line belongs to whichever mutation is being started, so it is
+    // always replaced. An error banner is not: it may be an earlier mutation's
+    // failure, and clearing it here is precisely how a second mutation used to
+    // erase a first one's failure — banner and flag together — leaving Done
+    // free to close the dialog with the user never having been told that the
+    // first mutation did not happen (#281).
+    //
+    // Be clear about what that costs, because it is not a temporary state:
+    // nothing ever removes a token from unacknowledgedFailures — it has no
+    // .delete call, unlike pendingMutations below — so once any mutation has
+    // failed, this guard stops clearing the banner for the rest of the dialog's
+    // life. A failed create's message therefore outlives every later
+    // *successful* mutation and goes only when the dialog closes, which can
+    // leave it standing, stale but true, beside a success.
+    //
+    // That is deliberate and it is forced: keeping a failure visible until the
+    // user has been given the chance to read it and clearing it as soon as the
+    // next mutation succeeds are the same decision with opposite answers, and
+    // #281 is the bug report for choosing the second. It is also the second of
+    // the two shapes #281 itself offers — "clear only messages belonging to the
+    // mutation being started, or nothing at all while an unacknowledged failure
+    // exists". A banner that lingers can be misread as a later mutation's
+    // failure; a banner that vanishes hides that an earlier one never happened.
+    // The first is the cheaper mistake. Do not add a read/acknowledge
+    // transition here to tidy the staleness away — that is the regression
+    // #281 was filed over.
+    clearStatus();
+    if (unacknowledgedFailures.size === 0) clearError();
+
+    // One token per attempt, so both sets track attempts by identity rather
+    // than by "the latest one". The tracked promise deliberately covers
+    // mutate() *and* the reload that redraws the dialog from its answer, so
+    // membership of pendingMutations lasts as long as this attempt still has
+    // something to do to the dialog (#280).
+    const token = {};
+    const attempt = (async () => {
+      try {
+        await mutate();
+      } catch (err) {
+        // Latched the moment the banner is painted, which is what makes the
+        // snapshot requestClose takes meaningful: a dismissal asked for after
+        // this point has had the error in front of it, one already waiting when
+        // it appeared has not.
+        showError(err);
+        unacknowledgedFailures.add(token);
+      }
+      // reload() reports instead of throwing, because it is also the initial
+      // render's path and has nobody to throw to there. Its failure is latched
+      // the same way a mutation's is: it paints the same banner in the same
+      // dialog, so a finalize that closed over it unseen would be the same bug
+      // in a different place.
+      if (!(await reload())) unacknowledgedFailures.add(token);
+    })();
+
     pendingMutations.add(attempt);
     try {
       await attempt;
     } finally {
-      // Leaves the set the moment it settles, whoever else is still in it and
-      // whenever they started — the whole point of tracking membership rather
-      // than "the latest one".
+      // Leaves the set the moment the attempt settles — its reload included —
+      // whoever else is still in it and whenever they started, which is the
+      // whole point of tracking membership rather than "the latest one".
       pendingMutations.delete(attempt);
     }
-    await reload();
   }
 
+  /**
+   * reload re-reads the tree and redraws the dialog from the server's answer.
+   *
+   * @returns {Promise<boolean>} true when the redraw happened, false when the
+   *   GET failed and showError put a banner up in its place.
+   */
   async function reload() {
     try {
       const body = await get(basePath());
@@ -195,12 +272,14 @@ export function openTreeManager(storageId, { kind }) {
       if (empty) {
         clearChildren(treeContainer);
         treeContainer.append(el("p", { class: "empty-state" }, [text(config.emptyMessage)]));
-        return;
+        return true;
       }
       if (kind === "categories") inherited = resolveInheritance(body.items);
       view.render(body.items);
+      return true;
     } catch (err) {
       showError(err);
+      return false;
     }
   }
 
@@ -214,9 +293,12 @@ export function openTreeManager(storageId, { kind }) {
     statusBox.hidden = false;
   }
 
-  function clearMessages() {
+  function clearError() {
     errorBox.textContent = "";
     errorBox.hidden = true;
+  }
+
+  function clearStatus() {
     statusBox.textContent = "";
     statusBox.hidden = true;
   }
@@ -265,8 +347,8 @@ export function openTreeManager(storageId, { kind }) {
   // a mutation that's still in flight instead of resolving createdIds without
   // it. If that mutation ended in an error, the dialog stays open on this
   // request so the user actually sees showError's message rather than it
-  // landing in a dialog already removed; dismissing again (Done or Esc, with
-  // nothing pending this time) closes it.
+  // landing in a dialog already removed; dismissing again — the error now in
+  // front of them — closes it.
   //
   // INVARIANT: finalize only with pendingMutations empty, and re-check it
   // after every wait instead of finalizing once the batch awaited here
@@ -277,24 +359,41 @@ export function openTreeManager(storageId, { kind }) {
   // is what makes both who-started-last and who-settles-last irrelevant —
   // finalizing on the first settled batch would resolve createdIds without
   // whatever a newer mutation is still in the middle of creating.
+  //
+  // The gesture is also where the set of failures the user has already been
+  // shown is captured, once, and then carried unchanged through every wait
+  // below. That snapshot is what separates "a failure that was on screen when
+  // the user asked to close" from "a failure that appeared while this dismissal
+  // was waiting", and it does so without consuming anything — which is exactly
+  // what two dismissals racing one failing mutation need, since both of them
+  // reach finalize in the same microtask batch and a consume-once flag can only
+  // stop one of them (#275).
   function requestClose() {
-    if (pendingMutations.size === 0) {
-      finalize();
-      return;
-    }
-    Promise.all([...pendingMutations]).then(() => requestClose());
+    waitThenFinalize(new Set(unacknowledgedFailures));
   }
 
-  // A failed mutation keeps the dialog open on the request that discovers
-  // it, so the user actually sees showError's message instead of it landing
-  // in a dialog already removed — but only once: consuming the flag here
-  // means a further dismissal (the user having now seen it, or an unrelated
-  // later click) actually closes, rather than every subsequent Done/Esc
-  // finding the same stale failure and never closing at all.
-  function finalize() {
-    if (pendingMutationFailed) {
-      pendingMutationFailed = false;
+  function waitThenFinalize(seenFailures) {
+    if (pendingMutations.size === 0) {
+      finalize(seenFailures);
       return;
+    }
+    Promise.all([...pendingMutations]).then(() => waitThenFinalize(seenFailures));
+  }
+
+  // A failed mutation keeps the dialog open on every dismissal that was asked
+  // for before its error was painted, so the user actually sees showError's
+  // message instead of it landing in a dialog already removed. The next
+  // dismissal — made with the banner in front of the user — carries that
+  // failure in its own snapshot and closes normally, so a failure can never
+  // trap the dialog open either.
+  //
+  // Only the dialog staying open is guaranteed, not that every message is
+  // individually legible: two failures share the one error box, so the later
+  // one's text replaces the earlier one's. Both tokens are latched, so the
+  // dialog still refuses to close over either of them.
+  function finalize(seenFailures) {
+    for (const failure of unacknowledgedFailures) {
+      if (!seenFailures.has(failure)) return;
     }
     dialog.close();
   }
@@ -336,6 +435,30 @@ export function openTreeManager(storageId, { kind }) {
 
     document.body.append(dialog);
     dialog.showModal();
+    // The initial render, deliberately not tracked in pendingMutations and its
+    // answer deliberately not latched. Unlike a mutation's reload, a dismissal
+    // is allowed to win the race against this one: Done, the backdrop and Esc
+    // are all wired above, *before* showModal(), so a dismissal genuinely can
+    // arrive while this GET is still in flight — requestClose then finds the set
+    // empty, finalize closes the dialog, and this reload's view.render or
+    // showError afterwards runs against a treeContainer and errorBox already
+    // detached from the document.
+    //
+    // That is the same shape as #280 and it is still the behaviour wanted here,
+    // which is why #280's own body excludes this call site: "reload() is also
+    // called from other places that are not mutations (the initial render), so
+    // the fix belongs in runMutation's tracking rather than inside reload()
+    // itself." Nothing is at stake in this window, whatever else has happened in
+    // the dialog by then: this reload's only casualty is a render, or a banner,
+    // applied to nodes already detached from the document. It cannot cost a
+    // created id — createdIds is resolved from its own array on the close event
+    // and a redraw never feeds it — so a tracked mutation that started, finished
+    // and emptied pendingMutations while this opening GET was still outstanding
+    // loses nothing either, even though createdIds is not empty in that case.
+    // Tracking this call, meanwhile, would make Esc do nothing at all until a
+    // slow opening GET came back, which is a real cost for no gain. A banner
+    // painted into a dialog the user has already dismissed is likewise not
+    // something finalize should hold anything open for.
     reload();
   });
 }
