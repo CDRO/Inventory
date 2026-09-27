@@ -31,7 +31,14 @@ const packetGhStub = `#!/bin/sh
 printf 'gh %s\n' "$*" >> "$STUB_LOG"
 case "$1 $2" in
   "pr view")
+    n=$3
     case "$*" in
+      *"--json number"*)
+        # The script's PR-vs-issue check for a referenced #n: a PR number
+        # answers this, a real issue number does not.
+        eval "ispr=\${STUB_PR_${n}_EXISTS:-0}"
+        [ "$ispr" = "1" ] && { echo "$n"; exit 0; }
+        exit 1 ;;
       *"--json title "*) echo "$STUB_TITLE" ;;
       *"--json body "*) printf '%s\n' "$STUB_PRBODY" ;;
       *"--json baseRefName "*) echo "$STUB_BASE" ;;
@@ -228,9 +235,50 @@ func TestPacketHappyPathWritesEveryTopLevelSection(t *testing.T) {
 	}
 }
 
-// Issue #253 (a #N in the PR body that gh issue view cannot read) must be
-// noted, not fatal - it is almost always a PR reference, not an issue one.
-func TestPacketIssueThatIsNotAnIssueIsNotedNotFatal(t *testing.T) {
+// The bug the round-1 test review caught on this PR itself: a PR's own body
+// routinely mentions its own number (this PR's "Size proof" section names
+// #335), and gh issue view resolves a PR number too - it does not fail the
+// way a made-up number does - so without excluding $pr up front the packet
+// duplicated the whole PR body a second time under a spurious "Issue #335"
+// heading, and its actual size on disk (71 181 bytes, 61.5%) blew past the
+// 60% acceptance criterion the PR body claimed (60 909 bytes, 52.6%) from a
+// number that was never actually written to .claude/review-packet.md.
+func TestPacketDoesNotTreatItsOwnPRNumberAsAReferencedIssue(t *testing.T) {
+	env := basicEnv()
+	env["STUB_PRBODY"] = "Implements #12. See the size proof in #42 itself."
+
+	r := runPacket(t, env, nil, "42")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", r.exit, r.stderr)
+	}
+	mustNotContain(t, r.stdout, "Issue #42", "the PR must not fetch or inline itself")
+	if r.called(`pr view 42 --json number`) || r.called(`issue view 42`) {
+		t.Errorf("the PR's own number must be excluded before any lookup, but called:\n%s", r.calls)
+	}
+}
+
+// A #N that resolves to another pull request (not this one) is noted, not
+// fatal - checked with `gh pr view`, since `gh issue view` on a PR number
+// succeeds and returns that PR's own body rather than failing.
+func TestPacketReferencedNumberThatIsAPullRequestIsNotedNotFatal(t *testing.T) {
+	env := basicEnv()
+	env["STUB_PRBODY"] = "See #999 for the earlier attempt."
+	env["STUB_PR_999_EXISTS"] = "1"
+
+	r := runPacket(t, env, nil, "42")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", r.exit, r.stderr)
+	}
+	mustContain(t, r.stdout, "#999", "the packet")
+	mustContain(t, r.stdout, "not an issue", "the packet")
+	if r.called("issue view 999") {
+		t.Errorf("a number already confirmed to be a PR must not also be fetched as an issue:\n%s", r.calls)
+	}
+}
+
+// A #N that is neither this PR nor another PR but still cannot be read as an
+// issue (deleted, or a typo) is noted the same way, not fatal.
+func TestPacketReferencedNumberThatCannotBeReadIsNotedNotFatal(t *testing.T) {
 	env := basicEnv()
 	env["STUB_PRBODY"] = "See #999 for the earlier attempt."
 	env["STUB_ISSUE_999_FOUND"] = "0"
@@ -322,6 +370,36 @@ func TestPacketSpecSectionNamedHeadingOnly(t *testing.T) {
 	mustContain(t, r.stdout, "other headings omitted", "the omission note")
 	mustNotContain(t, r.stdout, "Nothing to do with widgets.", "the unmatched section")
 	mustNotContain(t, r.stdout, "Background nobody named.", "the unmatched section")
+}
+
+// A spec named in the PR or issue body but absent from this checkout (a
+// rename, or a spec added by a package this PR hasn't merged with yet) must
+// be noted, not fatal.
+func TestPacketSpecNamedButNotFoundInThisCheckout(t *testing.T) {
+	env := basicEnv()
+	env["STUB_PRBODY"] = "Implements #12 (docs/specs/99-does-not-exist.md)."
+
+	r := runPacket(t, env, nil, "42")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", r.exit, r.stderr)
+	}
+	mustContain(t, r.stdout, "docs/specs/99-does-not-exist.md", "the packet")
+	mustContain(t, r.stdout, "not found in this checkout", "the packet")
+}
+
+// A spec of 300 lines or fewer with no heading named is small enough to
+// inline whole - the 300-line ceiling exists for the specs that are not.
+func TestPacketSpecAtOrUnderThreeHundredLinesWithNoHeadingNamedIsInlinedWhole(t *testing.T) {
+	env := basicEnv()
+	env["STUB_PRBODY"] = "Implements #12 (docs/specs/09-test-spec.md)."
+
+	r := runPacket(t, env, map[string]string{"docs/specs/09-test-spec.md": testSpec}, "42")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", r.exit, r.stderr)
+	}
+	mustContain(t, r.stdout, "whole file", "the packet")
+	mustContain(t, r.stdout, "Background nobody named.", "every section is present")
+	mustContain(t, r.stdout, "Nothing to do with widgets.", "every section is present")
 }
 
 const longSpecPrefix = `# 20 - Long Spec

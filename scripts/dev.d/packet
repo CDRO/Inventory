@@ -93,15 +93,32 @@ fi
 
 # --- issues the PR body references -----------------------------------------
 
-issue_nums=$(printf '%s\n' "$prbody" | grep -Eo '#[0-9]+' | tr -d '#' | sort -un)
+# Excludes $pr itself: a PR's own "Implements #N" prose routinely also
+# mentions its own number (this PR's "Size proof" section names #335), and
+# GitHub's issue-view API answers a PR number too (issues and PRs share one
+# number space), so without this exclusion the packet would inline the PR's
+# own body a second time under a spurious "Issue #<PR>" heading.
+issue_nums=$(printf '%s\n' "$prbody" | grep -Eo '#[0-9]+' | tr -d '#' | sort -un | grep -vx "$pr" || true)
 
 issues_text=""
 issues_section=""
 for n in $issue_nums; do
+  # A referenced number is checked against `gh pr view` first, not by letting
+  # `gh issue view` fail: GitHub's issue-view API resolves PR numbers too (a
+  # PR is an issue with a diff attached), so `gh issue view` on a PR number
+  # succeeds and returns that PR's own body - it does not fail the way a
+  # made-up or deleted number would.
+  if gh pr view "$n" --json number >/dev/null 2>&1; then
+    issues_section="$issues_section
+## #$n
+(not an issue - #$n is a pull request)
+"
+    continue
+  fi
   ibody=$(gh issue view "$n" --json body -q .body 2>/dev/null) || {
     issues_section="$issues_section
 ## #$n
-(not an issue - #$n could not be read with \`gh issue view\`; likely a PR reference)
+(not an issue - #$n could not be read with \`gh issue view\`)
 "
     continue
   }
