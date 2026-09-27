@@ -10,27 +10,81 @@
       "Bash(git commit:*)",
       "Bash(git pull:*)",
       "Bash(git push origin:*)",
+      "Bash(git fetch:*)",
+      "Bash(git worktree:*)",
+      "Bash(git merge:*)",
       "Bash(gh pr view:*)",
       "Bash(gh pr list:*)",
       "Bash(gh pr diff:*)",
       "Bash(gh pr create:*)",
       "Bash(gh pr comment:*)",
+      "Bash(gh pr checks:*)",
       "Bash(gh issue view:*)",
       "Bash(gh issue list:*)",
       "Bash(gh issue create:*)",
       "Bash(gh issue close:*)",
+      "Bash(gh issue comment:*)",
+      "Bash(gh issue edit:*)",
       "Bash(gh label create:*)",
       "Bash(gh pr merge:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh run watch:*)",
+      "Bash(gh workflow run:*)",
       "Bash(docker compose run:*)",
       "Bash(docker compose build:*)",
       "Bash(docker compose up:*)",
-      "Bash(docker compose down:*)"
+      "Bash(docker compose down:*)",
+      "Bash(docker compose logs:*)",
+      "Bash(docker compose ps:*)",
+      "Bash(docker compose exec:*)",
+      "Bash(docker compose config:*)",
+      "Bash(docker compose version:*)",
+      "Bash(docker volume create:*)",
+      "Bash(docker volume ls:*)",
+      "Bash(docker volume inspect:*)",
+      "Bash(docker info:*)",
+      "Bash(scripts/dev:*)",
+      "Bash(sh scripts/dev:*)",
+      "Edit",
+      "Write"
     ],
     "deny": [
       "Bash(git push --force:*)",
       "Bash(git push -f:*)",
       "Bash(git reset --hard:*)",
+      "Bash(docker system prune:*)",
+      "Bash(docker container prune:*)",
+      "Bash(docker image prune:*)",
+      "Bash(docker network prune:*)",
+      "Bash(docker volume prune:*)",
+      "Bash(docker builder prune:*)",
+      "Bash(docker volume rm:*)",
       "Read(./.env)"
+    ]
+  },
+  "hooks": {
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -NoProfile -File scripts/hooks/notify.ps1 Notification \"Claude Code needs input\"",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -NoProfile -File scripts/hooks/notify.ps1 Stop \"Claude Code session finished\"",
+            "timeout": 2
+          }
+        ]
+      }
     ]
   }
 }
