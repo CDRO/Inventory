@@ -606,9 +606,11 @@ test("a batch two locations deep renders its full path, root first", async ({ pa
 // docs/specs/16-product-maintenance.md describes the detail view as showing
 // the image "with the change paths from 07 — suggestion picker, custom
 // upload". Spec 16 shipped the edit surface without them; these cover the
-// half that has a route to call.
+// suggestion-picker half, which was the only one with a route to call when
+// they were written. The custom upload is #248's block at the end of this
+// file.
 //
-// What is deliberately NOT asserted is a picture actually arriving. This
+// What is deliberately NOT asserted here is a picture actually arriving. This
 // stack configures no SerpAPI key and no Iconify reachability
 // (docker-compose.e2e.yml: "external services are not stubbed here yet"), so
 // the suggestion list is empty or the provider is unreachable, and pinning a
@@ -793,3 +795,231 @@ for (const [name, fulfil] of [
     await expect.poll(() => sent).toEqual({ image: null, icon_name: null });
   });
 }
+
+// --- #248: the custom-upload change path ------------------------------------
+//
+// Spec 07's other change path: "pick one of the 3, upload a custom photo
+// instead (`POST /api/storages/{storage_id}/products/{id}/image` multipart)".
+// Unlike the picker's half above, this one needs no provider at all — the photo
+// comes from the caller — so these scenarios *can* assert a picture actually
+// arriving, and do.
+//
+// One product per scenario, for the reason the ...fa/...fb block in
+// e2e/fixtures/seed.sql gives: both of these write a picture, and this suite
+// runs fullyParallel.
+
+const PICTURE_UPLOAD_PRODUCT = "00000000-0000-7000-8000-0000000000ff";
+const PICTURE_UPLOAD_UI_PRODUCT = "00000000-0000-7000-8000-000000000100";
+
+// A real, decodable 1x1 PNG — the same fixture ingestion.spec.js uses where an
+// image has to survive an actual decode. It has to be a real one here: the
+// server reads the format from the magic bytes and re-encodes the pixels
+// (internal/httpapi/upload.go), so a stand-in would be refused as a 422.
+const TINY_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+  "base64",
+);
+
+function photoUpload(buffer) {
+  return { multipart: { image: { name: "IMG_0042.png", mimeType: "image/png", buffer } } };
+}
+
+test("a custom photo upload becomes the product's picture and is served back", async ({ page }) => {
+  await logIn(page);
+
+  const before = await fetchProduct(page, PICTURE_UPLOAD_PRODUCT);
+  expect(before.image_url, "the fixture must start out with no picture").toBeNull();
+
+  const res = await page.request.post(
+    `${BASE}/products/${PICTURE_UPLOAD_PRODUCT}/image`,
+    photoUpload(TINY_PNG),
+  );
+  expect(res.status(), await res.text()).toBe(200);
+  const body = await res.json();
+
+  // The address is the server's own, under this storage, and the name is
+  // generated — never what the request called the file.
+  expect(body.image_url).toMatch(
+    new RegExp(`^${BASE}/product-images/[0-9a-f-]+\\.png$`),
+  );
+  expect(body.image_url).not.toContain("IMG_0042");
+  expect(body.icon_name).toBeNull();
+
+  const after = await fetchProduct(page, PICTURE_UPLOAD_PRODUCT);
+  expect(after.image_url).toBe(body.image_url);
+
+  // And the file is really there: permanent storage, served back through the
+  // storage-scoped picture route rather than merely recorded on the row.
+  const served = await page.request.get(body.image_url);
+  expect(served.status()).toBe(200);
+  expect(served.headers()["content-type"]).toBe("image/png");
+});
+
+test("the upload route answers 404 for a product in another storage, not 403", async ({ page }) => {
+  await logIn(page);
+
+  const res = await page.request.post(
+    `${BASE}/products/${FOREIGN_PRODUCT}/image`,
+    photoUpload(TINY_PNG),
+  );
+
+  // Same-storage validation on the new route too: the session IS a member of
+  // the storage in the path, the product simply belongs to a different one
+  // (docs/specs/03-auth-and-multi-tenancy.md).
+  expect(res.status()).toBe(404);
+  const body = await res.json();
+  expect(body.error.code).toBe("not_found");
+  expect(body.error.debug_reason).toBeUndefined(); // APP_ENV=prod in this stack
+});
+
+test("the upload route answers 404 for a storage the session is not a member of", async ({
+  page,
+}) => {
+  await logIn(page); // e2e-bob, a member of "E2E Household" only
+
+  const inaccessible = await page.request.post(
+    `/api/storages/${FOREIGN_STORAGE}/products/${FOREIGN_PRODUCT}/image`,
+    photoUpload(TINY_PNG),
+  );
+  const unknown = await page.request.post(
+    `/api/storages/00000000-0000-7000-8000-0000000000ee/products/${FOREIGN_PRODUCT}/image`,
+    photoUpload(TINY_PNG),
+  );
+
+  expect(inaccessible.status()).toBe(404);
+  expect(unknown.status()).toBe(404);
+  // Identical either way, body included, or membership becomes discoverable by
+  // probing.
+  expect(await inaccessible.json()).toEqual(await unknown.json());
+});
+
+test("the detail view's upload control posts the chosen photo and shows it", async ({ page }) => {
+  await logIn(page);
+  await openProduct(page, "E2E Picture Upload UI Source");
+
+  const upload = page.locator('[data-role="picture-upload"]');
+  await expect(upload).toBeHidden(); // closed until the change affordance is used
+
+  // The same click that opens the picker reveals the upload control, and
+  // reveals it without waiting on the suggestions request — which in this
+  // stack has no provider to reach.
+  await page.locator('[data-role="change-picture"]').click();
+  await expect(upload).toBeVisible();
+
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (res) =>
+        res.url().endsWith(`/products/${PICTURE_UPLOAD_UI_PRODUCT}/image`) &&
+        res.request().method() === "POST",
+    ),
+    page
+      .locator('[data-role="upload-picture"]')
+      .setInputFiles({ name: "IMG_0043.png", mimeType: "image/png", buffer: TINY_PNG }),
+  ]);
+  expect(response.status()).toBe(200);
+
+  // The picture is re-rendered from what the route answered, and the edit form
+  // beside it survives — renderPicture redraws the picture alone.
+  const picture = page.locator('[data-role="product-picture"] img');
+  await expect(picture).toHaveAttribute(
+    "src",
+    new RegExp(`^${BASE}/product-images/[0-9a-f-]+\\.png$`),
+  );
+  await expect(page.locator('[data-role="picture-status"]')).toContainText("Picture updated.");
+  await expect(page.locator("#p-name")).toHaveValue("E2E Picture Upload UI Source");
+
+  // And the row really changed, read back from the server rather than from the
+  // DOM this page just updated.
+  const product = await fetchProduct(page, PICTURE_UPLOAD_UI_PRODUCT);
+  expect(product.image_url).not.toBeNull();
+  expect(product.icon_name).toBeNull();
+});
+
+// A product id that is never seeded, in the same spirit as the unknown
+// storage id the test above uses: it has to stay unseeded for that test to
+// mean anything, so do not give this id a fixture row.
+const UNKNOWN_PRODUCT = "00000000-0000-7000-8000-0000000000ed";
+
+// The product-level half of #248's item 2, which the storage-level test above
+// does not reach: there the storage varies and the product id is held
+// constant, so it proves nothing about telling one product id from another.
+// Here the storage is Bob's own in both requests and only the product id
+// changes — one that exists in Alice's storage, one that exists nowhere.
+//
+// What this catches: a `GetProduct` pre-check added ahead of the write that
+// answers the two cases differently — a different error code, a 422 for one
+// and a 404 for the other, a message that names the product. Any of those
+// hands a member of one storage a working oracle for which product ids exist
+// in another (docs/specs/03-auth-and-multi-tenancy.md).
+test("the upload route cannot tell an unknown product from one in another storage", async ({
+  page,
+}) => {
+  await logIn(page);
+
+  const foreign = await page.request.post(
+    `${BASE}/products/${FOREIGN_PRODUCT}/image`,
+    photoUpload(TINY_PNG),
+  );
+  const unknown = await page.request.post(
+    `${BASE}/products/${UNKNOWN_PRODUCT}/image`,
+    photoUpload(TINY_PNG),
+  );
+
+  expect(foreign.status()).toBe(404);
+  expect(unknown.status()).toBe(404);
+  expect(await foreign.json()).toEqual(await unknown.json());
+});
+
+// The failure path through the control itself, which the success scenario
+// above cannot reach. Both of the guards renderPictureUpload leans on are
+// only observable here: the input is cleared *before* the write, and the
+// in-flight guard is released whether the write succeeded or not.
+//
+// The POST is mocked, so nothing is written and no fixture is mutated — which
+// is why this shares the picker's product rather than taking one of its own.
+// The seed file's one-product-per-scenario rule is about scenarios that write.
+test("a failed upload says so and leaves the control ready to try again", async ({ page }) => {
+  await logIn(page);
+
+  let attempts = 0;
+  await page.route(`**/products/${PICTURE_PICKER_PRODUCT}/image`, async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    attempts += 1;
+    await route.fulfill({
+      status: 413,
+      json: { error: { code: "payload_too_large", message: "The uploaded file is too large." } },
+    });
+  });
+
+  await openProduct(page, "E2E Picture Picker Source");
+  await page.locator('[data-role="change-picture"]').click();
+
+  const input = page.locator('[data-role="upload-picture"]');
+  await input.setInputFiles({ name: "IMG_0044.png", mimeType: "image/png", buffer: TINY_PNG });
+
+  // The server's own words, through the error catalog rather than a generic
+  // "something went wrong" (docs/specs/19-localization.md).
+  await expect(page.locator('[data-role="picture-status"]')).toContainText(
+    "The uploaded file is too large.",
+  );
+  // Still no picture: a failed write must not leave the page claiming one.
+  await expect(page.locator('[data-role="product-picture"]')).toContainText("No picture yet.");
+
+  // Both guards the control leans on, asserted on what each one actually
+  // changes.
+  //
+  // The clear-before-write, read through `files` rather than `value`:
+  // Playwright's setInputFiles never populates a file input's `value`, so
+  // `toHaveValue("")` reads "" whether the handler cleared the control or not
+  // and would pass against the very regression it is meant to catch. `files`
+  // is what `value = ""` empties, and it is what a browser consults when
+  // deciding whether re-picking the same file is a change at all.
+  await expect.poll(() => input.evaluate((el) => el.files.length)).toBe(0);
+
+  // And the in-flight guard released, so the same file picked a second time
+  // really does reach the route a second time. A regression leaving
+  // `uploading` or `disabled` stuck true after a rejected request fails here.
+  await expect(input).toBeEnabled();
+  await input.setInputFiles({ name: "IMG_0044.png", mimeType: "image/png", buffer: TINY_PNG });
+  await expect.poll(() => attempts).toBe(2);
+});

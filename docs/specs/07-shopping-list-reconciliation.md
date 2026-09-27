@@ -313,12 +313,16 @@ catalog suggestion accepted into a storage (`02-data-model.md`) and to a
 user-uploaded custom photo, which goes straight to permanent storage.
 
 A picture is therefore never recorded by an address a caller supplies.
-Every route that sets one — resolving a line, adding a reorder item,
-`PATCH …/products/{id}/image` — takes the **hash** of a picked suggestion
-and promotes it; a suggestion-cache URL recorded on a product would be a
-path the eviction sweep can still delete out from under it, and any other
-URL would point a household's product at a server of the caller's
-choosing. Promoted pictures are served at
+Every route that sets one by *reference* — resolving a line, adding a
+reorder item, `PATCH …/products/{id}/image` — takes the **hash** of a
+picked suggestion and promotes it. The one route that sets one by *value*,
+`POST …/products/{id}/image` multipart (the custom upload above), takes the
+bytes themselves and writes them under a name the server generates; the
+address it records is that name's, never anything the request carried. A
+suggestion-cache URL recorded on a product would be a path the eviction
+sweep can still delete out from under it, and any other URL would point a
+household's product at a server of the caller's choosing. Promoted pictures
+are served at
 `/api/storages/{storage_id}/product-images/{name}`, only to the storage
 whose product uses them (`06-vision-shelf-ingestion.md`).
 

@@ -254,6 +254,92 @@ func (h *ProductHandler) SetImage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"image_url": imageURL, "icon_name": body.IconName})
 }
 
+// UploadImage serves POST /api/storages/{storage_id}/products/{product_id}/image
+// — spec 07's other change path, which names this exact address and method:
+// "The user can: pick one of the 3, upload a custom photo instead (`POST
+// /api/storages/{storage_id}/products/{id}/image` multipart)"
+// (docs/specs/07-shopping-list-reconciliation.md), one of the two change paths
+// docs/specs/16-product-maintenance.md places on the product detail view.
+//
+// It shares SetImage's path under a different method deliberately. One address
+// for "this product's picture" is what keeps the two change paths from drifting
+// into different scoping rules, and the spec asks for exactly that path.
+//
+// The body is multipart with one `image` file, read through ReadImageUpload —
+// the one upload path in this package, which applies the photo's orientation to
+// its pixels and only then strips every scrap of metadata (upload.go,
+// docs/specs/04-backend-api-conventions.md). A second implementation of that
+// ordering here is precisely the invariant CLAUDE.md lists as failing silently.
+//
+// The photo goes straight to permanent product storage, never through the
+// suggestion cache, which is what spec 07 means by "a user-uploaded custom
+// photo, which goes straight to permanent storage". Nothing about it reaches a
+// catalog entry either — spec 07's "unlike a provider image, is **never**
+// written to the catalog entry": a product's name is shareable, a photo taken
+// inside someone's home is not. That holds by construction, because the only
+// write here is SetProductImageAsUser and ProductStore has no catalog method to
+// call.
+func (h *ProductHandler) UploadImage(w http.ResponseWriter, r *http.Request) {
+	storageID, ok := StorageIDFrom(r.Context())
+	if !ok {
+		h.errors.WriteError(w, r, Internal(errNoStorageInContext))
+		return
+	}
+	user, ok := UserFrom(r.Context())
+	if !ok {
+		h.errors.WriteError(w, r, Unauthorized(ReasonSessionMissing))
+		return
+	}
+	// Before the body is read: a malformed id names nothing, and saying so
+	// costs nothing, where reading a 25MB photo first would.
+	productID, failure := idFromPath(r, "product_id", "malformed product id")
+	if failure != nil {
+		h.errors.WriteError(w, r, failure)
+		return
+	}
+
+	image, failure := ReadImageUpload(w, r, "image")
+	if failure != nil {
+		h.errors.WriteError(w, r, failure)
+		return
+	}
+
+	// ReadImageUpload admits JPEG and PNG only, and product storage keeps both,
+	// so the one remaining way this fails is an unusable upload volume — a
+	// deployment problem the caller cannot fix by choosing another file, and
+	// therefore not a 422 about their input.
+	//
+	// SetImage reads the same errPictureUnavailable sentinel as a 422, which
+	// fits the case that dominates there: a suggestion evicted since the list
+	// was drawn, which the person really can fix by picking another. That
+	// mapping is not exact — save returns this same sentinel when the volume
+	// is unconfigured, which is no more the caller's doing there than here —
+	// but SetImage's behaviour is not this route's to change. The difference
+	// is deliberate all the same: an upload has no pick to retry, so an
+	// unusable volume is the only thing the sentinel can mean here.
+	picture, url, err := h.pictures.save(storageID, image.Data, image.Format.ContentType())
+	if err != nil {
+		h.errors.WriteError(w, r, Internal(err))
+		return
+	}
+
+	// A picture replaces an icon rather than sitting beside one — the detail
+	// view shows one or the other — which is also what the picker's own PATCH
+	// sends (`{"image": "<hash>", "icon_name": null}`).
+	//
+	// The promote-then-remove shape is SetImage's: the file is written before
+	// the row that references it, and removed again if that row is refused. A
+	// product in another storage and one that does not exist are both
+	// store.ErrNotFound here, and FromStoreError turns both into the same 404
+	// (docs/specs/03-auth-and-multi-tenancy.md).
+	if err := h.store.SetProductImageAsUser(r.Context(), storageID, productID, &url, nil, user.ID); err != nil {
+		h.pictures.remove(r.Context(), h.errors, picture)
+		h.errors.WriteError(w, r, FromStoreError(err, "product not found in storage"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"image_url": url, "icon_name": nil})
+}
+
 // productDetail is the full product the edit screen of
 // docs/specs/16-product-maintenance.md reads: every field its PATCH can
 // change, plus the current stock, the batches behind it, and the recent
