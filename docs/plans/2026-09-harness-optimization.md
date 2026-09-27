@@ -48,6 +48,16 @@ rounded up to the next minute, so wall-clock and billable differ.
 | `e2e` (push to main, dispatch) | 88 | 2.3 min (max of two parallel jobs) | 2 (`e2e` ~3.2 min, `restore-round-trip` ~1.6 min) | ~530 min |
 | **Total** | | | | **~1 150 min / 30 d** |
 
+*Measured after the fact* with `scripts/dev ci-usage --month 2026-09` (H1,
+#321, merged 2026-09-27): September actually billed 626 min for `test`
+(314 runs — within 1 % of the estimate) and 279 min for `e2e` (89 runs),
+905 in total. The `e2e` estimate above is the *current* per-run cost
+(≈ 6 billed minutes) extrapolated over a month; September billed less
+because the round-trip job only exists since 09-25 (#133) and the `e2e` job
+grew from ~1.9 to ~3.2 minutes as the suite reached 157 tests. The per-run
+figure is the one to plan with, and `ci-usage` is how the month is tracked
+from now on.
+
 Activity is bursty: 85 runs on 2026-09-26 alone, 60 on 09-21. A wave day
 can spend 100+ minutes. Nothing is cached: `actions/cache` usage is 0 bytes.
 Inside the `test` job the `go vet` step takes 43 s (it builds the dev image
