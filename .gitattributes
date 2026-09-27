@@ -24,3 +24,4 @@ deploy/synology/update_test.go text eol=lf
 scripts/dev text eol=lf
 scripts/dev.d/* text eol=lf
 scripts/dev_test.go text eol=lf
+scripts/dev_packet_test.go text eol=lf

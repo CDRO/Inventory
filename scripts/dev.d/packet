@@ -1,0 +1,373 @@
+#!/bin/sh
+# Write .claude/review-packet.md: everything a reviewer needs about one PR, once.
+#
+#   scripts/dev packet <PR> [--since <sha>]
+#
+# Each of the three reviewers used to spend its first several turns on
+# `gh pr view`, `gh issue view`, a full spec read and `gh pr diff` - every
+# round, all three, separately (docs/plans/2026-09-harness-optimization.md,
+# workstream C2). This writes it all to one gitignored file instead: PR
+# title/body, the base/head branches and head SHA, the body of every issue
+# the PR references, the spec sections the issue or PR names (never a whole
+# spec file over 300 lines - see "spec sections" below), `git diff --stat`,
+# the diff itself, a table of exported Go identifiers the diff adds or
+# changes and whether each carries a doc comment, the test files touched,
+# the PR's CI checks, and - on `--since` - the reviewer's own previous
+# verdict comment for round >= 2.
+#
+#   --since <sha>   round >= 2: inline only the diff since <sha> (the
+#                   previous round's reviewed head), plus the whole-PR
+#                   diff --stat for context and a pointer to the full diff
+#                   instead of inlining it. Per decision D9: a merge commit
+#                   in <sha>..HEAD (the base branch was merged into this PR
+#                   between rounds) turns a two-dot delta into upstream
+#                   noise, so that case falls back to the full PR diff and
+#                   says so.
+#
+# Spec sections: a spec file is named when its path appears in the issue or
+# PR body. If the issue or PR body also names one of that spec's own
+# headings (the heading's exact text is a substring of the combined issue +
+# PR text, headings under 6 characters are ignored as too generic to match
+# on purpose), only the named sections are included, each from its heading
+# to the next heading of the same or higher level. If none of the file's
+# headings are named: the whole file when it is 300 lines or fewer,
+# otherwise the "Acceptance criteria" section plus the plain list of
+# headings, with a line saying what was left out. A spec that is over 300
+# lines and has no "Acceptance criteria" heading gets the headings list
+# alone, with the same omission line.
+#
+# The three reviewer prompts (.claude/agents/review-{go,tests,docs}.md) read
+# this file as their first step instead of running the calls above
+# themselves.
+#
+# POSIX sh and POSIX awk only (this runs under Git Bash on the host and
+# under busybox sh/awk in the dev image, scripts/dev_test.go); no jq
+# assumed - the JSON handling all goes through `gh ... --json ... -q`.
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root" || exit 1
+
+help() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
+
+pr=""
+since=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --since)
+      [ $# -ge 2 ] || { echo "packet: --since needs a commit SHA" >&2; exit 2; }
+      since=$2; shift 2 ;;
+    -h|--help) help; exit 0 ;;
+    -*) echo "packet: unknown option $1" >&2; exit 2 ;;
+    *)
+      if [ -n "$pr" ]; then echo "packet: one PR number only" >&2; exit 2; fi
+      pr=$1; shift ;;
+  esac
+done
+if [ -z "$pr" ]; then
+  echo "usage: scripts/dev packet <PR> [--since <sha>]" >&2
+  exit 2
+fi
+case "$pr" in
+  *[!0-9]*) echo "packet: '$pr' is not a PR number" >&2; exit 2 ;;
+esac
+
+mkdir -p .claude
+out=.claude/review-packet.md
+
+title=$(gh pr view "$pr" --json title -q .title) || exit 1
+prbody=$(gh pr view "$pr" --json body -q .body)
+base=$(gh pr view "$pr" --json baseRefName -q .baseRefName)
+headref=$(gh pr view "$pr" --json headRefName -q .headRefName)
+sha=$(gh pr view "$pr" --json headRefOid -q .headRefOid)
+
+git fetch origin "$base" --quiet 2>/dev/null || true
+if git rev-parse -q --verify "origin/$base" >/dev/null 2>&1; then
+  baseref="origin/$base"
+elif git rev-parse -q --verify "$base" >/dev/null 2>&1; then
+  baseref="$base"
+else
+  echo "packet: cannot find base branch '$base' locally or as origin/$base" >&2
+  exit 1
+fi
+
+# --- issues the PR body references -----------------------------------------
+
+issue_nums=$(printf '%s\n' "$prbody" | grep -Eo '#[0-9]+' | tr -d '#' | sort -un)
+
+issues_text=""
+issues_section=""
+for n in $issue_nums; do
+  ibody=$(gh issue view "$n" --json body -q .body 2>/dev/null) || {
+    issues_section="$issues_section
+## #$n
+(not an issue - #$n could not be read with \`gh issue view\`; likely a PR reference)
+"
+    continue
+  }
+  ititle=$(gh issue view "$n" --json title -q .title 2>/dev/null)
+  issues_section="$issues_section
+## Issue #$n: $ititle
+
+$ibody
+"
+  issues_text="$issues_text
+$ibody"
+done
+
+combined_text="$prbody
+$issues_text"
+
+# --- spec sections -----------------------------------------------------------
+
+spec_files=$(printf '%s' "$combined_text" | grep -Eo 'docs/specs/[0-9]+-[A-Za-z0-9._-]+\.md' | sort -u)
+
+extract_section() {
+  # $1 = file, $2 = exact heading text (no leading #'s)
+  awk -v want="$2" '
+    BEGIN { printing = 0; level = 0 }
+    /^#+[ \t]/ {
+      n = match($0, /^#+/); lvl = n>0 ? RLENGTH : 0
+      line = $0
+      sub(/^#+[ \t]*/, "", line)
+      if (printing && lvl <= level) { printing = 0 }
+      if (!printing && line == want) { printing = 1; level = lvl }
+    }
+    printing { print }
+  ' "$1"
+}
+
+specs_section=""
+if [ -n "$spec_files" ]; then
+  for spec in $spec_files; do
+    if [ ! -f "$spec" ]; then
+      specs_section="$specs_section
+### $spec
+(named by the issue or PR, but not found in this checkout)
+"
+      continue
+    fi
+
+    total_lines=$(wc -l < "$spec" | tr -d ' ')
+    headings=$(grep -n '^#\{1,6\}[ \t]' "$spec")
+
+    matched=""
+    while IFS= read -r entry; do
+      [ -n "$entry" ] || continue
+      htext=${entry#*:}
+      htext=$(printf '%s' "$htext" | sed -E 's/^#+[[:space:]]*//')
+      [ ${#htext} -ge 6 ] || continue
+      case "$combined_text" in
+        *"$htext"*) matched="$matched
+$htext" ;;
+      esac
+    done <<EOF
+$headings
+EOF
+
+    if [ -n "$matched" ]; then
+      specs_section="$specs_section
+### $spec (named sections only; other headings omitted)
+"
+      while IFS= read -r htext; do
+        [ -n "$htext" ] || continue
+        specs_section="$specs_section
+#### $htext
+
+$(extract_section "$spec" "$htext")
+"
+      done <<EOF
+$matched
+EOF
+    elif [ "$total_lines" -le 300 ]; then
+      specs_section="$specs_section
+### $spec (whole file, $total_lines lines)
+
+$(cat "$spec")
+"
+    else
+      ac_heading=$(printf '%s\n' "$headings" | sed -E 's/^[0-9]+://' | grep -i -m 1 '^#\{1,6\}[ \t]*Acceptance criteria' || true)
+      heading_list=$(printf '%s\n' "$headings" | sed -E 's/^[0-9]+:/  /')
+      if [ -n "$ac_heading" ]; then
+        ac_text=$(printf '%s' "$ac_heading" | sed -E 's/^#+[[:space:]]*//')
+        specs_section="$specs_section
+### $spec ($total_lines lines - over 300, no heading named: Acceptance criteria section + headings list only; the rest of the file was omitted)
+
+#### $ac_text
+
+$(extract_section "$spec" "$ac_text")
+
+Headings in $spec:
+$heading_list
+"
+      else
+        specs_section="$specs_section
+### $spec ($total_lines lines - over 300, no heading named and no Acceptance criteria section: headings list only; the file body was omitted)
+
+Headings in $spec:
+$heading_list
+"
+      fi
+    fi
+  done
+fi
+
+# --- diff --------------------------------------------------------------------
+
+full_stat=$(git diff --stat "$baseref...$sha")
+
+diff_note=""
+inlined_diff_file=$(mktemp)
+if [ -n "$since" ]; then
+  merges=$(git log --oneline --merges "$since..$sha" 2>/dev/null)
+  if [ -n "$merges" ]; then
+    diff_note="--since $since found a merge commit in $since..$sha (the base branch was merged into this PR between rounds), so the full PR diff is inlined instead of the delta:
+$merges
+"
+    git diff "$baseref...$sha" > "$inlined_diff_file"
+  else
+    diff_note="Delta since the previous round's head ($since). The whole-PR diff --stat above covers everything changed since $base; the full PR diff is not inlined here - run \`git diff $baseref...$sha\` for it.
+"
+    git diff "$since..$sha" > "$inlined_diff_file"
+  fi
+else
+  git diff "$baseref...$sha" > "$inlined_diff_file"
+fi
+
+# --- exported identifier table ------------------------------------------------
+
+identifier_table=$(awk '
+  BEGIN {
+    print "| Identifier | Kind | Doc comment |"
+    print "|---|---|---|"
+    pending = 0
+    top = ""
+  }
+  /^\+\+\+/ { pending = 0; top = ""; next }
+  {
+    line = $0
+    if (match(line, /^\+[ \t]*\/\//)) {
+      if (pending == 0) { top = line }
+      pending++
+      next
+    }
+    name = ""; kind = ""
+    if (match(line, /^\+[ \t]*func[ \t]+(\([^)]*\)[ \t]+)?[A-Z][A-Za-z0-9_]*\(/)) {
+      s = substr(line, RSTART, RLENGTH)
+      sub(/\($/, "", s)
+      n = split(s, parts, /[ \t]/)
+      name = parts[n]
+      kind = "func"
+    } else if (match(line, /^\+[ \t]*(type|var|const)[ \t]+[A-Z][A-Za-z0-9_]*/)) {
+      s = substr(line, RSTART, RLENGTH)
+      n = split(s, parts, /[ \t]/)
+      kind = parts[1]
+      sub(/^\+/, "", kind)
+      name = parts[n]
+    }
+    if (name != "") {
+      doc = "no"
+      if (pending > 0) {
+        cleaned = top
+        sub(/^\+[ \t]*\/\/[ \t]*/, "", cleaned)
+        if (index(cleaned, name) == 1) {
+          rest = substr(cleaned, length(name) + 1, 1)
+          if (rest !~ /[A-Za-z0-9_]/) doc = "yes"
+        }
+      }
+      printf "| %s | %s | %s |\n", name, kind, doc
+    }
+    pending = 0; top = ""
+  }
+' "$inlined_diff_file")
+
+# --- test files changed --------------------------------------------------------
+
+test_files=$(git diff --name-only "$baseref...$sha" | grep '_test\.go$' || true)
+[ -n "$test_files" ] || test_files="(none)"
+
+# --- CI status -----------------------------------------------------------------
+
+ci_output=$(gh pr checks "$pr" 2>&1)
+ci_rc=$?
+
+# --- previous verdict (round >= 2) ----------------------------------------------
+
+previous_section=""
+if [ -n "$since" ]; then
+  rs=$(printf '\036')
+  comments=$(gh pr view "$pr" --json comments -q '[.comments[].body] | join("")' 2>/dev/null)
+  for role in "go:Go" "tests:Test" "docs:Docs"; do
+    key=${role%%:*}
+    header=${role#*:}
+    verdict=$(printf '%s' "$comments" | awk -v RS="$rs" -v role="$key" -v header="$header" '
+      {
+        rec = $0
+        if (match(rec, "<!-- verdict: (APPROVE|BLOCK) round=[0-9]+ sha=[0-9a-fA-F]+ reviewer=" role " -->")) {
+          lastMarker = rec
+        }
+        if (match(rec, "^## " header " Review")) {
+          lastHeader = rec
+        }
+      }
+      END {
+        if (lastMarker != "") { print lastMarker; exit }
+        if (lastHeader != "") { print lastHeader }
+      }
+    ')
+    if [ -n "$verdict" ]; then
+      previous_section="$previous_section
+### Previous $header review
+
+$verdict
+"
+    fi
+  done
+  [ -n "$previous_section" ] || previous_section="
+(no previous verdict comment found for any reviewer - this may be the packet's first run against an older round, or H5's machine-readable marker is not yet in place; the reviewers fall back to reading round history from the PR comments directly in that case.)
+"
+fi
+
+# --- assemble ------------------------------------------------------------------
+
+{
+  echo "# Review packet - PR #$pr"
+  echo
+  echo "**Title:** $title"
+  echo "**Base:** $base  ·  **Head:** $headref"
+  echo "Head SHA: $sha"
+  [ -z "$since" ] || echo "Since: $since"
+  echo
+  echo "## PR body"
+  echo
+  printf '%s\n' "$prbody"
+  [ -z "$issues_section" ] || printf '%s\n' "$issues_section"
+  [ -z "$specs_section" ] || { echo; echo "## Spec sections"; printf '%s\n' "$specs_section"; }
+  echo
+  echo "## Diff --stat (whole PR, $base -> head)"
+  echo '```'
+  printf '%s\n' "$full_stat"
+  echo '```'
+  echo
+  echo "## Diff"
+  [ -z "$diff_note" ] || printf '%s\n' "$diff_note"
+  echo '```diff'
+  cat "$inlined_diff_file"
+  echo '```'
+  echo
+  echo "## Exported identifiers changed"
+  printf '%s\n' "$identifier_table"
+  echo
+  echo "## Test files changed"
+  printf '%s\n' "$test_files"
+  echo
+  echo "## CI status (gh pr checks, exit $ci_rc)"
+  echo '```'
+  printf '%s\n' "$ci_output"
+  echo '```'
+  [ -z "$previous_section" ] || { echo; echo "## Previous round's verdicts"; printf '%s\n' "$previous_section"; }
+} > "$out"
+
+rm -f "$inlined_diff_file"
+
+echo "wrote $out"
