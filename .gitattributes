@@ -45,3 +45,13 @@ scripts/doctor text eol=lf
 # dev_test.go and update_test.go do - same CRLF shebang problem, same fix.
 # (Redundant with *.go above, kept as H5 wrote it rather than reflowed.)
 scripts/gate_test.go text eol=lf
+
+# agent-usage's fixtures are read as raw bytes (its awk does substring
+# extraction, not JSON parsing), so a CRLF checkout would leave a trailing \r
+# on every extracted field and break every hand-computed total in
+# agent_usage_test.go. Redundant with *.go above for agent_usage_test.go
+# itself (kept anyway, same precedent as gate_test.go just above) - the
+# fixtures are not .go files, so they still need their own line.
+scripts/testdata/agent-usage/**/*.jsonl text eol=lf
+scripts/testdata/agent-usage/**/*.meta.json text eol=lf
+scripts/agent_usage_test.go text eol=lf
