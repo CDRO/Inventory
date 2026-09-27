@@ -94,11 +94,16 @@ on:
 
 # A second push to `main` supersedes an E2E run already in flight for the
 # push before it — nobody is waiting on a superseded deployment gate for a
-# commit that is no longer at the tip. `workflow_dispatch` runs are not
-# grouped by ref the same way pushes are (two people dispatching the same
-# branch back to back is rare and each wants its own answer), so this only
-# ever cancels a `push` run with an earlier `push` run, never a dispatched
-# debugging run.
+# commit that is no longer at the tip. `cancel-in-progress` is evaluated for
+# the INCOMING run, not the one it might cancel: a push evaluates it true and
+# cancels whatever is currently active in the group — including an
+# in-progress `workflow_dispatch` run, since the group key
+# (`e2e-${{ github.ref }}`) doesn't distinguish triggers — while a dispatch
+# evaluates it false and only ever queues behind whatever's active, never
+# cancelling it. So two people dispatching the same branch back to back get
+# their own answers in sequence, but a push to `main` still wins over
+# someone's in-flight debugging run, which is the right side to err on for
+# the actual deployment gate.
 concurrency:
   group: e2e-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
