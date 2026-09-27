@@ -178,12 +178,23 @@ jobs:
       # did. Checking for `inventory-e2e-app:latest` by that same literal
       # string would be a tautology (both jobs write the identical hardcoded
       # tag by hand, so a typo in one would just as easily be repeated in the
-      # other) — this asks Compose itself what tag it will use for `app`,
-      # the same resolution `run`/`up` below actually perform, and fails loud
-      # if no image was loaded under THAT name.
+      # other) — this asks Compose itself what tag it will use for `app`, the
+      # same resolution `run`/`up` below actually perform.
+      #
+      # `config --images app` alone isn't enough: Compose always resolves a
+      # named service's full dependency subgraph, so it prints `db`'s image
+      # (`postgres:16-alpine`) too, since `app` has `depends_on: db` —
+      # verified locally, not assumed. Subtracting `db`'s own (dependency-
+      # free) image list leaves exactly `app`'s.
       - name: Verify the image Compose will actually use is the one just loaded
         run: |
-          expected="$(docker compose -f docker-compose.e2e.yml config --images app)"
+          app_and_deps="$(docker compose -f docker-compose.e2e.yml config --images app | sort -u)"
+          db_only="$(docker compose -f docker-compose.e2e.yml config --images db | sort -u)"
+          expected="$(comm -23 <(echo "$app_and_deps") <(echo "$db_only"))"
+          if [ -z "$expected" ]; then
+            echo "could not isolate app's own image from its dependency subgraph" >&2
+            exit 1
+          fi
           docker image inspect "$expected" >/dev/null
 
       # Migrate, then start — in that order, and not `up -d` first. Since
