@@ -69,8 +69,10 @@ const SCANNED_FIRST_TIMER_PRE_CODED = "00000000-0000-7000-8000-000000000056";
 const SCANNED_FIRST_TIMER_CONTROL = "00000000-0000-7000-8000-000000000057";
 const SCANNED_FIRST_TIMER_PRE_CODED_CODE = "8712345678906";
 // The code already "scanned" and in hand for the miss-path offer. Never
-// actually attached in this test — both calls below answer "not this time" —
-// so it only needs to satisfy offerScannedBarcode's own truthiness check.
+// actually attached in this test: the pre-coded call below never reaches a
+// dialog at all (hasBarcodeAlready short-circuits it), and the control call's
+// dialog is dismissed with "not this time". So this only needs to satisfy
+// offerScannedBarcode's own truthiness check.
 const SCANNED_FIRST_TIMER_CODE = "5010255079763";
 
 const OFFER_DIALOG = "dialog[aria-labelledby='barcode-offer-title']";
