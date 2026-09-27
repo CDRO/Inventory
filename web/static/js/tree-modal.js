@@ -201,12 +201,12 @@ export function openTreeManager(storageId, { kind }) {
     // first mutation did not happen (#281).
     //
     // Be clear about what that costs, because it is not a temporary state:
-    // nothing ever removes a token from unacknowledgedFailures — there is no
-    // .delete anywhere in this file — so once any mutation has failed, this
-    // guard stops clearing the banner for the rest of the dialog's life. A
-    // failed create's message therefore outlives every later *successful*
-    // mutation and goes only when the dialog closes, which can leave it
-    // standing, stale but true, beside a success.
+    // nothing ever removes a token from unacknowledgedFailures — it has no
+    // .delete call, unlike pendingMutations below — so once any mutation has
+    // failed, this guard stops clearing the banner for the rest of the dialog's
+    // life. A failed create's message therefore outlives every later
+    // *successful* mutation and goes only when the dialog closes, which can
+    // leave it standing, stale but true, beside a success.
     //
     // That is deliberate and it is forced: keeping a failure visible until the
     // user has been given the chance to read it and clearing it as soon as the
@@ -448,9 +448,14 @@ export function openTreeManager(storageId, { kind }) {
     // which is why #280's own body excludes this call site: "reload() is also
     // called from other places that are not mutations (the initial render), so
     // the fix belongs in runMutation's tracking rather than inside reload()
-    // itself." Nothing is at stake in this window — no mutation has run, so
-    // createdIds is empty by construction and there is no answer the user is
-    // still owed — while tracking it would make Esc do nothing at all until a
+    // itself." Nothing is at stake in this window, whatever else has happened in
+    // the dialog by then: this reload's only casualty is a render, or a banner,
+    // applied to nodes already detached from the document. It cannot cost a
+    // created id — createdIds is resolved from its own array on the close event
+    // and a redraw never feeds it — so a tracked mutation that started, finished
+    // and emptied pendingMutations while this opening GET was still outstanding
+    // loses nothing either, even though createdIds is not empty in that case.
+    // Tracking this call, meanwhile, would make Esc do nothing at all until a
     // slow opening GET came back, which is a real cost for no gain. A banner
     // painted into a dialog the user has already dismissed is likewise not
     // something finalize should hold anything open for.
