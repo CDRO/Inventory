@@ -59,14 +59,9 @@
         </p>
       </div>
 
-      <div class="field">
-        <label for="photos" data-i18n="ingest.photos.label">Photos</label>
-        <!-- capture opens the rear camera on a phone and still allows a
-             gallery pick (docs/specs/05-frontend-pwa-foundations.md). -->
-        <input id="photos" type="file" accept="image/*" capture="environment" multiple required>
-      </div>
+      <div id="photo-picker-field" class="field"></div>
 
-      <button id="submit" type="submit" class="btn btn--primary" data-i18n="ingest.upload">Upload</button>
+      <button id="submit" type="submit" class="btn btn--primary" data-i18n="ingest.upload" disabled>Upload</button>
       <p class="muted" data-i18n="ingest.uploadHint">
         Photos are analysed in the background. You can leave this page as soon
         as they are uploaded — the results wait in your inbox.

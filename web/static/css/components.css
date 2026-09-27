@@ -557,6 +557,41 @@ th[aria-sort="descending"] .sort-button::after {
   }
 }
 
+/* --- Photo source picker (docs/specs/36-photo-source-picker.md) --- */
+
+/* Icon above caption, both meeting .btn's 44px min-height with an equal
+   min-width — a camera-first, one-handed UI's own touch-target rule, applied
+   here rather than relying on padding to happen to be wide enough. */
+.photo-picker__control {
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 2.75rem;
+  flex: 1;
+}
+
+.photo-picker__icon {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+.photo-picker__row {
+  align-items: center;
+}
+
+.photo-picker__thumb {
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+  background: var(--color-bg);
+  flex-shrink: 0;
+}
+
+.photo-picker__name {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
 /* --- Analytics (docs/specs/11-reporting-and-analytics.md) --- */
 
 .stat-tile {

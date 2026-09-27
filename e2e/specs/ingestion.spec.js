@@ -47,7 +47,7 @@ test("uploading without a usable model says so, as a configuration problem", asy
   await logInAsBob(page);
   await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
 
-  await page.locator("#photos").setInputFiles({ name: "shelf.jpg", mimeType: "image/jpeg", buffer: TINY_JPEG });
+  await page.locator("#photos-library").setInputFiles({ name: "shelf.jpg", mimeType: "image/jpeg", buffer: TINY_JPEG });
   await page.getByRole("button", { name: "Upload" }).click();
 
   const card = page.locator("#uploads .card").first();
@@ -55,6 +55,198 @@ test("uploading without a usable model says so, as a configuration problem", asy
   // moment to fail; the answer is still a 503, whatever the network does.
   await expect(card).toContainText("Not uploaded", { timeout: 20_000 });
   await expect(card).toContainText("AI model is unavailable");
+});
+
+// docs/specs/36-photo-source-picker.md's own E2E acceptance criteria, plus
+// #205 item 10 (the 44x44 hit area and one-thumbnail-per-row rule, folded in
+// here rather than as a separate journey since it needs the same picker
+// already on screen).
+test("the two-control picker appends photos from both sources into one list, drains each input on pick, and uploads exactly what survives a removal", async ({
+  page,
+}) => {
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  const libraryInput = page.locator("#photos-library");
+  const cameraInput = page.locator("#photos-camera");
+  const uploadButton = page.getByRole("button", { name: "Upload" });
+  const rows = page.locator("#photo-list li");
+
+  // The contract's own shape — a regression to a single `capture` input, or
+  // to `multiple` on the wrong one, fails here rather than downstream.
+  await expect(libraryInput).toHaveAttribute("accept", "image/jpeg,image/png");
+  expect(await libraryInput.getAttribute("multiple")).not.toBeNull();
+  expect(await libraryInput.getAttribute("capture")).toBeNull();
+  await expect(cameraInput).toHaveAttribute("accept", "image/*");
+  await expect(cameraInput).toHaveAttribute("capture", "environment");
+  expect(await cameraInput.getAttribute("multiple")).toBeNull();
+  // "There is no visible bare <input type='file'>" — the acceptance
+  // criterion is about what a person can see, not just that the two named
+  // ids exist; both real inputs carry the `hidden` attribute.
+  await expect(page.locator('input[type="file"]:not([hidden])')).toHaveCount(0);
+
+  await expect(uploadButton).toBeDisabled();
+
+  await libraryInput.setInputFiles([
+    { name: "shelf-a.jpg", mimeType: "image/jpeg", buffer: TINY_JPEG },
+    { name: "shelf-b.jpg", mimeType: "image/jpeg", buffer: TINY_JPEG },
+  ]);
+  await expect(uploadButton).toBeEnabled();
+  await expect(rows).toHaveCount(2);
+  // Drained into the selection and reset — not merely emptied by Playwright
+  // re-firing change, which it does regardless of whether the reset happened.
+  expect(await libraryInput.evaluate((el) => el.files.length)).toBe(0);
+
+  await cameraInput.setInputFiles({ name: "shelf-c.jpg", mimeType: "image/jpeg", buffer: TINY_JPEG });
+  await expect(rows).toHaveCount(3);
+  expect(await cameraInput.evaluate((el) => el.files.length)).toBe(0);
+
+  // Removing the middle row (shelf-b.jpg) leaves shelf-a.jpg and shelf-c.jpg,
+  // in that order. The exact accessible name — not a "Remove" substring —
+  // pins the position-and-name contract ("Remove photo 2 of 3, shelf-b.jpg").
+  await rows.nth(1).getByRole("button", { name: "Remove photo 2 of 3, shelf-b.jpg", exact: true }).click();
+  await expect(rows).toHaveCount(2);
+
+  // #205 item 10, first half: both controls meet the 44x44 CSS-pixel minimum
+  // hit area — this repo's own `.btn` floor (components.css), written down as
+  // a number here rather than a judgement call.
+  for (const role of ["pick-library", "pick-camera"]) {
+    const box = await page.locator(`[data-role="${role}"]`).boundingBox();
+    expect(box.width, `${role} width`).toBeGreaterThanOrEqual(44);
+    expect(box.height, `${role} height`).toBeGreaterThanOrEqual(44);
+  }
+  // #205 item 10, second half: one thumbnail per row, never two sharing one —
+  // the row count above already proved two rows, this proves each has
+  // exactly one <img>.
+  await expect(page.locator("#photo-list img[src^='blob:']")).toHaveCount(2);
+
+  // Counted only once the uploads list has settled (two cards, selection
+  // empty): uploads are sequential, and a regression that sent a third file
+  // would send it only after the second completes, which a count taken right
+  // after the click would still pass.
+  const requests = [];
+  await page.route("**/ingest/shelf-photos", async (route) => {
+    requests.push(route.request());
+    await route.fulfill({ json: { job_id: "00000000-0000-7000-8000-0000000000aa" } });
+  });
+
+  await uploadButton.click();
+  await expect(page.locator("#uploads .card")).toHaveCount(2);
+  await expect(rows).toHaveCount(0);
+  await expect(uploadButton).toBeDisabled();
+  expect(await libraryInput.evaluate((el) => el.files.length)).toBe(0);
+  expect(await cameraInput.evaluate((el) => el.files.length)).toBe(0);
+
+  expect(requests).toHaveLength(2);
+  // Multipart Content-Disposition filename= — postData() mangles a binary
+  // body, postDataBuffer() does not.
+  const filenames = requests.map((req) => {
+    const match = req.postDataBuffer().toString("latin1").match(/filename="([^"]*)"/);
+    return match ? match[1] : null;
+  });
+  expect(filenames).toEqual(["shelf-a.jpg", "shelf-c.jpg"]);
+
+  await page.unroute("**/ingest/shelf-photos");
+});
+
+// docs/specs/36-photo-source-picker.md and issue #206's own "Watch for"
+// section both call this out by name: "Rows are keyed by File identity,
+// never by name" — iOS hands out generic filenames, so two rows can share
+// one. The main journey above never exercises this because its three fixture
+// files all have distinct names; a regression to name-keyed removal (finding
+// by `.indexOf`/`.filter` on `file.name` instead of the `File` reference) would
+// pass every assertion there while silently removing the wrong photo, or
+// both, or neither, whenever two picks happen to share a name.
+test("removing a photo acts on File identity, not filename — two rows can share a name", async ({ page }) => {
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  const libraryInput = page.locator("#photos-library");
+  const rows = page.locator("#photo-list li");
+
+  // Same name, different bytes (a JPEG and a PNG) — indistinguishable by
+  // filename, easy to tell apart by content once uploaded.
+  await libraryInput.setInputFiles([
+    { name: "shelf.jpg", mimeType: "image/jpeg", buffer: TINY_JPEG },
+    { name: "shelf.jpg", mimeType: "image/png", buffer: TINY_PNG },
+  ]);
+  await expect(rows).toHaveCount(2);
+
+  // Removing the *second* "shelf.jpg" row on purpose, not the first: a
+  // regression to name-keyed removal (e.g. `findIndex(f => f.name ===
+  // file.name)`) finds the first match regardless of which row's button was
+  // clicked, so asking it to remove row 2 would silently remove row 1
+  // instead and this test would still see "one row left, named shelf.jpg" —
+  // indistinguishable from correct behaviour unless the survivor's actual
+  // content is checked below. Its accessible name is itself proof identity
+  // is in play — "1 of 2" and "2 of 2" differ even though the visible
+  // filename does not.
+  await rows.nth(1).getByRole("button", { name: "Remove photo 2 of 2, shelf.jpg", exact: true }).click();
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toContainText("shelf.jpg");
+  await expect(rows.first().getByRole("button")).toHaveAccessibleName("Remove photo 1 of 1, shelf.jpg");
+
+  // The strongest proof: uploading now sends the surviving (first-picked)
+  // File's own bytes — the JPEG — rather than the removed second one's — the
+  // PNG. A name-keyed regression that removed row 1 instead would upload the
+  // PNG here, which the assertions below would catch.
+  let request = null;
+  await page.route("**/ingest/shelf-photos", async (route) => {
+    request = route.request();
+    await route.fulfill({ json: { job_id: "00000000-0000-7000-8000-0000000000ac" } });
+  });
+  await page.getByRole("button", { name: "Upload" }).click();
+  await expect(page.locator("#uploads .card")).toHaveCount(1);
+
+  expect(request, "expected the surviving photo to upload").not.toBeNull();
+  const body = request.postDataBuffer().toString("latin1");
+  expect(body).toContain("Content-Type: image/jpeg");
+  expect(body).not.toContain("Content-Type: image/png");
+
+  await page.unroute("**/ingest/shelf-photos");
+});
+
+// docs/specs/36-photo-source-picker.md's E2E acceptance criteria for the scan
+// sheet: the same picker's library input, feeding the decode route, must
+// reach the same code lookup a typed digit string does.
+test("the barcode scan sheet's photograph control decodes through the same lookup as a typed code", async ({
+  page,
+}) => {
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+  // Shelf scan (the default mode) has no barcode affordance at all — a shelf
+  // is not a barcode — so a mode that has one has to be picked first.
+  await page.locator('input[name="mode"][value="stocking_up"]').check();
+
+  let decodeRequest = null;
+  await page.route("**/barcodes/decode", async (route) => {
+    decodeRequest = route.request();
+    await route.fulfill({ json: { barcode: "4006381333931" } });
+  });
+
+  await page.getByRole("button", { name: "Scan a barcode" }).click();
+  const dialog = page.locator("dialog[aria-labelledby='barcode-sheet-title']");
+  await expect(dialog).toBeVisible();
+
+  // Only the sheet's library input has no `capture` attribute — its own
+  // camera input does, exactly as the multi-photo picker's does.
+  await dialog.locator('input[type="file"]:not([capture])').setInputFiles({
+    name: "code.jpg",
+    mimeType: "image/jpeg",
+    buffer: TINY_JPEG,
+  });
+
+  expect(decodeRequest, "expected the photo to reach the decode route").not.toBeNull();
+
+  // HOUSEHOLD has never associated this code, so the decoded string reaches
+  // exactly the miss path a typed one would (docs/specs/20-barcode-recall.md;
+  // e2e/specs/barcode-recall.spec.js covers that lookup's own contract at the
+  // API level) — proof the photo path hands its code through openScanSheet's
+  // one finish() exit rather than a parallel one.
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator("#error")).toContainText("not known here yet");
+
+  await page.unroute("**/barcodes/decode");
 });
 
 test("the inbox lists waiting proposals with their size, and the badge counts them", async ({ page }) => {

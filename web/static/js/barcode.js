@@ -22,6 +22,7 @@
 import { postForm, ApiError } from "./api.js";
 import { el, text } from "./dom.js";
 import { t, apiErrorMessage } from "./i18n.js";
+import { mountPhotoPicker } from "./photo-picker.js";
 
 // The formats docs/specs/20-barcode-recall.md names. The same list the server
 // decoder tries, so the two paths agree about what counts as a barcode.
@@ -88,15 +89,15 @@ export function openScanSheet(storageId, { title = t("barcode.defaultTitle"), hi
     ]),
   ]);
 
-  const photoInput = el("input", {
-    type: "file",
-    accept: "image/*",
-    capture: "environment",
-    id: "barcode-sheet-photo",
-  });
+  // The single-photo picker (docs/specs/36-photo-source-picker.md): id-less,
+  // since the multi-photo picker on ingest.html carries #photos-library and
+  // #photos-camera while this sheet is open, and a document may not hold two
+  // elements sharing an id. Its two buttons keep their data-roles, so E2E
+  // addresses them the same way: `dialog [data-role="pick-library"]`.
+  const photoPickerContainer = el("div");
   const photoField = el("div", { class: "field" }, [
-    el("label", { for: "barcode-sheet-photo" }, [text(t("barcode.photographLabel"))]),
-    photoInput,
+    el("p", { class: "muted" }, [text(t("barcode.photographLabel"))]),
+    photoPickerContainer,
     el("p", { class: "muted" }, [
       text(t("barcode.photoDiscarded")),
     ]),
@@ -166,8 +167,8 @@ export function openScanSheet(storageId, { title = t("barcode.defaultTitle"), hi
     finish(typed);
   });
 
-  photoInput.addEventListener("change", async () => {
-    const file = photoInput.files && photoInput.files[0];
+  async function handlePickedPhoto(files) {
+    const file = files[0];
     if (!file) return;
     errorBox.hidden = true;
     showStatus(t("barcode.readingPhoto"));
@@ -178,10 +179,10 @@ export function openScanSheet(storageId, { title = t("barcode.defaultTitle"), hi
       finish(barcode);
     } catch (err) {
       showStatus("");
-      photoInput.value = "";
       showError(err);
     }
-  });
+  }
+  mountPhotoPicker(photoPickerContainer, { multiple: false, onChange: handlePickedPhoto });
 
   cancelButton.addEventListener("click", () => finish(null));
   dialog.addEventListener("click", (event) => {
