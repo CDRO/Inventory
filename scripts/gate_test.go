@@ -9,12 +9,20 @@ package scripts
 // repository with real commits just to exercise one case (the pattern
 // deploy/synology/update_test.go already uses for its own third command,
 // git).
+//
+// Comments are passed to the stub as an indexed list (STUB_COMMENT_COUNT,
+// STUB_COMMENT_1, STUB_COMMENT_2, ...) rather than one joined blob: the
+// script makes two different `gh pr view --json comments` calls - a flat
+// `.comments[].body` dump for the vote count, and a `... | @base64` one per
+// comment for the CHECKS-missing fallback's scoped Suite-line lookup - and
+// only a real per-comment boundary lets the stub answer both correctly.
 
 import (
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -23,9 +31,23 @@ const gateGhStub = `#!/bin/sh
 printf 'gh %s\n' "$*" >> "$STUB_LOG"
 case "$*" in
   "pr view "*"--json headRefOid,baseRefName"*)
+    [ "${STUB_INFO_RC:-0}" = 0 ] || exit "${STUB_INFO_RC}"
     printf '%s\t%s\n' "${STUB_HEAD_SHA:-}" "${STUB_BASE_REF:-integration/harness-welle-2}" ;;
+  "pr view "*"--json comments"*"@base64"*)
+    i=1
+    while [ "$i" -le "${STUB_COMMENT_COUNT:-0}" ]; do
+      eval "body=\${STUB_COMMENT_$i}"
+      printf '%s' "$body" | base64 -w0
+      printf '\n'
+      i=$((i + 1))
+    done ;;
   "pr view "*"--json comments"*)
-    printf '%s' "${STUB_COMMENTS:-}" ;;
+    i=1
+    while [ "$i" -le "${STUB_COMMENT_COUNT:-0}" ]; do
+      eval "body=\${STUB_COMMENT_$i}"
+      printf '%s\n' "$body"
+      i=$((i + 1))
+    done ;;
   "pr view "*"--json headRefName"*)
     printf '%s\n' "${STUB_HEAD_BRANCH:-spec/99-x}" ;;
   "pr checks "*)
@@ -52,6 +74,28 @@ type gateResult struct {
 }
 
 func (r gateResult) called(substr string) bool { return strings.Contains(r.calls, substr) }
+
+// commentEnv turns a list of full comment bodies into the indexed STUB_* form
+// the gh stub reads, each body kept intact (including its own internal blank
+// lines) rather than joined with the others.
+func commentEnv(bodies ...string) map[string]string {
+	env := map[string]string{"STUB_COMMENT_COUNT": strconv.Itoa(len(bodies))}
+	for i, b := range bodies {
+		env["STUB_COMMENT_"+strconv.Itoa(i+1)] = b
+	}
+	return env
+}
+
+// mergeEnv layers maps left to right; a later map's keys win.
+func mergeEnv(maps ...map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, m := range maps {
+		for k, v := range m {
+			out[k] = v
+		}
+	}
+	return out
+}
 
 // runGate mirrors dev_test.go's run() but with gh/git stubs shaped for the
 // calls scripts/dev.d/gate makes, which run() (built for test/vet/ci-status/
@@ -119,15 +163,14 @@ const (
 )
 
 func TestGateThreeApprovesAtHeadMerge(t *testing.T) {
-	env := map[string]string{
+	env := mergeEnv(map[string]string{
 		"STUB_HEAD_SHA": headSHA,
 		"STUB_BASE_REF": "integration/harness-welle-2",
-		"STUB_COMMENTS": strings.Join([]string{
-			marker("APPROVE", 2, headSHA, "go"),
-			marker("APPROVE", 2, headSHA, "tests"),
-			marker("APPROVE", 2, headSHA, "docs"),
-		}, "\n"),
-	}
+	}, commentEnv(
+		marker("APPROVE", 2, headSHA, "go"),
+		marker("APPROVE", 2, headSHA, "tests"),
+		marker("APPROVE", 2, headSHA, "docs"),
+	))
 	r := runGate(t, env, "gate", "42")
 	if r.exit != 0 {
 		t.Fatalf("expected exit 0, got %d\nstdout:\n%s\nstderr:\n%s", r.exit, r.stdout, r.stderr)
@@ -140,13 +183,10 @@ func TestGateThreeApprovesAtHeadMerge(t *testing.T) {
 // The acceptance criteria's literal example: two APPROVE + one missing verdict
 // for the head commit -> "WAIT tests" exit 3.
 func TestGateMissingReviewerWaits(t *testing.T) {
-	env := map[string]string{
-		"STUB_HEAD_SHA": headSHA,
-		"STUB_COMMENTS": strings.Join([]string{
-			marker("APPROVE", 1, headSHA, "go"),
-			marker("APPROVE", 1, headSHA, "docs"),
-		}, "\n"),
-	}
+	env := mergeEnv(map[string]string{"STUB_HEAD_SHA": headSHA}, commentEnv(
+		marker("APPROVE", 1, headSHA, "go"),
+		marker("APPROVE", 1, headSHA, "docs"),
+	))
 	r := runGate(t, env, "gate", "42")
 	if r.exit != 3 {
 		t.Fatalf("expected exit 3, got %d\n%s", r.exit, r.stdout)
@@ -158,14 +198,11 @@ func TestGateMissingReviewerWaits(t *testing.T) {
 // The acceptance criteria's literal example: a BLOCK in the current round ->
 // "BLOCK go" exit 4, regardless of the other two reviewers.
 func TestGateBlockInCurrentRoundBlocks(t *testing.T) {
-	env := map[string]string{
-		"STUB_HEAD_SHA": headSHA,
-		"STUB_COMMENTS": strings.Join([]string{
-			marker("BLOCK", 1, headSHA, "go"),
-			marker("APPROVE", 1, headSHA, "tests"),
-			marker("APPROVE", 1, headSHA, "docs"),
-		}, "\n"),
-	}
+	env := mergeEnv(map[string]string{"STUB_HEAD_SHA": headSHA}, commentEnv(
+		marker("BLOCK", 1, headSHA, "go"),
+		marker("APPROVE", 1, headSHA, "tests"),
+		marker("APPROVE", 1, headSHA, "docs"),
+	))
 	r := runGate(t, env, "gate", "42")
 	if r.exit != 4 {
 		t.Fatalf("expected exit 4, got %d\n%s", r.exit, r.stdout)
@@ -174,38 +211,92 @@ func TestGateBlockInCurrentRoundBlocks(t *testing.T) {
 }
 
 // A stale APPROVE for a commit that is no longer the head must never count -
-// not even to cancel out a fresh BLOCK for the current head.
+// not even to cancel out a fresh BLOCK for the current head. The stale
+// marker carries a *higher* round than the fresh ones on purpose: a sha
+// filter applied before the round is computed drops it and correctly finds
+// round 1 (BLOCK) for the head sha; a filter applied only after computing
+// the round across all markers would instead find round 2 globally, see no
+// head-sha marker at round 2, and report WAIT rather than BLOCK - so this is
+// the case that actually distinguishes the two orders, not just the same
+// round with a different sha.
 func TestGateStaleApproveDoesNotOutvoteFreshBlock(t *testing.T) {
-	env := map[string]string{
-		"STUB_HEAD_SHA": headSHA,
-		"STUB_COMMENTS": strings.Join([]string{
-			marker("APPROVE", 1, oldSHA, "go"), // stale: a different, earlier commit
-			marker("BLOCK", 1, headSHA, "go"),
-			marker("APPROVE", 1, headSHA, "tests"),
-			marker("APPROVE", 1, headSHA, "docs"),
-		}, "\n"),
-	}
+	env := mergeEnv(map[string]string{"STUB_HEAD_SHA": headSHA}, commentEnv(
+		marker("APPROVE", 2, oldSHA, "go"), // stale: a different, earlier commit
+		marker("BLOCK", 1, headSHA, "go"),
+		marker("APPROVE", 1, headSHA, "tests"),
+		marker("APPROVE", 1, headSHA, "docs"),
+	))
 	r := runGate(t, env, "gate", "42")
 	if r.exit != 4 {
 		t.Fatalf("expected exit 4 (BLOCK), got %d\n%s", r.exit, r.stdout)
 	}
+	mustContain(t, r.stdout, "go: BLOCK r1 @a1b2c3d", "stdout")
 	mustContain(t, r.stdout, "BLOCK go", "stdout")
-	mustNotContain(t, r.stdout, oldSHA[:7], "the stale commit must never be cited as current")
+}
+
+// The reviewer that never posted a marker for the current head at all - not
+// even a fresh one - is the case review-tests found untested (round 1): it
+// must be reported as stale, and it must count toward WAIT, not silently
+// read as approved because some marker with its name exists somewhere in the
+// thread.
+func TestGateStaleOnlyReviewerReportsStaleAndWaits(t *testing.T) {
+	env := mergeEnv(map[string]string{"STUB_HEAD_SHA": headSHA}, commentEnv(
+		marker("APPROVE", 1, oldSHA, "go"), // go never re-reviewed the new head
+		marker("APPROVE", 1, headSHA, "tests"),
+		marker("APPROVE", 1, headSHA, "docs"),
+	))
+	r := runGate(t, env, "gate", "42")
+	if r.exit != 3 {
+		t.Fatalf("expected exit 3 (WAIT), got %d\n%s", r.exit, r.stdout)
+	}
+	mustContain(t, r.stdout, "go: stale APPROVE r1 @"+oldSHA[:7], "stdout names the stale marker")
+	mustContain(t, r.stdout, "WAIT go", "stdout")
+}
+
+// If only one reviewer has posted at the new round and the other two are
+// still sitting on an earlier round's verdict for the very same commit, the
+// PR is not merge-ready: the round only really "advances" once all three
+// have weighed in on it, so the laggards must show as stale (not approved)
+// and the gate must WAIT on them rather than merge on the one fresh verdict.
+func TestGateLaggingReviewersAtOldRoundAreStale(t *testing.T) {
+	env := mergeEnv(map[string]string{"STUB_HEAD_SHA": headSHA}, commentEnv(
+		marker("APPROVE", 1, headSHA, "tests"),
+		marker("APPROVE", 1, headSHA, "docs"),
+		marker("APPROVE", 2, headSHA, "go"),
+	))
+	r := runGate(t, env, "gate", "42")
+	if r.exit != 3 {
+		t.Fatalf("expected exit 3 (WAIT), got %d\n%s", r.exit, r.stdout)
+	}
+	mustContain(t, r.stdout, "go: APPROVE r2 @a1b2c3d", "stdout")
+	mustContain(t, r.stdout, "tests: stale APPROVE r1 @a1b2c3d", "stdout")
+	mustContain(t, r.stdout, "docs: stale APPROVE r1 @a1b2c3d", "stdout")
+	mustContain(t, r.stdout, "WAIT tests docs", "stdout")
+}
+
+// The very first gh call (fetching the head sha and base) failing - a
+// network blip, an expired auth token - must fail closed with exit 2, not
+// proceed with an empty head sha that then silently matches nothing.
+func TestGateInitialLookupFailureExits2(t *testing.T) {
+	r := runGate(t, map[string]string{"STUB_INFO_RC": "1"}, "gate", "42")
+	if r.exit != 2 {
+		t.Fatalf("expected exit 2, got %d\n%s", r.exit, r.stdout)
+	}
+	if r.called("--json comments") {
+		t.Errorf("must not go on to fetch comments after the initial lookup failed:\n%s", r.calls)
+	}
 }
 
 // A round-2 APPROVE for the same commit overrides a round-1 BLOCK: the
 // current round is the highest round seen for the head sha, so round 1 is
 // history the moment round 2 exists for it.
 func TestGateRound2OverridesRound1BlockForSameSHA(t *testing.T) {
-	env := map[string]string{
-		"STUB_HEAD_SHA": headSHA,
-		"STUB_COMMENTS": strings.Join([]string{
-			marker("BLOCK", 1, headSHA, "go"),
-			marker("APPROVE", 2, headSHA, "go"),
-			marker("APPROVE", 2, headSHA, "tests"),
-			marker("APPROVE", 2, headSHA, "docs"),
-		}, "\n"),
-	}
+	env := mergeEnv(map[string]string{"STUB_HEAD_SHA": headSHA}, commentEnv(
+		marker("BLOCK", 1, headSHA, "go"),
+		marker("APPROVE", 2, headSHA, "go"),
+		marker("APPROVE", 2, headSHA, "tests"),
+		marker("APPROVE", 2, headSHA, "docs"),
+	))
 	r := runGate(t, env, "gate", "42")
 	if r.exit != 0 {
 		t.Fatalf("expected exit 0 (MERGE), got %d\n%s", r.exit, r.stdout)
@@ -217,17 +308,14 @@ func TestGateRound2OverridesRound1BlockForSameSHA(t *testing.T) {
 // Comments that carry no marker line - ordinary prose, a reply, a malformed
 // near-miss - must be invisible to the gate.
 func TestGateIgnoresCommentsWithoutAMarker(t *testing.T) {
-	env := map[string]string{
-		"STUB_HEAD_SHA": headSHA,
-		"STUB_COMMENTS": strings.Join([]string{
-			"## Go Review — VERDICT: APPROVE\n\nLooks fine, no findings.",
-			"just a reply from a human, ignore me",
-			"<!-- verdict: APPROVE round=1 sha=" + headSHA + " -->", // malformed: no reviewer=
-			marker("APPROVE", 1, headSHA, "go"),
-			marker("APPROVE", 1, headSHA, "tests"),
-			marker("APPROVE", 1, headSHA, "docs"),
-		}, "\n"),
-	}
+	env := mergeEnv(map[string]string{"STUB_HEAD_SHA": headSHA}, commentEnv(
+		"## Go Review — VERDICT: APPROVE\n\nLooks fine, no findings.",
+		"just a reply from a human, ignore me",
+		"<!-- verdict: APPROVE round=1 sha="+headSHA+" -->", // malformed: no reviewer=
+		marker("APPROVE", 1, headSHA, "go"),
+		marker("APPROVE", 1, headSHA, "tests"),
+		marker("APPROVE", 1, headSHA, "docs"),
+	))
 	r := runGate(t, env, "gate", "42")
 	if r.exit != 0 {
 		t.Fatalf("expected exit 0, got %d\n%s", r.exit, r.stdout)
@@ -266,21 +354,29 @@ func TestGateHelpExitsZeroAndCallsNothing(t *testing.T) {
 
 // --- CHECKS (decision D7) --------------------------------------------------
 
-func approvedAtRound(round int, sha string) string {
-	return strings.Join([]string{
+// approvedComments builds three separate comments (go, tests, docs), each
+// ending in its own marker as a real posted comment would. suiteLine, when
+// not empty, becomes part of the *tests* comment specifically - never a
+// separately joined string - because the production script only trusts a
+// Suite line that lives in the same comment as that round's own tests marker.
+func approvedComments(round int, sha, suiteLine string) []string {
+	tests := marker("APPROVE", round, sha, "tests")
+	if suiteLine != "" {
+		tests = suiteLine + "\n" + tests
+	}
+	return []string{
 		marker("APPROVE", round, sha, "go"),
-		marker("APPROVE", round, sha, "tests"),
+		tests,
 		marker("APPROVE", round, sha, "docs"),
-	}, "\n")
+	}
 }
 
 func TestGateChecksPassMergesOnMain(t *testing.T) {
-	env := map[string]string{
+	env := mergeEnv(map[string]string{
 		"STUB_HEAD_SHA": headSHA,
 		"STUB_BASE_REF": "main",
-		"STUB_COMMENTS": approvedAtRound(1, headSHA),
 		"STUB_BUCKET":   "pass",
-	}
+	}, commentEnv(approvedComments(1, headSHA, "")...))
 	r := runGate(t, env, "gate", "7")
 	if r.exit != 0 {
 		t.Fatalf("expected exit 0, got %d\n%s", r.exit, r.stdout)
@@ -292,12 +388,11 @@ func TestGateChecksPassMergesOnMain(t *testing.T) {
 }
 
 func TestGateChecksPendingWaits(t *testing.T) {
-	env := map[string]string{
+	env := mergeEnv(map[string]string{
 		"STUB_HEAD_SHA": headSHA,
 		"STUB_BASE_REF": "main",
-		"STUB_COMMENTS": approvedAtRound(1, headSHA),
 		"STUB_BUCKET":   "pending",
-	}
+	}, commentEnv(approvedComments(1, headSHA, "")...))
 	r := runGate(t, env, "gate", "7")
 	if r.exit != 3 {
 		t.Fatalf("expected exit 3, got %d\n%s", r.exit, r.stdout)
@@ -306,12 +401,11 @@ func TestGateChecksPendingWaits(t *testing.T) {
 }
 
 func TestGateChecksFailedBlocks(t *testing.T) {
-	env := map[string]string{
+	env := mergeEnv(map[string]string{
 		"STUB_HEAD_SHA": headSHA,
 		"STUB_BASE_REF": "main",
-		"STUB_COMMENTS": approvedAtRound(1, headSHA),
 		"STUB_BUCKET":   "fail",
-	}
+	}, commentEnv(approvedComments(1, headSHA, "")...))
 	r := runGate(t, env, "gate", "7")
 	if r.exit != 4 {
 		t.Fatalf("expected exit 4, got %d\n%s", r.exit, r.stdout)
@@ -320,9 +414,10 @@ func TestGateChecksFailedBlocks(t *testing.T) {
 }
 
 // No check was ever reported, but the diff is documentation-only and the test
-// reviewer's own Suite line shows a local run: D7's fallback is satisfied.
+// reviewer's own current-round comment carries a local Suite line: D7's
+// fallback is satisfied.
 func TestGateChecksMissingDocsOnlyLocalSuiteMerges(t *testing.T) {
-	env := map[string]string{
+	env := mergeEnv(map[string]string{
 		"STUB_HEAD_SHA": headSHA,
 		"STUB_BASE_REF": "main",
 		"STUB_BUCKET":   "",
@@ -330,9 +425,7 @@ func TestGateChecksMissingDocsOnlyLocalSuiteMerges(t *testing.T) {
 			"docs/specs/38-release-pipeline-and-nas-runner.md",
 			"CLAUDE.md",
 		}, "\n"),
-		"STUB_COMMENTS": approvedAtRound(1, headSHA) + "\n" +
-			"**Suite:** `docker compose run --rm app go test ./...` → exit 0, 34 passed",
-	}
+	}, commentEnv(approvedComments(1, headSHA, "**Suite:** `docker compose run --rm app go test ./...` → exit 0, 34 passed")...))
 	r := runGate(t, env, "gate", "7")
 	if r.exit != 0 {
 		t.Fatalf("expected exit 0, got %d\n%s", r.exit, r.stdout)
@@ -340,19 +433,18 @@ func TestGateChecksMissingDocsOnlyLocalSuiteMerges(t *testing.T) {
 	mustContain(t, r.stdout, "MERGE", "stdout")
 }
 
-// The same docs-only diff, but the test reviewer's Suite line cites a CI run
-// URL (no local exit code) rather than a local run: the fallback is not
-// satisfied, and the gate says so instead of merging on faith.
+// The same docs-only diff, but the test reviewer's current-round comment
+// cites a CI run URL (no local exit code) rather than a local run: the
+// fallback is not satisfied, and the gate says so instead of merging on
+// faith.
 func TestGateChecksMissingCIFallbackSuiteDoesNotMerge(t *testing.T) {
-	env := map[string]string{
+	env := mergeEnv(map[string]string{
 		"STUB_HEAD_SHA":    headSHA,
 		"STUB_BASE_REF":    "main",
 		"STUB_BUCKET":      "",
 		"STUB_HEAD_BRANCH": "integration/harness-welle-2",
 		"STUB_DIFF_FILES":  "docs/specs/38-release-pipeline-and-nas-runner.md",
-		"STUB_COMMENTS": approvedAtRound(1, headSHA) + "\n" +
-			"**Suite:** https://github.com/CDRO/Inventory/actions/runs/123 (success)",
-	}
+	}, commentEnv(approvedComments(1, headSHA, "**Suite:** https://github.com/CDRO/Inventory/actions/runs/123 (success)")...))
 	r := runGate(t, env, "gate", "7")
 	if r.exit != 3 {
 		t.Fatalf("expected exit 3, got %d\n%s", r.exit, r.stdout)
@@ -361,10 +453,39 @@ func TestGateChecksMissingCIFallbackSuiteDoesNotMerge(t *testing.T) {
 	mustContain(t, r.stdout, "scripts/dev ci-status "+headSHA, "stdout names the dispatch recipe")
 }
 
+// A round-1 local Suite line is real, but it is not *this* round's evidence:
+// once the PR has moved to round 2 (say tests re-ran against CI instead),
+// the stale round-1 line must not let a CI-only round 2 sneak through the
+// fallback. This is the exact bug review-go and review-tests both found in
+// round 1, reproduced as a regression test.
+func TestGateChecksMissingIgnoresAnOlderRoundsLocalSuiteLine(t *testing.T) {
+	env := mergeEnv(map[string]string{
+		"STUB_HEAD_SHA":    headSHA,
+		"STUB_BASE_REF":    "main",
+		"STUB_BUCKET":      "",
+		"STUB_HEAD_BRANCH": "integration/harness-welle-2",
+		"STUB_DIFF_FILES":  "docs/specs/38-release-pipeline-and-nas-runner.md",
+	}, commentEnv(
+		// Round 1: tests ran locally (this must be ignored - it is stale).
+		marker("APPROVE", 1, headSHA, "go"),
+		"**Suite:** `docker compose run --rm app go test ./...` → exit 0\n"+marker("APPROVE", 1, headSHA, "tests"),
+		marker("APPROVE", 1, headSHA, "docs"),
+		// Round 2: the current round's tests comment relies on CI instead.
+		marker("APPROVE", 2, headSHA, "go"),
+		"**Suite:** https://github.com/CDRO/Inventory/actions/runs/999 (success)\n"+marker("APPROVE", 2, headSHA, "tests"),
+		marker("APPROVE", 2, headSHA, "docs"),
+	))
+	r := runGate(t, env, "gate", "7")
+	if r.exit != 3 {
+		t.Fatalf("expected exit 3 (fail closed on the stale round-1 line), got %d\n%s", r.exit, r.stdout)
+	}
+	mustContain(t, r.stdout, "CHECKS missing", "stdout")
+}
+
 // A non-documentation file in the diff means the fallback never applies, no
 // matter what the Suite line says.
 func TestGateChecksMissingNonDocDiffDoesNotMerge(t *testing.T) {
-	env := map[string]string{
+	env := mergeEnv(map[string]string{
 		"STUB_HEAD_SHA": headSHA,
 		"STUB_BASE_REF": "main",
 		"STUB_BUCKET":   "",
@@ -372,9 +493,7 @@ func TestGateChecksMissingNonDocDiffDoesNotMerge(t *testing.T) {
 			"docs/specs/38-release-pipeline-and-nas-runner.md",
 			"internal/store/batches.go",
 		}, "\n"),
-		"STUB_COMMENTS": approvedAtRound(1, headSHA) + "\n" +
-			"**Suite:** `docker compose run --rm app go test ./...` → exit 0",
-	}
+	}, commentEnv(approvedComments(1, headSHA, "**Suite:** `docker compose run --rm app go test ./...` → exit 0")...))
 	r := runGate(t, env, "gate", "7")
 	if r.exit != 3 {
 		t.Fatalf("expected exit 3, got %d\n%s", r.exit, r.stdout)
@@ -385,14 +504,12 @@ func TestGateChecksMissingNonDocDiffDoesNotMerge(t *testing.T) {
 // If `git diff` itself cannot answer (no such ref, no repo), that is not
 // evidence of a documentation-only diff - it must fail closed, not merge.
 func TestGateChecksMissingGitFailureDoesNotMerge(t *testing.T) {
-	env := map[string]string{
+	env := mergeEnv(map[string]string{
 		"STUB_HEAD_SHA": headSHA,
 		"STUB_BASE_REF": "main",
 		"STUB_BUCKET":   "",
 		"STUB_DIFF_RC":  "128",
-		"STUB_COMMENTS": approvedAtRound(1, headSHA) + "\n" +
-			"**Suite:** `docker compose run --rm app go test ./...` → exit 0",
-	}
+	}, commentEnv(approvedComments(1, headSHA, "**Suite:** `docker compose run --rm app go test ./...` → exit 0")...))
 	r := runGate(t, env, "gate", "7")
 	if r.exit != 3 {
 		t.Fatalf("expected exit 3 (fail closed), got %d\n%s", r.exit, r.stdout)

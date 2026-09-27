@@ -24,3 +24,7 @@ deploy/synology/update_test.go text eol=lf
 scripts/dev text eol=lf
 scripts/dev.d/* text eol=lf
 scripts/dev_test.go text eol=lf
+
+# gate_test.go embeds gh/git stub scripts as raw string literals the same way
+# dev_test.go and update_test.go do - same CRLF shebang problem, same fix.
+scripts/gate_test.go text eol=lf

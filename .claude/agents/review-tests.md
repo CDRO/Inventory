@@ -190,6 +190,10 @@ CI instead, the `test` workflow's run URL and conclusion. Omit empty sections.
 verdict and round matching the header above it. `<n>` is the round you were
 given; `<head sha reviewed>` is the `headRefOid` you read in step 1 — never a
 value you recall from an earlier round or guess from the PR title.
-`scripts/dev gate <PR>` (H5) reads only this line, never the prose above it.
+`scripts/dev gate <PR>` (H5) reads only this line for the merge decision
+itself, never the prose above it — with one exception: on a PR against
+`main`, it may also read this comment's own `**Suite:**` line (never a stale
+round's), which is exactly why that line's exit code or run URL has to be
+real and current every round, not carried over from the last one.
 
 After posting, report back a two-line summary: the verdict and the suite result.

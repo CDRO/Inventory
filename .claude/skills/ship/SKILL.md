@@ -121,11 +121,14 @@ scripts/dev gate <PR>
 
 **Decide from this, not from what the agents told you.** A subagent's report
 is not visible to the user and is easy to remember generously; the verdict
-marker each reviewer posts on the PR is the record, and `scripts/dev gate`
-(`scripts/dev.d/gate`, H5) reads only those markers back from GitHub — never
-the prose above them, and never a comment whose `sha=` does not match the
-PR's current head commit, so a stale approval from before your last push can
-never count.
+marker each reviewer posts on the PR is the record, and for the merge
+decision itself `scripts/dev gate` (`scripts/dev.d/gate`, H5) reads only
+those markers back from GitHub — never the prose above them, and never a
+comment whose `sha=` does not match the PR's current head commit, so a stale
+approval from before your last push can never count. (The one exception: on
+a PR against `main`, its documentation-only fallback also reads the current
+round's own test-reviewer comment for a `**Suite:**` line — never a stale
+one — see the command's own `--help`.)
 
 It prints one line per reviewer and then exactly one of `MERGE`, `WAIT
 <reviewers>` or `BLOCK <reviewers>`, exiting 0, 3 or 4 respectively. Merge
