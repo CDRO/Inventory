@@ -266,6 +266,38 @@ from either workflow on a specific branch before it merges triggers
 `workflow_dispatch` on it explicitly, using the same dispatch-and-poll
 recipe as `test.yml`, above.
 
+`e2e.yml` builds the production image exactly once, in its own `build` job,
+and hands the result to the `e2e` job as a `docker save`/`actions/upload-
+artifact` tarball rather than a second `docker compose build` — H8
+(`docs/plans/2026-09-harness-optimization.md` — "Running the E2E suite"
+above notes where that document lives until PR #319 merges) measured that
+against a shared BuildKit layer cache (`type=gha`, each job rebuilding with
+`cache-from`) and kept the faster one; the numbers are in that workflow's own
+header comment, since a number here would go stale independently of it.
+`e2e/node_modules` is cached by `actions/cache`, keyed on `e2e/package.json`
+(not a lockfile — `.gitignore` deliberately keeps `e2e/package-lock.json`
+uncommitted, the same as `node_modules` itself). `package.json` is committed
+and pins both its dependencies to the exact Playwright version
+`docker-compose.e2e.yml`'s own comment on the `e2e` service already commits
+to keeping in lockstep with the pulled image tag, so a real version bump
+changes the file and invalidates the cache — which is what the lockfile
+would have keyed on if one existed here. The `e2e` service's `npm install`
+is then a no-op on a cache hit. The backup/restore round trip (issue #133)
+used to be a second job in `e2e.yml`, running on every push to `main`
+alongside the suite; H8 moved it into its own workflow,
+`.github/workflows/restore.yml`, triggered on a push to `main` that touches
+the files that can actually break it (the backup script, the compose files,
+`migrations/**`, `e2e/restore/**`, `e2e/fixtures/**`, the `Dockerfile`), on
+every `v*` release tag unconditionally, on a weekly `schedule` (to catch
+image-tag drift no path filter can see), and on `workflow_dispatch` —
+turning a job that ran on every push into one that runs on a small fraction
+of them, without weakening it as the deployment gate: it still runs before
+every release. `e2e.yml` carries a `concurrency` group keyed on
+`github.ref`, cancelling a superseded `push` run; `restore.yml` carries
+none — not mandated, and GitHub-hosted runners already put two concurrent
+round trips on separate ephemeral runners regardless. Both workflows have
+tighter `timeout-minutes` than before.
+
 ## Running more than one instance of the stack locally
 
 Two ordinary situations need this: developing two branches side by side, and

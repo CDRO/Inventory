@@ -403,7 +403,9 @@ Before assigning packages to a wave, check what each one touches:
    ```
    `-Validate` checks the schema, naming the path of every finding;
    `-DryRun` additionally shows which sessions would start with which
-   model/effort/advisor — neither starts anything.
+   model/effort/advisor — neither starts anything. Run `scripts/doctor` first,
+   too — it catches a broken Docker/gh/claude setup before the orchestrator
+   opens a single window.
 6. Report to the user what was planned, and the command that starts it. Do
    **not** start the orchestrator yourself — that is the user's call.
 

@@ -137,9 +137,11 @@ type result struct {
 
 func (r result) called(substr string) bool { return strings.Contains(r.calls, substr) }
 
-// run copies scripts/dev and scripts/dev.d/* into a throwaway repository root
-// (the commands locate the root as $(dirname $0)/../.., so the copy sits at
-// that depth), writes the stubs, and runs the dispatcher with args.
+// run copies scripts/dev, scripts/dev.d/* and scripts/doctor into a throwaway
+// repository root (the commands locate the root as $(dirname $0)/../.., so
+// the copy sits at that depth - scripts/dev.d/doctor forwards to scripts/doctor
+// at that same depth, hence copying it too), writes the stubs, and runs the
+// dispatcher with args.
 func run(t *testing.T, env map[string]string, args ...string) result {
 	t.Helper()
 
@@ -149,6 +151,7 @@ func run(t *testing.T, env map[string]string, args ...string) result {
 		t.Fatal(err)
 	}
 	copyFile(t, "dev", filepath.Join(dst, "dev"))
+	copyFile(t, "doctor", filepath.Join(dst, "doctor"))
 	entries, err := os.ReadDir("dev.d")
 	if err != nil {
 		t.Fatalf("read dev.d: %v", err)
@@ -251,12 +254,13 @@ func TestNoCommandListsEveryCommandAndExits2(t *testing.T) {
 	if r.exit != 2 {
 		t.Fatalf("expected exit 2, got %d", r.exit)
 	}
-	for _, c := range []string{"check", "test", "vet", "ci-status", "ci-usage"} {
+	for _, c := range []string{"check", "test", "vet", "ci-status", "ci-usage", "doctor"} {
 		mustContain(t, r.stdout, "\n  "+c, "usage lists "+c)
 	}
 	mustContain(t, r.stdout, "Run the Go suite in the dev container", "usage carries the test command's description")
 	mustContain(t, r.stdout, "Wait for the GitHub Actions run of an exact commit", "usage carries the ci-status description")
 	mustContain(t, r.stdout, "Deterministic pre-gate", "usage carries the check command's description")
+	mustContain(t, r.stdout, "Check the environment for what a session, a wave or a container needs before it starts", "usage carries the doctor command's description")
 	if r.calls != "" {
 		t.Errorf("usage must not run docker or gh, but called:\n%s", r.calls)
 	}
@@ -307,6 +311,24 @@ func TestCommandHelpIsTheHeaderAndNothingElse(t *testing.T) {
 		if r.calls != "" {
 			t.Errorf("%s --help must not call gh, but called:\n%s", c, r.calls)
 		}
+	}
+}
+
+// --- doctor -----------------------------------------------------------
+
+// scripts/dev.d/doctor is a plain forwarder to scripts/doctor at the same
+// repository root, not a copy, so the two can never drift out of sync.
+// --help proves the forwarding - args reach scripts/doctor and its own
+// usage text comes back - without needing to stub every check scripts/doctor
+// itself makes (that is scripts/tests/doctor.test.ps1's job).
+func TestDoctorForwardsToScriptsDoctor(t *testing.T) {
+	r := run(t, nil, "doctor", "--help")
+	if r.exit != 0 {
+		t.Fatalf("doctor --help: expected exit 0, got %d", r.exit)
+	}
+	mustContain(t, r.stdout, "scripts/doctor [--json] [--fix]", "doctor --help forwards to scripts/doctor's own usage")
+	if r.calls != "" {
+		t.Errorf("doctor --help must not call docker or gh, but called:\n%s", r.calls)
 	}
 }
 
