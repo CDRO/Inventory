@@ -128,8 +128,9 @@ Three things the sequence alone doesn't make obvious:
   at the top of the compose header is the only guard.
 - **The `db` service also runs with `fsync=off`, `synchronous_commit=off` and
   `full_page_writes=off`** (docs/plans/2026-09-harness-optimization.md,
-  decision D5), kept in step with `docker-compose.override.yml`'s own copy of
-  the same flags. This database already has no persistent volume — the
+  decision D5 — that document is on branch `harness/optimization-plan`, PR
+  #319, until it merges), kept in step with `docker-compose.override.yml`'s
+  own copy of the same flags. This database already has no persistent volume — the
   sequence's closing `down -v` discards it regardless — so trading crash
   durability for speed here costs nothing the stack was keeping anyway.
 
@@ -772,7 +773,9 @@ because this excerpt is shorter reintroduces exactly the failure it prevents.
 The override's `db` service adds one thing beyond a merge of the base file's:
 `command: postgres -c fsync=off -c synchronous_commit=off -c
 full_page_writes=off` (docs/plans/2026-09-harness-optimization.md, decision
-D5). These three flags trade crash durability for write speed on a database
+D5; "Running the E2E suite" above notes where that document lives until PR
+#319 merges). These three flags trade crash durability for write speed on a
+database
 that is entirely disposable — a developer's `pgdata` volume (still the base
 file's persistent, named one; the override does not touch it) survives an
 ordinary `docker compose down` or container restart, and the only thing a
