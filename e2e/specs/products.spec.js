@@ -800,10 +800,13 @@ for (const [name, fulfil] of [
 // call of the function, so it stopped a double click within one open picker
 // but not a close-and-reopen of the same logical picker. Both regression
 // tests below hold a mocked response open and release it on a schedule the
-// test controls — the same technique ingestion.spec.js uses for its own
-// overlapping-request races ("closing the location modal while two creates
-// overlap...") — rather than racing real timing, which would be flaky in
-// either direction.
+// test controls, rather than racing real timing, which would be flaky in
+// either direction — the same technique ingestion.spec.js uses for its own
+// overlapping-request races: the #252 test below holds two overlapping
+// fetches via a `releases` array, matching "closing the location modal while
+// two creates overlap..."; the #249 test holds a single one via one
+// `releaseFirst`/`...Held` promise, matching the simpler "closing the
+// location modal while its create POST is still in flight...".
 
 // #252: a reopen started before the first invocation's suggestions fetch has
 // resolved must not let that stale fetch land its own row beside the
@@ -874,7 +877,10 @@ test("a suggestion click after a reopen is refused while an earlier write from t
 
   await openProduct(page, "E2E Picture Picker Source");
   await page.locator('[data-role="change-picture"]').click();
-  await page.locator('[data-role="picture-suggestion"]').click(); // the held first PATCH
+
+  const choice = page.locator('[data-role="picture-suggestion"]');
+  await expect(choice).toBeVisible();
+  await choice.click(); // the held first PATCH
 
   await expect.poll(() => sent.length).toBe(1);
 
@@ -882,15 +888,20 @@ test("a suggestion click after a reopen is refused while an earlier write from t
   // picker and click its suggestion again while the first write is still
   // unresolved.
   await page.locator('[data-role="change-picture"]').click();
-  await page.locator('[data-role="picture-suggestion"]').click();
+  await expect(choice).toBeVisible();
+  await choice.click();
 
   // The guard's refusal is synchronous, so this only gives a bug a chance to
   // show up rather than racing the fix.
   await page.waitForTimeout(200);
   expect(sent.length, "the reopened picker's click must be refused, not raced").toBe(1);
 
+  // Let the held write finish so the mocked route's own promise chain settles
+  // cleanly rather than leaving it dangling when the test ends. Nothing below
+  // this point is a further check of the guard — that was already proven by
+  // the assertion above.
   releaseFirst();
-  await expect.poll(() => sent.length).toBe(1); // resolving the first write must not free a second one either
+  await expect.poll(() => sent.length).toBe(1);
 });
 
 // #254: the picker's rollback contract. choose() (js/image-picker.js) catches
