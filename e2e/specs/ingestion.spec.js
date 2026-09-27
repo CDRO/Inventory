@@ -447,7 +447,15 @@ test("with ImageCapture absent the still comes from the canvas, and the resoluti
   // regression that appended a fresh hint per shot would leave this dialog
   // showing the same sentence twice, which `toBeVisible()` alone would not
   // notice.
-  await expect(hint).toHaveCount(1);
+  // Scoped to the whole page, not to the dialog: a regression that appended a
+  // fresh hint per shot would most likely put it next to the first, but one
+  // that appended it to the picker or the body instead would escape a
+  // dialog-scoped count entirely.
+  await expect(page.locator('[data-role="resolution-hint"]')).toHaveCount(1);
+  // The assertion that does the real work, and the one #205's "appears exactly
+  // once" is about: a duplicated hint node and a single node whose text was
+  // concatenated twice both fail here, where a count of elements catches only
+  // the first.
   const shown = (await dialog.textContent()).split("Preview resolution.").length - 1;
   expect(shown, "the hint's text appears exactly once after the second shot").toBe(1);
 
@@ -700,6 +708,136 @@ test("the barcode scan sheet's Camera control opens the OS input, never the view
   // attribute that makes it one.
   expect(await chooser.element().getAttribute("capture")).toBe("environment");
   await expect(page.locator(VIEWFINDER)).toHaveCount(0);
+});
+
+// review-tests round 1, blocking: flip() had zero execution, and the "not
+// verifiable in this stack" defense did not hold. #205 does record the flip
+// button as device-only, but that is about which *physical camera* the second
+// stream comes from — the fake device has one. The flip *logic* is a different
+// thing and is perfectly drivable here, because the button's visibility and the
+// whole flip path are gated on enumerateDevices(), which is as overridable as
+// getUserMedia — which this file already overrides in four other journeys.
+//
+// What this pins is exactly what would otherwise have shipped untested: the old
+// stream released before the new one is attached (or the camera indicator stays
+// lit for a camera nobody is using), a new ImageCapture built for the new track
+// (or takePhoto() keeps photographing a stopped one), and the Shutter re-gated
+// until the new stream's first frame (or a canvas grab in that window yields a
+// null blob).
+//
+// Still not verifiable here, and unchanged from #205: that the second stream is
+// genuinely a different camera. Nothing in this stack can tell.
+test("flipping the camera releases the old stream, re-creates ImageCapture and re-gates the Shutter", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    // Two videoinputs, so the flip button is offered at all. js/camera.js reads
+    // nothing but `kind` off these, so plain objects are enough and are clearer
+    // than doctoring the real list.
+    navigator.mediaDevices.enumerateDevices = async () => [
+      { kind: "videoinput", deviceId: "fake_device_0", label: "fake_device_0", groupId: "g0" },
+      { kind: "videoinput", deviceId: "fake_device_1", label: "fake_device_1", groupId: "g1" },
+      { kind: "audioinput", deviceId: "fake_audio_0", label: "fake_audio_0", groupId: "g2" },
+    ];
+
+    window.__streams = [];
+    window.__constraints = [];
+    const realGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = async (constraints) => {
+      window.__constraints.push(JSON.stringify(constraints?.video ?? null));
+      // The second call is held open until the test releases it. That is what
+      // makes "the Shutter is disabled again after a flip" a deterministic
+      // assertion rather than a race against a ~60 ms stream handover.
+      if (window.__streams.length === 1) {
+        await new Promise((resolve) => {
+          window.__releaseSecondStream = resolve;
+        });
+      }
+      const stream = await realGetUserMedia(constraints);
+      window.__streams.push(stream);
+      return stream;
+    };
+
+    // Counting constructions is the only way to see the re-creation from
+    // outside: a stale ImageCapture holds a stopped track and would photograph
+    // nothing, which no visible state reveals until a press fails.
+    window.__imageCaptures = 0;
+    const RealImageCapture = window.ImageCapture;
+    window.ImageCapture = class extends RealImageCapture {
+      constructor(track) {
+        super(track);
+        window.__imageCaptures += 1;
+      }
+    };
+  });
+
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  const dialog = await openViewfinder(page);
+  const shutter = dialog.locator('[data-role="shutter"]');
+  const flip = dialog.locator('[data-role="flip"]');
+  const rows = page.locator("#photo-list li");
+
+  // Offered only because two cameras were reported: the other journeys, which
+  // report one, assert nothing about this button and it stays hidden there.
+  await expect(flip).toBeVisible();
+  expect(await page.evaluate(() => window.__imageCaptures), "one ImageCapture for the first stream").toBe(1);
+
+  await shutter.click();
+  await expect(rows).toHaveCount(1);
+
+  await flip.click();
+
+  // The second getUserMedia is still pending, so this is the re-gated state
+  // itself and not a snapshot taken before the handover finished.
+  await page.waitForFunction(() => typeof window.__releaseSecondStream === "function");
+  await expect(shutter).toBeDisabled();
+  // And the old stream is already released at this point — the spec stops it
+  // before asking for the new one, because two live streams on one device is
+  // how the second request comes back overconstrained on some phones.
+  const oldStreamStates = await page.evaluate(() =>
+    window.__streams[0].getTracks().map((track) => track.readyState),
+  );
+  expect(oldStreamStates.length, "expected the first stream to have tracks").toBeGreaterThan(0);
+  expect(
+    oldStreamStates.every((state) => state === "ended"),
+    `the old stream must be stopped before the new one is requested, got ${JSON.stringify(oldStreamStates)}`,
+  ).toBe(true);
+
+  await page.evaluate(() => window.__releaseSecondStream());
+  await expect(shutter).toBeEnabled({ timeout: 10_000 });
+
+  // facingMode actually flipped, rather than the same camera being reopened.
+  expect(await page.evaluate(() => window.__constraints)).toEqual([
+    JSON.stringify({ facingMode: "environment" }),
+    JSON.stringify({ facingMode: "user" }),
+  ]);
+  expect(await page.evaluate(() => window.__streams.length), "a second stream was opened").toBe(2);
+  expect(
+    await page.evaluate(() => window.__imageCaptures),
+    "a new ImageCapture must be built for the new track",
+  ).toBe(2);
+
+  // The viewfinder still works after the flip, and the numbering carried across
+  // it: a shot taken on the new stream is capture-2.jpg, and the shot taken
+  // before the flip is still in the list.
+  await shutter.click();
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toContainText("capture-1.jpg");
+  await expect(rows.nth(1)).toContainText("capture-2.jpg");
+  await expect(dialog.locator('[data-role="shot-count"]')).toHaveText("2 photos taken");
+
+  // Exiting still releases everything, both streams included.
+  await dialog.locator('[data-role="done"]').click();
+  await expect(page.locator(VIEWFINDER)).toHaveCount(0);
+  const allStates = await page.evaluate(() =>
+    window.__streams.flatMap((stream) => stream.getTracks().map((track) => track.readyState)),
+  );
+  expect(
+    allStates.every((state) => state === "ended"),
+    `every track of both streams must be ended, got ${JSON.stringify(allStates)}`,
+  ).toBe(true);
 });
 
 // #205 item 6, which the issue flags as unmeasured and asks the package to

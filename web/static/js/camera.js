@@ -136,9 +136,12 @@ async function openViewfinder({ picker, modeLabel, openOsCamera }) {
     class: "viewfinder__video",
     "data-role": "viewfinder-video",
   });
-  // Muted text under the preview, shown once per viewfinder session on the
-  // canvas path only — the owner's accepted trade-off, stated rather than
-  // hidden (spec 37, step 1).
+  // Muted text under the preview: the owner's accepted trade-off, stated
+  // rather than hidden (spec 37, step 1). Shown at most once per viewfinder
+  // session, and only where ImageCapture is absent for this *stream* — which
+  // is not the same as "whenever a press used the canvas", since a
+  // takePhoto() rejection falls back to the canvas and must still show no
+  // hint (#205 item 7). The gate itself is in capture(), which says why.
   const hint = el("p", { class: "muted", "data-role": "resolution-hint", hidden: true }, [
     text(t("camera.resolutionHint")),
   ]);
@@ -166,7 +169,12 @@ async function openViewfinder({ picker, modeLabel, openOsCamera }) {
   // Per *session*, unlike captureCount above: spec 37's dialog shows "the
   // running count of shots taken in this viewfinder session".
   let sessionShots = 0;
-  let imageCapture = makeImageCapture(stream.getVideoTracks()[0]);
+  // Built by attach(), which is the single place a stream becomes this
+  // dialog's stream — on open and again on every flip. Constructing one here
+  // as well would build two for the first stream and throw the first away,
+  // and a second construction per stream is not free: it is a live handle on
+  // a video track.
+  let imageCapture = null;
   let frameTimer = null;
   let capturing = false;
   let hintShown = false;
