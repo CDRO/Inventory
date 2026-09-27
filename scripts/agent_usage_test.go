@@ -88,20 +88,32 @@ func TestAgentUsageTrap1DropsInterimSnapshotWithoutOutputTokens(t *testing.T) {
 	// Only trap1 (ctx=172) and trap2 (ctx=100) fall on 2026-09-24; trap1's
 	// interim snapshot (in=2,cc=100,cr=50, no output) would double the input
 	// and cache figures if it were ever counted alongside the final one.
-	row(t, r.stdout, "claude-sonnet-5", "main", 2, "12", "120", "80", "60")
+	// Two calls -> an even-count median: (100+172)/2 = 136.0; max is the
+	// larger, 172.
+	row(t, r.stdout, "claude-sonnet-5", "main", 2, "12", "120", "80", "60", "172", "136.0")
 }
 
 // TestAgentUsageTrap2TakesTheLastUsageObjectOnTheLine: msg_trap2's line
-// carries a decoy `"usage":{...}` (input=999 etc, nested under
-// "iterations_preview") before the real one (input=10,cc=20,cr=30,out=40).
-// The decoy values must never reach the total.
+// carries two decoys - a whole `"usage":{...}` object (input=999 etc, nested
+// under "iterations_preview") before the real one, and, *inside* the real
+// object, an `iterations` array whose own input/output (777/888) differ from
+// the object's own top-level fields (input=10,cc=20,cr=30,out=40). Neither
+// decoy's values may reach the total: the first proves the last "usage":{
+// on the line is chosen over an earlier one; the second (777/888 not
+// appearing) proves each field is read at its *first* occurrence within that
+// chosen object, not wherever a later, coincidentally-matching-if-equal
+// nested copy happens to be - the two decoys used to share the same values
+// as the real fields, which meant this test could not tell first-occurrence
+// from last-occurrence apart (review-go, PR #353 round 1).
 func TestAgentUsageTrap2TakesTheLastUsageObjectOnTheLine(t *testing.T) {
 	r := run(t, agentUsageEnv(t, "testrepo", nil), "agent-usage", "--since", "2026-09-24", "--until", "2026-09-24", "--json")
 	if r.exit != 0 {
 		t.Fatalf("expected exit 0, got %d\n%s", r.exit, r.stderr)
 	}
-	mustContain(t, r.stdout, `"input":12`, "stdout") // 2 (trap1) + 10 (trap2's real usage, not 999)
+	mustContain(t, r.stdout, `"input":12`, "stdout") // 2 (trap1) + 10 (trap2's real usage, not 999 or 777)
 	mustNotContain(t, r.stdout, "999", "the decoy usage object's values must never appear")
+	mustNotContain(t, r.stdout, "777", "the nested iterations array's input_tokens must never appear")
+	mustNotContain(t, r.stdout, "888", "the nested iterations array's output_tokens must never appear")
 }
 
 // TestAgentUsageTrap3DedupesByMessageIDKeepingTheFinalBlock: msg_trap3
@@ -119,7 +131,8 @@ func TestAgentUsageTrap3DedupesByMessageIDKeepingTheFinalBlock(t *testing.T) {
 	// the two subagent calls (different files, own message ids, always kept
 	// separately) - review-go (ctx=18) and the meta.json-named general-purpose
 	// call (ctx=34).
-	row(t, r.stdout, "claude-sonnet-5", "main", 1, "5", "6", "7", "8")
+	// A single call -> its own context is both the max and the median.
+	row(t, r.stdout, "claude-sonnet-5", "main", 1, "5", "6", "7", "8", "26", "26.0")
 }
 
 // --- role: attributionAgent, the meta.json fallback, and "main" -------
@@ -130,10 +143,10 @@ func TestAgentUsageRoleFromAttributionAgentAndMetaJSONFallback(t *testing.T) {
 		t.Fatalf("expected exit 0, got %d\n%s", r.exit, r.stderr)
 	}
 	// agent-review-go.jsonl carries attributionAgent="review-go" directly.
-	row(t, r.stdout, "claude-sonnet-5", "review-go", 1, "3", "4", "5", "6")
+	row(t, r.stdout, "claude-sonnet-5", "review-go", 1, "3", "4", "5", "6", "18", "18.0")
 	// agent-unnamed.jsonl has no attributionAgent field; its sibling
 	// .meta.json's agentType ("general-purpose") is the fallback.
-	row(t, r.stdout, "claude-opus-5", "general-purpose", 1, "7", "8", "9", "10")
+	row(t, r.stdout, "claude-opus-5", "general-purpose", 1, "7", "8", "9", "10", "34", "34.0")
 }
 
 // --- --since / --until --------------------------------------------------
@@ -142,8 +155,24 @@ func TestAgentUsageSinceUntilExcludesOutOfRangeCalls(t *testing.T) {
 	withRange := run(t, agentUsageEnv(t, "testrepo", nil), "agent-usage", "--since", "2026-09-24", "--until", "2026-09-26")
 	mustNotContain(t, withRange.stdout, "400", "msg_old (2026-08-01, ctx 400) is outside --since/--until and must not appear")
 
+	// Without a range, all four calls in (claude-sonnet-5, main) are in
+	// scope: contexts [26, 100, 172, 400] (msg_old's 400 included) -> an
+	// even-count median of (100+172)/2 = 136.0, max 400.
 	noRange := run(t, agentUsageEnv(t, "testrepo", nil), "agent-usage")
-	mustContain(t, noRange.stdout, "400", "without a range, msg_old's context (400) must be the group's max_ctx")
+	row(t, noRange.stdout, "claude-sonnet-5", "main", 4, "117", "226", "187", "168", "400", "136.0")
+}
+
+// TestAgentUsageMedianIsExactOnAnOddCount: the "prscope" fixtures'
+// (claude-sonnet-5, main) group has three calls - contexts 50, 90 and 4000 -
+// an odd count, so the median must be the exact middle value (90), not an
+// average of two neighbors the way the even-count cases above are. A
+// off-by-one in the (cnt+1)/2 index would silently return 50 or 4000 instead.
+func TestAgentUsageMedianIsExactOnAnOddCount(t *testing.T) {
+	r := run(t, agentUsageEnv(t, "prscope", nil), "agent-usage")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d\n%s", r.exit, r.stderr)
+	}
+	row(t, r.stdout, "claude-sonnet-5", "main", 3, "1032", "1034", "1036", "1038", "4000", "90.0")
 }
 
 func TestAgentUsageRejectsMalformedDates(t *testing.T) {
@@ -157,7 +186,10 @@ func TestAgentUsageRejectsMalformedDates(t *testing.T) {
 // --- --pr: gitBranch, and the cwd fallback for a detached/HEAD record -----
 
 const prGhStub = `#!/bin/sh
-[ "${STUB_GH_FAIL:-}" != "1" ] || exit 1
+if [ "${STUB_GH_FAIL:-}" = "1" ]; then
+  echo "GraphQL: Could not resolve to a PullRequest with the number of 999999. (repository.pullRequest)" >&2
+  exit 1
+fi
 case "$*" in
   "pr view "*"--json headRefName -q .headRefName")
     printf '%s\n' "$STUB_PR_BRANCH"; exit 0 ;;
@@ -190,9 +222,31 @@ func TestAgentUsagePRFiltersByGitBranchWithCwdFallback(t *testing.T) {
 		t.Fatalf("expected exit 0, got %d\n%s", r.exit, r.stderr)
 	}
 	mustNotContain(t, r.stdout, "1000", "session-other.jsonl (branch=main) must be excluded from the PR total")
-	row(t, r.stdout, "claude-sonnet-5", "main", 2, "32", "34", "36", "38")
+	// Two calls in scope (ctx 50 and 90) -> even-count median (50+90)/2=70.0.
+	row(t, r.stdout, "claude-sonnet-5", "main", 2, "32", "34", "36", "38", "90", "70.0")
 }
 
+// TestAgentUsagePRCwdFallbackIsASuffixMatchNotASubstringOne: the "cwdscope"
+// fixture's cwd is ".../Testrepo-target-branch-old" - it contains the
+// branch's suffix ("target-branch") but does not end in it, so it must be
+// excluded from the --pr total (an earlier version used a substring-anywhere
+// match, which this fixture would have passed).
+func TestAgentUsagePRCwdFallbackIsASuffixMatchNotASubstringOne(t *testing.T) {
+	env := agentUsageEnv(t, "cwdscope", map[string]string{
+		"AGENT_USAGE_GH": writeGhStub(t),
+		"STUB_PR_BRANCH": "feature/target-branch",
+	})
+	r := run(t, env, "agent-usage", "--pr", "42")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d\n%s", r.exit, r.stderr)
+	}
+	mustContain(t, r.stdout, "(no calls in range)", "a cwd that merely contains the branch suffix, without ending in it, must not match")
+}
+
+// TestAgentUsagePRLookupFailureExitsNonZero also pins that `gh`'s own error
+// text reaches stderr (review-go, PR #353 round 1: an auth failure, a
+// network error and "no such PR" used to all produce the identical generic
+// message, since gh's stderr was discarded with 2>/dev/null).
 func TestAgentUsagePRLookupFailureExitsNonZero(t *testing.T) {
 	env := agentUsageEnv(t, "prscope", map[string]string{
 		"AGENT_USAGE_GH": writeGhStub(t),
@@ -203,6 +257,7 @@ func TestAgentUsagePRLookupFailureExitsNonZero(t *testing.T) {
 		t.Fatalf("expected a non-zero exit when the PR's branch cannot be resolved")
 	}
 	mustContain(t, r.stderr, "999999", "stderr names the PR that failed")
+	mustContain(t, r.stderr, "Could not resolve to a PullRequest", "gh's own error text must reach stderr, not just a generic message")
 }
 
 func TestAgentUsageRejectsNonNumericPR(t *testing.T) {

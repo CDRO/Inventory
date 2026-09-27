@@ -12,8 +12,18 @@
 # ends inclusive). --pr <n> keeps only calls whose record names the PR's head
 # branch (`gh pr view <n>`) as `gitBranch`, or - when that field is absent or
 # "HEAD" - whose `cwd` ends in the branch's last path segment; it then prints
-# only that filtered total. --json emits the same rows as one JSON object
-# instead of a table. Never prints message content: only counts.
+# only that filtered total. Never prints message content: only counts.
+#
+# Output: one row per (model, role) group - calls, the four summed token
+# fields (input, cache_creation, cache_read, output), then max_ctx and
+# median_ctx, the largest and middle `input + cache_creation + cache_read +
+# output` of any single call in the group (context size, not billed total -
+# see the plan's own "context size" distinction in section 1.4). A `total`
+# row sums the first five columns only; a per-group max/median across mixed
+# models has no single meaning. --json emits the identical figures as
+# `{"rows":[{"model","role","calls","input","cache_creation","cache_read",
+# "output","max_context","median_context"}, ...],"total":{...without the two
+# context fields...}}` - same names as the table's columns throughout.
 #
 # Three traps in these transcripts, each unit-tested against fixtures
 # (scripts/testdata/agent-usage/):
@@ -36,6 +46,11 @@
 #     Keying on `message.id` and keeping only the last line that clears trap 1
 #     fixes both: a truly duplicated line collapses into the same id, and a
 #     call's block-by-block partial snapshots collapse into its final one.
+#     Dedup is scoped per file (one awk invocation per transcript, not one
+#     over all of them - see "Portable" below), which is only sound because
+#     `message.id` is the API's own per-request id and is not reused across
+#     separate calls, let alone separate sessions; a collision across two
+#     different transcript files is not a real possibility to guard against.
 #
 # Role: the three reviewers (and any other named subagent) carry
 # `attributionAgent` directly on their records; when a subagent record has
@@ -132,11 +147,25 @@ fi
 want_branch=""
 want_suffix=""
 if [ -n "$pr" ]; then
-  want_branch=$("$gh" pr view "$pr" --json headRefName -q .headRefName 2>/dev/null)
-  if [ $? -ne 0 ] || [ -z "$want_branch" ]; then
-    echo "agent-usage: could not resolve the head branch of PR #$pr" >&2
+  gh_err=$(mktemp) || gh_err=""
+  if [ -n "$gh_err" ]; then
+    want_branch=$("$gh" pr view "$pr" --json headRefName -q .headRefName 2>"$gh_err")
+  else
+    want_branch=$("$gh" pr view "$pr" --json headRefName -q .headRefName 2>&1)
+  fi
+  rc=$?
+  if [ $rc -ne 0 ] || [ -z "$want_branch" ]; then
+    detail=""
+    [ -z "$gh_err" ] || detail=$(cat "$gh_err" 2>/dev/null)
+    [ -z "$gh_err" ] || rm -f "$gh_err"
+    if [ -n "$detail" ]; then
+      echo "agent-usage: could not resolve the head branch of PR #$pr: $detail" >&2
+    else
+      echo "agent-usage: could not resolve the head branch of PR #$pr" >&2
+    fi
     exit 1
   fi
+  [ -z "$gh_err" ] || rm -f "$gh_err"
   want_suffix=${want_branch##*/}
 fi
 
@@ -160,6 +189,15 @@ function extract_str(s, key,   at, rest, q) {
   q = index(rest, "\"")
   if (q == 0) return ""
   return substr(rest, 1, q - 1)
+}
+# Case-insensitive suffix test, not a substring-anywhere one: a cwd
+# containing a branch's suffix in its middle (two worktrees that happen to
+# share a trailing word) must not match, only a worktree whose own directory
+# name actually ends in it.
+function ends_with(s, suf,   ls, lsuf) {
+  ls = tolower(s); lsuf = tolower(suf)
+  if (length(lsuf) == 0 || length(lsuf) > length(ls)) return 0
+  return substr(ls, length(ls) - length(lsuf) + 1) == lsuf
 }
 BEGIN { ulen = length("\"usage\":{") }
 index($0, "\"type\":\"assistant\"") == 0 { next }
@@ -204,9 +242,10 @@ index($0, "\"type\":\"assistant\"") == 0 { next }
   if (wantbranch != "") {
     okbranch = (branch == wantbranch)
     if (!okbranch && (branch == "-" || branch == "HEAD") && wantsuffix != "" && cwd != "") {
-      cl = cwd; wl = wantsuffix
+      cl = cwd
       gsub(/\\\\/, "/", cl)
-      okbranch = (index(tolower(cl), tolower(wl)) > 0)
+      sub(/\/$/, "", cl)
+      okbranch = ends_with(cl, wantsuffix)
     }
     if (!okbranch) next
   }
@@ -296,7 +335,7 @@ BEGIN {
   # `ctxn == 0` in flushgrp() compared "" to "0" and was always false until
   # this line made ctxn a real number from the start. gawk does not have this
   # quirk, which is why this broke only under the dev image's busybox, not on
-  # a host shell - see scripts/agent_usage_test.go, TestAgentUsageJSONShapeAndTotal.
+  # a host shell - see scripts/agent_usage_test.go, TestAgentUsageEmptyRangeProducesNoRows.
   FS = "\t"; curmodel = ""; currole = ""; rows = 0
   t_calls = 0; t_in = 0; t_cc = 0; t_cr = 0; t_out = 0
   ctxn = 0; g_in = 0; g_cc = 0; g_cr = 0; g_out = 0
