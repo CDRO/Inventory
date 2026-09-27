@@ -4,7 +4,7 @@
 -- It began as "a known admin, two ordinary users, and two storages with small
 -- inventories of their own", and those first two storages — "E2E Household"
 -- and "E2E Other Household" — are still what most journeys run against. The
--- other eleven exist because of the rule spec 05 states and every block below
+-- other twelve exist because of the rule spec 05 states and every block below
 -- follows: a journey that writes state another journey would observe gets its
 -- **own** seeded user and storage, because the suite runs files in parallel.
 -- That is why this file grows by a block rather than by a row.
