@@ -158,6 +158,8 @@
   "products.picture.saving": "Bild wird gespeichert…",
   "products.picture.saved": "Bild aktualisiert.",
   "products.picture.cleared": "Bild entfernt.",
+  "products.picture.upload": "Foto hochladen",
+  "products.picture.uploading": "Foto wird hochgeladen…",
   "products.pictures.loading": "Suche nach Bildern…",
   "products.pictures.unavailable": "Die Bildsuche ist gerade nicht verfügbar. Versuch es später noch einmal.",
   "products.pictures.none": "Keine Bilder für dieses Produkt gefunden.",

@@ -26,7 +26,7 @@ import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "..
 import { renderStorageSwitcher } from "../storage-switcher.js";
 import { renderNav, startPageFor } from "../nav.js";
 import { initGamification } from "../gamification.js";
-import { get, patch, post, del, ApiError } from "../api.js";
+import { get, patch, post, postForm, del, ApiError } from "../api.js";
 import { fetchCategories, appendCategoryOptions } from "../category-options.js";
 import { fetchLocations, appendLocationOptions, openLocationField } from "../location-options.js";
 import { clearChildren, el, text } from "../dom.js";
@@ -336,13 +336,19 @@ function renderBarcodeCard(product) {
 // and an id belonging to another storage gets the same 404 an unknown one
 // does (docs/specs/03-auth-and-multi-tenancy.md).
 //
-// Spec 07's other change path, a custom photo upload, has no route to call:
-// the only endpoints that take an image upload create an ingestion or
-// consumption *job*. It stays unreachable from here, tracked separately.
+// Spec 07's other change path, a custom photo upload, is the file control
+// beside the picker. It posts the photo itself to the same address the PATCH
+// writes to — `POST …/products/{id}/image` multipart, the address spec 07
+// names — and the server reads it through the one upload path that strips a
+// photo's metadata after applying its orientation to the pixels. It is
+// deliberately built here rather than inside js/image-picker.js: the picker's
+// other caller is the shopping-list reconciliation screen, where the product
+// being given a picture does not exist yet and there is no id to post to.
 function renderPicture(product) {
   const current = el("div", { "data-role": "product-picture" }, [currentPicture(product)]);
   const pickerBox = el("div", { "data-role": "picture-picker", class: "stack", hidden: true });
   const status = el("p", { class: "muted", "data-role": "picture-status", hidden: true });
+  const uploadBox = renderPictureUpload(product, current, status);
 
   const change = el(
     "button",
@@ -351,7 +357,12 @@ function renderPicture(product) {
       class: "btn btn--ghost",
       "data-role": "change-picture",
       onclick: async () => {
+        // Both change paths appear together, and both before the await: spec
+        // 07 offers them as alternatives ("pick one of the 3, upload a custom
+        // photo instead"), so the upload must not wait on a provider round
+        // trip that may never come back.
         pickerBox.hidden = false;
+        uploadBox.hidden = false;
         await renderImagePicker(pickerBox, {
           storageId,
           query: product.name,
@@ -368,7 +379,51 @@ function renderPicture(product) {
     [text(t("products.picture.change"))],
   );
 
-  return el("div", { class: "stack" }, [current, change, pickerBox, status]);
+  return el("div", { class: "stack" }, [current, change, pickerBox, uploadBox, status]);
+}
+
+// renderPictureUpload builds the custom-upload control: a labelled file input
+// that posts the chosen photo to `POST …/products/{id}/image`.
+//
+// The in-flight guard is a local of this call, not a module variable. A
+// module-level one would be shared by every product ever opened in this
+// session, so returning to a product while another one's upload was still in
+// flight would silently refuse it (the bug class of #249/#252 in the picker).
+function renderPictureUpload(product, current, status) {
+  let uploading = false;
+
+  const input = el("input", {
+    type: "file",
+    id: "p-picture",
+    // The server keeps JPEG and PNG only (internal/httpapi/upload.go), so
+    // saying "image/*" here would let a phone offer a HEIC the upload then
+    // refuses.
+    accept: "image/jpeg,image/png",
+    "data-role": "upload-picture",
+    onchange: async (event) => {
+      const chosen = event.currentTarget.files?.[0];
+      // Cleared before the write, not after. A browser fires no change event
+      // when the same file is picked twice, so a control that keeps its value
+      // goes quietly dead on the retry after a failure — and the File already
+      // in hand stays readable once the input no longer holds it.
+      event.currentTarget.value = "";
+      if (!chosen || uploading) return;
+
+      uploading = true;
+      input.disabled = true;
+      try {
+        await uploadPicture(product, chosen, current, status);
+      } finally {
+        uploading = false;
+        input.disabled = false;
+      }
+    },
+  });
+
+  return el("div", { class: "row", "data-role": "picture-upload", hidden: true }, [
+    el("label", { for: "p-picture" }, [text(t("products.picture.upload"))]),
+    input,
+  ]);
 }
 
 function currentPicture(product) {
@@ -397,10 +452,7 @@ async function setPicture(product, hash, current, status) {
       image: hash,
       icon_name: null,
     });
-    product.image_url = updated.image_url ?? null;
-    product.icon_name = updated.icon_name ?? null;
-    clearChildren(current);
-    current.append(currentPicture(product));
+    applyPicture(product, updated, current);
     status.textContent = hash ? t("products.picture.saved") : t("products.picture.cleared");
   } catch (err) {
     status.textContent = apiErrorMessage(err, t("products.error.network"));
@@ -410,6 +462,39 @@ async function setPicture(product, hash, current, status) {
     // hash whose cache entry has been evicted since the list was drawn.
     throw err;
   }
+}
+
+// uploadPicture sends a custom photo to the same address setPicture patches,
+// under POST with a multipart body — spec 07's upload change path
+// (docs/specs/07-shopping-list-reconciliation.md). The server generates the
+// filename and strips the photo's metadata, so nothing here has to: what the
+// browser called the file never reaches disk.
+//
+// Unlike setPicture it does not rethrow. There is no selection state to roll
+// back — the file input was cleared the moment the file was read — and the
+// status line already carries the server's own words.
+async function uploadPicture(product, file, current, status) {
+  status.hidden = false;
+  status.textContent = t("products.picture.uploading");
+
+  const body = new FormData();
+  body.append("image", file);
+  try {
+    applyPicture(product, await postForm(`${basePath()}/${product.id}/image`, body), current);
+    status.textContent = t("products.picture.saved");
+  } catch (err) {
+    status.textContent = apiErrorMessage(err, t("products.error.network"));
+  }
+}
+
+// applyPicture writes what the route answered back onto the product and
+// re-renders the picture alone. Both change paths go through it, so the two
+// cannot disagree about which fields the response carries.
+function applyPicture(product, updated, current) {
+  product.image_url = updated.image_url ?? null;
+  product.icon_name = updated.icon_name ?? null;
+  clearChildren(current);
+  current.append(currentPicture(product));
 }
 
 function renderEditForm(product) {
