@@ -153,11 +153,13 @@ export function mountPhotoPicker(container, { multiple = true, onChange = () => 
     if (newFiles.length === 0) return;
     if (multiple) {
       for (const file of newFiles) {
-        // Guards `add()` (docs/specs/37-in-page-camera.md's viewfinder calls
-        // it with a freshly captured File, but a caller handing back the
-        // same object twice must not orphan its first object URL or render
-        // it as two rows) as much as `handleChange` above, which cannot hit
-        // this in practice — a picked File is never the same object twice.
+        // Defensive, not spec-required: docs/specs/37-in-page-camera.md's
+        // viewfinder guarantees every capture is a distinct File with a
+        // distinct name, and a picked File is never the same object twice
+        // either. But `add()` is a public entry point with no such
+        // guarantee enforced here, and a caller that did hand back the same
+        // File object twice must not orphan its first object URL or render
+        // a duplicate row.
         if (urlByFile.has(file)) continue;
         urlByFile.set(file, URL.createObjectURL(file));
         selection.push(file);
