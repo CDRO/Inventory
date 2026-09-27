@@ -796,6 +796,66 @@ for (const [name, fulfil] of [
   });
 }
 
+// #254: the picker's rollback contract. choose() (js/image-picker.js) catches
+// a failed write and undoes the optimistic selection, and setPicture
+// (js/pages/products.js) deliberately rethrows so that catch fires — every
+// picker journey above this one exercises only a successful PATCH, so nothing
+// before this test would notice if the rethrow were removed, the catch made
+// to swallow, or the rollback stopped restoring the previous selection.
+//
+// The PATCH is mocked to fail, so nothing is written and no fixture is
+// mutated — the same reasoning the failed-upload test below gives for
+// sharing PICTURE_PICKER_PRODUCT rather than taking a dedicated one.
+test("a failed write rolls the picker's selection back to its pre-click state", async ({ page }) => {
+  await logIn(page);
+  await mockSuggestions(page, [
+    { url: `/api/storages/${STORAGE_ID}/images/${SUGGESTION_HASH_A}`, type: "photo" },
+  ]);
+  await page.route(`**/products/${PICTURE_PICKER_PRODUCT}/image`, async (route) => {
+    if (route.request().method() !== "PATCH") return route.fallback();
+    await route.fulfill({
+      status: 500,
+      json: { error: { code: "internal", message: "The server could not save that picture." } },
+    });
+  });
+
+  await openProduct(page, "E2E Picture Picker Source");
+  await page.locator('[data-role="change-picture"]').click();
+
+  const choice = page.locator('[data-role="picture-suggestion"]');
+  await expect(choice).toHaveCount(1);
+  await expect(choice).toHaveAttribute("aria-pressed", "false"); // pre-click: nothing chosen yet
+
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (res) =>
+        res.url().endsWith(`/products/${PICTURE_PICKER_PRODUCT}/image`) &&
+        res.request().method() === "PATCH",
+    ),
+    choice.click(),
+  ]);
+  expect(response.status()).toBe(500);
+
+  // The caller's own words, through the error catalog — proof the rethrow and
+  // the catch actually ran, not just that a button's class changed.
+  await expect(page.locator('[data-role="picture-status"]')).toContainText(
+    "The server could not save that picture.",
+  );
+
+  // Rolled back to the pre-click state: nothing was selected before the
+  // click, so nothing is selected after the failed write either.
+  await expect(choice).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator('[data-role="picture-none"]')).toHaveAttribute("aria-pressed", "false");
+
+  // And the picture block still shows the server's actual picture — none —
+  // rather than the clicked suggestion.
+  await expect(page.locator('[data-role="product-picture"]')).toContainText("No picture yet.");
+
+  const product = await fetchProduct(page, PICTURE_PICKER_PRODUCT);
+  expect(product.image_url).toBeNull();
+  expect(product.icon_name).toBeNull();
+});
+
 // --- #248: the custom-upload change path ------------------------------------
 //
 // Spec 07's other change path: "pick one of the 3, upload a custom photo
