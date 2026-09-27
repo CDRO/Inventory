@@ -44,7 +44,31 @@ case "$1 $2" in
       *"--json baseRefName "*) echo "$STUB_BASE" ;;
       *"--json headRefName "*) echo "$STUB_HEADREF" ;;
       *"--json headRefOid "*) echo "$STUB_SHA" ;;
-      *"--json comments "*) printf '%s' "$STUB_COMMENTS" ;;
+      *"--json comments "*)
+        # Actually performs the join the real query asks for, with whatever
+        # separator sits between join("...") in the command line, instead of
+        # a fixture pre-joined by the test - that was exactly how the round-1
+        # test review's finding (join("") losing its separator) went unnoticed:
+        # the old fixture was hand-joined with the correct byte regardless of
+        # what the real -q expression asked for.
+        q="$*"
+        rest=${q#*'join("'}
+        sep=${rest%%'")'*}
+        # The stub never runs real jq, so it sees the query's literal source
+        # text, not what jq's own \uXXXX decoding would produce at runtime;
+        # this is the one escape the real script relies on, decoded by hand.
+        case "$sep" in
+          '\u001e') sep=$(printf '\036') ;;
+        esac
+        out=""
+        i=1
+        while :; do
+          eval "c=\${STUB_COMMENT_${i}:-__PACKET_TEST_UNSET__}"
+          [ "$c" = "__PACKET_TEST_UNSET__" ] && break
+          if [ -z "$out" ]; then out=$c; else out="$out$sep$c"; fi
+          i=$((i + 1))
+        done
+        printf '%s' "$out" ;;
     esac
     exit 0 ;;
   "pr checks")
@@ -507,10 +531,9 @@ func TestPacketSinceFallsBackToFullDiffOnAMergeCommit(t *testing.T) {
 
 func TestPacketSinceFindsThePreviousVerdictByTheHeaderFormat(t *testing.T) {
 	env := basicEnv()
-	rs := "\x1e"
-	env["STUB_COMMENTS"] = "## Go Review — VERDICT: BLOCK\n\n**Round:** 1  ·  **Spec:** docs/specs/01-architecture-and-deployment.md" + rs +
-		"## Test Review — VERDICT: APPROVE\n\n**Round:** 1" + rs +
-		"## Docs Review — VERDICT: APPROVE\n\n**Round:** 1"
+	env["STUB_COMMENT_1"] = "## Go Review — VERDICT: BLOCK\n\n**Round:** 1  ·  **Spec:** docs/specs/01-architecture-and-deployment.md"
+	env["STUB_COMMENT_2"] = "## Test Review — VERDICT: APPROVE\n\n**Round:** 1"
+	env["STUB_COMMENT_3"] = "## Docs Review — VERDICT: APPROVE\n\n**Round:** 1"
 
 	r := runPacket(t, env, nil, "42", "--since", "priorSHA123")
 	if r.exit != 0 {
@@ -519,6 +542,14 @@ func TestPacketSinceFindsThePreviousVerdictByTheHeaderFormat(t *testing.T) {
 	mustContain(t, r.stdout, "Go Review — VERDICT: BLOCK", "the previous round's Go verdict")
 	mustContain(t, r.stdout, "Test Review — VERDICT: APPROVE", "the previous round's test verdict")
 	mustContain(t, r.stdout, "Docs Review — VERDICT: APPROVE", "the previous round's docs verdict")
+	// The regression this test would have caught: join("") (no separator)
+	// concatenates all three comments into one unsplit record, and only the
+	// first one (whichever GitHub returns first) would ever be found. The
+	// call log carries the query's literal source text (jq's own record-
+	// separator escape), not a decoded byte - nothing here runs real jq.
+	if !r.called(`join("\u001e")`) {
+		t.Errorf("expected the real gh query to join with the \\u001e escape, got calls:\n%s", r.calls)
+	}
 }
 
 // The H5 marker (docs/plans/2026-09-harness-optimization.md decision C3),
@@ -526,9 +557,8 @@ func TestPacketSinceFindsThePreviousVerdictByTheHeaderFormat(t *testing.T) {
 // only the latest of several rounds' markers is kept.
 func TestPacketSinceFindsThePreviousVerdictByTheH5Marker(t *testing.T) {
 	env := basicEnv()
-	rs := "\x1e"
-	env["STUB_COMMENTS"] = "## Go Review — VERDICT: BLOCK\n<!-- verdict: BLOCK round=1 sha=aaa reviewer=go -->" + rs +
-		"## Go Review — VERDICT: APPROVE\n<!-- verdict: APPROVE round=2 sha=bbb reviewer=go -->"
+	env["STUB_COMMENT_1"] = "## Go Review — VERDICT: BLOCK\n<!-- verdict: BLOCK round=1 sha=aaa reviewer=go -->"
+	env["STUB_COMMENT_2"] = "## Go Review — VERDICT: APPROVE\n<!-- verdict: APPROVE round=2 sha=bbb reviewer=go -->"
 
 	r := runPacket(t, env, nil, "42", "--since", "priorSHA123")
 	if r.exit != 0 {
@@ -540,7 +570,7 @@ func TestPacketSinceFindsThePreviousVerdictByTheH5Marker(t *testing.T) {
 
 func TestPacketRound1DoesNotLookForAPreviousVerdict(t *testing.T) {
 	env := basicEnv()
-	env["STUB_COMMENTS"] = "## Go Review — VERDICT: APPROVE\n\n**Round:** 1"
+	env["STUB_COMMENT_1"] = "## Go Review — VERDICT: APPROVE\n\n**Round:** 1"
 
 	r := runPacket(t, env, nil, "42")
 	if r.exit != 0 {

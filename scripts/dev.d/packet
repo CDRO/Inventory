@@ -325,7 +325,7 @@ ci_rc=$?
 previous_section=""
 if [ -n "$since" ]; then
   rs=$(printf '\036')
-  comments=$(gh pr view "$pr" --json comments -q '[.comments[].body] | join("")' 2>/dev/null)
+  comments=$(gh pr view "$pr" --json comments -q '[.comments[].body] | join("\u001e")' 2>/dev/null)
   for role in "go:Go" "tests:Test" "docs:Docs"; do
     key=${role%%:*}
     header=${role#*:}
