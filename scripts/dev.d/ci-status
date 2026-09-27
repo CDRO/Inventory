@@ -1,0 +1,81 @@
+#!/bin/sh
+# Wait for the GitHub Actions run of an exact commit and exit with its result; can dispatch one first.
+#
+#   scripts/dev ci-status <sha> [--workflow test.yml] [--dispatch <branch>] [--attempts 20]
+#
+# The dispatch-and-poll recipe that .github/workflows/test.yml, e2e.yml,
+# docs/specs/01-architecture-and-deployment.md and
+# .claude/agents/review-tests.md describe in prose, as a command. Two things
+# make it more than `gh run watch`: outside an interactive terminal `gh run
+# watch` needs an explicit run id, and right after a dispatch `gh run list`
+# can briefly show only an older run from the same branch - so the run is
+# found by its exact head SHA (`gh run list --commit`), never as "the newest".
+#
+#   --workflow   the workflow file to look for (default test.yml)
+#   --dispatch   run `gh workflow run <workflow> --ref <branch>` first
+#   --attempts   polls, three seconds apart, before giving up (default 20)
+#
+# Exit codes: the run's own conclusion via `gh run watch --exit-status`
+# (0 success, non-zero failure); 2 usage; 3 no run exists for the SHA and
+# none was dispatched - the message names --dispatch.
+set -u
+
+sha=""; wf=test.yml; branch=""; attempts=20
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --workflow) [ $# -ge 2 ] || { echo "ci-status: --workflow needs a value" >&2; exit 2; }; wf=$2; shift 2 ;;
+    --dispatch) [ $# -ge 2 ] || { echo "ci-status: --dispatch needs a branch" >&2; exit 2; }; branch=$2; shift 2 ;;
+    --attempts) [ $# -ge 2 ] || { echo "ci-status: --attempts needs a number" >&2; exit 2; }; attempts=$2; shift 2 ;;
+    -h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "ci-status: unknown option $1" >&2; exit 2 ;;
+    *)
+      if [ -n "$sha" ]; then echo "ci-status: one SHA only" >&2; exit 2; fi
+      sha=$1; shift ;;
+  esac
+done
+if [ -z "$sha" ]; then
+  echo "usage: scripts/dev ci-status <sha> [--workflow test.yml] [--dispatch <branch>] [--attempts 20]" >&2
+  exit 2
+fi
+case "$sha" in
+  *[!0-9a-fA-F]*|?|??|???|????|?????|??????)
+    echo "ci-status: '$sha' is not a commit SHA (7 to 40 hex characters)" >&2
+    exit 2 ;;
+esac
+
+if [ -n "$branch" ]; then
+  gh workflow run "$wf" --ref "$branch" || exit $?
+  echo "dispatched $wf on $branch"
+fi
+
+# GitHub's run filter matches the full 40-character SHA only, so an
+# abbreviated one is matched by prefix over the workflow's recent runs instead.
+lookup() {
+  if [ ${#sha} -eq 40 ]; then
+    gh run list --workflow "$wf" --commit "$sha" --limit 5 --json databaseId -q '.[0].databaseId' 2>/dev/null
+  else
+    gh run list --workflow "$wf" --limit 50 --json databaseId,headSha \
+      -q ".[] | select(.headSha | startswith(\"$sha\")) | .databaseId" 2>/dev/null | head -1
+  fi
+}
+
+run_id=""
+i=0
+while [ "$i" -lt "$attempts" ]; do
+  run_id=$(lookup)
+  [ -n "$run_id" ] && break
+  i=$((i + 1))
+  sleep 3
+done
+
+if [ -z "$run_id" ]; then
+  echo "ci-status: no $wf run for $sha after $attempts attempts" >&2
+  if [ -z "$branch" ]; then
+    echo "ci-status: none was dispatched either - add --dispatch <branch> to start one" >&2
+  fi
+  exit 3
+fi
+
+url=$(gh run view "$run_id" --json url -q .url 2>/dev/null)
+echo "run $run_id $url"
+gh run watch "$run_id" --exit-status

@@ -51,7 +51,7 @@ that is not an approval.
 | Open PR, any `BLOCK` in current round | Fix the blocking findings, then re-run the review round via the `ship` skill |
 | Open PR, all three `APPROVE`, tests green | Merge per the `ship` skill's gate |
 | Open PR, fewer than three verdicts this round | Spawn only the missing reviewers |
-| Open PR, uncommitted local changes | Finish the change, run tests, push, then review |
+| Open PR, uncommitted local changes | Finish the change, run tests (`scripts/dev test`), push, then review |
 | No open PR, issues remain | Pick the lowest-numbered unblocked issue; start it via `ship` |
 | No open PR, no issues | Say so and ask what to do — do not invent work |
 | Working tree dirty on `main` | Stop and ask. Never commit to `main` directly |

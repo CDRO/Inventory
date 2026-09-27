@@ -1,0 +1,96 @@
+#!/bin/sh
+# Billable GitHub Actions minutes per workflow for a month, each job rounded up to the minute, with a projection against the 2000-minute cap.
+#
+#   scripts/dev ci-usage [--month YYYY-MM]        default: the current month (UTC)
+#
+# GitHub-hosted runners bill per job, rounded up to the next full minute: a
+# job of 1.4 minutes costs 2. That is why this reads every run's jobs rather
+# than the runs' own timing - about one API call per run, well inside the
+# 5000/hour limit for a month of a few hundred runs. Jobs that ran on a
+# self-hosted runner (a `self-hosted` label) are not billed and are left out.
+# docs/plans/2026-09-harness-optimization.md, section 1.1, was computed the
+# same way and is the number to compare a month against.
+#
+# Output: one line per workflow (runs, billed minutes), a total, and - for
+# the current month - a straight-line projection to the month's end against
+# 2000 minutes. For a past month the projection equals the total.
+set -u
+
+month=$(date -u +%Y-%m)
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --month) [ $# -ge 2 ] || { echo "ci-usage: --month needs YYYY-MM" >&2; exit 2; }; month=$2; shift 2 ;;
+    -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "ci-usage: unknown option $1" >&2; exit 2 ;;
+  esac
+done
+case "$month" in
+  [0-9][0-9][0-9][0-9]-[0-1][0-9]) ;;
+  *) echo "ci-usage: --month wants YYYY-MM, got '$month'" >&2; exit 2 ;;
+esac
+
+y=${month%-*}
+m=${month#*-}
+m=${m#0}
+
+# Days in the month, without `date -d` (busybox date in the dev image has no
+# reliable -d for this; arithmetic works everywhere).
+case "$m" in
+  1|3|5|7|8|10|12) days=31 ;;
+  4|6|9|11) days=30 ;;
+  2)
+    if [ $((y % 4)) -eq 0 ] && { [ $((y % 100)) -ne 0 ] || [ $((y % 400)) -eq 0 ]; }; then days=29; else days=28; fi ;;
+  *) echo "ci-usage: month out of range" >&2; exit 2 ;;
+esac
+from=$(printf '%04d-%02d-01' "$y" "$m")
+to=$(printf '%04d-%02d-%02d' "$y" "$m" "$days")
+
+elapsed=$days
+if [ "$month" = "$(date -u +%Y-%m)" ]; then
+  elapsed=$(date -u +%d); elapsed=${elapsed#0}
+fi
+
+# One line per run: "<id>\t<workflow name>". --paginate walks every page.
+runs=$(gh api --paginate "repos/{owner}/{repo}/actions/runs?created=$from..$to&per_page=100" \
+  --jq '.workflow_runs[] | "\(.id)\t\(.name)"') || { echo "ci-usage: could not list runs" >&2; exit 1; }
+
+if [ -z "$runs" ]; then
+  echo "no workflow runs in $month"
+  exit 0
+fi
+
+# One line per billed job: "<workflow name>\t<seconds>". Jobs still running
+# (no completed_at) and self-hosted jobs are skipped.
+jobs=$(printf '%s\n' "$runs" | while IFS="$(printf '\t')" read -r id name; do
+  [ -n "$id" ] || continue
+  gh api "repos/{owner}/{repo}/actions/runs/$id/jobs?per_page=100" \
+    --jq '.jobs[] | select(.started_at != null and .completed_at != null)
+                  | select(((.labels // []) | index("self-hosted")) == null)
+                  | "\(.started_at)\t\(.completed_at)"' 2>/dev/null \
+    | awk -v n="$name" -F '\t' '{ print n "\t" $1 "\t" $2 }'
+done)
+
+printf '%s\n' "$runs" "---" "$jobs" | awk -F '\t' -v month="$month" -v elapsed="$elapsed" -v days="$days" '
+  function epoch(s,  Y, M, D, h, mi, se) {
+    # 2026-09-26T18:55:20Z -> seconds since 1970-01-01 (proleptic Gregorian)
+    Y = substr(s, 1, 4) + 0; M = substr(s, 6, 2) + 0; D = substr(s, 9, 2) + 0
+    h = substr(s, 12, 2) + 0; mi = substr(s, 15, 2) + 0; se = substr(s, 18, 2) + 0
+    if (M <= 2) { Y--; M += 12 }
+    return (365 * Y + int(Y / 4) - int(Y / 100) + int(Y / 400) + int(30.6001 * (M + 1)) + D - 719591) * 86400 + h * 3600 + mi * 60 + se
+  }
+  BEGIN { section = "runs" }
+  section == "runs" && $0 == "---" { section = "jobs"; next }
+  section == "runs" && NF >= 2 { runs[$2]++; next }
+  section == "jobs" && NF >= 3 {
+    sec = epoch($3) - epoch($2)
+    if (sec < 0) sec = 0
+    min[$1] += int((sec + 59) / 60)
+    next
+  }
+  END {
+    printf "%-24s %6s %11s\n", "workflow", "runs", "billed_min"
+    for (w in runs) { printf "%-24s %6d %11d\n", w, runs[w], min[w] + 0; total += min[w] + 0; n += runs[w] }
+    printf "%-24s %6d %11d\n", "total", n, total
+    if (elapsed < days && elapsed > 0) proj = int(total * days / elapsed + 0.5); else proj = total
+    printf "month %s: %d of %d days -> projected %d of 2000 minutes (%d%%)\n", month, elapsed, days, proj, int(proj * 100 / 2000 + 0.5)
+  }'

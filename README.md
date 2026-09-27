@@ -105,6 +105,16 @@ The frontend has no build, install, or lint command — it is plain HTML, CSS,
 and ES modules served as-is. In dev, `STATIC_DIR` points the server at
 `web/static` on disk, so editing a file and refreshing the browser is enough.
 
+**Developer commands.** `scripts/dev <command>` wraps the recurring ones with
+compact output: `scripts/dev test [packages]` runs the unit tests above and
+prints only the failures (the full log lands in `.claude/last-test.log`),
+`scripts/dev vet` does the same for `go vet`, `scripts/dev ci-status <sha>
+[--dispatch <branch>]` waits for the GitHub Actions run of an exact commit, and
+`scripts/dev ci-usage [--month YYYY-MM]` reports billable Actions minutes.
+`scripts/dev` alone lists the commands; each lives in `scripts/dev.d/` as a
+POSIX `sh` file, and `scripts/dev_test.go` runs them under the dev image's
+shell. These are conveniences over the documented commands, not replacements.
+
 ## Compose files
 
 - `docker-compose.yml` — base and **production**. The `app` service is the

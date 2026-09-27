@@ -92,7 +92,12 @@ services:
       - ./.gitignore:/src/.gitignore
       - ./.dockerignore:/src/.dockerignore
       - ./.gitattributes:/src/.gitattributes
-      - ./scripts/backup:/src/scripts/backup
+      # The whole scripts tree rather than scripts/backup alone: besides
+      # compose_test.go's read of scripts/backup, scripts/dev_test.go runs the
+      # working tree's scripts/dev and scripts/dev.d/* under the image's sh,
+      # and a command added or edited there must be the one under test - not
+      # the copy baked into the image at the last rebuild.
+      - ./scripts:/src/scripts
     # Both sides read the same variable, not a fixed "8000:8000": the app
     # itself listens on $HTTP_PORT (internal/config/config.go), not a
     # hardcoded 8000, so the host and container sides must move together.
