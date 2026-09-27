@@ -179,6 +179,17 @@ if ([string]::IsNullOrWhiteSpace($WaveFile)) {
     $WaveFile = Join-Path $PSScriptRoot 'wellen.json'
 }
 
+# Invoke-WaveDockerCleanup passes $WaveFile into a Start-Job, which runs in
+# its own working directory - a relative path (the common case when a caller
+# passes ./scripts/wellen-followups.json) silently fails to resolve there,
+# so cleanup no-ops instead of erroring (#283). Resolve to an absolute path
+# once, here, before anything downstream can capture the relative form.
+function Resolve-WaveFilePath {
+    param([string]$Path)
+    return (Resolve-Path -LiteralPath $Path).Path
+}
+$WaveFile = Resolve-WaveFilePath -Path $WaveFile
+
 $RepoRoot   = Split-Path -Path $PSScriptRoot -Parent
 $RepoName   = Split-Path -Path $RepoRoot -Leaf
 $ParentDir  = Split-Path -Path $RepoRoot -Parent
