@@ -117,6 +117,11 @@ done
 
 combined_text="$prbody
 $issues_text"
+# Whitespace-collapsed copy for heading matches: prose wraps a heading's own
+# words across lines (this PR's body does exactly that to "No-host-toolchain
+# constraint"), so a heading is "named" if its words appear in order with any
+# run of whitespace between them, not only as an unbroken substring.
+combined_norm=$(printf '%s' "$combined_text" | tr '\n\r\t' '   ' | tr -s ' ')
 
 # --- spec sections -----------------------------------------------------------
 
@@ -151,21 +156,27 @@ if [ -n "$spec_files" ]; then
     total_lines=$(wc -l < "$spec" | tr -d ' ')
     headings=$(grep -n '^#\{1,6\}[ \t]' "$spec")
 
-    matched=""
+    # Headings and matches are read from real files, never from a heredoc: an
+    # unquoted heredoc body is expanded for backticks and $ before `read`
+    # ever sees it, and this project's spec headings are full of backtick-
+    # quoted identifiers (e.g. `` `docker-compose.yml` ``) that would
+    # otherwise be run as command substitutions.
+    headings_file=$(mktemp)
+    printf '%s\n' "$headings" > "$headings_file"
+    matched_file=$(mktemp)
+    : > "$matched_file"
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
       htext=${entry#*:}
       htext=$(printf '%s' "$htext" | sed -E 's/^#+[[:space:]]*//')
       [ ${#htext} -ge 6 ] || continue
-      case "$combined_text" in
-        *"$htext"*) matched="$matched
-$htext" ;;
+      htext_norm=$(printf '%s' "$htext" | tr -s ' ')
+      case "$combined_norm" in
+        *"$htext_norm"*) printf '%s\n' "$htext" >> "$matched_file" ;;
       esac
-    done <<EOF
-$headings
-EOF
+    done < "$headings_file"
 
-    if [ -n "$matched" ]; then
+    if [ -s "$matched_file" ]; then
       specs_section="$specs_section
 ### $spec (named sections only; other headings omitted)
 "
@@ -176,16 +187,17 @@ EOF
 
 $(extract_section "$spec" "$htext")
 "
-      done <<EOF
-$matched
-EOF
+      done < "$matched_file"
+      rm -f "$headings_file" "$matched_file"
     elif [ "$total_lines" -le 300 ]; then
+      rm -f "$headings_file" "$matched_file"
       specs_section="$specs_section
 ### $spec (whole file, $total_lines lines)
 
 $(cat "$spec")
 "
     else
+      rm -f "$headings_file" "$matched_file"
       ac_heading=$(printf '%s\n' "$headings" | sed -E 's/^[0-9]+://' | grep -i -m 1 '^#\{1,6\}[ \t]*Acceptance criteria' || true)
       heading_list=$(printf '%s\n' "$headings" | sed -E 's/^[0-9]+:/  /')
       if [ -n "$ac_heading" ]; then

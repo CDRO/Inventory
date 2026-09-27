@@ -243,6 +243,47 @@ func TestPacketIssueThatIsNotAnIssueIsNotedNotFatal(t *testing.T) {
 	mustContain(t, r.stdout, "not an issue", "the packet")
 }
 
+// A heading with a backtick-quoted term and a $-sigil, the shape several
+// real specs use (e.g. "## `docker-compose.yml` (base/production)"). An
+// unquoted heredoc expands backticks and $ in its body before a read loop
+// ever sees it, which silently ate this heading and its section the first
+// time this script fed headings through one; headings must reach the match
+// loop through a plain file redirect instead.
+const backtickSpec = "# 30 - Backtick Spec\n\n" +
+	"## `docker-compose.yml` (base/production) and $HOME\n\n" +
+	"Do not run `rm -rf $HOME` here.\n\n" +
+	"## Unrelated\n\nFiller.\n"
+
+func TestPacketSpecHeadingWithBackticksAndDollarSurvives(t *testing.T) {
+	env := basicEnv()
+	env["STUB_PRBODY"] = "Implements #12. See docs/specs/30-backtick-spec.md, " +
+		"section \"`docker-compose.yml` (base/production) and $HOME\"."
+
+	r := runPacket(t, env, map[string]string{"docs/specs/30-backtick-spec.md": backtickSpec}, "42")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", r.exit, r.stderr)
+	}
+	mustContain(t, r.stdout, "docker-compose.yml` (base/production) and $HOME", "the packet")
+	mustContain(t, r.stdout, "Do not run `rm -rf $HOME` here.", "the section body")
+	mustNotContain(t, r.stdout, "Filler.", "the unmatched section")
+}
+
+// Prose wraps a heading's own words across lines - this project's own PR
+// bodies do it constantly - so a heading is named even when the PR body's
+// line break falls in the middle of it, as long as the words are in order.
+func TestPacketSpecHeadingNamedAcrossALineWrapStillMatches(t *testing.T) {
+	env := basicEnv()
+	env["STUB_PRBODY"] = "Implements #12. See docs/specs/09-test-spec.md, section \"Widget Behavior\n" +
+		"Rules\"."
+
+	r := runPacket(t, env, map[string]string{"docs/specs/09-test-spec.md": testSpec}, "42")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", r.exit, r.stderr)
+	}
+	mustContain(t, r.stdout, "Widgets must be blue.", "the wrapped heading still matches")
+	mustNotContain(t, r.stdout, "Nothing to do with widgets.", "the unmatched section")
+}
+
 // --- spec sections ----------------------------------------------------------
 
 const testSpec = `# 09 - Test Spec
