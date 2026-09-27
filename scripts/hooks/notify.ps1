@@ -11,14 +11,13 @@
         powershell -NoProfile -File scripts/hooks/notify.ps1 <event> [title]
 
     <event> is the hook name Claude Code passes ("Notification" or "Stop"),
-    shown verbatim so the toast says which one fired. [title] is a fallback
-    label only; the toast prefers, in order: the hook's own stdin JSON
-    ("message"/"title"/"reason", whichever is present - a Notification event
-    carries the actual prompt text there) and, failing that, the CURRENT
-    console window's title - which is what actually identifies the session,
-    since the orchestrator sets it per package to "Wave N - Spec X (#issue)"
-    (scripts/wellen-planen.md). Nothing here can name which of nine windows
-    fired except that title, so it is preferred whenever present.
+    shown verbatim so the toast says which one fired. [title] is the
+    last-resort fallback; the toast body prefers, in order: the CURRENT
+    console window's title (since the orchestrator sets it per package to
+    "Wave N - Spec X (#issue)", scripts/wellen-planen.md - nothing else here
+    can say which of nine open windows fired), then the hook's own stdin
+    JSON ("message"/"title"/"reason", whichever is present - a Notification
+    event carries the actual prompt text there), then [title] itself.
 
     Must NEVER block or fail the session, and must return within about 2
     seconds even if the toast backend hangs: the actual toast call runs as a
@@ -73,11 +72,13 @@ function Send-Toast {
     # Isolated so the test can substitute a fake backend without a real
     # Windows toast subsystem (CI, a locked-down account, no BurntToast
     # installed). "ok" simulates success; "throw" simulates a backend that
-    # fails - both must still let the caller reach exit 0.
+    # fails; "hang" simulates one that never returns - all three must still
+    # let the caller (the Wait-Job -Timeout below) reach exit 0 on schedule.
     param([string]$Title, [string]$Body)
     switch ($env:CLAUDE_NOTIFY_TEST_BACKEND) {
         'ok' { return }
         'throw' { throw 'simulated toast backend failure (test)' }
+        'hang' { Start-Sleep -Seconds 30; return }
     }
     if (Get-Module -ListAvailable -Name BurntToast) {
         Import-Module BurntToast -ErrorAction Stop
@@ -114,7 +115,12 @@ $toastBody = Get-ToastBody -Fallback (Get-StdinMessage -Raw $stdinRaw -Fallback 
 
 try {
     $job = Start-Job -ScriptBlock ${function:Send-Toast} -ArgumentList $toastTitle, $toastBody
-    Wait-Job -Job $job -Timeout 1.5 | Out-Null
+    # 0.8s, not the full ~2s budget: Start-Job itself already costs time (a
+    # new background PowerShell process), so the wait has to leave headroom
+    # for that overhead plus Remove-Job and PowerShell's own startup - a
+    # hanging backend (scripts/tests/hooks.test.ps1's "hang" case) must not
+    # push the total past Claude Code's ~2s hook timeout.
+    Wait-Job -Job $job -Timeout 0.8 | Out-Null
     Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
 } catch {
     # A backend failure, a job that never starts, anything at all - the hook

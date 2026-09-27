@@ -446,14 +446,19 @@ through to `exit 0` within about two seconds (`scripts/tests/hooks.test.ps1`
 covers this). `.claude/settings.json`'s `permissions.allow` list is the
 other half of the same concern, and in wave 6 it becomes load-bearing rather
 than a convenience: headless sessions there run with `--permission-mode
-dontAsk --permission-prompts none` (H19, decision D10 of
-`docs/plans/2026-09-harness-optimization.md`), under which anything not on
-the allowlist is *denied*, never prompted, so a session started that way
-cannot fall back on a human noticing a stuck prompt. Both interactive and
-headless sessions read the same list; keeping it in step with what the loop
-actually runs is not optional maintenance. **If a package's ship, pickup,
-review or orchestrator loop needs a command that is not already allowed,
-add it to `.claude/settings.json` in the same PR that starts using it** —
+dontAsk --permission-prompts none` (H19, decision D10 of the harness
+optimization plan — `docs/plans/2026-09-harness-optimization.md` once #293's
+plan PR merges; until then it lives on branch `harness/optimization-plan`,
+PR #319), under which anything not on the allowlist is *denied*, never
+prompted, so a session started that way cannot fall back on a human
+noticing a stuck prompt. That is also why `permissions.allow` carries two
+plain tool-name entries, `Edit` and `Write`, with no path restriction:
+decision D10 extends the allowlist to the edit tools themselves, not just
+Bash prefixes, for the same reason. Both interactive and headless sessions
+read the same list; keeping it in step with what the loop actually runs is
+not optional maintenance. **If a package's ship, pickup, review or
+orchestrator loop needs a command that is not already allowed, add it to
+`.claude/settings.json` in the same PR that starts using it** —
 narrowly scoped to the actual subcommand (`Bash(gh issue edit:*)`, not a
 bare `Bash(gh:*)`), read-only or otherwise a standard, non-destructive step
 of one of those loops, and never widening the deny list's own set of

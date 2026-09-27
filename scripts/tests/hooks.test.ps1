@@ -12,8 +12,10 @@
     no real Windows toast subsystem is needed. The main tail (job dispatch,
     the try/catch, `exit 0`) is then exercised end to end as a real
     subprocess, with $env:CLAUDE_NOTIFY_TEST_BACKEND selecting Send-Toast's
-    fake backend, to prove the acceptance criteria in #303: exit 0 whether
-    the backend succeeds or throws, and total runtime under 2 seconds.
+    fake backend, to prove the acceptance criteria in #303: exit 0 and total
+    runtime under 2 seconds whether the backend succeeds, throws, or - the
+    case that actually exercises Wait-Job's timeout rather than a backend
+    that just happens to be fast - hangs for 30 seconds.
 
     Run:  powershell -NoProfile -File scripts\tests\hooks.test.ps1
     Needs no Docker, no network, no real toast backend. Takes a few seconds.
@@ -49,6 +51,10 @@ Assert ((Get-StdinMessage -Raw '{"title":"only a title"}' -Fallback 'fallback') 
     'falls back to "title" when "message" is absent'
 Assert ((Get-StdinMessage -Raw '{"reason":"only a reason"}' -Fallback 'fallback') -ceq 'only a reason') `
     'falls back to "reason" when neither "message" nor "title" is present'
+Assert ((Get-StdinMessage -Raw '{"message":"m","title":"t","reason":"r"}' -Fallback 'fallback') -ceq 'm') `
+    'with all three fields present, "message" wins over "title" and "reason"'
+Assert ((Get-StdinMessage -Raw '{"title":"t","reason":"r"}' -Fallback 'fallback') -ceq 't') `
+    'with "title" and "reason" both present (no "message"), "title" wins'
 Assert ((Get-StdinMessage -Raw '' -Fallback 'fallback') -ceq 'fallback') `
     'empty stdin returns the fallback, no throw'
 Assert ((Get-StdinMessage -Raw 'not json at all' -Fallback 'fallback') -ceq 'fallback') `
@@ -87,6 +93,13 @@ try {
     Remove-Item Env:\CLAUDE_NOTIFY_TEST_BACKEND -ErrorAction SilentlyContinue
 }
 
+# The "hang" backend sleeps 30s - if Send-Toast is called directly (as
+# above) this call would genuinely block for 30s, so it is only exercised
+# through the real script end-to-end below, where Wait-Job -Timeout must cut
+# it off. This directly guards against the timeout being deleted or
+# bypassed: without it, the "hang" case in the section below would time out
+# this whole test file instead of completing in under 2 seconds.
+
 # --- Run the real script end to end, as a subprocess -----------------------
 # This is what actually proves the acceptance criteria: the *whole* hook -
 # stdin read, job dispatch, Wait-Job timeout, exit 0 - not just the
@@ -114,6 +127,14 @@ Assert ($ok.Seconds -lt 2.0) "runs in under 2 seconds when the backend succeeds 
 $thrown = Invoke-Hook -Backend 'throw'
 Assert ($thrown.ExitCode -eq 0) "exit 0 when the toast backend throws (got $($thrown.ExitCode))"
 Assert ($thrown.Seconds -lt 2.0) "runs in under 2 seconds when the backend throws (took $([math]::Round($thrown.Seconds, 2))s)"
+
+# This is the one that actually proves Wait-Job -Timeout does something: the
+# "hang" backend sleeps 30s, so a script that waited on it unconditionally,
+# or whose timeout had been deleted or widened, would blow well past 2
+# seconds here - this is not a fast backend happening to finish quickly.
+$hung = Invoke-Hook -Backend 'hang'
+Assert ($hung.ExitCode -eq 0) "exit 0 when the toast backend hangs for 30s (got $($hung.ExitCode))"
+Assert ($hung.Seconds -lt 2.0) "runs in under 2 seconds even when the backend hangs for 30s (took $([math]::Round($hung.Seconds, 2))s) - proves Wait-Job -Timeout actually bounds it"
 
 if ($script:failures -gt 0) {
     Write-Host "$($script:failures) assertion(s) FAILED" -ForegroundColor Red
