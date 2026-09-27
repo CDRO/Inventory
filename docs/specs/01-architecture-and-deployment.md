@@ -39,6 +39,10 @@ non-obvious ways:
 Python, no Java, for setup, building, testing, migrations, or one-off
 scripts. Only `docker` and `docker compose` may be assumed present.
 
+The rule extends to linters: `staticcheck` and `revive` (H6, `scripts/dev
+check`) are installed and pinned in the Dockerfile's `dev` stage, never on
+the host.
+
 Every command is therefore a Docker invocation:
 
 | Task | Command |
@@ -149,6 +153,12 @@ has no Go, Node, or Postgres installed directly, only Docker; every command
 still goes through `docker compose`. `docker buildx` and `actions/cache`,
 below, are runner-side tooling in the same sense — they move cache bytes
 around, they never compile or run project code themselves.
+
+Before that invocation, a `scripts/dev check` step (H6, "No-host-toolchain
+constraint" above) runs the deterministic pre-gate — `gofmt`, `go vet`,
+`staticcheck`, `revive` and `TestEnvExampleParity` — against the same image,
+and the job fails there, without ever reaching `go vet && go test`, on any
+finding.
 
 The job is cached across runs on two axes. The Go build object cache
 (`docker-compose.override.yml`'s `go-build-cache` volume, normally a

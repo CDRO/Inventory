@@ -72,10 +72,13 @@ type Handler struct {
 // carry request_id.
 func NewHandler(h slog.Handler) *Handler { return &Handler{inner: h} }
 
+// Enabled implements slog.Handler by delegating to the wrapped handler.
 func (h *Handler) Enabled(ctx context.Context, level slog.Level) bool {
 	return h.inner.Enabled(ctx, level)
 }
 
+// Handle implements slog.Handler, adding the request id before delegating to
+// the wrapped handler.
 func (h *Handler) Handle(ctx context.Context, record slog.Record) error {
 	if id := RequestIDFrom(ctx); id != "" {
 		record.AddAttrs(slog.String("request_id", id))
@@ -93,6 +96,8 @@ func (h *Handler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return &Handler{inner: h.inner.WithAttrs(attrs)}
 }
 
+// WithGroup implements slog.Handler; see WithAttrs for why it re-wraps rather
+// than returning the inner handler.
 func (h *Handler) WithGroup(name string) slog.Handler {
 	return &Handler{inner: h.inner.WithGroup(name)}
 }

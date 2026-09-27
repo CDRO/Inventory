@@ -15,6 +15,7 @@ import (
 // string.
 type TurnoverGranularity string
 
+// TurnoverGranularity values.
 const (
 	GranularityWeek  TurnoverGranularity = "week"
 	GranularityMonth TurnoverGranularity = "month"

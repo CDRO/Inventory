@@ -129,7 +129,9 @@ and ES modules served as-is. In dev, `STATIC_DIR` points the server at
 **Developer commands.** `scripts/dev <command>` wraps the recurring ones with
 compact output: `scripts/dev test [packages]` runs the unit tests above and
 prints only the failures (the full log lands in `.claude/last-test.log`),
-`scripts/dev vet` does the same for `go vet`, `scripts/dev ci-status <sha>
+`scripts/dev vet` does the same for `go vet`, `scripts/dev check` runs the
+deterministic pre-gate (`gofmt`, `go vet`, `staticcheck`, `revive` and
+`TestEnvExampleParity`) before a push, `scripts/dev ci-status <sha>
 [--dispatch <branch>]` waits for the GitHub Actions run of an exact commit, and
 `scripts/dev ci-usage [--month YYYY-MM]` reports billable Actions minutes.
 `scripts/dev` alone lists the commands; each lives in `scripts/dev.d/` as a

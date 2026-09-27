@@ -33,7 +33,11 @@ Update `.claude/worklog.md` as you go.
 Everything runs in Docker — no host toolchain
 (`docs/specs/01-architecture-and-deployment.md`).
 
-Run it so the **full log lands on disk and only the signal enters context**:
+Run `scripts/dev check` (`sh scripts/dev check` if the executable bit is
+missing, #336) before `scripts/dev test`; do not push on a nonzero exit — it
+is the mechanical half of what a reviewer's round would otherwise catch (H6).
+
+Run the suite so the **full log lands on disk and only the signal enters context**:
 
 ```bash
 scripts/dev test                      # docker compose run --rm app go test ./...

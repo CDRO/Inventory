@@ -363,11 +363,11 @@ func (h *BarcodeHandler) catalogCardFor(ctx context.Context, storageID uuid.UUID
 // barcodeLogRequest is the confirmed quick-log sheet
 // (docs/specs/20-barcode-recall.md, "Scan-and-log").
 type barcodeLogRequest struct {
-	Direction      string                  `json:"direction"`
-	Quantity       int                     `json:"quantity"`
-	LocationID     *uuid.UUID              `json:"location_id"`
-	ExpirationDate *string                 `json:"expiration_date"`
-	Decrements     []barcodeLogDecrement   `json:"decrements"`
+	Direction      string                `json:"direction"`
+	Quantity       int                   `json:"quantity"`
+	LocationID     *uuid.UUID            `json:"location_id"`
+	ExpirationDate *string               `json:"expiration_date"`
+	Decrements     []barcodeLogDecrement `json:"decrements"`
 }
 
 type barcodeLogDecrement struct {

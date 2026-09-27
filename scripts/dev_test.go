@@ -35,8 +35,52 @@ case "$*" in
   "compose run --rm app go vet"*)
     [ -z "${STUB_VET_OUTPUT:-}" ] || printf '%s\n' "$STUB_VET_OUTPUT"
     exit ${STUB_VET_RC:-0} ;;
+  "compose run --rm app sh -c "*)
+    # check's whole point is the shell logic embedded in this one payload
+    # ($7: docker compose run --rm app sh -c '<payload>') - so it is run for
+    # real, against the gofmt/go/staticcheck/revive stubs below, rather than
+    # answered with more canned text. That is what makes a dropped "status=1"
+    # in any one of check's five branches (or the final exit "$status")
+    # something this suite would actually notice.
+    sh -c "$7"
+    exit $? ;;
 esac
 exit 0
+`
+
+// gofmtStub, goStub, staticcheckStub and reviveStub are the tools
+// scripts/dev.d/check's embedded payload calls directly (not through
+// docker). They only exist so that payload's own PASS/FAIL/status logic runs
+// for real in TestCheck*, each controlled by one pair of env vars.
+const gofmtStub = `#!/bin/sh
+printf 'gofmt %s\n' "$*" >> "$STUB_LOG"
+[ -z "${STUB_CHECK_GOFMT_OUT:-}" ] || printf '%s\n' "$STUB_CHECK_GOFMT_OUT"
+exit ${STUB_CHECK_GOFMT_RC:-0}
+`
+
+const goStub = `#!/bin/sh
+printf 'go %s\n' "$*" >> "$STUB_LOG"
+case "$1" in
+  vet)
+    [ -z "${STUB_CHECK_VET_OUT:-}" ] || printf '%s\n' "$STUB_CHECK_VET_OUT"
+    exit ${STUB_CHECK_VET_RC:-0} ;;
+  test)
+    [ -z "${STUB_CHECK_PARITY_OUT:-}" ] || printf '%s\n' "$STUB_CHECK_PARITY_OUT"
+    exit ${STUB_CHECK_PARITY_RC:-0} ;;
+esac
+exit 0
+`
+
+const staticcheckStub = `#!/bin/sh
+printf 'staticcheck %s\n' "$*" >> "$STUB_LOG"
+[ -z "${STUB_CHECK_STATICCHECK_OUT:-}" ] || printf '%s\n' "$STUB_CHECK_STATICCHECK_OUT"
+exit ${STUB_CHECK_STATICCHECK_RC:-0}
+`
+
+const reviveStub = `#!/bin/sh
+printf 'revive %s\n' "$*" >> "$STUB_LOG"
+[ -z "${STUB_CHECK_REVIVE_OUT:-}" ] || printf '%s\n' "$STUB_CHECK_REVIVE_OUT"
+exit ${STUB_CHECK_REVIVE_RC:-0}
 `
 
 // ghStub models the four gh calls the commands make. `run list` answers from a
@@ -124,9 +168,13 @@ func run(t *testing.T, env map[string]string, args ...string) result {
 		t.Fatal(err)
 	}
 	for name, body := range map[string]string{
-		"docker": dockerStub,
-		"gh":     ghStub,
-		"sleep":  sleepStub,
+		"docker":      dockerStub,
+		"gh":          ghStub,
+		"sleep":       sleepStub,
+		"gofmt":       gofmtStub,
+		"go":          goStub,
+		"staticcheck": staticcheckStub,
+		"revive":      reviveStub,
 	} {
 		if err := os.WriteFile(filepath.Join(stubs, name), []byte(body), 0o755); err != nil {
 			t.Fatal(err)
@@ -206,11 +254,12 @@ func TestNoCommandListsEveryCommandAndExits2(t *testing.T) {
 	if r.exit != 2 {
 		t.Fatalf("expected exit 2, got %d", r.exit)
 	}
-	for _, c := range []string{"test", "vet", "ci-status", "ci-usage", "doctor"} {
+	for _, c := range []string{"check", "test", "vet", "ci-status", "ci-usage", "doctor"} {
 		mustContain(t, r.stdout, "\n  "+c, "usage lists "+c)
 	}
 	mustContain(t, r.stdout, "Run the Go suite in the dev container", "usage carries the test command's description")
 	mustContain(t, r.stdout, "Wait for the GitHub Actions run of an exact commit", "usage carries the ci-status description")
+	mustContain(t, r.stdout, "Deterministic pre-gate", "usage carries the check command's description")
 	mustContain(t, r.stdout, "Check the environment for what a session, a wave or a container needs before it starts", "usage carries the doctor command's description")
 	if r.calls != "" {
 		t.Errorf("usage must not run docker or gh, but called:\n%s", r.calls)
@@ -360,6 +409,117 @@ func TestVetKeepsFindingsAndDropsComposeNoise(t *testing.T) {
 	mustContain(t, r.stdout, "internal/store/x.go:10:2: unreachable code", "stdout")
 	mustNotContain(t, r.stdout, "Container probe-db-1", "stdout drops Compose's status lines")
 	mustContain(t, r.stdout, "exit=1", "stdout")
+}
+
+// --- check ------------------------------------------------------------------
+
+// TestCheckGofmtParseErrorFailsEvenWithNoListedFile covers the case
+// `gofmt -l` a nonzero exit but nothing on stdout, e.g. a file that fails to
+// parse at all: `-l` never lists it, so the only signal is the exit code.
+// Without checking it (round-1 go review nit), this would print
+// "gofmt: PASS" directly above the real error.
+func TestCheckGofmtParseErrorFailsEvenWithNoListedFile(t *testing.T) {
+	r := run(t, map[string]string{"STUB_CHECK_GOFMT_RC": "2"}, "check")
+	if r.exit != 1 {
+		t.Fatalf("expected exit 1, got %d:\n%s", r.exit, r.stdout)
+	}
+	mustContain(t, r.stdout, "gofmt: FAIL", "stdout")
+	for _, want := range []string{"go vet: PASS", "staticcheck: PASS", "revive: PASS", "TestEnvExampleParity: PASS"} {
+		mustContain(t, r.stdout, want, "stdout (proves the other tools still ran)")
+	}
+}
+
+func TestCheckAllToolsPassIsCompactAndGreen(t *testing.T) {
+	r := run(t, nil, "check")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d", r.exit)
+	}
+	for _, want := range []string{"gofmt: PASS", "go vet: PASS", "staticcheck: PASS", "revive: PASS", "TestEnvExampleParity: PASS", "exit=0"} {
+		mustContain(t, r.stdout, want, "stdout")
+	}
+	if n := lines(r.stdout); n > 6 {
+		t.Errorf("a green check must cost at most 6 lines of stdout, got %d:\n%s", n, r.stdout)
+	}
+
+	log, err := os.ReadFile(filepath.Join(r.root, ".claude", "last-check.log"))
+	if err != nil {
+		t.Fatalf("the full log must be on disk: %v", err)
+	}
+	mustContain(t, string(log), "gofmt: PASS", "last-check.log")
+}
+
+// TestCheckExitsNonZeroWhenAnySingleToolFails is the regression test the
+// issue's acceptance criteria need but a one-off CI demonstration can't give:
+// for each of the five branches in turn, a dropped "status=1" (or an
+// inverted condition) would make this fail, because it asserts BOTH that the
+// failing tool is named and that overall exit is 1 AND that the other four
+// still ran and passed - so a branch that quietly stops the others from
+// running, or stops affecting the overall exit code, is caught here rather
+// than shipping silently.
+func TestCheckExitsNonZeroWhenAnySingleToolFails(t *testing.T) {
+	allPass := map[string]string{
+		"gofmt":                "gofmt: PASS",
+		"go vet":               "go vet: PASS",
+		"staticcheck":          "staticcheck: PASS",
+		"revive":               "revive: PASS",
+		"TestEnvExampleParity": "TestEnvExampleParity: PASS",
+	}
+
+	cases := []struct {
+		name   string
+		env    map[string]string
+		fail   string // the tool's label as it appears in stdout
+		output string // the offending line that must reach stdout
+	}{
+		{
+			name:   "gofmt",
+			env:    map[string]string{"STUB_CHECK_GOFMT_OUT": "internal/store/x.go", "STUB_CHECK_GOFMT_RC": "0"},
+			fail:   "gofmt",
+			output: "internal/store/x.go",
+		},
+		{
+			name:   "go vet",
+			env:    map[string]string{"STUB_CHECK_VET_OUT": "internal/store/x.go:10:2: unreachable code", "STUB_CHECK_VET_RC": "1"},
+			fail:   "go vet",
+			output: "internal/store/x.go:10:2: unreachable code",
+		},
+		{
+			name:   "staticcheck",
+			env:    map[string]string{"STUB_CHECK_STATICCHECK_OUT": "internal/store/x.go:5:1: SA4006", "STUB_CHECK_STATICCHECK_RC": "1"},
+			fail:   "staticcheck",
+			output: "internal/store/x.go:5:1: SA4006",
+		},
+		{
+			name:   "revive",
+			env:    map[string]string{"STUB_CHECK_REVIVE_OUT": "internal/store/x.go:1:1: exported function Foo should have comment or be unexported", "STUB_CHECK_REVIVE_RC": "1"},
+			fail:   "revive",
+			output: "exported function Foo should have comment or be unexported",
+		},
+		{
+			name:   "TestEnvExampleParity",
+			env:    map[string]string{"STUB_CHECK_PARITY_OUT": "--- FAIL: TestEnvExampleParity", "STUB_CHECK_PARITY_RC": "1"},
+			fail:   "TestEnvExampleParity",
+			output: "--- FAIL: TestEnvExampleParity",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := run(t, c.env, "check")
+			if r.exit != 1 {
+				t.Fatalf("expected exit 1, got %d:\n%s", r.exit, r.stdout)
+			}
+			mustContain(t, r.stdout, c.fail+": FAIL", "stdout")
+			mustContain(t, r.stdout, c.output, "stdout")
+			mustContain(t, r.stdout, "exit=1", "stdout")
+			for tool, passLine := range allPass {
+				if tool == c.fail {
+					continue
+				}
+				mustContain(t, r.stdout, passLine, "stdout (proves the other tools still ran)")
+			}
+		})
+	}
 }
 
 // --- ci-status ------------------------------------------------------------

@@ -538,6 +538,7 @@ func repointBarcodes(ctx context.Context, q querier, storageID, survivorID, sour
 // capture mode: stocking up, or using up.
 type BarcodeLogDirection string
 
+// BarcodeLogDirection values.
 const (
 	BarcodeLogIn  BarcodeLogDirection = "in"
 	BarcodeLogOut BarcodeLogDirection = "out"
