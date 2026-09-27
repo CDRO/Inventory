@@ -44,6 +44,14 @@
 # the `e2e` service's pulled image, exactly as docker-compose.e2e.yml
 # documents — nothing is installed on the runner directly.
 #
+# The steps below deliberately do NOT pass the `-p inventory-e2e` that
+# docker-compose.e2e.yml's header prescribes for local runs, and that is not
+# an oversight: a runner has no `.env`, so nothing sets COMPOSE_PROJECT_NAME,
+# the file's own `name:` stands, and the project already is `inventory-e2e`.
+# The flag exists for checkouts whose `.env` would otherwise win (#190).
+# Adding it to every command here (and in restore.yml, same reasoning) would
+# change no behaviour.
+#
 # Two jobs. `build` builds the production image once
 # (docker/build-push-action, same `prod` target docker-compose.e2e.yml's
 # `app` service builds) and hands it to `e2e` as a GitHub Actions artifact —
@@ -212,10 +220,12 @@ jobs:
       # uncommitted, since `npm install` regenerates it on every invocation
       # of the throwaway Playwright container and it was never meant to
       # persist, same as node_modules itself. package.json IS committed and
-      # pins exact versions (its own description comment says so), so it
-      # invalidates the cache exactly when a dependency actually changes,
-      # which is what the lockfile would have keyed on if one existed here.
-      # A cache hit means the `npm install` below has nothing to do — its
+      # pins both dependencies to the exact Playwright version
+      # docker-compose.e2e.yml's own `e2e` service comment already commits to
+      # keeping in lockstep with the pulled image tag, so a real version bump
+      # changes the file and invalidates the cache — which is what the
+      # lockfile would have keyed on if one existed here. A cache hit means
+      # the `npm install` below has nothing to do — its
       # own output says "up to date" — instead of reinstalling
       # @playwright/test and playwright-core on every run. `npm install`,
       # not `npm ci`, stays the `e2e` service's own entrypoint

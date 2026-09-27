@@ -51,6 +51,10 @@
 # (`curl`, `diff`, `grep`) on the runner — no Go, Node, or Postgres installed
 # directly. The Playwright browser runtime this workflow does NOT use at
 # all; the round trip never touches the `e2e` service.
+#
+# Like e2e.yml, the steps below deliberately do NOT pass docker-compose.e2e
+# .yml's `-p inventory-e2e` — see that workflow's header for why omitting it
+# on a runner changes no behaviour.
 name: restore-round-trip
 
 on:
