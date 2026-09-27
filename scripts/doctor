@@ -1,0 +1,361 @@
+#!/bin/sh
+# scripts/doctor - tells an administrator what to fix before a session, a
+# wave or a container starts (also reachable as `scripts/dev doctor`).
+#
+# A session once started inside a container that could not start other
+# containers (no rights on the Docker socket); the failure surfaced at the
+# first `docker compose run`, minutes in. This runs the same ten checks the
+# orchestrator will one day run first (H11, not this package), prints one
+# `ok`, `warn` or `FAIL` line per check with a remediation when it is not
+# `ok`, and exits 0 only if nothing is FAIL.
+#
+#   scripts/doctor [--json] [--fix]
+#
+#   --json  machine-readable: a JSON array, one object per check, each with
+#           "check", "status" and "remediation" ("" when ok).
+#   --fix   performs the one safe fix this script can make on its own
+#           (creates the missing build-cache volume). Never installs
+#           software.
+#
+# Checks: docker daemon reachable; Compose >= 2.24; a container can actually
+# be started; the external build-cache volume exists; HTTP_PORT/TRAEFIK_PORT
+# (from .env, read with grep - no other key is ever read, and their values
+# are not secrets) are free; gh is authenticated with headroom; git identity
+# and LF line endings are in order; claude is on PATH and authenticated;
+# disk space; and, inside a container, that the bind-mounted repo path is
+# what the daemon itself sees (the trap that makes a nested
+# `docker compose run` mount an empty directory).
+#
+# Test seams (not a supported interface, just what scripts/tests/doctor.test.ps1
+# overrides to drive this without touching the real machine):
+#   DOCTOR_SOCKET     path checked in place of /var/run/docker.sock
+#   DOCTOR_VOLUME     volume name checked/created in place of the real one
+#   DOCTOR_ENV_FILE   .env path checked in place of the repo's own
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+json=0
+fix=0
+for a in "$@"; do
+  case "$a" in
+    --json) json=1 ;;
+    --fix) fix=1 ;;
+    -h|--help)
+      awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
+      exit 0 ;;
+    *)
+      echo "scripts/doctor: unknown option $a" >&2
+      exit 2 ;;
+  esac
+done
+
+: "${DOCTOR_SOCKET:=/var/run/docker.sock}"
+: "${DOCTOR_VOLUME:=inventory-go-build-cache}"
+: "${DOCTOR_ENV_FILE:=$root/.env}"
+
+results=$(mktemp)
+trap 'rm -f "$results"' EXIT
+
+# $1 name  $2 status (ok|warn|FAIL)  $3 remediation (empty for ok)
+add_result() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$results"; }
+
+docker_daemon_ok=0
+
+# 1. docker CLI present; daemon reachable; an unwritable socket gets its own
+#    remediation, distinct from "the daemon just is not running".
+check_docker_daemon() {
+  if ! command -v docker >/dev/null 2>&1; then
+    add_result "docker CLI" FAIL "install Docker (https://docs.docker.com/get-docker/) and put it on PATH"
+    return
+  fi
+  if docker info >/dev/null 2>&1; then
+    docker_daemon_ok=1
+    add_result "docker daemon" ok ""
+    return
+  fi
+  sock="$DOCTOR_SOCKET"
+  if [ -e "$sock" ] && [ ! -w "$sock" ]; then
+    add_result "docker daemon" FAIL "add the user to the socket's group (stat -c %G $sock) or mount the socket with --group-add"
+  else
+    add_result "docker daemon" FAIL "docker info failed - start Docker Desktop or the docker daemon"
+  fi
+}
+
+# 2. Compose plugin or standalone docker-compose, >= 2.24.
+check_compose_version() {
+  ver=""
+  if docker compose version >/dev/null 2>&1; then
+    ver=$(docker compose version --short 2>/dev/null)
+  elif command -v docker-compose >/dev/null 2>&1 && docker-compose version >/dev/null 2>&1; then
+    ver=$(docker-compose version --short 2>/dev/null)
+  fi
+  if [ -z "$ver" ]; then
+    add_result "compose version" FAIL "install Docker Compose >= 2.24 (plugin) or docker-compose >= 2.24 (standalone)"
+    return
+  fi
+  ver=${ver#v}
+  major=${ver%%.*}
+  rest=${ver#*.}
+  minor=${rest%%.*}
+  case "$major" in ''|*[!0-9]*) major=0 ;; esac
+  case "$minor" in ''|*[!0-9]*) minor=0 ;; esac
+  if [ "$major" -gt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -ge 24 ]; }; then
+    add_result "compose version" ok ""
+  else
+    add_result "compose version" FAIL "Compose $ver is older than 2.24 - upgrade Docker Desktop or the compose plugin"
+  fi
+}
+
+# 3. The daemon answering `docker info` is not the same as it being able to
+#    start a container for this user (rootless/userns/cgroup misconfiguration).
+check_container_run() {
+  if [ "$docker_daemon_ok" != 1 ]; then
+    add_result "container start" warn "skipped: the docker daemon is not reachable (see check 1)"
+    return
+  fi
+  image=busybox
+  if ! docker image inspect busybox >/dev/null 2>&1 && docker image inspect postgres:16-alpine >/dev/null 2>&1; then
+    image=postgres:16-alpine
+  fi
+  if docker run --rm "$image" true >/dev/null 2>&1; then
+    add_result "container start" ok ""
+  else
+    add_result "container start" FAIL "the daemon answers docker info but cannot start containers for this user - check rootless/userns/cgroup configuration, or restart the daemon"
+  fi
+}
+
+# 4. The external build-cache volume every worktree shares.
+check_build_cache_volume() {
+  vol="$DOCTOR_VOLUME"
+  if docker volume inspect "$vol" >/dev/null 2>&1; then
+    add_result "build cache volume" ok ""
+    return
+  fi
+  if [ "$fix" -eq 1 ]; then
+    if docker volume create "$vol" >/dev/null 2>&1; then
+      add_result "build cache volume" ok "created by --fix"
+    else
+      add_result "build cache volume" FAIL "docker volume create $vol failed"
+    fi
+  else
+    add_result "build cache volume" FAIL "docker volume create $vol (or re-run scripts/doctor --fix)"
+  fi
+}
+
+# 5. HTTP_PORT/TRAEFIK_PORT, read only with grep - never the whole file, and
+#    a port number is not a secret, so it may appear in the output.
+check_ports_free() {
+  http_port=$(grep -m1 '^HTTP_PORT=' "$DOCTOR_ENV_FILE" 2>/dev/null | cut -d= -f2-)
+  traefik_port=$(grep -m1 '^TRAEFIK_PORT=' "$DOCTOR_ENV_FILE" 2>/dev/null | cut -d= -f2-)
+  [ -n "$http_port" ] || http_port=8000
+  [ -n "$traefik_port" ] || traefik_port=80
+  label="ports (HTTP_PORT=$http_port, TRAEFIK_PORT=$traefik_port)"
+
+  if [ "$docker_daemon_ok" != 1 ]; then
+    add_result "$label" warn "skipped: the docker daemon is not reachable (see check 1)"
+    return
+  fi
+
+  busy=""
+  for kv in "HTTP_PORT=$http_port" "TRAEFIK_PORT=$traefik_port"; do
+    port=${kv#*=}
+    case "$port" in ''|*[!0-9]*) continue ;; esac
+    docker run --rm -p "$port:$port" busybox true >/dev/null 2>&1 || busy="$busy ${kv%%=*}=$port"
+  done
+  if [ -z "$busy" ]; then
+    add_result "$label" ok ""
+  else
+    add_result "$label" FAIL "port(s)$busy already in use - stop whatever is listening on them, or change the value in .env"
+  fi
+}
+
+# 6. gh authenticated, repo scope present, rate limit has headroom.
+check_gh_auth() {
+  if ! command -v gh >/dev/null 2>&1; then
+    add_result "gh auth" FAIL "install the GitHub CLI (https://cli.github.com/) and run gh auth login"
+    return
+  fi
+  if ! gh auth status >/dev/null 2>&1; then
+    add_result "gh auth" FAIL "run gh auth login"
+    return
+  fi
+  scopes=$(gh api -i user 2>/dev/null | grep -i '^x-oauth-scopes:' | tr -d '\r')
+  case "$scopes" in
+    *repo*) : ;;
+    *)
+      add_result "gh auth" FAIL "the token is missing the 'repo' scope - run gh auth refresh -s repo"
+      return ;;
+  esac
+  remaining=$(gh api rate_limit --jq '.rate.remaining' 2>/dev/null)
+  case "$remaining" in
+    ''|*[!0-9]*)
+      add_result "gh auth" warn "could not read the API rate limit (gh api rate_limit)"
+      return ;;
+  esac
+  if [ "$remaining" -le 500 ]; then
+    add_result "gh auth" warn "GitHub API rate limit is low ($remaining remaining) - avoid heavy gh usage until it resets"
+    return
+  fi
+  case "$scopes" in
+    *workflow*) add_result "gh auth" ok "" ;;
+    *) add_result "gh auth" warn "token is missing the 'workflow' scope - only needed if gh workflow run/dispatch is used (gh auth refresh -s workflow)" ;;
+  esac
+}
+
+# 7. git identity set; every file .gitattributes pins `text eol=lf` is
+#    actually LF in the working tree - the failure a stray CRLF checkout
+#    would otherwise surface as "shebang not found" deep inside a run.
+check_git_identity_and_line_endings() {
+  name=$(git config --get user.name 2>/dev/null)
+  email=$(git config --get user.email 2>/dev/null)
+  if [ -z "$name" ] || [ -z "$email" ]; then
+    add_result "git identity + line endings" FAIL "run git config --global user.name '<name>' and git config --global user.email '<email>'"
+    return
+  fi
+  bad=""
+  attrs="$root/.gitattributes"
+  if [ -f "$attrs" ]; then
+    while IFS= read -r line; do
+      case "$line" in
+        \#*|'') continue ;;
+      esac
+      case "$line" in
+        *"eol=lf"*)
+          pattern=${line%% *}
+          for f in "$root"/$pattern; do
+            [ -f "$f" ] || continue
+            cnt=$(grep -c "$(printf '\r')" "$f" 2>/dev/null)
+            if [ "${cnt:-0}" -gt 0 ]; then bad="$bad ${f#"$root"/}"; fi
+          done
+          ;;
+      esac
+    done < "$attrs"
+  fi
+  if [ -n "$bad" ]; then
+    add_result "git identity + line endings" FAIL "LF-pinned file(s) have CRLF endings:$bad - check core.autocrlf and .gitattributes, then re-checkout"
+  else
+    add_result "git identity + line endings" ok ""
+  fi
+}
+
+# 8. claude on PATH, runnable, and authenticated one way or another.
+check_claude_cli() {
+  if ! command -v claude >/dev/null 2>&1; then
+    add_result "claude CLI" FAIL "install Claude Code and put it on PATH"
+    return
+  fi
+  if ! claude --version >/dev/null 2>&1; then
+    add_result "claude CLI" FAIL "claude --version failed - reinstall Claude Code"
+    return
+  fi
+  if claude auth status >/dev/null 2>&1; then
+    add_result "claude CLI" ok ""
+    return
+  fi
+  if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    add_result "claude CLI" ok "authenticated via CLAUDE_CODE_OAUTH_TOKEN"
+    return
+  fi
+  add_result "claude CLI" FAIL "run claude login on the host, or pass CLAUDE_CODE_OAUTH_TOKEN into the container"
+}
+
+# 9. >= 10 GB free on the repo's own drive and on the Docker data root
+#    (skipped as unmeasurable, not FAIL, when the data root is inside a
+#    Docker Desktop VM the host cannot df).
+check_disk_space() {
+  min_kb=$((10 * 1024 * 1024))
+  repo_free_kb=$(df -Pk "$root" 2>/dev/null | awk 'NR==2{print $4}')
+  repo_bad=0
+  case "$repo_free_kb" in ''|*[!0-9]*) repo_bad=0 ;; *) [ "$repo_free_kb" -lt "$min_kb" ] && repo_bad=1 ;; esac
+
+  docker_bad=0
+  docker_note=""
+  if [ "$docker_daemon_ok" = 1 ]; then
+    docker_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)
+    if [ -n "$docker_root" ]; then
+      docker_free_kb=$(df -Pk "$docker_root" 2>/dev/null | awk 'NR==2{print $4}')
+      case "$docker_free_kb" in
+        ''|*[!0-9]*) docker_note="docker data root ($docker_root) is not on a filesystem this host can measure (e.g. a Docker Desktop VM) - check its disk allocation separately" ;;
+        *) [ "$docker_free_kb" -lt "$min_kb" ] && docker_bad=1 ;;
+      esac
+    fi
+  fi
+
+  if [ "$repo_bad" -eq 1 ] || [ "$docker_bad" -eq 1 ]; then
+    add_result "disk space" FAIL "less than 10 GB free - free up space on the repo drive and/or the Docker data root"
+  elif [ -n "$docker_note" ]; then
+    add_result "disk space" warn "$docker_note"
+  else
+    add_result "disk space" ok ""
+  fi
+}
+
+# 10. Inside a container (detected via /.dockerenv), the repo path this
+#     process sees must be the same path the daemon sees for it - otherwise a
+#     nested `docker compose run` bind-mounts an empty directory. Not
+#     reachable outside a container; that path just reports ok.
+check_bind_mount_path() {
+  if [ ! -e /.dockerenv ]; then
+    add_result "bind-mount path" ok "not in a container"
+    return
+  fi
+  if [ "$docker_daemon_ok" != 1 ]; then
+    add_result "bind-mount path" warn "in a container, but the docker daemon is not reachable to check the bind mount"
+    return
+  fi
+  cid=$(sed -n 's#^[0-9]*:[^:]*:.*/docker/##p' /proc/self/cgroup 2>/dev/null | head -1)
+  [ -n "$cid" ] || cid=$(hostname 2>/dev/null)
+  mount_line=$(docker inspect "$cid" --format '{{range .Mounts}}{{.Source}}|{{.Destination}}{{"\n"}}{{end}}' 2>/dev/null |
+    awk -F'|' -v r="$root" 'index(r, $2) == 1 {print length($2), $0}' | sort -rn | head -1 | cut -d' ' -f2-)
+  if [ -z "$mount_line" ]; then
+    add_result "bind-mount path" warn "in a container, but could not find the bind mount covering $root to verify it"
+    return
+  fi
+  src=${mount_line%%|*}
+  dest=${mount_line#*|}
+  if [ "$src" = "$dest" ]; then
+    add_result "bind-mount path" ok ""
+  else
+    add_result "bind-mount path" FAIL "the repo is mounted at $dest but the daemon sees it as $src - a nested docker compose run would bind-mount the wrong (likely empty) directory; mount the checkout at the same path on the host as inside this container"
+  fi
+}
+
+check_docker_daemon
+check_compose_version
+check_container_run
+check_build_cache_volume
+check_ports_free
+check_gh_auth
+check_git_identity_and_line_endings
+check_claude_cli
+check_disk_space
+check_bind_mount_path
+
+json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+
+if [ "$json" -eq 1 ]; then
+  printf '[\n'
+  first=1
+  while IFS="$(printf '\t')" read -r name status remediation; do
+    [ "$first" -eq 1 ] && first=0 || printf ',\n'
+    printf '  {"check": "%s", "status": "%s", "remediation": "%s"}' \
+      "$(json_escape "$name")" "$(json_escape "$status")" "$(json_escape "$remediation")"
+  done < "$results"
+  printf '\n]\n'
+else
+  n=0
+  while IFS="$(printf '\t')" read -r name status remediation; do
+    n=$((n + 1))
+    if [ -n "$remediation" ]; then
+      printf '%2d. %-40s %-4s - %s\n' "$n" "$name" "$status" "$remediation"
+    else
+      printf '%2d. %-40s %s\n' "$n" "$name" "$status"
+    fi
+  done < "$results"
+fi
+
+if awk -F'\t' '$2=="FAIL"{found=1} END{exit !found}' "$results"; then
+  exit 1
+fi
+exit 0

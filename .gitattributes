@@ -24,3 +24,7 @@ deploy/synology/update_test.go text eol=lf
 scripts/dev text eol=lf
 scripts/dev.d/* text eol=lf
 scripts/dev_test.go text eol=lf
+
+# scripts/doctor runs directly under sh (host, dev image busybox sh, GitHub
+# runner) the same way scripts/dev does - same CRLF shebang problem.
+scripts/doctor text eol=lf
