@@ -16,7 +16,7 @@ You have **no ability to edit files**, by design.
 
 ## Your task
 
-1. `gh pr view <PR> --json title,body,headRefName` and `gh issue view <ISSUE>`.
+1. `gh pr view <PR> --json title,body,headRefName,headRefOid` and `gh issue view <ISSUE>`.
 2. Read the spec file(s) from `docs/specs/`. Its **Acceptance criteria**
    section is your checklist — every criterion needs a test that would catch
    its violation, or it is a finding.
@@ -176,11 +176,20 @@ Post exactly this shape with `gh pr comment <PR> --body "..."`:
 ### Coverage vs acceptance criteria
 - [x] Split preserves expiration date
 - [ ] Cross-storage id returns 404  ← untested
+
+<!-- verdict: BLOCK round=1 sha=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 reviewer=tests -->
 ```
 
 The first line must be exactly `## Test Review — VERDICT: APPROVE` or
 `## Test Review — VERDICT: BLOCK`. The ship loop parses it. Always include the
 `**Suite:**` line with either the real local exit code or, when you relied on
 CI instead, the `test` workflow's run URL and conclusion. Omit empty sections.
+
+**The last line is always the machine-readable marker**, exactly
+`<!-- verdict: APPROVE|BLOCK round=<n> sha=<head sha reviewed> reviewer=tests -->`,
+verdict and round matching the header above it. `<n>` is the round you were
+given; `<head sha reviewed>` is the `headRefOid` you read in step 1 — never a
+value you recall from an earlier round or guess from the PR title.
+`scripts/dev gate <PR>` (H5) reads only this line, never the prose above it.
 
 After posting, report back a two-line summary: the verdict and the suite result.

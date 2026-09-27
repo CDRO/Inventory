@@ -1,0 +1,156 @@
+#!/bin/sh
+# Read reviewer verdicts back from a PR and decide MERGE, WAIT or BLOCK.
+#
+#   scripts/dev gate <PR>
+#
+# Replaces `ship/SKILL.md` step 6's "re-read every comment into context": the
+# three reviewers (.claude/agents/review-{go,tests,docs}.md) each end their
+# posted comment with one machine-readable line,
+#   <!-- verdict: APPROVE|BLOCK round=<n> sha=<head sha reviewed> reviewer=go|tests|docs -->
+# and this command greps for exactly that, never the prose above it. Only
+# markers whose sha matches the PR's current head count; a marker for an
+# older commit is stale and is dropped before the round is even computed, so
+# a stale APPROVE can never outvote a fresh BLOCK and a re-review after a
+# push starts the round count over for that commit. The *current round* is
+# the highest round= among the markers that do match the head sha; within
+# it, a reviewer's last marker wins over an earlier one at the same round
+# (the reviewer corrected itself, or you re-ran it by hand).
+#
+# Prints one line per reviewer (`go: APPROVE r2 @abc1234`, or `go: missing`
+# when no marker matches the head sha at the current round) and then exactly
+# one of:
+#   MERGE                    all three APPROVE at the current round
+#   WAIT <reviewers>         fewer than three markers for the head sha
+#   BLOCK <reviewers>        any BLOCK among the current round's markers
+#
+# When all three approve and the PR's base is `main`, the `test` check on
+# the head commit gates the MERGE too (decision D7,
+# docs/plans/2026-09-harness-optimization.md §9):
+#   CHECKS pending            the check is still running
+#   CHECKS failed             the check failed
+#   CHECKS missing            no check was ever reported, and either the diff
+#                             is not documentation-only or the test reviewer's
+#                             own **Suite:** line was not a local run — dispatch
+#                             one with the command the message prints
+# A base other than `main` needs no check at all (package PRs get no
+# automatic run, docs/specs/01-architecture-and-deployment.md).
+#
+# Exit codes: 2 usage; 0 MERGE; 3 WAIT or CHECKS pending/missing;
+# 4 BLOCK or CHECKS failed.
+set -u
+
+help() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
+
+case "${1:-}" in
+  -h|--help) help; exit 0 ;;
+esac
+pr=${1:-}
+case "$pr" in
+  ''|*[!0-9]*)
+    echo "usage: scripts/dev gate <PR>" >&2
+    exit 2 ;;
+esac
+
+info=$(gh pr view "$pr" --json headRefOid,baseRefName -q '"\(.headRefOid)\t\(.baseRefName)"') || exit 2
+head_sha=$(printf '%s' "$info" | cut -f1)
+base_ref=$(printf '%s' "$info" | cut -f2)
+short_sha=$(printf '%s' "$head_sha" | cut -c1-7)
+
+comments=$(gh pr view "$pr" --json comments -q '.comments[].body' 2>/dev/null)
+
+# Each marker line becomes "VERDICT ROUND SHA REVIEWER"; anything that is not
+# a marker line (the prose above it, an unrelated comment) is dropped here so
+# nothing later has to distinguish comments from each other.
+markers=$(printf '%s\n' "$comments" | awk '
+  /^<!-- verdict: (APPROVE|BLOCK) round=[0-9]+ sha=[0-9a-fA-F]+ reviewer=(go|tests|docs) -->/ {
+    line = $0
+    sub(/^<!-- verdict: /, "", line)
+    split(line, f, " ")
+    v = f[1]
+    round = f[2]; sub(/^round=/, "", round)
+    sha = f[3]; sub(/^sha=/, "", sha)
+    reviewer = f[4]; sub(/^reviewer=/, "", reviewer)
+    print v, round, sha, reviewer
+  }')
+
+state=$(printf '%s\n' "$markers" | awk -v sha="$head_sha" '
+  $3 == sha { if ($2 + 0 > maxround) maxround = $2 + 0; order[NR] = $1" "$2" "$4 }
+  END {
+    for (i = 1; i <= NR; i++) {
+      if (order[i] == "") continue
+      split(order[i], f, " ")
+      if (f[2] + 0 == maxround) latest[f[3]] = f[1]
+    }
+    printf "round=%d\n", maxround
+    for (r in latest) printf "%s=%s\n", r, latest[r]
+  }')
+round=$(printf '%s\n' "$state" | sed -n 's/^round=//p')
+verdict_of() { printf '%s\n' "$state" | sed -n "s/^$1=//p"; }
+go_v=$(verdict_of go); tests_v=$(verdict_of tests); docs_v=$(verdict_of docs)
+
+missing=""
+blocked=""
+for pair in "go:$go_v" "tests:$tests_v" "docs:$docs_v"; do
+  name=${pair%%:*}; v=${pair#*:}
+  if [ -z "$v" ]; then
+    echo "$name: missing"
+    missing="$missing $name"
+  else
+    echo "$name: $v r$round @$short_sha"
+    [ "$v" = BLOCK ] && blocked="$blocked $name"
+  fi
+done
+
+if [ -n "$blocked" ]; then
+  echo "BLOCK${blocked}"
+  exit 4
+fi
+if [ -n "$missing" ]; then
+  echo "WAIT${missing}"
+  exit 3
+fi
+
+if [ "$base_ref" != main ]; then
+  echo MERGE
+  exit 0
+fi
+
+bucket=$(gh pr checks "$pr" --json name,bucket -q '.[] | select(.name == "test") | .bucket' 2>/dev/null | tail -1)
+case "$bucket" in
+  pass) : ;;
+  pending)
+    echo "CHECKS pending"
+    exit 3 ;;
+  "")
+    diff_files=$(git diff --name-only "origin/$base_ref...$head_sha" 2>/dev/null)
+    if [ $? -ne 0 ]; then
+      # Diff itself failed (no such ref locally, no repo): unknown is not
+      # the same as docs-only, so this must not satisfy the fallback.
+      ignored=0
+    else
+      ignored=1
+      for f in $diff_files; do
+        case "$f" in
+          docs/*|*.md|.claude/*|LICENSE) ;;
+          *) ignored=0 ;;
+        esac
+      done
+    fi
+    suite_local=0
+    if printf '%s\n' "$comments" | grep -qE '\*\*Suite:\*\*.*exit [0-9]+'; then
+      suite_local=1
+    fi
+    if [ "$ignored" -eq 1 ] && [ "$suite_local" -eq 1 ]; then
+      : # docs-only diff, and the test reviewer's Suite line shows a local run
+    else
+      branch=$(gh pr view "$pr" --json headRefName -q .headRefName 2>/dev/null)
+      echo "CHECKS missing — dispatch with scripts/dev ci-status $head_sha --dispatch $branch"
+      exit 3
+    fi ;;
+  *)
+    echo "CHECKS failed"
+    exit 4 ;;
+esac
+
+echo MERGE
+exit 0
