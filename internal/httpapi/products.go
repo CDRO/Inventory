@@ -308,6 +308,12 @@ func (h *ProductHandler) UploadImage(w http.ResponseWriter, r *http.Request) {
 	// so the one remaining way this fails is an unusable upload volume — a
 	// deployment problem the caller cannot fix by choosing another file, and
 	// therefore not a 422 about their input.
+	//
+	// SetImage reads the same errPictureUnavailable sentinel as a 422, and the
+	// difference is deliberate rather than an oversight: there it means the
+	// suggestion the person picked has been evicted since the list was drawn,
+	// which they really can fix by picking another. Here there is nothing to
+	// pick.
 	picture, url, err := h.pictures.save(storageID, image.Data, image.Format.ContentType())
 	if err != nil {
 		h.errors.WriteError(w, r, Internal(err))

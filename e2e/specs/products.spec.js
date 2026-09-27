@@ -934,3 +934,92 @@ test("the detail view's upload control posts the chosen photo and shows it", asy
   expect(product.image_url).not.toBeNull();
   expect(product.icon_name).toBeNull();
 });
+
+// A product id that is never seeded, in the same spirit as the unknown
+// storage id the test above uses: it has to stay unseeded for that test to
+// mean anything, so do not give this id a fixture row.
+const UNKNOWN_PRODUCT = "00000000-0000-7000-8000-0000000000ed";
+
+// The product-level half of #248's item 2, which the storage-level test above
+// does not reach: there the storage varies and the product id is held
+// constant, so it proves nothing about telling one product id from another.
+// Here the storage is Bob's own in both requests and only the product id
+// changes — one that exists in Alice's storage, one that exists nowhere.
+//
+// What this catches: a `GetProduct` pre-check added ahead of the write that
+// answers the two cases differently — a different error code, a 422 for one
+// and a 404 for the other, a message that names the product. Any of those
+// hands a member of one storage a working oracle for which product ids exist
+// in another (docs/specs/03-auth-and-multi-tenancy.md).
+test("the upload route cannot tell an unknown product from one in another storage", async ({
+  page,
+}) => {
+  await logIn(page);
+
+  const foreign = await page.request.post(
+    `${BASE}/products/${FOREIGN_PRODUCT}/image`,
+    photoUpload(TINY_PNG),
+  );
+  const unknown = await page.request.post(
+    `${BASE}/products/${UNKNOWN_PRODUCT}/image`,
+    photoUpload(TINY_PNG),
+  );
+
+  expect(foreign.status()).toBe(404);
+  expect(unknown.status()).toBe(404);
+  expect(await foreign.json()).toEqual(await unknown.json());
+});
+
+// The failure path through the control itself, which the success scenario
+// above cannot reach. Both of the guards renderPictureUpload leans on are
+// only observable here: the input is cleared *before* the write, and the
+// in-flight guard is released whether the write succeeded or not.
+//
+// The POST is mocked, so nothing is written and no fixture is mutated — which
+// is why this shares the picker's product rather than taking one of its own.
+// The seed file's one-product-per-scenario rule is about scenarios that write.
+test("a failed upload says so and leaves the control ready to try again", async ({ page }) => {
+  await logIn(page);
+
+  let attempts = 0;
+  await page.route(`**/products/${PICTURE_PICKER_PRODUCT}/image`, async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    attempts += 1;
+    await route.fulfill({
+      status: 413,
+      json: { error: { code: "payload_too_large", message: "The uploaded file is too large." } },
+    });
+  });
+
+  await openProduct(page, "E2E Picture Picker Source");
+  await page.locator('[data-role="change-picture"]').click();
+
+  const input = page.locator('[data-role="upload-picture"]');
+  await input.setInputFiles({ name: "IMG_0044.png", mimeType: "image/png", buffer: TINY_PNG });
+
+  // The server's own words, through the error catalog rather than a generic
+  // "something went wrong" (docs/specs/19-localization.md).
+  await expect(page.locator('[data-role="picture-status"]')).toContainText(
+    "The uploaded file is too large.",
+  );
+  // Still no picture: a failed write must not leave the page claiming one.
+  await expect(page.locator('[data-role="product-picture"]')).toContainText("No picture yet.");
+
+  // Both guards the control leans on, asserted on what each one actually
+  // changes.
+  //
+  // The clear-before-write, read through `files` rather than `value`:
+  // Playwright's setInputFiles never populates a file input's `value`, so
+  // `toHaveValue("")` reads "" whether the handler cleared the control or not
+  // and would pass against the very regression it is meant to catch. `files`
+  // is what `value = ""` empties, and it is what a browser consults when
+  // deciding whether re-picking the same file is a change at all.
+  await expect.poll(() => input.evaluate((el) => el.files.length)).toBe(0);
+
+  // And the in-flight guard released, so the same file picked a second time
+  // really does reach the route a second time. A regression leaving
+  // `uploading` or `disabled` stuck true after a rejected request fails here.
+  await expect(input).toBeEnabled();
+  await input.setInputFiles({ name: "IMG_0044.png", mimeType: "image/png", buffer: TINY_PNG });
+  await expect.poll(() => attempts).toBe(2);
+});

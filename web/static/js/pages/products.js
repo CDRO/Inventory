@@ -483,6 +483,11 @@ async function uploadPicture(product, file, current, status) {
     applyPicture(product, await postForm(`${basePath()}/${product.id}/image`, body), current);
     status.textContent = t("products.picture.saved");
   } catch (err) {
+    // Deliberately not rethrown, where setPicture just above does rethrow.
+    // There is no selection to roll back here: the file input was cleared the
+    // moment the file was read, so the control already shows nothing chosen
+    // and the status line carries the server's own words. What the retry
+    // needs is the guard released, which the caller's `finally` does.
     status.textContent = apiErrorMessage(err, t("products.error.network"));
   }
 }
