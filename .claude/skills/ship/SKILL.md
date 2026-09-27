@@ -104,6 +104,12 @@ EOF
 
 ## 5. Review round
 
+Generate the packet once before spawning the three reviewers —
+`scripts/dev packet <PR>` on round 1, `scripts/dev packet <PR> --since
+<previous round's head SHA>` on round ≥ 2 — so all three read one file
+instead of each re-gathering the PR, the issue, the spec and the diff
+themselves (`scripts/dev.d/packet`, H7).
+
 Spawn **all three reviewers in one message** so they run in parallel:
 
 - `review-go`
