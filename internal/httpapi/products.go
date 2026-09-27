@@ -309,11 +309,14 @@ func (h *ProductHandler) UploadImage(w http.ResponseWriter, r *http.Request) {
 	// deployment problem the caller cannot fix by choosing another file, and
 	// therefore not a 422 about their input.
 	//
-	// SetImage reads the same errPictureUnavailable sentinel as a 422, and the
-	// difference is deliberate rather than an oversight: there it means the
-	// suggestion the person picked has been evicted since the list was drawn,
-	// which they really can fix by picking another. Here there is nothing to
-	// pick.
+	// SetImage reads the same errPictureUnavailable sentinel as a 422, which
+	// fits the case that dominates there: a suggestion evicted since the list
+	// was drawn, which the person really can fix by picking another. That
+	// mapping is not exact — save returns this same sentinel when the volume
+	// is unconfigured, which is no more the caller's doing there than here —
+	// but SetImage's behaviour is not this route's to change. The difference
+	// is deliberate all the same: an upload has no pick to retry, so an
+	// unusable volume is the only thing the sentinel can mean here.
 	picture, url, err := h.pictures.save(storageID, image.Data, image.Format.ContentType())
 	if err != nil {
 		h.errors.WriteError(w, r, Internal(err))
