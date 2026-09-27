@@ -18,6 +18,17 @@ The version floor is real: the compose files use the long-form `env_file` with
 ignoring the key. Synology's Container Manager has shipped older versions —
 check with `docker compose version` before deploying.
 
+## Before you start
+
+In a development checkout, before a session or a wave — not a deployment
+step, and not on the NAS — run `scripts/doctor` (or `scripts/dev doctor`)
+first. It checks the daemon is reachable and can actually start containers,
+the Compose version floor above, the shared build-cache volume, that
+`HTTP_PORT`/`TRAEFIK_PORT` are free, and a few other things that otherwise
+surface as a confusing failure minutes into a session — printing one
+remediation line per problem, or `scripts/doctor --fix` to create the missing
+build-cache volume itself.
+
 ## First run
 
 > **On the operator's own Synology NAS, use the two-file command in
