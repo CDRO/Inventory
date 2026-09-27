@@ -189,6 +189,23 @@ jobs:
           SERPAPI_API_KEY=
           EOF
 
+      # The deterministic pre-gate (H6, docs/plans/2026-09-harness-
+      # optimization.md): gofmt, go vet, staticcheck, revive and
+      # TestEnvExampleParity, before the full suite below spends time on a
+      # PR a linter would have caught in seconds. Same image, same
+      # `docker compose run --rm app` as scripts/dev.d/check, so a run here
+      # and a local `scripts/dev check` never disagree.
+      #
+      # `sh scripts/dev check`, not the bare form: scripts/dev and
+      # scripts/dev.d/* are committed without the executable bit (H1, #300 -
+      # harmless on the Windows/Git-Bash sessions that have run them so far,
+      # since neither NTFS nor MSYS enforces it, but a plain exec of the path
+      # would hit "Permission denied" on this Linux runner). Tracked as #336
+      # rather than fixed here - scripts/dev's own mode bits are outside this
+      # issue's file ownership.
+      - name: scripts/dev check
+        run: sh scripts/dev check
+
       # One container invocation instead of a separate `run` for `go vet` and
       # for `go test`: each `docker compose run` starts its own copy of the
       # stack and waits on `db`'s healthcheck (docker-compose.yml's

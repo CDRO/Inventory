@@ -67,6 +67,10 @@ scripts/dev ci-status "$(git rev-parse HEAD)" --dispatch spec/<NN>-<slug>   # no
 Slower than local Docker — each round-trip is a push and a runner boot — but
 it means a red suite is still caught before opening the PR, not after.
 
+Run `scripts/dev check` (`sh scripts/dev check` if the executable bit is
+missing, #336) before `scripts/dev test`; do not push on a nonzero exit — it
+is the mechanical half of what a reviewer's round would otherwise catch (H6).
+
 ## 4. Open the PR
 
 ```bash

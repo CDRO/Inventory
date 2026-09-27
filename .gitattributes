@@ -24,3 +24,14 @@ deploy/synology/update_test.go text eol=lf
 scripts/dev text eol=lf
 scripts/dev.d/* text eol=lf
 scripts/dev_test.go text eol=lf
+
+# gofmt's canonical output is always LF; on a CRLF checkout (Windows,
+# core.autocrlf=true) `gofmt -l` reports every .go file as unformatted even
+# when its content is otherwise correctly gofmt'ed, because the only
+# difference is the line ending (H6, docs/plans/2026-09-harness-optimization.md).
+# Pinning LF here is what makes `scripts/dev check` (which runs `gofmt -l`)
+# usable from a Windows worktree at all. Existing worktrees need one
+# `git add --renormalize -- '*.go' && git checkout -- '*.go'` (or a fresh
+# checkout) to pick this up — the stored blobs are already LF (autocrlf=true
+# converts on commit), so nothing in git history changes.
+*.go text eol=lf

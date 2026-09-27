@@ -29,6 +29,7 @@ const FallbackIcon = "mdi:package-variant-closed"
 // SuggestionType distinguishes a vector icon from a photograph.
 type SuggestionType string
 
+// SuggestionType values.
 const (
 	TypeIcon  SuggestionType = "icon"
 	TypePhoto SuggestionType = "photo"

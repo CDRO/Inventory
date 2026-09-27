@@ -1,0 +1,87 @@
+#!/bin/sh
+# Deterministic pre-gate: gofmt, go vet, staticcheck, revive and the .env.example/loader parity test, in one container invocation.
+#
+#   scripts/dev check
+#
+# This is the mechanical half of what a reviewer's round is for (H6,
+# docs/plans/2026-09-harness-optimization.md): an exported identifier without
+# a doc comment, a formatting nit and an .env.example that has drifted from
+# the loader are the recurring classes among the docs reviewer's BLOCK
+# verdicts on the last 40 merged PRs (37 of them). A linter catches these
+# before a session opens a PR at all.
+#
+# All five tools run inside a single `docker compose run --rm app sh -c '...'`
+# - one container start, one wait on `db`'s healthcheck - and every tool runs
+# regardless of an earlier one's result, so a session sees every finding in
+# one pass instead of fixing them one round-trip at a time. gofmt has no
+# failing exit code of its own (`gofmt -l` exits 0 once the input parses,
+# whether or not it lists a file); "listed a file" is what fails it here, per
+# the issue this implements.
+#
+# Compact output, the same convention scripts/dev test and vet use: the
+# complete log always lands at .claude/last-check.log (gitignored); stdout
+# carries one PASS/FAIL line per tool, plus the offending output (file:line)
+# for whichever tool failed - a clean run is five lines, a dirty one shows
+# exactly what to fix and where.
+#
+# Exit code: 0 only if every tool passed. .claude/skills/ship/SKILL.md step 3
+# runs this before `scripts/dev test`; do not push on a nonzero exit.
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root" || exit 1
+mkdir -p .claude
+log=.claude/last-check.log
+
+docker compose run --rm app sh -c '
+  set -u
+  status=0
+
+  gofmt_out=$(gofmt -l .)
+  if [ -n "$gofmt_out" ]; then
+    printf "%s\n" "$gofmt_out"
+    echo "gofmt: FAIL"
+    status=1
+  else
+    echo "gofmt: PASS"
+  fi
+
+  if vet_out=$(go vet ./... 2>&1); then
+    echo "go vet: PASS"
+  else
+    printf "%s\n" "$vet_out"
+    echo "go vet: FAIL"
+    status=1
+  fi
+
+  if sc_out=$(staticcheck ./... 2>&1); then
+    echo "staticcheck: PASS"
+  else
+    printf "%s\n" "$sc_out"
+    echo "staticcheck: FAIL"
+    status=1
+  fi
+
+  if rv_out=$(revive -config revive.toml -set_exit_status ./... 2>&1); then
+    echo "revive: PASS"
+  else
+    printf "%s\n" "$rv_out"
+    echo "revive: FAIL"
+    status=1
+  fi
+
+  if parity_out=$(go test ./internal/config/ -run TestEnvExampleParity 2>&1); then
+    echo "TestEnvExampleParity: PASS"
+  else
+    printf "%s\n" "$parity_out"
+    echo "TestEnvExampleParity: FAIL"
+    status=1
+  fi
+
+  exit "$status"
+' > "$log" 2>&1
+code=$?
+
+grep -v -E "^ Container |^ Network |^ Volume " "$log"
+echo "exit=$code"
+exit "$code"

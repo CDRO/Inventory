@@ -39,6 +39,10 @@ non-obvious ways:
 Python, no Java, for setup, building, testing, migrations, or one-off
 scripts. Only `docker` and `docker compose` may be assumed present.
 
+The rule extends to linters: `staticcheck` and `revive` (H6, `scripts/dev
+check`) are installed and pinned in the Dockerfile's `dev` stage, never on
+the host.
+
 Every command is therefore a Docker invocation:
 
 | Task | Command |

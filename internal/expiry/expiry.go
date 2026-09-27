@@ -40,6 +40,7 @@ import (
 // it be tested exhaustively without one.
 type ItemType string
 
+// ItemType values.
 const (
 	Perishable    ItemType = "perishable"
 	LongShelfLife ItemType = "long_shelf_life"
@@ -92,6 +93,7 @@ type Resolution struct {
 // Source identifies which rule in the chain produced a resolution.
 type Source string
 
+// Source values.
 const (
 	SourceProduct      Source = "product"
 	SourceCatalog      Source = "catalog"
