@@ -756,6 +756,161 @@ test("two dismissals racing one failing create leave the location modal open wit
   await expect(dialog).toBeHidden();
 });
 
+// #281: pendingMutationFailed was one shared boolean, and runMutation reset it
+// on entry together with a clearMessages() that wiped the banner with it. So a
+// first mutation's failure could be erased by a second mutation merely starting
+// — easy, because the add-root form reopens the instant it is submitted — and
+// if that second mutation succeeded, Done then closed the dialog with the user
+// never told that the first one silently did not happen.
+//
+// What distinguishes fixed from broken here is NOT whether the dialog closes.
+// It closes on the first Done either way: with the fix, that Done is made with
+// the banner already in front of the user, so it carries that failure in its own
+// snapshot and is entitled to close. The observable is the banner itself —
+// that it survives the second mutation's entry and its success. Reverting
+// runMutation's `if (unacknowledgedFailures.size === 0) clearError()` to an
+// unconditional clear reinstates #281's bug, and this test is the one that
+// fails when it does.
+test("a failed create's error survives a second create starting and succeeding", async ({ page }) => {
+  await logInAsBob(page);
+  await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOCATION_MODAL_JOB}`);
+  const first = page.locator("#rows .review-row").first();
+
+  await first.locator('[data-role="location-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Pantry");
+
+  // The first create fails, every later one succeeds. An aborted request never
+  // reaches the server, so the failing name below is written nowhere.
+  let posts = 0;
+  await page.route(`**/api/storages/${HOUSEHOLD}/locations`, async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    posts += 1;
+    if (posts === 1) {
+      await route.abort("failed");
+      return;
+    }
+    await route.continue();
+  });
+
+  const addRoot = async (name) => {
+    await dialog.getByRole("button", { name: "Add top-level location" }).click();
+    await dialog.locator('input[aria-label="Name of the new top-level location"]').fill(name);
+    await dialog.locator("#location-modal-add-root-form button[type=submit]").click();
+  };
+
+  // A fails, and says so.
+  await addRoot("Warped Trunk");
+  await expect(dialog.getByRole("alert")).toContainText("Could not reach the server");
+
+  // B starts — the point of the issue is that this alone used to wipe A's
+  // banner — and succeeds, which is what used to leave Done free to close over
+  // a failure nobody had read.
+  await addRoot("Tiled Alcove");
+  await expect(dialog).toContainText("Tiled Alcove");
+
+  // A's error is still on screen. This is the assertion #281 is about; at rest,
+  // not in a transient window — B's reload has already redrawn the tree above,
+  // and B cleared the banner (if it was going to) synchronously on submit, long
+  // before that.
+  await expect(dialog.getByRole("alert")).toContainText("Could not reach the server");
+  await expect(dialog).not.toContainText("Warped Trunk");
+
+  // Having now been shown it, the user can close: this Done carries A's failure
+  // in its own snapshot.
+  await page.unroute(`**/api/storages/${HOUSEHOLD}/locations`);
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeHidden();
+
+  await expect(first.locator('[data-role="location"] option', { hasText: "Tiled Alcove" })).toHaveCount(1);
+  await expect(first.locator('[data-role="location"] option', { hasText: "Warped Trunk" })).toHaveCount(0);
+});
+
+// The other half of the failure ledger: a mutation whose *reload* fails latches
+// that failure too, exactly as a failed mutation does. reload() reports instead
+// of throwing (it is also the initial render's path), so runMutation latches a
+// false return — without which a dismissal that was already waiting when the
+// reload failed would close over a banner nobody had seen, which is #275's
+// finding one function along. Dropping runMutation's
+// `if (!(await reload())) unacknowledgedFailures.add(token)` is what this test
+// fails against.
+//
+// The create itself succeeds here, so its id still reaches createdIds and is
+// still preselected after the close — the failed redraw costs the user the
+// redraw and nothing else.
+test("a create whose own reload fails keeps the dialog open on a dismissal that was already waiting", async ({
+  page,
+}) => {
+  await logInAsBob(page);
+  await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOCATION_MODAL_JOB}`);
+  const first = page.locator("#rows .review-row").first();
+
+  await first.locator('[data-role="location-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(dialog).toBeVisible();
+  // The opening reload has rendered, so the next GET is the create's own.
+  await expect(dialog).toContainText("Pantry");
+
+  // The create is held so Done can be asked for while it is still in flight —
+  // the dismissal has to be *waiting* when the failure appears, which is the
+  // whole point — and then allowed through. Its reload is the request that
+  // fails.
+  let releasePost;
+  const postHeld = new Promise((resolve) => {
+    releasePost = resolve;
+  });
+  let failedReloads = 0;
+  await page.route(`**/api/storages/${HOUSEHOLD}/locations`, async (route) => {
+    if (route.request().method() === "POST") {
+      await postHeld;
+      await route.continue();
+      return;
+    }
+    if (failedReloads === 0) {
+      failedReloads = 1;
+      await route.abort("failed");
+      return;
+    }
+    await route.continue();
+  });
+
+  await dialog.getByRole("button", { name: "Add top-level location" }).click();
+  await dialog.locator('input[aria-label="Name of the new top-level location"]').fill("Chalk Niche");
+  await dialog.locator("#location-modal-add-root-form button[type=submit]").click();
+
+  // Asked for before anything has failed, so its snapshot of seen failures is
+  // empty.
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeVisible();
+
+  // The create succeeds, its reload fails, and the waiting Done must not close
+  // over that. Waiting for the page to see the failed request and then for two
+  // animation frames puts the assertions strictly after the point at which an
+  // unlatched reload failure closed the dialog.
+  const reloadFailed = page.waitForEvent(
+    "requestfailed",
+    (request) => request.method() === "GET" && request.url().includes(`/api/storages/${HOUSEHOLD}/locations`),
+  );
+  releasePost();
+  await reloadFailed;
+  await page.unroute(`**/api/storages/${HOUSEHOLD}/locations`);
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("alert")).toContainText("Could not reach the server");
+
+  // And a dismissal made with the banner in front of the user closes, with the
+  // location that really was created still preselected.
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(first.locator('[data-role="location"] option', { hasText: "Chalk Niche" })).toHaveCount(1);
+  await expect(first.locator('[data-role="location"] option:checked')).toContainText("Chalk Niche");
+});
+
 // docs/specs/26-location-quick-create.md's first acceptance criterion, for
 // `06` review specifically: "in a storage with zero locations ... the user
 // opens the modal, creates a root location, closes the modal, and that

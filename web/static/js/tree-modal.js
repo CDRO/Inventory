@@ -195,10 +195,30 @@ export function openTreeManager(storageId, { kind }) {
   async function runMutation(mutate) {
     // The status line belongs to whichever mutation is being started, so it is
     // always replaced. An error banner is not: it may be an earlier mutation's
-    // failure that nobody has read yet, and clearing it here is precisely how a
-    // second mutation used to erase a first one's failure — banner and flag
-    // together — leaving Done free to close the dialog with the user never
-    // having been told that the first mutation did not happen (#281).
+    // failure, and clearing it here is precisely how a second mutation used to
+    // erase a first one's failure — banner and flag together — leaving Done
+    // free to close the dialog with the user never having been told that the
+    // first mutation did not happen (#281).
+    //
+    // Be clear about what that costs, because it is not a temporary state:
+    // nothing ever removes a token from unacknowledgedFailures — there is no
+    // .delete anywhere in this file — so once any mutation has failed, this
+    // guard stops clearing the banner for the rest of the dialog's life. A
+    // failed create's message therefore outlives every later *successful*
+    // mutation and goes only when the dialog closes, which can leave it
+    // standing, stale but true, beside a success.
+    //
+    // That is deliberate and it is forced: keeping a failure visible until the
+    // user has been given the chance to read it and clearing it as soon as the
+    // next mutation succeeds are the same decision with opposite answers, and
+    // #281 is the bug report for choosing the second. It is also the second of
+    // the two shapes #281 itself offers — "clear only messages belonging to the
+    // mutation being started, or nothing at all while an unacknowledged failure
+    // exists". A banner that lingers can be misread as a later mutation's
+    // failure; a banner that vanishes hides that an earlier one never happened.
+    // The first is the cheaper mistake. Do not add a read/acknowledge
+    // transition here to tidy the staleness away — that is the regression
+    // #281 was filed over.
     clearStatus();
     if (unacknowledgedFailures.size === 0) clearError();
 
@@ -415,11 +435,25 @@ export function openTreeManager(storageId, { kind }) {
 
     document.body.append(dialog);
     dialog.showModal();
-    // The initial render, deliberately neither tracked nor latched: nothing is
-    // waiting on it — there is no attempt to put in pendingMutations and no
-    // dismissal that could have raced it — and a tree the user has not touched
-    // yet failing to load is a banner to read, not a failure to hold the dialog
-    // open over.
+    // The initial render, deliberately not tracked in pendingMutations and its
+    // answer deliberately not latched. Unlike a mutation's reload, a dismissal
+    // is allowed to win the race against this one: Done, the backdrop and Esc
+    // are all wired above, *before* showModal(), so a dismissal genuinely can
+    // arrive while this GET is still in flight — requestClose then finds the set
+    // empty, finalize closes the dialog, and this reload's view.render or
+    // showError afterwards runs against a treeContainer and errorBox already
+    // detached from the document.
+    //
+    // That is the same shape as #280 and it is still the behaviour wanted here,
+    // which is why #280's own body excludes this call site: "reload() is also
+    // called from other places that are not mutations (the initial render), so
+    // the fix belongs in runMutation's tracking rather than inside reload()
+    // itself." Nothing is at stake in this window — no mutation has run, so
+    // createdIds is empty by construction and there is no answer the user is
+    // still owed — while tracking it would make Esc do nothing at all until a
+    // slow opening GET came back, which is a real cost for no gain. A banner
+    // painted into a dialog the user has already dismissed is likewise not
+    // something finalize should hold anything open for.
     reload();
   });
 }
