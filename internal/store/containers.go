@@ -206,6 +206,13 @@ func setBatchContainerType(ctx context.Context, tx pgx.Tx, storageID, batchID uu
 
 // batchContainerID reads the container a batch currently points at, if any.
 //
+// FOR UPDATE for the same reason every other write path in batches.go locks
+// the row it is about to change: this is a read the very next statement acts
+// on. Without it two concurrent "name this container" patches on the same
+// container-less batch both see NULL, both insert, and one of the two
+// containers is immediately an orphan nothing references — harmless to the
+// stock, but a row nobody asked for and nobody can find again.
+//
 // Unscoped by storage on purpose: every caller has already resolved the batch
 // against the URL's storage, and repeating the join here would make the
 // container paths look like they carry a check they do not — the structural
@@ -214,7 +221,7 @@ func setBatchContainerType(ctx context.Context, tx pgx.Tx, storageID, batchID uu
 func batchContainerID(ctx context.Context, tx pgx.Tx, batchID uuid.UUID) (*uuid.UUID, error) {
 	var containerID *uuid.UUID
 	err := tx.QueryRow(ctx,
-		`SELECT container_id FROM inventory_batches WHERE id = $1`, batchID).Scan(&containerID)
+		`SELECT container_id FROM inventory_batches WHERE id = $1 FOR UPDATE`, batchID).Scan(&containerID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

@@ -436,11 +436,18 @@ func TestSplitRejectsAnUnknownContainerDisposition(t *testing.T) {
 	assert.Len(t, batches, 1, "the refused split must not have happened")
 }
 
-// TestARefusedSplitDestroysNothing is the transactional half of
-// container_disposition: "destroy" runs inside the split's own transaction, so a
-// split that cannot complete leaves the container exactly as it was. Without
-// that, a client could see a destroyed container and un-split stock.
-func TestARefusedSplitDestroysNothing(t *testing.T) {
+// TestARefusedSplitChangesNothingAtAll pins the ordering, not the atomicity: a
+// split refused for any reason — here a target location in another storage —
+// leaves the source's quantity, its location and its container exactly as they
+// were, because the disposition never runs on a split that does not happen.
+//
+// It deliberately does not claim to observe the transaction. "destroy" sharing
+// the split's transaction is a property of both writes running inside the same
+// s.inTx, and no test outside that transaction can see a moment where one
+// landed and the other had not — which is the point of it being one
+// transaction. What this test would catch is the disposition being moved ahead
+// of the validation that refuses the split.
+func TestARefusedSplitChangesNothingAtAll(t *testing.T) {
 	s := requireDB(t)
 	ctx := context.Background()
 	storageID, productID, _, batchID := stocked(t, ctx, s, 24)
@@ -458,7 +465,8 @@ func TestARefusedSplitDestroysNothing(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrNotFound)
 
 	survivor := readContainer(t, ctx, containerID)
-	assert.Nil(t, survivor.DestroyedAt, "a refused split destroys nothing")
+	assert.Nil(t, survivor.DestroyedAt,
+		"the disposition must not run on a split that was refused before it began")
 	batches, err := s.ListProductBatches(ctx, storageID, productID)
 	require.NoError(t, err)
 	require.Len(t, batches, 1)
