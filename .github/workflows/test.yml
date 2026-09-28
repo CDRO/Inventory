@@ -59,6 +59,16 @@
 # `actions/cache` below are runner-side tooling, not a host toolchain — they
 # move bytes into caches, they don't compile or run anything themselves. No
 # Go, Node, or Postgres is installed on the runner directly.
+#
+# Everything above is about the `test` job. This workflow also carries a second,
+# unrelated job, `runner-image` (H16, #315): it builds the self-hosted NAS
+# runner's image and runs that image's own start-up smoke test, and it does so
+# only on a commit that changed `deploy/synology/runner/**`. It lives here rather
+# than in a workflow of its own because GitHub's path filters are per workflow,
+# not per job, so its own file would have had to duplicate these triggers and
+# the reasons for them; the trade-off is that a commit which is not about the
+# runner still starts that job for a few seconds before it says so and builds
+# nothing. Its own comment block, above the job, has the rest.
 name: test
 
 on:
@@ -228,3 +238,98 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose down -v
+
+  # H16 (docs/specs/38-release-pipeline-and-nas-runner.md, "The runner: a
+  # container on the NAS"): build the self-hosted runner's image, and run its
+  # start-up smoke test, whenever anything in deploy/synology/runner/ changes -
+  # and only then. The runner is the one component nothing else exercises: it is
+  # built by hand on the NAS, at most a few times a year, and a base image that
+  # dropped a tool or a download URL that moved would otherwise be discovered
+  # during a release, by an operator, on the NAS. Spec 38's criterion is "its
+  # image is built in CI only when deploy/synology/runner/** changes".
+  #
+  # Why a job with a path check in it rather than a `paths:` trigger: GitHub's
+  # path filters are per WORKFLOW (on.<event>.paths), not per job, so a
+  # `paths`-filtered trigger here would have to narrow the whole `test` job
+  # above with it. The alternative - a second workflow file - would duplicate
+  # this workflow's triggers and its reasons for them. So the filter is a step,
+  # and the cost of the narrowing is one runner start (a few seconds) on a
+  # change that is not about the runner, which then says so in the log and
+  # builds nothing.
+  runner-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # fetch-depth: 0, because the next step diffs against a base commit.
+      # The default shallow checkout has neither HEAD~1 nor the PR's base sha.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      # The path filter. Each event has its own honest answer to "compared with
+      # what?", and there is no answer that fits all three:
+      #   pull_request     - the PR's base commit: the whole PR is the change.
+      #   push             - the commit that was there before the push.
+      #   workflow_dispatch - the dispatched commit alone (HEAD~1), which is also
+      #                       what makes "does this commit touch the runner?" a
+      #                       question you can ask on demand.
+      - name: Did deploy/synology/runner/ change?
+        id: filter
+        run: |
+          set -eu
+          case "${{ github.event_name }}" in
+            pull_request) base='${{ github.event.pull_request.base.sha }}' ;;
+            push)         base='${{ github.event.before }}' ;;
+            *)            base='' ;;
+          esac
+          # A new branch's push reports an all-zero "before", and a dispatch
+          # reports nothing at all: fall back to the dispatched commit's own
+          # parent, and to "build it" when even that does not exist (a root
+          # commit).
+          case "$base" in
+            ''|0000000000000000000000000000000000000000)
+              base=$(git rev-parse --verify --quiet HEAD~1) || base= ;;
+          esac
+          if [ -z "$base" ]; then
+            echo "no base commit to compare against - building the runner image"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$base" HEAD -- deploy/synology/runner/ | wc -l)
+          echo "base=$base  files changed under deploy/synology/runner/: $changed"
+          if [ "$changed" -gt 0 ]; then
+            git diff --name-only "$base" HEAD -- deploy/synology/runner/
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy/synology/runner/ unchanged - NOT building the runner image"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Plain `docker build`, not buildx with a layer cache: this runs on a
+      # handful of commits a year, and the expensive layer (the base image) is
+      # pulled either way. It is also the exact command spec 38's criterion and
+      # deploy/synology/runner/README.md name, so a green tick here means that
+      # command works.
+      - name: Build the runner image
+        if: steps.filter.outputs.changed == 'true'
+        run: docker build -t inventory-runner:local deploy/synology/runner
+
+      # The image's own start-up smoke test, in the mode that registers nothing
+      # and takes no job (RUNNER_SMOKE_ONLY=1). This is the part that catches a
+      # base image which dropped git or the Docker CLI, or a docker-compose that
+      # can no longer parse the app stack's two files - none of which a
+      # successful build would notice.
+      #
+      # The checkout stands in for the clone, mounted at the identical path
+      # inside and out, which is what the runner requires on the NAS and what
+      # $GITHUB_WORKSPACE happens to make possible here: it is a real path on
+      # the same host whose daemon /var/run/docker.sock belongs to.
+      - name: Run the runner image's start-up smoke test
+        if: steps.filter.outputs.changed == 'true'
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            -e "INVENTORY_CLONE=$GITHUB_WORKSPACE" \
+            -e RUNNER_SMOKE_ONLY=1 \
+            inventory-runner:local

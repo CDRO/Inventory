@@ -5,12 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"path/filepath"
-	"sort"
-	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/pressly/goose/v3"
 )
 
 // undefinedTable is PostgreSQL's SQLSTATE for "relation does not exist" — how
@@ -207,21 +203,17 @@ func isUndefinedTable(err error) bool {
 // "migration 10" is. A file goose would reject is skipped rather than fatal:
 // `migrate up` is where a malformed name should fail, loudly and with goose's
 // own message, not here in a comparison that would then report a nonsense
-// count.
+// count. Built on shippedMigrationFiles (plan.go), which Plan also needs —
+// filenames as well as versions — so the two never disagree about what is
+// shipped.
 func shippedVersions(dir string) ([]int64, error) {
-	matches, err := filepath.Glob(filepath.Join(dir, "*.sql"))
+	files, err := shippedMigrationFiles(dir)
 	if err != nil {
-		return nil, fmt.Errorf("migrate: scan %s: %w", dir, err)
+		return nil, err
 	}
-
-	versions := make([]int64, 0, len(matches))
-	for _, match := range matches {
-		version, err := goose.NumericComponent(strings.TrimSpace(filepath.Base(match)))
-		if err != nil {
-			continue
-		}
-		versions = append(versions, version)
+	versions := make([]int64, len(files))
+	for i, f := range files {
+		versions[i] = f.version
 	}
-	sort.Slice(versions, func(i, j int) bool { return versions[i] < versions[j] })
 	return versions, nil
 }

@@ -30,3 +30,10 @@ backups
 # written through the e2e/ bind mount, are not something Docker's tar-based
 # build context reader tolerates.
 e2e/
+
+# The self-hosted runner's registration credentials (deploy/synology/runner/
+# README.md) sit in a bind mount inside the clone, so without this line every
+# `docker compose build` of the app would copy the key this NAS authenticates to
+# GitHub Actions with into an image layer. Full path, not a bare name: the
+# patterns above match at the context root only.
+deploy/synology/runner/runner_state

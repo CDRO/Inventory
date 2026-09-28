@@ -55,3 +55,11 @@ scripts/gate_test.go text eol=lf
 scripts/testdata/agent-usage/**/*.jsonl text eol=lf
 scripts/testdata/agent-usage/**/*.meta.json text eol=lf
 scripts/agent_usage_test.go text eol=lf
+
+# The runner container's entrypoint runs under bash inside a Linux image built
+# from a Windows checkout (deploy/synology/runner/), so a CRLF shebang would make
+# it "bad interpreter" — the same problem the NAS scripts above have, and the
+# same fix. The Dockerfile is pinned too: its RUN lines use backslash
+# continuations, which CRLF has broken in Docker builds before.
+deploy/synology/runner/entrypoint.sh text eol=lf
+deploy/synology/runner/Dockerfile text eol=lf

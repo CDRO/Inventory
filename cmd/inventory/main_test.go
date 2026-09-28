@@ -56,6 +56,16 @@ func TestExitCodeForConfigFailure(t *testing.T) {
 			err:  errors.New("dial tcp: connection refused"),
 			want: 1,
 		},
+		{
+			// A migrate plan marker-placement error (docs/specs/38-release-pipeline-and-nas-runner.md)
+			// is a plain CLI error, not a schema mismatch — pinned so a future
+			// change cannot special-case it toward EX_CONFIG, which would make
+			// deploy/synology/update treat a marker typo as the NAS's fatal,
+			// unrecoverable schema-mismatch path instead of a plain exit 1.
+			name: "a migrate plan marker-placement error exits generically, not as EX_CONFIG",
+			err:  &migrate.MarkerPlacementError{Line: 4},
+			want: 1,
+		},
 	}
 
 	for _, tc := range tests {
@@ -111,6 +121,27 @@ func TestASchemaMismatchIsFatalAndNonRetryable(t *testing.T) {
 	// merely unreachable is worth retrying, and must not be reported as a
 	// deployment the operator has to repair.
 	assert.Equal(t, 1, exitCodeFor(errors.New("dial tcp: connection refused")))
+}
+
+// TestPlanClassicErrorExitsWithTheSpecsDistinctCodeAndPrintsNothing is the
+// cmd/inventory half of migrate plan's classic outcome
+// (docs/specs/38-release-pipeline-and-nas-runner.md, decision D3): a `sh`
+// script under `set -eu` reads only the process's exit code, so classic must
+// map to migrate.ExitClassic rather than the generic 1 a plain error would
+// get, and errorMessage must print nothing extra — migrate.Plan has already
+// written the whole report to stdout before returning this error.
+func TestPlanClassicErrorExitsWithTheSpecsDistinctCodeAndPrintsNothing(t *testing.T) {
+	t.Parallel()
+
+	err := &migrate.PlanClassicError{}
+
+	assert.Equal(t, migrate.ExitClassic, exitCodeFor(err))
+	assert.Equal(t, 3, migrate.ExitClassic, "the exit code is part of the deploy pipeline's contract; changing it changes what deploy/synology/update reads")
+	assert.Empty(t, errorMessage(err))
+
+	wrapped := fmt.Errorf("running migrate plan: %w", err)
+	assert.Equal(t, migrate.ExitClassic, exitCodeFor(wrapped))
+	assert.Empty(t, errorMessage(wrapped))
 }
 
 // TestRunRejectsUnknownCommand keeps a typo from being mistaken for `serve`,
