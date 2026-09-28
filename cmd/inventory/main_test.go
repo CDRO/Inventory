@@ -156,6 +156,30 @@ func TestRunRejectsUnknownCommand(t *testing.T) {
 	assert.Equal(t, 1, exitCodeFor(err))
 }
 
+// TestRunIconsRejectsUnknownAction guards `icons`' own dispatch
+// (docs/specs/42-local-icon-library.md): only `import` is a valid action,
+// and this must be refused before config.Load ever runs, so it needs no
+// DATABASE_URL to test.
+func TestRunIconsRejectsUnknownAction(t *testing.T) {
+	t.Parallel()
+
+	err := runIcons(context.Background(), []string{"export"})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown icons action "export"`)
+}
+
+// TestRunIconsRequiresAnAction covers the bare `icons` invocation, the same
+// as `migrate` defaulting args[0] to "" when none is given.
+func TestRunIconsRequiresAnAction(t *testing.T) {
+	t.Parallel()
+
+	err := runIcons(context.Background(), nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown icons action ""`)
+}
+
 // TestStaticFSPrefersStaticDir covers the dev half of the asset switch: with
 // STATIC_DIR set the server must read from disk, which is the whole reason
 // editing a .js file and refreshing the browser is enough.
