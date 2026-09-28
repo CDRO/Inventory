@@ -17,11 +17,17 @@
 import { test, expect } from "@playwright/test";
 
 const HOUSEHOLD = "00000000-0000-7000-8000-000000000010";
-// Both jobs' analyses flagged a shopping list. KEEP_JOB is only ever
-// dismissed, so it survives every run; PROCESS_JOB is DISCARDED by the action
-// this suite performs on it, so it belongs to that one test alone.
+// Every job below was flagged as a shopping list by its own analysis.
+// KEEP_JOB is only ever dismissed, so it survives every run; PROCESS_JOB is
+// DISCARDED by the action this suite performs on it, so it belongs to that one
+// test alone.
 const KEEP_JOB = "00000000-0000-7000-8000-000000000076";
 const PROCESS_JOB = "00000000-0000-7000-8000-000000000077";
+// The same classification on a consumption photo. Its own fixture, and its
+// own test below, because consume-review.html is a different page module
+// wiring the same shared banner, and because internal/consume's payload has
+// no `mode` field at all — the banner's copy comes from the job's kind.
+const CONSUMPTION_JOB = "00000000-0000-7000-8000-000000000078";
 // An ordinary shelf proposal, seeded for e2e/specs/ingestion.spec.js: the
 // overwhelming majority case, which this spec must leave looking untouched.
 const ORDINARY_JOB = "00000000-0000-7000-8000-000000000074";
@@ -126,4 +132,30 @@ test("processing it as a shopping list lands on a real, resolvable list and disc
   // which is what the banner navigated to.
   await page.goto(`/shopping-list.html?storage=${HOUSEHOLD}&list=${listId}`);
   await expect(page.locator("#items .item")).toHaveCount(3);
+});
+
+test("a consumption photo read as a list offers the same choice, naming its own mode", async ({ page }) => {
+  await logInAsBob(page);
+  await page.goto(`/consume-review.html?storage=${HOUSEHOLD}&job=${CONSUMPTION_JOB}`);
+
+  const banner = page.locator("#shopping-list-banner");
+  await expect(banner).toBeVisible();
+  // The copy names the mode this photo was actually captured under — not a
+  // shelf photo, which is what a banner reading the payload's `mode` would
+  // have said here, since internal/consume's payload has no such field.
+  await expect(banner).toContainText("not a consumption photo");
+  await expect(banner.getByRole("button", { name: "Process as shopping list" })).toBeVisible();
+
+  await banner.getByRole("button", { name: "Keep as consumption photo" }).click();
+  await expect(banner).toBeHidden();
+
+  // And the consumption review proceeds unchanged underneath, empty item list
+  // included — the same guarantee the shelf screen gives.
+  await expect(page.locator("#status")).toContainText("Nothing was found in this photo");
+  await expect(page.getByRole("button", { name: "Confirm" })).toBeVisible();
+  expect(new URL(page.url()).pathname).toBe("/consume-review.html");
+
+  const job = await page.request.get(`/api/storages/${HOUSEHOLD}/jobs/${CONSUMPTION_JOB}`);
+  expect(job.status()).toBe(200);
+  expect((await job.json()).status).toBe("done");
 });

@@ -621,6 +621,21 @@ INSERT INTO jobs (id, storage_id, kind, status, payload, created_by) VALUES
    '00000000-0000-7000-8000-000000000003')
 ON CONFLICT (id) DO NOTHING;
 
+-- The same classification on a consumption photo (...078), in the shape
+-- internal/consume writes — no mode field and no location placement, which is
+-- exactly why it is worth its own fixture: the banner on
+-- consume-review.html reads the job's *kind* rather than the payload's mode,
+-- and that wiring is a different file (web/static/js/pages/consume-review.js)
+-- from review.html's. Only ever dismissed, never processed, so it survives
+-- every run.
+INSERT INTO jobs (id, storage_id, kind, status, payload, created_by) VALUES
+  ('00000000-0000-7000-8000-000000000078', '00000000-0000-7000-8000-000000000010', 'consumption_photo', 'done',
+   '{"rows":[],
+     "looks_like_shopping_list":true,
+     "shopping_list_lines":["canned tomatoes","oat milk","sourdough bread"]}',
+   '00000000-0000-7000-8000-000000000003')
+ON CONFLICT (id) DO NOTHING;
+
 -- One shelf-ingestion job in "E2E Admin Household" (...012), which —
 -- despite the name — also starts with zero locations, the same as "E2E
 -- Zero-Locations Household" (...013) does; dedicated to
