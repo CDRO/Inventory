@@ -556,6 +556,23 @@ func TestCreateProductWithUnknownCategoryIs404(t *testing.T) {
 	assert.Equal(t, "not_found", errorCode(t, rec))
 }
 
+// TestCreateProductRefusesANonMember mirrors
+// TestProductMaintenanceRoutesRefuseANonMember for the one product route that
+// test cannot reach: Create has no {product_id} in its path, so it needs its
+// own check that the whole maintenance surface's gate — the same 404 a
+// nonexistent storage gets — still covers it (docs/specs/03-auth-and-multi-tenancy.md).
+func TestCreateProductRefusesANonMember(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	other := uuid.New() // a storage this session is not a member of
+
+	rec := f.do(http.MethodPost, "/api/storages/"+other.String()+"/products", `{"name":"Milk"}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, "not_found", errorCode(t, rec))
+	assert.Zero(t, f.reorder.createCalls, "a refused request must not reach the store")
+}
+
 // TestCreateProductPromotesImageSuggestion: the picture, when given, is
 // promoted into permanent storage, never recorded by its suggestion-cache
 // address — the same rule SetImage enforces.
@@ -574,6 +591,27 @@ func TestCreateProductPromotesImageSuggestion(t *testing.T) {
 	prefix := f.base() + "/product-images/"
 	require.True(t, strings.HasPrefix(*f.reorder.lastNew.ImageURL, prefix), *f.reorder.lastNew.ImageURL)
 	assert.Equal(t, []byte("\x89PNGsoup"), f.pictures.files[strings.TrimPrefix(*f.reorder.lastNew.ImageURL, prefix)])
+}
+
+// TestCreateProductWithImageLeavesNoOrphanedFileWhenTheStoreRefuses mirrors
+// TestUploadImageReportsNotFoundFromTheStoreAndKeepsNoFile: the picture is
+// promoted before the insert (so it can be attached to it), and this is the
+// half of that ordering the happy-path test above cannot reach — the file
+// written before the row must not survive the row being refused.
+func TestCreateProductWithImageLeavesNoOrphanedFileWhenTheStoreRefuses(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	f.reorder.createErr = store.ErrNotFound
+	hash := strings.Repeat("b", 64)
+	f.imageData.sources = map[string]string{hash: "https://provider.test/soup.png"}
+	f.imageData.data, f.imageData.contentType = []byte("\x89PNGsoup"), "image/png"
+
+	rec := f.do(http.MethodPost, f.base()+"/products",
+		`{"name":"Soup","category_id":"`+uuid.NewString()+`","image":"`+hash+`"}`)
+
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Empty(t, f.pictures.files, "a refused write must leave no orphaned photo behind")
 }
 
 // TestCreateProductRefusesASuggestionNoLongerCached — the person picked a
