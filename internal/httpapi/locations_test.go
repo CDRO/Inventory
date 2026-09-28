@@ -114,23 +114,35 @@ type fakeBatches struct {
 	moved    *store.Batch
 	moveErr  error
 
-	lastStorageID  uuid.UUID
-	lastBatchID    uuid.UUID
-	lastQuantity   int
-	lastTargetID   uuid.UUID
-	lastPatch      store.BatchPatch
-	lastActingUser *uuid.UUID
+	destroyErr error
+
+	lastStorageID   uuid.UUID
+	lastBatchID     uuid.UUID
+	lastQuantity    int
+	lastTargetID    uuid.UUID
+	lastPatch       store.BatchPatch
+	lastActingUser  *uuid.UUID
+	lastSplit       store.SplitBatchInput
+	destroyedIDs    []uuid.UUID
+	lastDestroyedIn uuid.UUID
 }
 
-func (f *fakeBatches) SplitBatch(_ context.Context, storageID, batchID uuid.UUID, quantity int, target uuid.UUID, userID *uuid.UUID) (*store.Batch, error) {
-	f.lastStorageID, f.lastBatchID, f.lastQuantity, f.lastTargetID, f.lastActingUser = storageID, batchID, quantity, target, userID
+func (f *fakeBatches) SplitBatch(_ context.Context, storageID, batchID uuid.UUID, in store.SplitBatchInput, userID *uuid.UUID) (*store.Batch, error) {
+	f.lastStorageID, f.lastBatchID, f.lastActingUser = storageID, batchID, userID
+	f.lastQuantity, f.lastTargetID, f.lastSplit = in.Quantity, in.TargetLocationID, in
 	if f.splitErr != nil {
 		return nil, f.splitErr
 	}
 	if f.split != nil {
 		return f.split, nil
 	}
-	return &store.Batch{ID: uuid.New(), LocationID: target, Quantity: quantity}, nil
+	return &store.Batch{ID: uuid.New(), LocationID: in.TargetLocationID, Quantity: in.Quantity}, nil
+}
+
+func (f *fakeBatches) DestroyContainer(_ context.Context, storageID, containerID uuid.UUID) error {
+	f.lastDestroyedIn = storageID
+	f.destroyedIDs = append(f.destroyedIDs, containerID)
+	return f.destroyErr
 }
 
 func (f *fakeBatches) UpdateBatch(_ context.Context, storageID, batchID uuid.UUID, patch store.BatchPatch, userID *uuid.UUID) (*store.Batch, error) {

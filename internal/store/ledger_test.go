@@ -165,7 +165,8 @@ func TestSplitPreservesExpiryAndTotal(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	created, err := s.SplitBatch(ctx, storageID, source.ID, 1, kitchen.ID, nil)
+	created, err := s.SplitBatch(ctx, storageID, source.ID,
+		store.SplitBatchInput{Quantity: 1, TargetLocationID: kitchen.ID}, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, created.Quantity)
@@ -206,7 +207,8 @@ func TestSplitRejectsWholeBatchAndOverdraw(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, qty := range []int{0, -1, 3, 4} {
-		_, err := s.SplitBatch(ctx, storageID, batch.ID, qty, kitchen.ID, nil)
+		_, err := s.SplitBatch(ctx, storageID, batch.ID,
+			store.SplitBatchInput{Quantity: qty, TargetLocationID: kitchen.ID}, nil)
 		require.ErrorIsf(t, err, store.ErrValidation, "split of %d must be rejected", qty)
 	}
 

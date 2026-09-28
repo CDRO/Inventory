@@ -442,6 +442,12 @@ func NewRouter(d Deps) http.Handler {
 			sr.Patch("/inventory-batches/{id}", batches.Update)
 			sr.Post("/inventory-batches/{id}/split", batches.Split)
 
+			// The only container route (docs/specs/39-batch-containers.md).
+			// Setting, renaming and clearing a container all happen through the
+			// batch PATCH above, and a split disposes of one; destroying is the
+			// single operation that addresses a container by its own id.
+			sr.Post("/containers/{id}/destroy", batches.DestroyContainer)
+
 			expiry := NewExpiryHandler(d.Store, errs)
 			sr.Patch("/inventory-batches/{id}/expiry", expiry.PatchBatchExpiry)
 			sr.Patch("/categories/{id}/shelf-life", expiry.PatchCategoryShelfLife)
