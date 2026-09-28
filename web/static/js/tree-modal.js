@@ -144,7 +144,34 @@ export function openTreeManager(storageId, { kind }) {
   // their dismissal was already waiting.
   const unacknowledgedFailures = new Set();
 
-  const errorBox = el("div", { class: "alert", role: "alert", hidden: true });
+  // Every failure gets its own banner inside this one live region, instead of
+  // one box whose text the next failure overwrites (#347). Each banner names the
+  // operation it belongs to — "Could not rename “Pantry”." — so two failures are
+  // both readable and neither can be mistaken for the other's, which a single
+  // shared box could not manage however its text was handled: the last text
+  // painted was all there was, and it said nothing about whose it was.
+  //
+  // The region carries role="alert" and its children deliberately do not, so the
+  // dialog has exactly one alert node however many failures are on screen, and
+  // an appended banner is announced without a second live region appearing.
+  //
+  // Two things this deliberately does not do, which is the decision #347 asked
+  // for about what an acknowledged-but-still-open failure looks like:
+  //
+  // - A banner never shows whether its failure has been acknowledged. The
+  //   snapshot requestClose takes decides whether a *dismissal* may close the
+  //   dialog; it says nothing about whether a message is still true, and every
+  //   banner here names a mutation that did not happen, which stays true either
+  //   way. Rendering it would also mean lifting that snapshot out of
+  //   requestClose's local scope into shared mutable state — the exact shape
+  //   #275 was.
+  // - No banner carries a dismiss control. Removing the attempt's token with it
+  //   would reintroduce a consume-once transition on the failure ledger, which
+  //   is #275; leaving the token would hide a message the dialog still refuses
+  //   to close over, which is worse for the user than the banner is. The
+  //   dismissal that ends these is the dialog's own — closing it is what clears
+  //   them.
+  const errorList = el("div", { class: "stack", role: "alert", hidden: true });
   const statusBox = el("p", { class: "empty-state", role: "status", hidden: true });
   const hint = el("p", { class: "empty-state" }, [text(config.hint)]);
   const addRootButton = el("button", { type: "button", class: "btn" }, [text(config.addRootLabel)]);
@@ -153,7 +180,7 @@ export function openTreeManager(storageId, { kind }) {
 
   const dialog = el("dialog", { class: "card stack", "aria-labelledby": config.titleId }, [
     el("h2", { id: config.titleId }, [text(config.title)]),
-    errorBox,
+    errorList,
     statusBox,
     el("div", { class: "row row--between" }, [hint, addRootButton]),
     treeContainer,
@@ -173,15 +200,71 @@ export function openTreeManager(storageId, { kind }) {
   // and adding it here is out of this spec's scope.
   let inherited = new Map();
 
+  // Each callback composes its own failure sentence here, at the gesture,
+  // rather than leaving showError to invent one when the attempt eventually
+  // fails: by then a concurrent mutation's reload may have redrawn the tree
+  // under it, and the banner has to say what the user asked for, not what the
+  // tree happens to look like when the answer comes back.
   const view = new TreeView(treeContainer, {
-    onAddChild: (parentId, name) => runMutation(() => createNode(parentId, name)),
-    onRename: (id, name) => runMutation(() => patch(`${basePath()}/${id}`, { name })),
-    onMove: (id, newParentId) => runMutation(() => patch(`${basePath()}/${id}`, { parent_id: newParentId })),
+    onAddChild: (parentId, name) =>
+      runMutation(() => createNode(parentId, name), t("treeModal.failed.add", { name })),
+    onRename: (id, name) =>
+      runMutation(
+        () => patch(`${basePath()}/${id}`, { name }),
+        nodeFailureMessage("treeModal.failed.rename", id, name),
+      ),
+    onMove: (id, newParentId) =>
+      runMutation(
+        () => patch(`${basePath()}/${id}`, { parent_id: newParentId }),
+        nodeFailureMessage("treeModal.failed.move", id),
+      ),
     renderDetail:
       kind === "categories"
         ? createShelfLifeDetail({ basePath, runMutation, showStatus, getInherited: () => inherited })
         : undefined,
   });
+
+  /**
+   * nodeFailureMessage renders one of the `treeModal.failed.*` sentences for a
+   * mutation tree.js identified by id alone. onRename and onMove are handed an
+   * id and no name, and a banner that cannot name the node it is about is the
+   * whole defect #347 is about.
+   *
+   * The name comes from `view.nodes` — TreeView's own record of what it last
+   * rendered — rather than a second map maintained here, so the banner names the
+   * node as it was on screen when the user acted rather than as some later
+   * reload found it.
+   *
+   * @param {string} key - a catalog key taking a single `{name}` placeholder.
+   * @param {string} id
+   * @param {string} [fallbackName] - used when `id` is not in the rendered tree;
+   *   the new name, for a rename, which the user has just typed.
+   * @returns {string}
+   */
+  function nodeFailureMessage(key, id, fallbackName) {
+    const name = nodeName(id, view.nodes) ?? fallbackName;
+    // Only reachable if tree.js called back for a node it never drew, which it
+    // has no path to do — both callbacks hang off a rendered row. The generic
+    // sentence is here so that if one ever appears it cannot read
+    // `Could not move “undefined”.`
+    return name === undefined ? t("treeModal.failed.change") : t(key, { name });
+  }
+
+  /**
+   * nodeName finds one node's name in a rendered tree.
+   *
+   * @param {string} id
+   * @param {import("./tree.js").TreeNode[]} nodes
+   * @returns {string|undefined} undefined when no node in the tree has that id.
+   */
+  function nodeName(id, nodes) {
+    for (const node of nodes) {
+      if (node.id === id) return node.name;
+      const found = node.children ? nodeName(id, node.children) : undefined;
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
 
   function createNode(parentId, name) {
     return post(basePath(), { name, parent_id: parentId }).then((created) => {
@@ -189,24 +272,35 @@ export function openTreeManager(storageId, { kind }) {
     });
   }
 
-  // The server validates every mutation — same-storage membership, the cycle
-  // rule on a move — so the dialog redraws from its answer rather than
-  // predicting the new shape, exactly as locations.js and categories.js do.
-  async function runMutation(mutate) {
+  /**
+   * runMutation applies one change and redraws the dialog from the server's
+   * answer. The server validates every mutation — same-storage membership, the
+   * cycle rule on a move — so the dialog redraws from that answer rather than
+   * predicting the new shape, exactly as locations.js and categories.js do.
+   *
+   * @param {() => Promise<void>} mutate
+   * @param {string} failureMessage - a whole localized sentence naming this
+   *   attempt, for the banner its failure would put up. Required: a banner that
+   *   cannot name its attempt is the defect #347 is about, so there is no
+   *   nameless default to fall back to.
+   * @returns {Promise<void>} resolves when the attempt has finished with the
+   *   dialog, whether it succeeded or failed — it never rejects.
+   */
+  async function runMutation(mutate, failureMessage) {
     // The status line belongs to whichever mutation is being started, so it is
-    // always replaced. An error banner is not: it may be an earlier mutation's
-    // failure, and clearing it here is precisely how a second mutation used to
-    // erase a first one's failure — banner and flag together — leaving Done
+    // always replaced. The error banners are not: they may be earlier mutations'
+    // failures, and clearing them here is precisely how a second mutation used
+    // to erase a first one's failure — banner and flag together — leaving Done
     // free to close the dialog with the user never having been told that the
     // first mutation did not happen (#281).
     //
     // Be clear about what that costs, because it is not a temporary state:
     // nothing ever removes a token from unacknowledgedFailures — it has no
     // .delete call, unlike pendingMutations below — so once any mutation has
-    // failed, this guard stops clearing the banner for the rest of the dialog's
-    // life. A failed create's message therefore outlives every later
+    // failed, this guard stops clearing the banners for the rest of the dialog's
+    // life. A failed create's banner therefore outlives every later
     // *successful* mutation and goes only when the dialog closes, which can
-    // leave it standing, stale but true, beside a success.
+    // leave it standing beside a success.
     //
     // That is deliberate and it is forced: keeping a failure visible until the
     // user has been given the chance to read it and clearing it as soon as the
@@ -214,11 +308,16 @@ export function openTreeManager(storageId, { kind }) {
     // #281 is the bug report for choosing the second. It is also the second of
     // the two shapes #281 itself offers — "clear only messages belonging to the
     // mutation being started, or nothing at all while an unacknowledged failure
-    // exists". A banner that lingers can be misread as a later mutation's
-    // failure; a banner that vanishes hides that an earlier one never happened.
-    // The first is the cheaper mistake. Do not add a read/acknowledge
-    // transition here to tidy the staleness away — that is the regression
-    // #281 was filed over.
+    // exists" — and since #347 the first shape is what happens as well, there
+    // simply being no banner yet that belongs to the attempt being started.
+    //
+    // What a lingering banner no longer costs is attribution. It used to be
+    // readable as the *current* mutation's failure, because one box held
+    // whatever text was painted last and named no operation at all (#347); a
+    // banner now names the attempt it belongs to, so an old one is old news
+    // about a named mutation rather than a wrong statement about this one. Do
+    // not add a read/acknowledge transition here to tidy that away — that is
+    // the regression #281 was filed over.
     clearStatus();
     if (unacknowledgedFailures.size === 0) clearError();
 
@@ -236,14 +335,16 @@ export function openTreeManager(storageId, { kind }) {
         // snapshot requestClose takes meaningful: a dismissal asked for after
         // this point has had the error in front of it, one already waiting when
         // it appeared has not.
-        showError(err);
+        showError(err, failureMessage);
         unacknowledgedFailures.add(token);
       }
       // reload() reports instead of throwing, because it is also the initial
       // render's path and has nobody to throw to there. Its failure is latched
-      // the same way a mutation's is: it paints the same banner in the same
-      // dialog, so a finalize that closed over it unseen would be the same bug
-      // in a different place.
+      // the same way a mutation's is: it paints a banner in the same dialog, so
+      // a finalize that closed over it unseen would be the same bug in a
+      // different place. It gets a banner of its own rather than amending the
+      // mutation's, since the two say different things: the mutation may well
+      // have happened and only the redraw have failed.
       if (!(await reload())) unacknowledgedFailures.add(token);
     })();
 
@@ -260,6 +361,11 @@ export function openTreeManager(storageId, { kind }) {
 
   /**
    * reload re-reads the tree and redraws the dialog from the server's answer.
+   *
+   * Its own failure sentence is fixed rather than a parameter: every caller's
+   * GET fails in the same way and means the same thing — the list on screen is
+   * not what the server has — whether the reload followed a mutation or is the
+   * dialog's opening render.
    *
    * @returns {Promise<boolean>} true when the redraw happened, false when the
    *   GET failed and showError put a banner up in its place.
@@ -278,14 +384,31 @@ export function openTreeManager(storageId, { kind }) {
       view.render(body.items);
       return true;
     } catch (err) {
-      showError(err);
+      showError(err, t("treeModal.failed.reload"));
       return false;
     }
   }
 
-  function showError(err) {
-    errorBox.textContent = err instanceof ApiError ? apiErrorMessage(err) : t("treeModal.networkError");
-    errorBox.hidden = false;
+  /**
+   * showError appends one banner for one failed attempt, naming what was being
+   * attempted and then why it did not happen.
+   *
+   * The two are separate whole sentences from separate catalog keys, joined by a
+   * space — never a sentence assembled out of fragments, which is what
+   * docs/specs/19-localization.md forbids. The reason is the same string a single
+   * shared box used to show on its own; what is new is the sentence in front of
+   * it saying which attempt it belongs to (#347).
+   *
+   * @param {unknown} err - what the attempt threw, or the GET rejected with.
+   * @param {string} failureMessage - a whole localized sentence naming the
+   *   operation, composed by the caller before the attempt started.
+   */
+  function showError(err, failureMessage) {
+    const reason = err instanceof ApiError ? apiErrorMessage(err) : t("treeModal.networkError");
+    errorList.append(
+      el("div", { class: "alert" }, [el("strong", {}, [text(failureMessage)]), text(` ${reason}`)]),
+    );
+    errorList.hidden = false;
   }
 
   function showStatus(message) {
@@ -293,9 +416,16 @@ export function openTreeManager(storageId, { kind }) {
     statusBox.hidden = false;
   }
 
+  // Clears every banner rather than one of them. The guard in runMutation is its
+  // only caller and runs only while nothing at all is latched, so the single
+  // banner this can ever discard is the one the opening reload() puts up — that
+  // call site deliberately latches no token (see its comment below), which is
+  // exactly what leaves the set empty with a real failure on screen. Discarding
+  // that one is the right trade: the mutation now starting issues its own
+  // reload, so the list is about to be redrawn or to fail again and say so.
   function clearError() {
-    errorBox.textContent = "";
-    errorBox.hidden = true;
+    clearChildren(errorList);
+    errorList.hidden = true;
   }
 
   function clearStatus() {
@@ -328,7 +458,7 @@ export function openTreeManager(storageId, { kind }) {
           const name = input.value.trim();
           if (!name) return;
           form.remove();
-          runMutation(() => createNode(null, name));
+          runMutation(() => createNode(null, name), t("treeModal.failed.add", { name }));
         },
       },
       [
@@ -387,10 +517,20 @@ export function openTreeManager(storageId, { kind }) {
   // failure in its own snapshot and closes normally, so a failure can never
   // trap the dialog open either.
   //
-  // Only the dialog staying open is guaranteed, not that every message is
-  // individually legible: two failures share the one error box, so the later
-  // one's text replaces the earlier one's. Both tokens are latched, so the
-  // dialog still refuses to close over either of them.
+  // With two failures latched, the loop below is what makes both of them count:
+  // a dismissal may close only when EVERY live token is in its own snapshot,
+  // never when merely one of them is. Each failure has its own banner since
+  // #347, so both are legible while that is being decided — which the single
+  // shared error box this used to paint into could not offer, and which this
+  // comment used to say was simply the price.
+  //
+  // Nothing is removed from unacknowledgedFailures, so any snapshot of it is a
+  // subset of it, and "some live token is missing from the snapshot" and "the
+  // two differ in size" are the same question today. The loop is written per
+  // token because per-token identity is the property this needs; a size
+  // comparison would stop being equivalent the moment anything ever deleted
+  // from the set, and a check of one token — the newest, say — the moment
+  // anything made a snapshot other than at the gesture.
   function finalize(seenFailures) {
     for (const failure of unacknowledgedFailures) {
       if (!seenFailures.has(failure)) return;
@@ -441,7 +581,7 @@ export function openTreeManager(storageId, { kind }) {
     // are all wired above, *before* showModal(), so a dismissal genuinely can
     // arrive while this GET is still in flight — requestClose then finds the set
     // empty, finalize closes the dialog, and this reload's view.render or
-    // showError afterwards runs against a treeContainer and errorBox already
+    // showError afterwards runs against a treeContainer and errorList already
     // detached from the document.
     //
     // That is the same shape as #280 and it is still the behaviour wanted here,

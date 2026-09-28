@@ -146,6 +146,13 @@ function createCategory(parentId, name) {
 
 // runMutation applies one change and then re-reads the tree, redrawing from
 // the server's answer for the reasons locations.js's runMutation gives.
+//
+// One argument on purpose, where js/category-shelf-life.js's interface passes
+// two: its second argument is a sentence naming the attempt, for a caller that
+// shows one banner per failed attempt (js/tree-modal.js, #347). This page has a
+// single shared message area — clearMessages() below replaces it on every
+// mutation — so there is nothing here to attribute a banner to, and the argument
+// is dropped rather than rendered somewhere it would not belong.
 async function runMutation(mutate) {
   clearMessages();
   try {
