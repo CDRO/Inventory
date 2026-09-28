@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"os"
+	"path"
 	"regexp"
 	"strings"
 	"testing"
@@ -68,7 +69,7 @@ func TestShellAssetsMatchManifest(t *testing.T) {
 		}
 		body, err := fs.ReadFile(assets, name)
 		require.NoErrorf(t, err, "SHELL_ASSETS lists %q, which is not an embedded asset", p)
-		actual.Digests[p] = digestOf(body)
+		actual.Digests[p] = digestOf(name, body)
 	}
 
 	raw, err := os.ReadFile("shell-manifest.json")
@@ -133,16 +134,29 @@ func manifestsEqual(a, b shellManifest) bool {
 	return true
 }
 
-// digestOf hashes content with CRLF normalized to LF first. web/static's .js
-// and .css files carry no .gitattributes eol pin, so a Windows checkout
+// textShellAsset is every SHELL_ASSETS file extension that is actually text.
+// The two binary ones — the PNG icons — are deliberately excluded from CRLF
+// normalization below: a PNG's own magic number contains a literal \r\n
+// (the format's built-in check for exactly the kind of text-mode transfer
+// this normalization guards against for the text assets), so stripping it
+// would hash something other than the bytes the icon actually ships as.
+var textShellAsset = map[string]bool{
+	".html": true, ".css": true, ".js": true, ".json": true,
+}
+
+// digestOf hashes a text asset's content with CRLF normalized to LF first,
+// and every other (binary) asset's content raw. web/static's .js and .css
+// files carry no .gitattributes eol pin, so a Windows checkout
 // (core.autocrlf=true) embeds them with \r\n while a Linux checkout (CI) embeds
 // plain \n — same bytes the application ships either way, but two different
 // digests for the same content if hashed raw. Normalizing here means the
 // manifest this test checks in is the same on every platform that generates
 // it, and a real content edit is still exactly what changes it.
-func digestOf(body []byte) string {
-	normalized := bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n"))
-	sum := sha256.Sum256(normalized)
+func digestOf(name string, body []byte) string {
+	if textShellAsset[path.Ext(name)] {
+		body = bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n"))
+	}
+	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:])
 }
 
