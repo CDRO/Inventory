@@ -71,6 +71,15 @@ services:
       # "up" quiet once the runner is registered.
       RUNNER_TOKEN: ${RUNNER_TOKEN:-}
 
+      # RUNNER_STATE_DIR and RUNNER_WORK_DIR are absent from this list on
+      # purpose, although the Dockerfile declares both. They are not operator
+      # knobs: the state directory is the *target* of the third mount below, so
+      # changing it here without changing that line would leave the registration
+      # in the container layer and quietly stop it surviving a recreate — the one
+      # property the state directory exists for. They are named in the image so
+      # the entrypoint has one place to read them from, not so they can be
+      # overridden per deployment.
+
     volumes:
       # 1. The host's Docker daemon. This is the whole point of the container
       #    and, named plainly, the whole of its risk: a process that can talk to

@@ -209,9 +209,12 @@ $ gh api repos/CDRO/Inventory/actions/runners -q '.runners[] | "\(.id)\t\(.name)
 $ gh api -X DELETE repos/CDRO/Inventory/actions/runners/<id>
 ```
 
-Leaving `runner_state` behind after either route is what produces the confusing
-case: a container that starts, finds a registration GitHub no longer knows, and
-fails to connect. Delete the directory and register again with a fresh token.
+`rm -rf runner_state` is a step, not tidying: `config.sh remove` deletes the
+credentials from inside the container, where the entrypoint copied them at start,
+and never touches the bind-mounted directory they were copied *from*. Leaving it
+behind is what produces the confusing case — a container that starts, finds a
+registration GitHub no longer knows, and fails to connect. Delete the directory
+and register again with a fresh token.
 
 ## When something is wrong
 

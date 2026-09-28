@@ -65,7 +65,10 @@ smoke_test() {
   # 3. The Docker socket. Split into "is it mounted" and "does it answer",
   #    because the fixes are different: a missing mount is this compose file, a
   #    socket that does not answer is the host's daemon.
-  local socket=${DOCKER_SOCKET:-/var/run/docker.sock}
+  #    The literal path, deliberately not an override: both halves of the mount
+  #    in docker-compose.runner.yml are that path, so a variable here could only
+  #    ever disagree with the thing it is checking.
+  local socket=/var/run/docker.sock
   if [ ! -S "$socket" ]; then
     bad "$socket is not a socket inside the container. Check the volumes in docker-compose.runner.yml."
   elif ! docker info >/dev/null 2>&1; then
