@@ -210,6 +210,40 @@ func TestRotate90MovesTheCornerWhereItBelongs(t *testing.T) {
 	assert.Equal(t, uint32(0), b)
 }
 
+// TestEXIFLessJPEGIsAcceptedAndCopiedThrough is
+// docs/specs/37-in-page-camera.md's server-side half: every still the in-page
+// viewfinder produces is re-encoded through a canvas, so it carries no APP1
+// segment at all — not an orientation of 1, but no EXIF whatsoever. That spec
+// states the server "treats a JPEG without an APP1 segment as upright and
+// copies it through", and says explicitly that this is a statement about what
+// the client sends rather than something the server relies on. Nothing here
+// held it to that: every other JPEG in this file either carries an orientation
+// tag or has metadata deliberately spliced in, so the one shape the viewfinder
+// actually uploads was the one shape untested.
+func TestEXIFLessJPEGIsAcceptedAndCopiedThrough(t *testing.T) {
+	t.Parallel()
+
+	// jpeg.Encode writes a JFIF APP0 segment and no APP1 — the same shape
+	// canvas.toBlob("image/jpeg") produces in a browser.
+	var encoded bytes.Buffer
+	require.NoError(t, jpeg.Encode(&encoded, cornerImage(8, 8), &jpeg.Options{Quality: 92}))
+	original := encoded.Bytes()
+	require.NotContains(t, string(original), string([]byte{0xFF, 0xE1}),
+		"this test is meaningless if the fixture already has an APP1 segment")
+
+	result, err := images.Strip(original)
+	require.NoError(t, err, "an EXIF-less JPEG must be accepted, not refused")
+
+	assert.False(t, result.ReEncoded, "with no orientation to apply there is nothing to re-encode")
+	assert.False(t, containsEXIF(result.Data))
+	// Copied through: the scan data is the original's, byte for byte, so a
+	// viewfinder photo is not silently degraded by a pointless second encode.
+	scanStart := bytes.Index(original, []byte{0xFF, 0xDA})
+	require.Positive(t, scanStart)
+	assert.True(t, bytes.Contains(result.Data, original[scanStart:]),
+		"the compressed pixel data must be copied, not re-encoded")
+}
+
 // TestUprightImageIsStrippedWithoutReEncoding covers the performance rule that
 // is also a quality rule: an image needing no rotation is stripped by segment
 // surgery, so it is neither degraded by a second lossy encode nor decoded at

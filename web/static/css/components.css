@@ -557,6 +557,71 @@ th[aria-sort="descending"] .sort-button::after {
   }
 }
 
+/* --- Photo source picker (docs/specs/36-photo-source-picker.md) --- */
+
+/* Icon above caption, both meeting .btn's 44px min-height with an equal
+   min-width — a camera-first, one-handed UI's own touch-target rule, applied
+   here rather than relying on padding to happen to be wide enough. */
+.photo-picker__control {
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 2.75rem;
+  flex: 1;
+}
+
+.photo-picker__icon {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+.photo-picker__row {
+  align-items: center;
+}
+
+.photo-picker__thumb {
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+  background: var(--color-bg);
+  flex-shrink: 0;
+}
+
+.photo-picker__name {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+/* --- The in-page camera (docs/specs/37-in-page-camera.md) ---
+   No literal colours: the dialog itself reuses the `card stack` idiom and the
+   `btn` tokens, and the only things stated here are the sizes the spec names
+   and the capture confirmation. */
+
+.viewfinder__video {
+  /* Fills the dialog's width, per the spec, and never overflows it on a
+     narrow phone whatever the stream's own aspect ratio turns out to be. */
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  /* The capture confirmation below animates this. */
+  transition: opacity 120ms ease-out;
+}
+
+.viewfinder__video--flash {
+  /* The ~150 ms dim that says a shot was taken (spec 37, step 4). Opacity
+     rather than a colour overlay, so this stays theme-agnostic. */
+  opacity: 0.4;
+}
+
+.viewfinder__shutter {
+  /* >= 56 CSS px, large and centred below the preview — the spec's own
+     number, written down rather than left to the `btn` floor of 2.75rem. */
+  min-height: 3.5rem;
+  min-width: 3.5rem;
+  flex: 1;
+}
+
 /* --- Analytics (docs/specs/11-reporting-and-analytics.md) --- */
 
 .stat-tile {

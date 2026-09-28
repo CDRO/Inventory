@@ -47,7 +47,7 @@ test("uploading without a usable model says so, as a configuration problem", asy
   await logInAsBob(page);
   await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
 
-  await page.locator("#photos").setInputFiles({ name: "shelf.jpg", mimeType: "image/jpeg", buffer: TINY_JPEG });
+  await page.locator("#photos-library").setInputFiles({ name: "shelf.jpg", mimeType: "image/jpeg", buffer: TINY_JPEG });
   await page.getByRole("button", { name: "Upload" }).click();
 
   const card = page.locator("#uploads .card").first();
@@ -55,6 +55,979 @@ test("uploading without a usable model says so, as a configuration problem", asy
   // moment to fail; the answer is still a 503, whatever the network does.
   await expect(card).toContainText("Not uploaded", { timeout: 20_000 });
   await expect(card).toContainText("AI model is unavailable");
+});
+
+// docs/specs/36-photo-source-picker.md's own E2E acceptance criteria, plus
+// #205 item 10 (the 44x44 hit area and one-thumbnail-per-row rule, folded in
+// here rather than as a separate journey since it needs the same picker
+// already on screen).
+test("the two-control picker appends photos from both sources into one list, drains each input on pick, and uploads exactly what survives a removal", async ({
+  page,
+}) => {
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  const libraryInput = page.locator("#photos-library");
+  const cameraInput = page.locator("#photos-camera");
+  const uploadButton = page.getByRole("button", { name: "Upload" });
+  const rows = page.locator("#photo-list li");
+
+  // The contract's own shape — a regression to a single `capture` input, or
+  // to `multiple` on the wrong one, fails here rather than downstream.
+  await expect(libraryInput).toHaveAttribute("accept", "image/jpeg,image/png");
+  expect(await libraryInput.getAttribute("multiple")).not.toBeNull();
+  expect(await libraryInput.getAttribute("capture")).toBeNull();
+  await expect(cameraInput).toHaveAttribute("accept", "image/*");
+  await expect(cameraInput).toHaveAttribute("capture", "environment");
+  expect(await cameraInput.getAttribute("multiple")).toBeNull();
+  // "There is no visible bare <input type='file'>" — the acceptance
+  // criterion is about what a person can see, not just that the two named
+  // ids exist; both real inputs carry the `hidden` attribute.
+  await expect(page.locator('input[type="file"]:not([hidden])')).toHaveCount(0);
+  // Spec 36 also asks that ingest.html contain no file input *other* than the
+  // two the picker renders. "None visible" does not say that: a leftover
+  // hidden third input would satisfy the assertion above and still reach the
+  // server on submit. The exact count, plus the ids, is what closes it.
+  await expect(page.locator('input[type="file"]')).toHaveCount(2);
+  expect(await page.locator('input[type="file"]').evaluateAll((els) => els.map((el) => el.id))).toEqual([
+    "photos-library",
+    "photos-camera",
+  ]);
+
+  await expect(uploadButton).toBeDisabled();
+
+  await libraryInput.setInputFiles([
+    { name: "shelf-a.jpg", mimeType: "image/jpeg", buffer: TINY_JPEG },
+    { name: "shelf-b.jpg", mimeType: "image/jpeg", buffer: TINY_JPEG },
+  ]);
+  await expect(uploadButton).toBeEnabled();
+  await expect(rows).toHaveCount(2);
+  // Drained into the selection and reset — not merely emptied by Playwright
+  // re-firing change, which it does regardless of whether the reset happened.
+  expect(await libraryInput.evaluate((el) => el.files.length)).toBe(0);
+
+  await cameraInput.setInputFiles({ name: "shelf-c.jpg", mimeType: "image/jpeg", buffer: TINY_JPEG });
+  await expect(rows).toHaveCount(3);
+  expect(await cameraInput.evaluate((el) => el.files.length)).toBe(0);
+
+  // Removing the middle row (shelf-b.jpg) leaves shelf-a.jpg and shelf-c.jpg,
+  // in that order. The exact accessible name — not a "Remove" substring —
+  // pins the position-and-name contract ("Remove photo 2 of 3, shelf-b.jpg").
+  await rows.nth(1).getByRole("button", { name: "Remove photo 2 of 3, shelf-b.jpg", exact: true }).click();
+  await expect(rows).toHaveCount(2);
+
+  // #205 item 10, first half: both controls meet the 44x44 CSS-pixel minimum
+  // hit area — this repo's own `.btn` floor (components.css), written down as
+  // a number here rather than a judgement call.
+  for (const role of ["pick-library", "pick-camera"]) {
+    const box = await page.locator(`[data-role="${role}"]`).boundingBox();
+    expect(box.width, `${role} width`).toBeGreaterThanOrEqual(44);
+    expect(box.height, `${role} height`).toBeGreaterThanOrEqual(44);
+  }
+  // #205 item 10, second half: one thumbnail per row, never two sharing one —
+  // the row count above already proved two rows, this proves each has
+  // exactly one <img>.
+  await expect(page.locator("#photo-list img[src^='blob:']")).toHaveCount(2);
+
+  // Counted only once the uploads list has settled (two cards, selection
+  // empty): uploads are sequential, and a regression that sent a third file
+  // would send it only after the second completes, which a count taken right
+  // after the click would still pass.
+  const requests = [];
+  await page.route("**/ingest/shelf-photos", async (route) => {
+    requests.push(route.request());
+    await route.fulfill({ json: { job_id: "00000000-0000-7000-8000-0000000000aa" } });
+  });
+
+  await uploadButton.click();
+  await expect(page.locator("#uploads .card")).toHaveCount(2);
+  await expect(rows).toHaveCount(0);
+  await expect(uploadButton).toBeDisabled();
+  expect(await libraryInput.evaluate((el) => el.files.length)).toBe(0);
+  expect(await cameraInput.evaluate((el) => el.files.length)).toBe(0);
+
+  expect(requests).toHaveLength(2);
+  // Multipart Content-Disposition filename= — postData() mangles a binary
+  // body, postDataBuffer() does not.
+  const filenames = requests.map((req) => {
+    const match = req.postDataBuffer().toString("latin1").match(/filename="([^"]*)"/);
+    return match ? match[1] : null;
+  });
+  expect(filenames).toEqual(["shelf-a.jpg", "shelf-c.jpg"]);
+
+  await page.unroute("**/ingest/shelf-photos");
+});
+
+// docs/specs/36-photo-source-picker.md and issue #206's own "Watch for"
+// section both call this out by name: "Rows are keyed by File identity,
+// never by name" — iOS hands out generic filenames, so two rows can share
+// one. The main journey above never exercises this because its three fixture
+// files all have distinct names; a regression to name-keyed removal (finding
+// by `.indexOf`/`.filter` on `file.name` instead of the `File` reference) would
+// pass every assertion there while silently removing the wrong photo, or
+// both, or neither, whenever two picks happen to share a name.
+test("removing a photo acts on File identity, not filename — two rows can share a name", async ({ page }) => {
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  const libraryInput = page.locator("#photos-library");
+  const rows = page.locator("#photo-list li");
+
+  // Same name, different bytes (a JPEG and a PNG) — indistinguishable by
+  // filename, easy to tell apart by content once uploaded.
+  await libraryInput.setInputFiles([
+    { name: "shelf.jpg", mimeType: "image/jpeg", buffer: TINY_JPEG },
+    { name: "shelf.jpg", mimeType: "image/png", buffer: TINY_PNG },
+  ]);
+  await expect(rows).toHaveCount(2);
+
+  // Removing the *second* "shelf.jpg" row on purpose, not the first: a
+  // regression to name-keyed removal (e.g. `findIndex(f => f.name ===
+  // file.name)`) finds the first match regardless of which row's button was
+  // clicked, so asking it to remove row 2 would silently remove row 1
+  // instead and this test would still see "one row left, named shelf.jpg" —
+  // indistinguishable from correct behaviour unless the survivor's actual
+  // content is checked below. Its accessible name is itself proof identity
+  // is in play — "1 of 2" and "2 of 2" differ even though the visible
+  // filename does not.
+  await rows.nth(1).getByRole("button", { name: "Remove photo 2 of 2, shelf.jpg", exact: true }).click();
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toContainText("shelf.jpg");
+  await expect(rows.first().getByRole("button")).toHaveAccessibleName("Remove photo 1 of 1, shelf.jpg");
+
+  // The strongest proof: uploading now sends the surviving (first-picked)
+  // File's own bytes — the JPEG — rather than the removed second one's — the
+  // PNG. A name-keyed regression that removed row 1 instead would upload the
+  // PNG here, which the assertions below would catch.
+  let request = null;
+  await page.route("**/ingest/shelf-photos", async (route) => {
+    request = route.request();
+    await route.fulfill({ json: { job_id: "00000000-0000-7000-8000-0000000000ac" } });
+  });
+  await page.getByRole("button", { name: "Upload" }).click();
+  await expect(page.locator("#uploads .card")).toHaveCount(1);
+
+  expect(request, "expected the surviving photo to upload").not.toBeNull();
+  const body = request.postDataBuffer().toString("latin1");
+  expect(body).toContain("Content-Type: image/jpeg");
+  expect(body).not.toContain("Content-Type: image/png");
+
+  await page.unroute("**/ingest/shelf-photos");
+});
+
+// docs/specs/36-photo-source-picker.md's E2E acceptance criteria for the scan
+// sheet: the same picker's library input, feeding the decode route, must
+// reach the same code lookup a typed digit string does.
+test("the barcode scan sheet's photograph control decodes through the same lookup as a typed code", async ({
+  page,
+}) => {
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+  // Shelf scan (the default mode) has no barcode affordance at all — a shelf
+  // is not a barcode — so a mode that has one has to be picked first.
+  await page.locator('input[name="mode"][value="stocking_up"]').check();
+
+  let decodeRequest = null;
+  await page.route("**/barcodes/decode", async (route) => {
+    decodeRequest = route.request();
+    await route.fulfill({ json: { barcode: "4006381333931" } });
+  });
+
+  await page.getByRole("button", { name: "Scan a barcode" }).click();
+  const dialog = page.locator("dialog[aria-labelledby='barcode-sheet-title']");
+  await expect(dialog).toBeVisible();
+
+  // Only the sheet's library input has no `capture` attribute — its own
+  // camera input does, exactly as the multi-photo picker's does.
+  await dialog.locator('input[type="file"]:not([capture])').setInputFiles({
+    name: "code.jpg",
+    mimeType: "image/jpeg",
+    buffer: TINY_JPEG,
+  });
+
+  expect(decodeRequest, "expected the photo to reach the decode route").not.toBeNull();
+
+  // HOUSEHOLD has never associated this code, so the decoded string reaches
+  // exactly the miss path a typed one would (docs/specs/20-barcode-recall.md;
+  // e2e/specs/barcode-recall.spec.js covers that lookup's own contract at the
+  // API level) — proof the photo path hands its code through openScanSheet's
+  // one finish() exit rather than a parallel one.
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator("#error")).toContainText("not known here yet");
+
+  await page.unroute("**/barcodes/decode");
+});
+
+// --- docs/specs/37-in-page-camera.md: the in-page viewfinder -----------------
+//
+// These journeys run under the Chromium fake camera that
+// e2e/playwright.config.js turns on (--use-fake-device-for-media-stream and
+// --use-fake-ui-for-media-stream: a synthetic camera, permission auto-granted,
+// no hardware and no prompt). Both flags were confirmed live before anything
+// here was written to depend on them, and that file records the measurements.
+//
+// The one that matters most for reading the assertions below: the fake device
+// answers `takePhoto()` with an **image/png** Blob. That is what makes the
+// JPEG SOI checks real rather than tautological — the source bytes genuinely
+// are not JPEG, so a `type: "image/jpeg"` label slapped onto them without a
+// re-encode fails here rather than downstream on a phone.
+//
+// Not verifiable in this stack, and left as #205 records them: sensor
+// resolution kept through normalisation (the fake device gives 640x480 on both
+// paths, so canvas-at-bitmap-size and canvas-at-preview-size are
+// indistinguishable) and EXIF orientation via `imageOrientation: "from-image"`
+// (the fake PNG carries none).
+//
+// The expired-activation branch was on that list too, on the grounds that it
+// "cannot be driven without waiting out the activation window". That was
+// wrong, for exactly the reason the flip-button claim below was wrong:
+// activationIsAlive() reads `navigator.userActivation.isActive`, and
+// `userActivation` is a Navigator prototype accessor that an own property
+// shadows — the same technique the mediaDevices journey already uses. No wait
+// is needed and a journey drives it below.
+//
+// The flip button is NOT on that list, though #205 puts it there. The fake
+// device does report one videoinput, but `enumerateDevices()` is as
+// overridable as `getUserMedia` — so the flip *logic* is driven by a journey
+// below, and only the question of whether the second stream is a genuinely
+// different physical camera is device-only. That journey's own comment says
+// which half is which.
+
+const VIEWFINDER = 'dialog[data-role="viewfinder"]';
+const PICKER_STATUS = '#photo-picker-field [data-role="status"]';
+
+// retainStreams keeps every MediaStream getUserMedia hands out on `window`, so
+// the tracks can be inspected after the dialog is gone. It must be an init
+// script: the page's own module graph is what calls getUserMedia, so wrapping
+// it after the page has loaded would wrap nothing that the viewfinder uses.
+async function retainStreams(page) {
+  await page.addInitScript(() => {
+    window.__streams = [];
+    const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = async (constraints) => {
+      const stream = await original(constraints);
+      window.__streams.push(stream);
+      return stream;
+    };
+  });
+}
+
+// openViewfinder taps Camera and waits until the Shutter is actually usable.
+//
+// The wait is on the Shutter's enabled state, not on the video being visible:
+// a <video> is laid out and "visible" tens of milliseconds before it has a
+// frame (~59 ms, measured), and `toBeVisible()` on it proves nothing about
+// one. The Shutter's enabled state IS `videoWidth > 0`, which is the only
+// observable proof that a canvas grab would now produce pixels rather than a
+// null blob.
+async function openViewfinder(page) {
+  await page.locator('[data-role="pick-camera"]').click();
+  const dialog = page.locator(VIEWFINDER);
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('[data-role="shutter"]')).toBeEnabled({ timeout: 10_000 });
+  return dialog;
+}
+
+// multipartParts reads each part's declared Content-Type and the first two
+// bytes of its body out of a captured request.
+//
+// latin1 throughout: postDataBuffer() holds raw bytes, and latin1 is the only
+// encoding that round-trips an arbitrary byte to one JS character and back.
+// Decoding as utf-8 would mangle 0xFF 0xD8 into a replacement character and
+// the SOI assertions would then be checking the decoder, not the upload.
+function multipartParts(request) {
+  const body = request.postDataBuffer().toString("latin1");
+  const parts = [];
+  const header = /Content-Type: (\S+)\r\n\r\n/g;
+  let match;
+  while ((match = header.exec(body)) !== null) {
+    const start = match.index + match[0].length;
+    const end = body.indexOf("\r\n--", start);
+    parts.push({
+      contentType: match[1],
+      magic: [...body.slice(start, start + 2)].map((c) => c.charCodeAt(0).toString(16).padStart(2, "0")).join(" "),
+      length: end === -1 ? body.length - start : end - start,
+    });
+  }
+  return parts;
+}
+
+// expectJpegUpload asserts one captured request carries exactly one image
+// part, that it declares image/jpeg, and that its bytes actually begin with
+// the JPEG SOI marker FF D8 and are not empty.
+function expectJpegUpload(request, label) {
+  const parts = multipartParts(request);
+  expect(parts, `${label}: one image part per request`).toHaveLength(1);
+  expect(parts[0].contentType, `${label}: declared type`).toBe("image/jpeg");
+  // The assertion PNG-relabelled-as-JPEG fails on. The fake camera's
+  // takePhoto() hands back PNG (magic 89 50), so this is the check that the
+  // normalisation in js/camera.js genuinely re-encoded rather than renamed.
+  expect(parts[0].magic, `${label}: JPEG SOI bytes`).toBe("ff d8");
+  expect(parts[0].length, `${label}: non-empty body`).toBeGreaterThan(0);
+}
+
+test("the viewfinder captures through takePhoto(), numbers its shots, keeps the page, and uploads real JPEG bytes", async ({
+  page,
+}) => {
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  // A marker any navigation or reload would wipe. Spec 37's first acceptance
+  // criterion is that the page behind the dialog is not navigated away from or
+  // reloaded — the whole reason the viewfinder exists — and nothing else here
+  // would notice a regression that re-entered the page between shots.
+  await page.evaluate(() => {
+    window.__pageIdentity = "not-reloaded";
+  });
+
+  const dialog = await openViewfinder(page);
+
+  // The mode's name in the heading, so docs/specs/09-consumption-logging.md's
+  // "the current mode is always visible while the camera is open" holds even
+  // though a modal dialog is covering the selector itself.
+  await expect(dialog.locator("h2")).toContainText("Shelf scan");
+  // getByLabel, per the accessibility criterion: the <video> has an accessible
+  // name rather than being an unlabelled black rectangle to a screen reader.
+  await expect(dialog.getByLabel("Camera preview")).toBeVisible();
+
+  const rows = page.locator("#photo-list li");
+  const shutter = dialog.locator('[data-role="shutter"]');
+
+  await shutter.click();
+  await expect(rows).toHaveCount(1);
+  // The dialog stays open across shots — that is the feature.
+  await expect(dialog).toBeVisible();
+  await shutter.click();
+  await expect(rows).toHaveCount(2);
+  await expect(dialog.locator('[data-role="shot-count"]')).toHaveText("2 photos taken");
+  // Three presses in ONE session, which is the criterion as spec 37 words it.
+  // The stream-released journey below reaches capture-3.jpg too, but across
+  // three separate dialogs — that proves the counter survives a session, not
+  // that one session handles three presses.
+  await shutter.click();
+  await expect(rows).toHaveCount(3);
+  await expect(dialog.locator('[data-role="shot-count"]')).toHaveText("3 photos taken");
+  await expect(dialog).toBeVisible();
+
+  // Distinct names, in sequence, each row with a thumbnail and a Remove
+  // button.
+  await expect(rows.nth(0)).toContainText("capture-1.jpg");
+  await expect(rows.nth(1)).toContainText("capture-2.jpg");
+  await expect(rows.nth(2)).toContainText("capture-3.jpg");
+  await expect(page.locator("#photo-list img[src^='blob:']")).toHaveCount(3);
+  await expect(rows.nth(0).getByRole("button", { name: "Remove photo 1 of 3, capture-1.jpg", exact: true })).toBeVisible();
+
+  // On the takePhoto() path the resolution hint is never shown: nothing was
+  // downscaled to the preview size, so there is no trade-off to state.
+  await expect(dialog.locator('[data-role="resolution-hint"]')).toBeHidden();
+
+  await dialog.locator('[data-role="done"]').click();
+  await expect(page.locator(VIEWFINDER)).toHaveCount(0);
+  await expect(rows).toHaveCount(3);
+
+  // The page itself survived: same document, same sticky mode, location field
+  // still where it was.
+  expect(await page.evaluate(() => window.__pageIdentity)).toBe("not-reloaded");
+  await expect(page.locator('input[name="mode"][value="shelf_scan"]')).toBeChecked();
+  await expect(page.locator("#location-field")).toBeVisible();
+
+  // Upload: the same endpoint and the same one-request-per-photo shape as a
+  // library pick, which is the criterion about server-side handling being
+  // identical.
+  const requests = [];
+  await page.route("**/ingest/shelf-photos", async (route) => {
+    requests.push(route.request());
+    await route.fulfill({ json: { job_id: "00000000-0000-7000-8000-0000000000b1" } });
+  });
+
+  await page.getByRole("button", { name: "Upload" }).click();
+  await expect(page.locator("#uploads .card")).toHaveCount(3);
+  await expect(rows).toHaveCount(0);
+
+  expect(requests).toHaveLength(3);
+  expectJpegUpload(requests[0], "first capture");
+  expectJpegUpload(requests[1], "second capture");
+  expectJpegUpload(requests[2], "third capture");
+
+  await page.unroute("**/ingest/shelf-photos");
+});
+
+test("with ImageCapture absent the still comes from the canvas, and the resolution hint appears exactly once per session", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    delete window.ImageCapture;
+  });
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  const dialog = await openViewfinder(page);
+  const rows = page.locator("#photo-list li");
+  const shutter = dialog.locator('[data-role="shutter"]');
+  const hint = dialog.locator('[data-role="resolution-hint"]');
+
+  // Not shown before there is anything to qualify.
+  await expect(hint).toBeHidden();
+
+  await shutter.click();
+  await expect(rows).toHaveCount(1);
+  await expect(hint).toBeVisible();
+
+  await shutter.click();
+  await expect(rows).toHaveCount(2);
+  // "Once per viewfinder session" as a count, not just as a visible element: a
+  // regression that appended a fresh hint per shot would leave this dialog
+  // showing the same sentence twice, which `toBeVisible()` alone would not
+  // notice.
+  // Scoped to the whole page, not to the dialog: a regression that appended a
+  // fresh hint per shot would most likely put it next to the first, but one
+  // that appended it to the picker or the body instead would escape a
+  // dialog-scoped count entirely.
+  await expect(page.locator('[data-role="resolution-hint"]')).toHaveCount(1);
+  // The assertion that does the real work, and the one #205's "appears exactly
+  // once" is about: a duplicated hint node and a single node whose text was
+  // concatenated twice both fail here, where a count of elements catches only
+  // the first.
+  const shown = (await dialog.textContent()).split("Preview resolution.").length - 1;
+  expect(shown, "the hint's text appears exactly once after the second shot").toBe(1);
+
+  // The canvas path normalises too — same JPEG guarantee, different source.
+  let request = null;
+  await page.route("**/ingest/shelf-photos", async (route) => {
+    request = route.request();
+    await route.fulfill({ json: { job_id: "00000000-0000-7000-8000-0000000000b2" } });
+  });
+  await dialog.locator('[data-role="done"]').click();
+  await page.getByRole("button", { name: "Upload" }).click();
+  await expect(page.locator("#uploads .card")).toHaveCount(2);
+  expectJpegUpload(request, "canvas-path capture");
+
+  await page.unroute("**/ingest/shelf-photos");
+});
+
+// Spec 37's "stream released" criterion, plus #205 item 5 (capture numbering
+// continuing across viewfinder sessions), which the same three sessions prove
+// without a fourth journey: the numbering claim is about what happens when the
+// viewfinder is closed and reopened, which is exactly what this does.
+test("Done, Esc and a backdrop click each release the stream and keep the shots, and numbering continues across sessions", async ({
+  page,
+}) => {
+  await retainStreams(page);
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  const rows = page.locator("#photo-list li");
+  const exits = [
+    ["Done", async (dialog) => dialog.locator('[data-role="done"]').click()],
+    ["Esc", async () => page.keyboard.press("Escape")],
+    // The viewport corner: a modal dialog's backdrop is the dialog element
+    // itself outside its content box, so this is a genuine backdrop click and
+    // not a click on a control.
+    ["backdrop", async () => page.mouse.click(2, 2)],
+  ];
+
+  let taken = 0;
+  for (const [exitName, exit] of exits) {
+    const dialog = await openViewfinder(page);
+    await dialog.locator('[data-role="shutter"]').click();
+    taken += 1;
+    await expect(rows).toHaveCount(taken);
+    // Each session counts its own shots, unlike the file numbering below.
+    await expect(dialog.locator('[data-role="shot-count"]')).toHaveText("1 photo taken");
+
+    await exit(dialog);
+    await expect(page.locator(VIEWFINDER)).toHaveCount(0);
+
+    // Every track of every stream handed out so far — not just this session's
+    // — because a leak in an earlier session would otherwise be invisible
+    // once its dialog was gone.
+    const states = await page.evaluate(() =>
+      window.__streams.flatMap((stream) => stream.getTracks().map((track) => track.readyState)),
+    );
+    expect(states.length, `${exitName}: expected at least one retained track`).toBeGreaterThan(0);
+    expect(
+      states.every((state) => state === "ended"),
+      `${exitName}: every retained track must be ended, got ${JSON.stringify(states)}`,
+    ).toBe(true);
+
+    // "Keeps every shot already taken in the list": exiting is not discarding.
+    await expect(rows).toHaveCount(taken);
+  }
+
+  // #205 item 5: the numbering continues rather than restarting per session.
+  // Three sessions, one shot each, so a per-session counter would produce
+  // three rows all named capture-1.jpg — and docs/specs/36's list keys rows by
+  // File identity, so it would render them without complaint.
+  await expect(rows.nth(0)).toContainText("capture-1.jpg");
+  await expect(rows.nth(1)).toContainText("capture-2.jpg");
+  await expect(rows.nth(2)).toContainText("capture-3.jpg");
+});
+
+// #205 item 1: the takePhoto() rejection path had no journey at all, though
+// spec 37 requires that press to fall back to the canvas grab rather than do
+// nothing. Measured as cheap to drive, and it is.
+test("a takePhoto() rejection falls back to the canvas grab for that press, with no resolution hint", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    // The rejection real Android devices produce (UnknownError,
+    // InvalidStateError). The constructor still exists and still succeeds —
+    // only the call fails, which is the case the canvas fallback is for.
+    window.ImageCapture.prototype.takePhoto = () =>
+      Promise.reject(new DOMException("takePhoto refused", "UnknownError"));
+  });
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  const dialog = await openViewfinder(page);
+  const rows = page.locator("#photo-list li");
+
+  await dialog.locator('[data-role="shutter"]').click();
+  // One row, not zero: the press produced a photo by another route.
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toContainText("capture-1.jpg");
+
+  // #205 item 7's first nit. The hint describes the ImageCapture-absent
+  // trade-off; this press's fallback is not that, and the next press will try
+  // takePhoto() again — so showing it here would be telling the person
+  // something untrue about their camera.
+  await expect(dialog.locator('[data-role="resolution-hint"]')).toBeHidden();
+
+  // And it is a real JPEG, not a relabelled anything.
+  let request = null;
+  await page.route("**/ingest/shelf-photos", async (route) => {
+    request = route.request();
+    await route.fulfill({ json: { job_id: "00000000-0000-7000-8000-0000000000b3" } });
+  });
+  await dialog.locator('[data-role="done"]').click();
+  await page.getByRole("button", { name: "Upload" }).click();
+  await expect(page.locator("#uploads .card")).toHaveCount(1);
+  expectJpegUpload(request, "takePhoto-rejection fallback");
+
+  await page.unroute("**/ingest/shelf-photos");
+});
+
+// #205 item 2: the real plain-HTTP home-network case, which the rejecting stub
+// does not cover. `navigator.mediaDevices` is `undefined` there — not an
+// object with a missing method — so a guard written without optional chaining
+// throws a TypeError, the Camera button is dead on HTTP, and every other
+// journey in this file stays green.
+test("with navigator.mediaDevices absent, Camera opens the OS input on the same tap and says nothing", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "mediaDevices", { value: undefined, configurable: true });
+  });
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  // The chooser event, not a raw click: a hidden file input can receive a
+  // click that opens nothing at all once the tap's activation has expired, so
+  // only the event proves the chooser actually opened. Awaiting the event and
+  // the click together is what makes this a same-tap assertion — a handler
+  // that awaited anything before click() would not produce the event.
+  const [chooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    page.locator('[data-role="pick-camera"]').click(),
+  ]);
+  expect(await chooser.element().getAttribute("id")).toBe("photos-camera");
+
+  await expect(page.locator(VIEWFINDER)).toHaveCount(0);
+  // Silently. An insecure origin simply has no in-page camera, and a status
+  // line here would be reporting the platform as a fault.
+  await expect(page.locator(PICKER_STATUS)).toBeHidden();
+  await expect(page.locator("#error")).toBeHidden();
+});
+
+// Spec 37's own fallback journey: getUserMedia present but rejecting, which is
+// a denied permission or a camera in use. The rejection is immediate, so the
+// tap's activation is still alive and the same tap reaches the OS input.
+test("with getUserMedia rejecting, Camera reaches the OS input on the same tap and shows no error", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    navigator.mediaDevices.getUserMedia = () =>
+      Promise.reject(new DOMException("Permission denied", "NotAllowedError"));
+  });
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  const [chooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    page.locator('[data-role="pick-camera"]').click(),
+  ]);
+  expect(await chooser.element().getAttribute("id")).toBe("photos-camera");
+
+  await expect(page.locator(VIEWFINDER)).toHaveCount(0);
+  // "No error is shown for a denied permission" — the OS camera is the
+  // answer, and it needs no browser permission.
+  await expect(page.locator("#error")).toBeHidden();
+});
+
+// The other half of spec 37's fallback rule, and the one both the spec and the
+// comment at the top of this block used to call undrivable: the rejection
+// arrives when the tap's activation is already GONE. click() would then be a
+// silent no-op, so camera.js latches `cameraUnavailable`, shows the one status
+// line, and sends the NEXT tap straight to the OS input.
+//
+// Driven by shadowing `navigator.userActivation` — a Navigator prototype
+// accessor, so an own property on the instance wins, the same way this file
+// already replaces `navigator.mediaDevices` and `enumerateDevices()`. Note
+// what the stub does and does not change: it changes only what camera.js
+// *believes* about activation. Chromium's real activation state is untouched,
+// which is precisely why the second tap's chooser genuinely opens.
+test("with getUserMedia rejecting after activation expired, the tap says so and the NEXT tap opens the OS input", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    navigator.mediaDevices.getUserMedia = () =>
+      Promise.reject(new DOMException("Permission denied", "NotAllowedError"));
+    Object.defineProperty(navigator, "userActivation", {
+      value: { isActive: false, hasBeenActive: true },
+      configurable: true,
+    });
+  });
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  // First tap: this tap can no longer open a chooser, so the status line is
+  // the whole of what the person gets — without it the Camera button looks
+  // simply dead, which is the failure this branch exists to avoid.
+  await page.locator('[data-role="pick-camera"]').click();
+  await expect(page.locator(PICKER_STATUS)).toHaveText("Using your phone’s camera.");
+  await expect(page.locator(VIEWFINDER)).toHaveCount(0);
+  // Still a status and not an error: a denied permission is not a fault.
+  await expect(page.locator("#error")).toBeHidden();
+
+  // Second tap: `cameraUnavailable` is latched, so this goes straight to the
+  // OS input synchronously, without consulting getUserMedia again.
+  const [chooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    page.locator('[data-role="pick-camera"]').click(),
+  ]);
+  expect(await chooser.element().getAttribute("id")).toBe("photos-camera");
+});
+
+// Press Shutter, then close the dialog before the shot settles. review-go
+// round 1 on PR #360: capture() checked `closed` only on entry, so exit()
+// would stop the track and clear srcObject under an in-flight takePhoto(),
+// the canvas fallback would then grab a 0x0 frame, and "that shot could not
+// be saved" would appear on the ingest page for a screen the person had
+// deliberately closed — a failure message with no failure behind it.
+//
+// The ordering is enforced rather than timed: the stub parks its own reject
+// function on `window` and this test calls it only after Done has been
+// awaited. A stub that rejected on a timer would pass whenever the timer won
+// the race on a slow runner, and would stop testing anything at all.
+test("closing the viewfinder while a shot is still in flight reports no failure", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.ImageCapture.prototype.takePhoto = () =>
+      new Promise((_resolve, reject) => {
+        window.__rejectTakePhoto = () => reject(new DOMException("stopped", "InvalidStateError"));
+      });
+  });
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  const dialog = await openViewfinder(page);
+  const rows = page.locator("#photo-list li");
+
+  await dialog.locator('[data-role="shutter"]').click();
+  // The press is in flight and nothing has landed yet: takePhoto() is parked.
+  await expect(rows).toHaveCount(0);
+
+  await dialog.locator('[data-role="done"]').click();
+  await expect(page.locator(VIEWFINDER)).toHaveCount(0);
+
+  // Only now let the press fail, with the dialog already gone and the track
+  // already stopped — the exact interleaving the guard is about.
+  await page.evaluate(() => window.__rejectTakePhoto());
+
+  // The post-exit state: no row appeared, and above all no status line. The
+  // viewfinder assertion above plus this one is what makes the test about
+  // being closed, rather than merely about nothing having happened yet.
+  await expect(page.locator(PICKER_STATUS)).toBeHidden();
+  await expect(rows).toHaveCount(0);
+});
+
+// #205 item 4: the journeys above all wait for the Shutter to *become*
+// enabled, so a regression that enabled it the moment the dialog opened would
+// pass every one of them. This pins videoWidth at 0 and asserts the gate
+// holds, which is the only way to test a guard rather than its eventual
+// release.
+test("the Shutter stays disabled while videoWidth is 0, and enables only once a frame exists", async ({ page }) => {
+  await page.addInitScript(() => {
+    // The real getter is captured before the override, and releasing restores
+    // it. Without that capture the pin could never be lifted, the Shutter
+    // would never enable, and the second half of this test would be asserting
+    // that a permanently broken video never works.
+    const real = Object.getOwnPropertyDescriptor(HTMLVideoElement.prototype, "videoWidth");
+    window.__releaseVideoWidth = () => {
+      Object.defineProperty(HTMLVideoElement.prototype, "videoWidth", real);
+    };
+    Object.defineProperty(HTMLVideoElement.prototype, "videoWidth", {
+      configurable: true,
+      get() {
+        return 0;
+      },
+    });
+  });
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  await page.locator('[data-role="pick-camera"]').click();
+  const dialog = page.locator(VIEWFINDER);
+  await expect(dialog).toBeVisible();
+  const shutter = dialog.locator('[data-role="shutter"]');
+
+  // The video is laid out and visible with videoWidth still 0 — which is
+  // exactly why spec 37 says toBeVisible() on it proves nothing about a frame.
+  await expect(dialog.getByLabel("Camera preview")).toBeVisible();
+  await expect(shutter).toBeDisabled();
+  // Held, not merely disabled at the instant the dialog opened. A fixed wait
+  // is the point here rather than a smell: the claim is that a state persists
+  // while a condition holds, and only elapsed time can demonstrate that. The
+  // module's own first-frame poller runs every 30 ms, so this is ~16 chances
+  // for a wrong implementation to enable the Shutter.
+  await page.waitForTimeout(500);
+  await expect(shutter).toBeDisabled();
+
+  await page.evaluate(() => window.__releaseVideoWidth());
+  await expect(shutter).toBeEnabled({ timeout: 10_000 });
+
+  // And the frame it waited for is real: the press produces a photo rather
+  // than the null blob a grab before the first frame would have yielded.
+  await shutter.click();
+  await expect(page.locator("#photo-list li")).toHaveCount(1);
+});
+
+// #205 item 3: the scan sheet journey above covers only its library input, so
+// nothing caught a regression that wired the viewfinder into the sheet too.
+// Spec 37 is explicit that the sheet keeps the OS input — it is already a
+// modal dialog, has no list to append to, and a live camera for a barcode is
+// docs/specs/20-barcode-recall.md's own scan path.
+test("the barcode scan sheet's Camera control opens the OS input, never the viewfinder", async ({ page }) => {
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+  // Shelf scan has no barcode affordance at all, so a mode that has one first.
+  await page.locator('input[name="mode"][value="stocking_up"]').check();
+
+  await page.getByRole("button", { name: "Scan a barcode" }).click();
+  const sheet = page.locator("dialog[aria-labelledby='barcode-sheet-title']");
+  await expect(sheet).toBeVisible();
+
+  const [chooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    sheet.locator('[data-role="pick-camera"]').click(),
+  ]);
+  // The sheet's picker is id-less on purpose — the multi-photo picker holds
+  // #photos-camera while the sheet is open, and a document may not have two
+  // elements sharing an id — so the proof it is the OS camera input is the
+  // attribute that makes it one.
+  expect(await chooser.element().getAttribute("capture")).toBe("environment");
+  await expect(page.locator(VIEWFINDER)).toHaveCount(0);
+});
+
+// review-tests round 1, blocking: flip() had zero execution, and the "not
+// verifiable in this stack" defense did not hold. #205 does record the flip
+// button as device-only, but that is about which *physical camera* the second
+// stream comes from — the fake device has one. The flip *logic* is a different
+// thing and is perfectly drivable here, because the button's visibility and the
+// whole flip path are gated on enumerateDevices(), which is as overridable as
+// getUserMedia — which this file already overrides in four other journeys.
+//
+// What this pins is exactly what would otherwise have shipped untested: the old
+// stream released before the new one is attached (or the camera indicator stays
+// lit for a camera nobody is using), a new ImageCapture built for the new track
+// (or takePhoto() keeps photographing a stopped one), and the Shutter re-gated
+// until the new stream's first frame (or a canvas grab in that window yields a
+// null blob).
+//
+// Still not verifiable here, and unchanged from #205: that the second stream is
+// genuinely a different camera. Nothing in this stack can tell.
+test("flipping the camera releases the old stream, re-creates ImageCapture and re-gates the Shutter", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    // Two videoinputs, so the flip button is offered at all. js/camera.js reads
+    // nothing but `kind` off these, so plain objects are enough and are clearer
+    // than doctoring the real list.
+    navigator.mediaDevices.enumerateDevices = async () => [
+      { kind: "videoinput", deviceId: "fake_device_0", label: "fake_device_0", groupId: "g0" },
+      { kind: "videoinput", deviceId: "fake_device_1", label: "fake_device_1", groupId: "g1" },
+      { kind: "audioinput", deviceId: "fake_audio_0", label: "fake_audio_0", groupId: "g2" },
+    ];
+
+    window.__streams = [];
+    window.__constraints = [];
+    const realGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = async (constraints) => {
+      window.__constraints.push(JSON.stringify(constraints?.video ?? null));
+      // The second call is held open until the test releases it. That is what
+      // makes "the Shutter is disabled again after a flip" a deterministic
+      // assertion rather than a race against a ~60 ms stream handover.
+      if (window.__streams.length === 1) {
+        await new Promise((resolve) => {
+          window.__releaseSecondStream = resolve;
+        });
+      }
+      const stream = await realGetUserMedia(constraints);
+      window.__streams.push(stream);
+      return stream;
+    };
+
+    // Counting constructions is the only way to see the re-creation from
+    // outside: a stale ImageCapture holds a stopped track and would photograph
+    // nothing, which no visible state reveals until a press fails.
+    window.__imageCaptures = 0;
+    const RealImageCapture = window.ImageCapture;
+    window.ImageCapture = class extends RealImageCapture {
+      constructor(track) {
+        super(track);
+        window.__imageCaptures += 1;
+      }
+    };
+  });
+
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  const dialog = await openViewfinder(page);
+  const shutter = dialog.locator('[data-role="shutter"]');
+  const flip = dialog.locator('[data-role="flip"]');
+  const rows = page.locator("#photo-list li");
+
+  // Offered only because two cameras were reported: the other journeys, which
+  // report one, assert nothing about this button and it stays hidden there.
+  await expect(flip).toBeVisible();
+  expect(await page.evaluate(() => window.__imageCaptures), "one ImageCapture for the first stream").toBe(1);
+
+  await shutter.click();
+  await expect(rows).toHaveCount(1);
+
+  await flip.click();
+
+  // The second getUserMedia is still pending, so this is the re-gated state
+  // itself and not a snapshot taken before the handover finished.
+  await page.waitForFunction(() => typeof window.__releaseSecondStream === "function");
+  await expect(shutter).toBeDisabled();
+  // And the old stream is already released at this point — the spec stops it
+  // before asking for the new one, because two live streams on one device is
+  // how the second request comes back overconstrained on some phones.
+  const oldStreamStates = await page.evaluate(() =>
+    window.__streams[0].getTracks().map((track) => track.readyState),
+  );
+  expect(oldStreamStates.length, "expected the first stream to have tracks").toBeGreaterThan(0);
+  expect(
+    oldStreamStates.every((state) => state === "ended"),
+    `the old stream must be stopped before the new one is requested, got ${JSON.stringify(oldStreamStates)}`,
+  ).toBe(true);
+
+  await page.evaluate(() => window.__releaseSecondStream());
+  await expect(shutter).toBeEnabled({ timeout: 10_000 });
+
+  // facingMode actually flipped, rather than the same camera being reopened.
+  expect(await page.evaluate(() => window.__constraints)).toEqual([
+    JSON.stringify({ facingMode: "environment" }),
+    JSON.stringify({ facingMode: "user" }),
+  ]);
+  expect(await page.evaluate(() => window.__streams.length), "a second stream was opened").toBe(2);
+  expect(
+    await page.evaluate(() => window.__imageCaptures),
+    "a new ImageCapture must be built for the new track",
+  ).toBe(2);
+
+  // The viewfinder still works after the flip, and the numbering carried across
+  // it: a shot taken on the new stream is capture-2.jpg, and the shot taken
+  // before the flip is still in the list.
+  await shutter.click();
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toContainText("capture-1.jpg");
+  await expect(rows.nth(1)).toContainText("capture-2.jpg");
+  await expect(dialog.locator('[data-role="shot-count"]')).toHaveText("2 photos taken");
+
+  // Exiting still releases everything, both streams included.
+  await dialog.locator('[data-role="done"]').click();
+  await expect(page.locator(VIEWFINDER)).toHaveCount(0);
+  const allStates = await page.evaluate(() =>
+    window.__streams.flatMap((stream) => stream.getTracks().map((track) => track.readyState)),
+  );
+  expect(
+    allStates.every((state) => state === "ended"),
+    `every track of both streams must be ended, got ${JSON.stringify(allStates)}`,
+  ).toBe(true);
+});
+
+// #205 item 6, which the issue flags as unmeasured and asks the package to
+// decide: what happens when the normalisation itself fails. The decision, and
+// what this journey pins:
+//
+//   * `createImageBitmap` rejecting → fall back to the raw video frame. It is
+//     the same fallback a takePhoto() rejection already takes, it needs no new
+//     concept, and it keeps the press producing a photo.
+//   * `toBlob` yielding null on both paths → show the picker's status line. A
+//     press that silently does nothing is the failure mode spec 37's fallback
+//     rules exist to prevent, and there is no third path left to try.
+//   * No canvas size cap. A 50 MP re-encode at q0.92 approaching the 25 MB
+//     MaxUploadBytes (internal/httpapi/upload.go) is refused by the server
+//     with payload_too_large, which js/pages/ingest.js already renders as its
+//     own message — a client-side cap would silently downscale the photo the
+//     person chose the full sensor for, and would need a second number kept in
+//     step with the server's.
+test("a createImageBitmap rejection falls back to the raw frame; a toBlob that yields nothing says so instead of doing nothing", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    // Both stubs in one journey, because the interesting part is the order:
+    // the first press must still produce a photo, the second must not produce
+    // one silently, and the third proves the numbering did not advance on the
+    // press that produced nothing.
+    window.createImageBitmap = () => Promise.reject(new Error("no decoder for this blob"));
+    window.__breakToBlob = false;
+    const realToBlob = HTMLCanvasElement.prototype.toBlob;
+    HTMLCanvasElement.prototype.toBlob = function (callback, ...rest) {
+      if (window.__breakToBlob) {
+        // What a canvas too large for the platform's limits does: null, not a
+        // throw.
+        callback(null);
+        return undefined;
+      }
+      return realToBlob.call(this, callback, ...rest);
+    };
+  });
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  const dialog = await openViewfinder(page);
+  const rows = page.locator("#photo-list li");
+  const shutter = dialog.locator('[data-role="shutter"]');
+  const status = page.locator(PICKER_STATUS);
+
+  // createImageBitmap is broken, so the takePhoto() Blob cannot be normalised
+  // — and the press still produces a photo, from the raw frame.
+  await shutter.click();
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toContainText("capture-1.jpg");
+  await expect(status).toBeHidden();
+
+  // Now no encode can succeed at all. The press must say so.
+  await page.evaluate(() => {
+    window.__breakToBlob = true;
+  });
+  await shutter.click();
+  await expect(status).toBeVisible();
+  await expect(status).toContainText("could not be saved");
+  await expect(rows).toHaveCount(1);
+
+  // And the numbering did not advance on a press that produced no file: the
+  // next successful shot is capture-2.jpg, not capture-3.jpg. A counter
+  // incremented before the encode instead of after it would leave a gap here.
+  await page.evaluate(() => {
+    window.__breakToBlob = false;
+  });
+  await shutter.click();
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(1)).toContainText("capture-2.jpg");
 });
 
 test("the inbox lists waiting proposals with their size, and the badge counts them", async ({ page }) => {
