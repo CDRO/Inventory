@@ -34,18 +34,19 @@ refusal paths and its guarantees are the ones
 `01-architecture-and-deployment.md` already specifies, and this spec restates
 them per phase rather than replacing them.
 
-**Nothing described here exists yet.** `inventory migrate plan`, the `--ref`,
+**Everything described here now exists.** `inventory migrate plan`, the `--ref`,
 `--auto` and `--backup` flags of `deploy/synology/update`,
 `deploy/synology/runner/`, `.github/workflows/release.yml` and
-`scripts/dev release` are all still to be built, by four packages that each own
-one layer. Every criterion under "Acceptance criteria" names the package that
+`scripts/dev release` were built by four packages that each own one layer.
+Every criterion under "Acceptance criteria" names the package that
 delivers it — **H14** (`migrate plan`), **H15** (the update script), **H16**
 (the runner container), **H17** (`release.yml` and `scripts/dev release`) — so
-a package can point at its own subset of this spec. Until they land, the manual
-procedure in `01-architecture-and-deployment.md` and
-`18-operations-and-observability.md` is what is true, and it stays the
-documented fallback afterwards: a NAS whose runner is down is deployed by hand,
-with the same script.
+a package can point at its own subset of this spec. An ordinary release on that
+NAS is now `scripts/dev release <tag>` (`deploy/synology/README.md`, "A release,
+start to finish"). The manual procedure in
+`01-architecture-and-deployment.md` and `18-operations-and-observability.md`
+stays the documented fallback: a NAS whose runner is down is deployed by hand,
+with the same script, as is any deployment that is not that NAS.
 
 Background — **not** contract — is the harness optimization plan (issue #293)
 and the decisions it records as **D3** (classic-deploy signalling) and **D4**
@@ -89,8 +90,11 @@ own rules, not by the deployment), and the question actually asked of a NAS is
 
 ## Trigger and gate: `.github/workflows/release.yml`
 
-One workflow, two jobs, and it is the **only** workflow in the repository that
-names the NAS runner:
+One workflow, and it is the **only** workflow in the repository that names the
+NAS runner. Two jobs decide and deploy; the two between them exist because a
+reusable workflow is called from a `uses:` at **job** level and never from a
+step, so "run `test` and `e2e` when this commit has no green run of them"
+cannot live inside `gate` and has to be a conditional job of its own:
 
 ```yaml
 on:
@@ -100,8 +104,16 @@ on:
 jobs:
   gate:
     runs-on: ubuntu-latest          # GitHub-hosted, billed
-  deploy:
+  test:
     needs: gate
+    if: needs.gate.outputs.need_test == 'true'
+    uses: ./.github/workflows/test.yml
+  e2e:
+    needs: gate
+    if: needs.gate.outputs.need_e2e == 'true'
+    uses: ./.github/workflows/e2e.yml
+  deploy:
+    needs: [gate, test, e2e]        # `skipped` counts as satisfied
     runs-on: [self-hosted, nas]
     environment: production
     concurrency: { group: nas-deploy }
@@ -113,7 +125,16 @@ jobs:
   dispatch-and-poll. If either is missing, the gate runs it on the tag and waits
   for it; if either fails, the release stops here and nothing reaches the NAS.
   Because neither workflow is callable today, making them callable
-  (`on: workflow_call`, keeping their existing triggers) is part of H17.
+  (`on: workflow_call`, keeping their existing triggers) is part of H17. A
+  called workflow contributes its jobs to *this* run rather than creating a
+  `test` or `e2e` run of its own, so the runs this lookup can find are the ones
+  from the pull request or push that merged the commit — and a second tag on a
+  commit whose first tag had to run them here runs them here again.
+- **The gate reads the annotated tag through the API, not from a checkout.**
+  `actions/checkout` fetches annotated tags peeled, which would lose the
+  message the `deploy: classic` override lives in (see "The tag override"), and
+  the runner image carries no `gh`. So the tag object is read in `gate` and the
+  mode is handed to `deploy` as a job output.
 - **`deploy`** does **no checkout**. It runs the clone's own script on the NAS,
   which is the only tree whose bind mounts resolve to the real data
   (`01-architecture-and-deployment.md`, "Synology NAS variant"); a checkout
@@ -547,7 +568,8 @@ container; **H17** `release.yml` and `scripts/dev release`.
   them on the tag when they are missing and failing the release when they are
   red.
 - `deploy` runs with `runs-on: [self-hosted, nas]`, `environment: production`,
-  `concurrency: { group: nas-deploy }`, `needs: gate`, no checkout, and calls
+  `concurrency: { group: nas-deploy }`, `needs: [gate, test, e2e]` (a skipped
+  reusable call counts as satisfied), no checkout, and calls
   `sh deploy/synology/update --ref <tag> --auto --backup` from the clone.
 - The tag message's `deploy: classic` line is read through
   `gh api repos/.../git/tags/<sha>` and passed as `DEPLOY_MODE=classic`.

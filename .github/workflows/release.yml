@@ -1,0 +1,327 @@
+# The release pipeline: a tag is the release.
+#
+# Contract: docs/specs/38-release-pipeline-and-nas-runner.md — "The release
+# unit: an annotated tag", "Trigger and gate", "What the deploy job runs",
+# "Classic or rolling (decision D3)" and "Security posture". The decisions it
+# cites (D3 the classic signalling, D4 the runner's registration and privilege)
+# are recorded verbatim in docs/plans/2026-09-harness-optimization.md §9.
+#
+# Pushing an annotated tag `vYYYY.MM.DD[.n]` is the whole release procedure.
+# `scripts/dev release <tag>` is how that tag is normally cut; this workflow
+# gives a tag pushed by hand no benefit of the doubt and checks the same things
+# again.
+#
+# Four jobs, not the two spec 38's sketch shows, for one mechanical reason: a
+# reusable workflow is called from a `uses:` at JOB level, never from a step, so
+# "run `test` and `e2e` when the tag's commit has no green run of them" cannot
+# live inside `gate`. It is `gate` (decide) plus `test`/`e2e` (conditional
+# reusable calls) plus `deploy` (needs all three). The gate's own decision is
+# still one job and still costs one billed minute.
+#
+#   gate    hosted, billed. Resolves the tag to its COMMIT sha, reads the
+#           annotated tag's message for the `deploy: classic` override, and
+#           looks for a successful `test` and `e2e` run FOR THAT EXACT SHA.
+#   test    the reusable .github/workflows/test.yml, only when the gate found
+#   e2e     the reusable .github/workflows/e2e.yml,  only when the gate found
+#           no green run for that sha. Green there, or the release stops.
+#   deploy  the NAS. No checkout; it runs the clone's own update script.
+#
+# By SHA, never "the newest run on the branch" — the same trap test.yml's own
+# header documents for dispatch-and-poll, and the reason `scripts/dev ci-status`
+# exists. A tag on a commit whose `test` run was green and whose `e2e` run was
+# red does not deploy.
+#
+# One consequence of calling them as REUSABLE workflows rather than dispatching
+# them: a called workflow does not create a `test`/`e2e` workflow RUN of its own,
+# it contributes its jobs to this run. So the green runs this gate looks for are
+# the ones from the PR or push that merged the commit — and a second tag on the
+# same commit, after a first tag whose gate had to run them here, runs them here
+# again. That is a few minutes on a rare path, not a correctness problem.
+#
+# The restore round trip (`restore.yml`) also triggers on a `v*` tag and runs
+# beside this workflow. `deploy` does NOT wait for it: what it proves is that
+# the rollback works, and the backup `--backup` takes before migrating IS that
+# rollback (spec 38, "Trigger and gate"). A red restore run on a release tag is
+# a reason to stop releasing until it is green, not an interlock on this job.
+#
+# Security posture (spec 38, and worth grepping in review): this is the only
+# workflow in the repository that names a self-hosted runner —
+# scripts/release_workflow_test.go fails the suite if that stops being true.
+# The trigger is a tag push only, which a fork cannot do to this repository, and
+# both jobs check `github.repository` and `github.actor` so a workflow file
+# carried into a fork never acts on the NAS. The residual risk is named in the
+# spec and in deploy/synology/runner/README.md: the runner holds the Docker
+# socket, and a process that can talk to that socket is root on the NAS.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+# `actions: read` is what the gate's run lookup needs
+# (GET /repos/{owner}/{repo}/actions/workflows/{file}/runs); `contents: read` is
+# for the two git-database reads that resolve the tag. The repository's default
+# workflow permission is already read-only, so this block is documentation of
+# the two scopes that are actually used rather than a grant.
+#
+# A called workflow cannot exceed its caller's grant: `test.yml` and `e2e.yml`
+# each declare `permissions: contents: read`, a subset of this.
+permissions:
+  contents: read
+  actions: read
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  # Everything this workflow decides, decided once, on a hosted runner, before
+  # anything reaches the NAS.
+  gate:
+    # Spec 38, "Security posture": checked here as well as on `deploy`, so that
+    # a fork's copy of this file does not even spend a minute looking things up.
+    # The one that matters is the one on `deploy`.
+    if: github.repository == 'CDRO/Inventory' && github.actor == 'CDRO'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.tag.outputs.sha }}
+      deploy_mode: ${{ steps.tag.outputs.deploy_mode }}
+      need_test: ${{ steps.runs.outputs.need_test }}
+      need_e2e: ${{ steps.runs.outputs.need_e2e }}
+    steps:
+      # No checkout anywhere in this workflow. Here, because two API reads are
+      # cheaper and more honest than a clone; on `deploy`, because a checkout
+      # would produce a second tree that migrates the wrong database.
+      #
+      # `actions/checkout` fetches annotated tags PEELED, so the tag object's
+      # message — the only place a forced-classic deploy can be declared
+      # (decision D3) — would be gone from a checkout. It is read from the git
+      # database instead: refs/tags/<tag> resolves to the tag OBJECT for an
+      # annotated tag (`.object.type == "tag"`) or to the commit itself for a
+      # lightweight one, and the tag object carries both the message and the
+      # commit it points at.
+      - name: Resolve the tag, and read its message for the classic override
+        id: tag
+        run: |
+          set -eu
+          TAG="$GITHUB_REF_NAME"
+          ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG")
+          type=$(printf '%s' "$ref" | jq -r '.object.type')
+          obj=$(printf '%s' "$ref" | jq -r '.object.sha')
+
+          if [ "$type" = tag ]; then
+            tagobj=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$obj")
+            sha=$(printf '%s' "$tagobj" | jq -r '.object.sha')
+            msg=$(printf '%s' "$tagobj" | jq -r '.message')
+          else
+            # A lightweight tag is still a valid release; it simply carries no
+            # message and therefore cannot force anything.
+            sha="$obj"
+            msg=""
+          fi
+
+          # The override is the exact LINE `deploy: classic`, not a substring:
+          # "not deploy: classic yet" in a release note must not force a stack
+          # restart. A trailing carriage return is stripped first, for the same
+          # reason spec 38 tolerates one on the migration marker — this is a
+          # repository developed on Windows.
+          mode=
+          if printf '%s\n' "$msg" | tr -d '\r' | grep -qx 'deploy: classic'; then
+            mode=classic
+          fi
+
+          echo "tag=$TAG  object=$type  commit=$sha  deploy_mode=${mode:-<from the pending migrations>}"
+          {
+            echo "sha=$sha"
+            echo "deploy_mode=$mode"
+          } >> "$GITHUB_OUTPUT"
+
+      # The gate proper. `head_sha` is the exact-commit filter, and the
+      # per-workflow runs endpoint answers for the workflow FILE rather than for
+      # a job of some other workflow that happens to be named the same.
+      - name: Green test and e2e runs for that commit?
+        id: runs
+        env:
+          SHA: ${{ steps.tag.outputs.sha }}
+        run: |
+          set -eu
+          have_green() {
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$1/runs?head_sha=$SHA&per_page=100" \
+              --jq '[.workflow_runs[] | select(.conclusion == "success")] | length'
+          }
+          for wf in test e2e; do
+            n=$(have_green "$wf.yml")
+            if [ "${n:-0}" -gt 0 ]; then
+              echo "$wf.yml: $n successful run(s) for $SHA - reusing them"
+              echo "need_$wf=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "$wf.yml: no successful run for $SHA - running it on the tag"
+              echo "need_$wf=true" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+      - name: Gate summary
+        env:
+          SHA: ${{ steps.tag.outputs.sha }}
+          MODE: ${{ steps.tag.outputs.deploy_mode }}
+          NEED_TEST: ${{ steps.runs.outputs.need_test }}
+          NEED_E2E: ${{ steps.runs.outputs.need_e2e }}
+        run: |
+          set -eu
+          how() {
+            if [ "$1" = true ]; then
+              echo "run here, on the tag"
+            else
+              echo "reused (already green for this commit)"
+            fi
+          }
+          {
+            printf '## Release `%s`\n\n' "$GITHUB_REF_NAME"
+            printf '| | |\n|---|---|\n'
+            printf '| commit | `%s` |\n' "$SHA"
+            printf '| test | %s |\n' "$(how "$NEED_TEST")"
+            printf '| e2e | %s |\n' "$(how "$NEED_E2E")"
+            printf '| mode | %s |\n\n' "${MODE:-from the pending migrations (--auto)}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The two reusable calls. `uses:` at job level is the only way to call a
+  # reusable workflow, and `if:` on the job is what makes "only when this commit
+  # is not already green" expressible at all. A skipped job's `result` is
+  # `skipped`, which `deploy`'s own `if` accepts beside `success` and nothing
+  # else.
+  #
+  # Both run on the CALLER's ref, which on this trigger is the tag — so what
+  # they test is exactly what is about to be deployed.
+  test:
+    needs: gate
+    if: needs.gate.outputs.need_test == 'true'
+    uses: ./.github/workflows/test.yml
+
+  e2e:
+    needs: gate
+    if: needs.gate.outputs.need_e2e == 'true'
+    uses: ./.github/workflows/e2e.yml
+
+  deploy:
+    needs: [gate, test, e2e]
+    # A `needs` job that is SKIPPED would skip this one too, which is why the
+    # condition is spelled out rather than left implicit: `success` or `skipped`
+    # for the two reusable calls, `success` for the gate, and `!cancelled()` so
+    # that a cancelled run never falls through to the NAS.
+    #
+    # The repository/actor guard (spec 38, "Security posture") is the line that
+    # keeps a fork's copy of this file from acting on this NAS. GitHub shows it
+    # evaluated in the run's log when this job is skipped.
+    if: >-
+      !cancelled()
+      && github.repository == 'CDRO/Inventory'
+      && github.actor == 'CDRO'
+      && needs.gate.result == 'success'
+      && (needs.test.result == 'success' || needs.test.result == 'skipped')
+      && (needs.e2e.result == 'success' || needs.e2e.result == 'skipped')
+    runs-on: [self-hosted, nas]
+    # Every deploy leaves a deployment record, and the environment's own
+    # protection rules (a required reviewer, if one is ever wanted) then apply
+    # without editing this file.
+    environment: production
+    # The OUTER guard only (decision D4): two tags pushed minutes apart queue
+    # instead of interleaving. A single runner takes one job at a time by
+    # construction, and `deploy/synology/update`'s own lock directory is the last
+    # line of defence — it is held even against a deploy run by hand at the same
+    # moment. `cancel-in-progress: false` explicitly: cancelling a deploy
+    # mid-migration is the one thing that must never happen automatically.
+    concurrency:
+      group: nas-deploy
+      cancel-in-progress: false
+    timeout-minutes: 30
+    steps:
+      # NO actions/checkout. The clone at /volume1/docker/inventory is the only
+      # tree whose bind mounts resolve to the real data
+      # (docs/specs/01-architecture-and-deployment.md, "Synology NAS variant");
+      # a checkout would produce a second tree that migrates the wrong database
+      # — the same failure migrations/README.md warns about for a missing `-f`
+      # layer. The runner mounts that clone at the identical absolute path it
+      # has on the host, which is what makes running it from here work at all.
+      #
+      # This job reads the script's exit code and its last line, and nothing
+      # else — never a grep of the log for success.
+      - name: Deploy ${{ github.ref_name }} onto the NAS
+        env:
+          # The standalone Compose the NAS and the runner image both carry; the
+          # script's own default, passed explicitly so the log says which binary
+          # ran.
+          DOCKER_COMPOSE: docker-compose
+          # Empty unless the annotated tag's message carried `deploy: classic`.
+          # Empty is not "rolling": under --auto an empty DEPLOY_MODE means the
+          # pending migrations decide (decision D3 — the override is one-way,
+          # and nothing in a tag can force rolling over a marker).
+          DEPLOY_MODE: ${{ needs.gate.outputs.deploy_mode }}
+        run: |
+          set -euo pipefail
+          CLONE="${INVENTORY_CLONE:-/volume1/docker/inventory}"
+          TAG="$GITHUB_REF_NAME"
+          log="$RUNNER_TEMP/update.log"
+
+          rc=0
+          sh "$CLONE/deploy/synology/update" --ref "$TAG" --auto --backup 2>&1 | tee "$log" || rc=$?
+
+          # The summary line, matched rather than tailed: stderr is merged into
+          # this log so the operator sees the run as it happens, and the last
+          # physical line of a merged stream is not something to bet a release
+          # report on. `update` prints exactly one of these, last, from its exit
+          # trap — on success and on failure alike.
+          summary=$(grep -E '^update: (done|failed) ' "$log" | tail -n 1 || true)
+          [ -n "$summary" ] || summary="update: no summary line - the script did not reach its exit trap"
+
+          printf '### Deploy\n\n```\n%s\n```\n\n' "$summary" >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$rc"
+
+      # A deploy is not done because the script exited 0: it is done when the
+      # NAS serves the tag. `VERSION=<tag>` is stamped into the binary by the
+      # build (docs/specs/18-operations-and-observability.md, "Version
+      # visibility"), so /healthz answering with any other version means the
+      # stack is up on something other than what was released.
+      #
+      # Probed from inside the `db` container, the way the update script's own
+      # health wait does it: an Alpine image with wget, on the compose network,
+      # so it works where container addresses are not routable from the host and
+      # needs no extra image.
+      - name: Assert /healthz reports ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          CLONE="${INVENTORY_CLONE:-/volume1/docker/inventory}"
+          PROJECT="${INVENTORY_PROJECT:-inventory}"
+          cd "$CLONE"
+
+          id=$(docker ps -q --no-trunc \
+            --filter "label=com.docker.compose.project=$PROJECT" \
+            --filter "label=com.docker.compose.service=app" \
+            --filter "label=com.docker.compose.oneoff=False" | head -n 1)
+          [ -n "$id" ] || { echo "release: no running app container in project $PROJECT" >&2; exit 1; }
+
+          ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$id")
+          port=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$id" | sed -n 's/^HTTP_PORT=//p' | head -n 1)
+          port=${port:-8000}
+
+          # The update script already waited for this endpoint, so one answer is
+          # the expected case; the two retries are for the seconds right after
+          # the sidecar was recreated, not for a stack that is genuinely down.
+          health=
+          for _ in 1 2 3; do
+            health=$(docker-compose -p "$PROJECT" -f docker-compose.yml -f docker-compose.nas.yml \
+              exec -T db wget -q -O - -T 5 "http://$ip:$port/healthz" 2>/dev/null) && break
+            health=
+            sleep 5
+          done
+          [ -n "$health" ] || { echo "release: /healthz did not answer at http://$ip:$port/healthz" >&2; exit 1; }
+
+          echo "$health"
+          printf '### `GET /healthz`\n\n```json\n%s\n```\n' "$health" >> "$GITHUB_STEP_SUMMARY"
+
+          version=$(printf '%s' "$health" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "release: /healthz reports version=\"$version\", not \"$GITHUB_REF_NAME\" - the stack is up, but not on this release" >&2
+            exit 1
+          fi
+          echo "release: /healthz reports version=$version"

@@ -91,6 +91,26 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  # H17 (docs/specs/38-release-pipeline-and-nas-runner.md, "Trigger and gate"):
+  # `.github/workflows/release.yml` gates every release on a successful `test`
+  # and `e2e` run for the TAG'S EXACT COMMIT, and when there is none it runs
+  # this workflow on the tag itself and requires it to pass. That call is a
+  # `uses:` at job level, which only works against a workflow that declares
+  # `workflow_call`. No inputs and no secrets: the release gate needs this
+  # workflow exactly as a push to `main` gets it.
+  #
+  # A called run inherits the CALLER's ref and event, so the checkout below
+  # takes the tag — which is the point, since the E2E suite is the deployment
+  # gate spec 01 names and the gate is asking about the tagged commit. It also
+  # means `github.event_name` reads `push` inside a call from a tag push, so
+  # the concurrency group below still evaluates `cancel-in-progress: true`;
+  # the group is keyed on `github.ref`, which is the tag, so the only thing it
+  # can cancel is another run for that same tag.
+  #
+  # A called run is not an `e2e` workflow RUN of its own — its jobs belong to
+  # the release run — so the gate's own SHA lookup will never find it
+  # afterwards (release.yml's header says what that costs).
+  workflow_call:
 
 # A second push to `main` supersedes an E2E run already in flight for the
 # push before it — nobody is waiting on a superseded deployment gate for a
