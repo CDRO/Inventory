@@ -612,6 +612,17 @@
   "photoPicker.count.other": "{count} photos selected",
   "photoPicker.empty": "No photos selected yet",
 
+  "camera.heading": "Camera — {mode}",
+  "camera.preview": "Camera preview",
+  "camera.shutter": "Shutter",
+  "camera.done": "Done",
+  "camera.flip": "Flip camera",
+  "camera.shots.one": "1 photo taken",
+  "camera.shots.other": "{count} photos taken",
+  "camera.resolutionHint": "Preview resolution. For the full camera resolution, use your phone’s camera.",
+  "camera.usingPhoneCamera": "Using your phone’s camera.",
+  "camera.captureFailed": "That shot could not be saved. Try again, or use your phone’s camera.",
+
   "ingest.pageTitle": "Scan photos · Inventory",
   "ingest.title": "Scan photos",
   "ingest.mode.legend": "What are you doing?",

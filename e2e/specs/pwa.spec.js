@@ -218,7 +218,14 @@ test("the service worker never serves a cached response for a path outside its a
 // directly, and every page whose barcode scan sheet does — are proof the
 // asset is actually reachable from the cache SHELL_ASSETS fills, not just
 // present in the source list.
-test("photo-picker.js — imported by ingest.html and the barcode scan sheet — is in the shell cache", async ({
+//
+// js/camera.js is here for the same reason and on the same list: spec 37's own
+// acceptance criteria require it in SHELL_ASSETS, and its "Watch for" section
+// says outright that nothing enforces that. This assertion is that
+// enforcement, for both modules at once — they share one mechanism, one cache
+// and one failure mode, so a second copy of this journey would only be a
+// second thing to keep in step.
+test("photo-picker.js and camera.js — the modules ingest.html imports — are in the shell cache", async ({
   page,
 }) => {
   await page.goto("/index.html");
@@ -235,6 +242,7 @@ test("photo-picker.js — imported by ingest.html and the barcode scan sheet —
 
   expect(cached, "expected exactly one inventory-shell-* cache").not.toBeNull();
   expect(cached).toContain("/js/photo-picker.js");
+  expect(cached).toContain("/js/camera.js");
 });
 
 // CACHE_VERSION bumps exist specifically so a browser that already has an
