@@ -528,6 +528,17 @@ $conventionsPackage = [pscustomobject]@{
 $packagePrompt = Get-PackagePrompt -Plan $conventionsPlan -Standards $conventionsStandards -Wave $conventionsWave -Package $conventionsPackage
 Assert ($packagePrompt -match 'CONVENTIONS-MARKER-9f3a') 'Get-PackagePrompt still carries plan.conventions'
 
+# H19 (#318) extracted the literal prompt text out of Get-PackagePrompt into
+# scripts/package-prompt.template, so scripts/agent-loop.sh can render the
+# identical prompt. This is the one assertion that guards the refactor: an
+# exact, byte-for-byte comparison against what the pre-extraction inline
+# here-string produced for these same fixtures, so any drift in the template
+# file or the .Replace() chain - a dropped space, a wrong placeholder, a
+# missing trailing newline - fails here instead of only ever being caught by
+# a human diffing prompts.
+$expectedPackagePrompt = "/pickup`n`nWork Issue 1: test (issue #1, wave 7 of Test Plan) through the full ship loop, here in this worktree, with the PR against integration/x instead of main - wave plan #999 takes precedence over the ship skill's default target. Open PRs belonging to other packages belong to parallel sessions: do not touch them, do not ask about them. Do the thing. CONVENTIONS-MARKER-9f3a After the merge, close the spec issue, comment on wave issue #231, and do not switch to main. Stop and report if you hit the round limit (2).`n"
+Assert ($packagePrompt -ceq $expectedPackagePrompt) 'Get-PackagePrompt renders byte-identical output via the extracted template (H19, #318)'
+
 $consolidationPrompt = Get-ConsolidationPrompt -Plan $conventionsPlan -Standards $conventionsStandards -Wave $conventionsWave -NextWave $null
 Assert ($consolidationPrompt -match 'CONVENTIONS-MARKER-9f3a') 'Get-ConsolidationPrompt carries plan.conventions too (#255, #246)'
 
