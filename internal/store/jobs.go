@@ -15,6 +15,7 @@ import (
 // accepts.
 type JobKind string
 
+// JobKind values.
 const (
 	JobShelfIngestion    JobKind = "shelf_ingestion"
 	JobProductPhoto      JobKind = "product_photo"

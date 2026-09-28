@@ -1,0 +1,15 @@
+# Configuration for revive (scripts/dev.d/check, H6). Deliberately narrow:
+# only the two rules the docs reviewer already blocks on today
+# (docs/plans/2026-09-harness-optimization.md) — an exported identifier
+# without a doc comment starting with its name, and a package without a
+# package comment. Nothing stylistic beyond that.
+severity = "error"
+confidence = 0.8
+
+[rule.exported]
+# The stuttering check (a type Foo.Bar that "stutters" as foo.Bar) is a style
+# opinion the docs reviewer has never blocked on; only the doc-comment
+# requirement is in scope here.
+arguments = ["disableStutteringCheck"]
+
+[rule.package-comments]

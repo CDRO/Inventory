@@ -5,6 +5,7 @@ package gamification
 // match the CHECK on contribution_events.kind exactly.
 type ContributionKind string
 
+// ContributionKind values.
 const (
 	KindAICorrection      ContributionKind = "ai_correction"
 	KindMetadataFilled    ContributionKind = "metadata_filled"

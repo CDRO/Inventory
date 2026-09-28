@@ -42,6 +42,7 @@ const MaxPixels = 50_000_000
 // Format names the container of a stripped image.
 type Format string
 
+// Format values.
 const (
 	FormatJPEG Format = "jpeg"
 	FormatPNG  Format = "png"
