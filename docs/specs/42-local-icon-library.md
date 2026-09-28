@@ -1,10 +1,21 @@
 # 42 — Local Icon Library
 
 Depends on: [`02-data-model.md`](02-data-model.md),
-[`40-icon-picker.md`](40-icon-picker.md) (the search UI this spec supplies
-data for), [`01-architecture-and-deployment.md`](01-architecture-and-deployment.md)
+[`01-architecture-and-deployment.md`](01-architecture-and-deployment.md)
 (no host toolchain — everything below runs through Docker or the compiled
-binary).
+binary; the documented first-clone command sequence this spec's import
+step fits into).
+
+This spec is self-contained — it defines the `icons` table and how it's
+populated, and depends on nothing that in turn depends on it.
+[`40-icon-picker.md`](40-icon-picker.md) is this spec's only consumer
+(its search endpoint reads the `icons` table this spec creates); `40`'s
+own "Depends on" line points here, and this spec does not point back —
+a one-directional reference, not a circular one, even though `40`'s file
+number is lower and this spec was added second. A reader who follows
+`00-overview.md`'s filename order reaches `40` first and, per `40`'s own
+dependency line, is told to read this spec's data model before relying
+on `40`'s search endpoint.
 
 ## Why this spec exists
 
@@ -81,10 +92,19 @@ for.
   key`, `svg_body` reconstructed from the collection's shared SVG
   attributes plus the icon's own path data per the IconifyJSON format),
   and inserts with `ON CONFLICT (name) DO NOTHING` — safe to run more
-  than once, and run automatically as one step of first-time setup
-  (`docker compose run --rm setup`, `30-setup-wizard-derived-config.md`)
-  so a fresh install has a searchable library with no separate manual
-  step. All 3,145 icons import — this spec does not hand-curate a
+  than once. **Run as part of `inventory migrate up`, after the schema
+  migration that creates `icons` has applied** — not during `docker
+  compose run --rm setup`, which only writes `.env` and runs *before*
+  `migrate up` in the documented sequence
+  (`01-architecture-and-deployment.md`, the four-command first-clone
+  sequence), so the table does not exist yet at that point. This is the
+  same shape `migrate up` already has for the initial admin — "also
+  creates the initial admin" is already one of `migrate up`'s
+  side-effects beyond pure schema migration, and this is a second one —
+  so a fresh install has a searchable library after the same command a
+  fresh install already had to run, with no separate manual step and no
+  change to the documented command sequence. All 3,145 icons import —
+  this spec does not hand-curate a
   subset; a smaller, hand-picked set is real editorial work with no
   clear stopping point, while "import everything, let search and the
   alias table (`40`) surface what's actually useful" costs only inert
@@ -112,9 +132,10 @@ Two paths, both offline, neither turning into a running dependency:
 pasted SVG string) plus a `name`. For the rare case the vendored set has
 nothing close enough.
 
-- The uploaded content must parse as well-formed SVG (`404`/`422` on
-  anything else — this is a format check, not a redraw or a
-  simplification pass); stored as-is, `source = 'uploaded'`.
+- The uploaded content must parse as well-formed SVG — `422` on anything
+  else, the same validation-failure code every other malformed-input
+  case in this system already uses (this is a format check, not a redraw
+  or a simplification pass); stored as-is, `source = 'uploaded'`.
 - `name` is freely chosen by the uploader (validated non-empty, ≤ 100
   chars, unique — `422` on a collision, including with a vendored name,
   so nobody can accidentally shadow `noto:cheese-wedge`) and immediately
@@ -149,9 +170,12 @@ nothing close enough.
 
 ## Acceptance criteria
 
-- A fresh install (`docker compose run --rm setup`) ends with a
-  populated, searchable `icons` table with no separate manual import
-  step and no network access during that setup.
+- A fresh install following `01-architecture-and-deployment.md`'s
+  documented four-command sequence (`setup`, `build`, `migrate up`,
+  `up -d`) ends with a populated, searchable `icons` table after
+  `migrate up` — the same command that already creates the initial
+  admin — with no separate manual import step and no network access at
+  any point in that sequence.
 - `inventory icons import` run a second time changes nothing (`ON
   CONFLICT (name) DO NOTHING`) and does not error.
 - Every `icons.name` value the base import produces is prefixed `noto:`
@@ -163,7 +187,11 @@ nothing close enough.
 - An uploaded SVG is never rendered as inline DOM markup anywhere in the
   frontend — grep the icon-rendering code path for confirmation as part
   of this package's own review, not just at picker-UI review time.
-- No file in this repository or request this system makes reaches
-  `api.iconify.design` or any other icon-serving host — grep for the
-  string as a regression guard alongside the E2E network-blocked check
-  `40` already specifies.
+- Neither this spec's icon-import path nor `40`'s search/picker endpoints
+  ever reach `api.iconify.design` or any other icon-serving host — the
+  E2E network-blocked check `40` already specifies is the regression
+  guard. **This does not extend to `07-shopping-list-reconciliation.md`'s
+  picture-suggestion flow**, which keeps its own, different, already-
+  shipped call to the same host (see `07`'s own flagged note) — a
+  system-wide "never calls Iconify" claim would be false and is not what
+  this spec asserts.
