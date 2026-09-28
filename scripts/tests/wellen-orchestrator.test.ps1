@@ -541,6 +541,50 @@ $consolidationPromptEmpty = Get-ConsolidationPrompt -Plan $emptyPlan -Standards 
 Assert ($packagePromptEmpty -notmatch '  ') 'empty plan.conventions leaves no double space in Get-PackagePrompt'
 Assert ($consolidationPromptEmpty -notmatch '  ') 'empty plan.conventions leaves no double space in Get-ConsolidationPrompt'
 
+Write-Host "== Get-PackagePrompt / Get-ConsolidationPrompt: wave.planIssue overrides plan.planIssue =="
+
+# PR #369 (welle 16) appended a wave onto a plan file whose own plan.planIssue
+# (#176) had already closed - review-docs caught, on a real diff, that both
+# prompt builders would still tell their sessions to close/comment on #176,
+# the wrong (and already-closed) issue, and never mention the wave's own
+# tracking issue at all. Same shape of bug as the plan.conventions gap above:
+# a field that exists in the data model but that neither prompt builder read.
+# No wave.planIssue set anywhere here proves nothing new by itself, so this
+# also asserts the ABSENCE case falls back to plan.planIssue, not just that
+# the override wins when present.
+Assert ($packagePrompt -match 'wave plan #999') 'Get-PackagePrompt falls back to plan.planIssue when the wave sets no override'
+Assert ($consolidationPrompt -match 'wave plan #999') 'Get-ConsolidationPrompt falls back to plan.planIssue when the wave sets no override'
+
+$overrideWave = [pscustomobject]@{
+    number            = 16
+    waveIssue         = 366
+    planIssue         = 366
+    planName          = 'PLANNAME-MARKER-b7c2'
+    integrationBranch = 'integration/x'
+    dockerCleanup     = $true
+}
+$overridePackagePrompt = Get-PackagePrompt -Plan $conventionsPlan -Standards $conventionsStandards -Wave $overrideWave -Package $conventionsPackage
+Assert ($overridePackagePrompt -match 'wave plan #366') 'Get-PackagePrompt uses wave.planIssue when set'
+Assert ($overridePackagePrompt -notmatch 'wave plan #999') 'Get-PackagePrompt does not also mention plan.planIssue when overridden'
+Assert ($overridePackagePrompt -match 'PLANNAME-MARKER-b7c2') 'Get-PackagePrompt uses wave.planName when set'
+Assert ($overridePackagePrompt -notmatch 'Test Plan') 'Get-PackagePrompt does not also mention plan.name when overridden'
+
+$overrideConsolidationPromptLast = Get-ConsolidationPrompt -Plan $conventionsPlan -Standards $conventionsStandards -Wave $overrideWave -NextWave $null
+Assert ($overrideConsolidationPromptLast -match 'close wave plan #366') 'Get-ConsolidationPrompt (last wave) closes the overriding wave.planIssue, not plan.planIssue'
+Assert ($overrideConsolidationPromptLast -notmatch '#999') 'Get-ConsolidationPrompt (last wave) never mentions the stale plan.planIssue when overridden'
+# review-go's round-2 finding on PR #369: the planIssue fix alone still left
+# $Plan.name interpolated unconditionally, so the generated close-comment
+# read "close wave plan #366 - Deferred follow-ups ... is then complete" -
+# the wrong plan's name attached to the right issue number. Pin both halves.
+Assert ($overrideConsolidationPromptLast -match 'PLANNAME-MARKER-b7c2 is then complete') 'Get-ConsolidationPrompt (last wave) declares the overriding wave.planName complete, not plan.name'
+Assert ($overrideConsolidationPromptLast -notmatch 'Test Plan') 'Get-ConsolidationPrompt (last wave) does not also mention plan.name when overridden'
+
+$nextWaveStub = [pscustomobject]@{ number = 17; integrationBranch = 'integration/y' }
+$overrideConsolidationPromptNext = Get-ConsolidationPrompt -Plan $conventionsPlan -Standards $conventionsStandards -Wave $overrideWave -NextWave $nextWaveStub
+Assert ($overrideConsolidationPromptNext -match 'comment on wave plan #366') 'Get-ConsolidationPrompt (with a next wave) comments on the overriding wave.planIssue, not plan.planIssue'
+Assert ($overrideConsolidationPromptNext -match 'wave 16 of PLANNAME-MARKER-b7c2') 'Get-ConsolidationPrompt (with a next wave) also uses wave.planName in its opening sentence'
+Assert ($overrideConsolidationPromptNext -notmatch 'Test Plan') 'Get-ConsolidationPrompt (with a next wave) does not also mention plan.name when overridden'
+
 Write-Host "== Invoke-Wave (parallel branch): teardown follows ACTUAL close order (#188) =="
 
 # The parallel branch's own polling loop (wellen-orchestrator.ps1, the `while

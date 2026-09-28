@@ -269,6 +269,15 @@ status line, and the `aria-label` of the `<video>` ("Camera preview").
   `page.waitForEvent("filechooser")` resolves with a chooser whose
   `element()` is `#photos-camera` — the chooser event, not a raw click,
   because a hidden input can receive a `click` that opens nothing once
-  activation has expired. The expired-activation branch (the "next tap"
-  rule and its status line) cannot be driven from Playwright without
-  waiting out the activation window and is implementation-reviewed.
+  activation has expired.
+- E2E, the expired-activation branch (the "next tap" rule and its status
+  line): with `getUserMedia` stubbed to reject **and**
+  `navigator.userActivation` shadowed by an own property reporting
+  `isActive: false`, the first tap opens no chooser and shows the status
+  line, and the second tap resolves a `filechooser` whose `element()` is
+  `#photos-camera`. No wait is required: `userActivation` is a `Navigator`
+  prototype accessor, so an own property on the instance shadows it, the
+  same way `navigator.mediaDevices` and `enumerateDevices()` are already
+  replaced elsewhere in this spec's journeys. The stub changes only what the
+  page believes about activation, not the browser's real activation state —
+  which is what leaves the second tap's chooser able to open.

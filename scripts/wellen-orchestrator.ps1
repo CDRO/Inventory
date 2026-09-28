@@ -328,6 +328,16 @@ function Import-WavePlan {
         if ((Get-Field $wave 'waveIssue' 0) -le 0) { Add-ErrorMsg "${wPath}.waveIssue: missing or not a positive number" }
         if (-not (Get-Field $wave 'integrationBranch')) { Add-ErrorMsg "${wPath}.integrationBranch: missing" }
 
+        # Optional override of plan.planIssue for a wave tracked by its own
+        # issue (e.g. a bonus wave appended after the plan's own issue closed).
+        $planIssueProperty = $wave.PSObject.Properties['planIssue']
+        if ($null -ne $planIssueProperty) {
+            $wavePlanIssue = $planIssueProperty.Value
+            if ($wavePlanIssue -isnot [int] -and $wavePlanIssue -isnot [long]) { Add-ErrorMsg "${wPath}.planIssue: must be an issue number (integer)" }
+            elseif ($wavePlanIssue -le 0) { Add-ErrorMsg "${wPath}.planIssue: must be a positive number" }
+        }
+        if ($wave.PSObject.Properties['planName']) { Test-TitleText "${wPath}.planName" (Get-Field $wave 'planName') }
+
         # Read the property itself: Get-Field turns "" and null into "not set", and
         # a value that is present but not a boolean must not silently mean false.
         $dockerCleanupProperty = $wave.PSObject.Properties['dockerCleanup']
@@ -863,10 +873,18 @@ function Get-PackagePrompt {
     $limit = Get-Field $Standards 'roundLimitPackage' 2
     $conventions = Get-Field $Plan 'conventions' ''
     if ($conventions) { $conventions = "$conventions " }
+    # A wave appended onto another plan's file (e.g. a one-off bonus wave with
+    # its own tracking issue, filed after the plan's own issue already closed)
+    # names its own issue and its own display name here, instead of
+    # inheriting the file-wide plan.planIssue / plan.name - a mismatched name
+    # is not just cosmetic: "wave 16 of Deferred follow-ups" would describe a
+    # plan the wave was deliberately kept out of.
+    $planIssue = Get-Field $Wave 'planIssue' $Plan.planIssue
+    $planName = Get-Field $Wave 'planName' $Plan.name
     return @"
 /pickup
 
-Work $($Package.spec) (issue #$($Package.specIssue), wave $($Wave.number) of $($Plan.name)) through the full ship loop, here in this worktree, with the PR against $($Wave.integrationBranch) instead of main - wave plan #$($Plan.planIssue) takes precedence over the ship skill's default target. Open PRs belonging to other packages belong to parallel sessions: do not touch them, do not ask about them. $($Package.focus) ${conventions}After the merge, close the spec issue, comment on wave issue #$($Wave.waveIssue), and do not switch to main. Stop and report if you hit the round limit ($limit).
+Work $($Package.spec) (issue #$($Package.specIssue), wave $($Wave.number) of $planName) through the full ship loop, here in this worktree, with the PR against $($Wave.integrationBranch) instead of main - wave plan #$planIssue takes precedence over the ship skill's default target. Open PRs belonging to other packages belong to parallel sessions: do not touch them, do not ask about them. $($Package.focus) ${conventions}After the merge, close the spec issue, comment on wave issue #$($Wave.waveIssue), and do not switch to main. Stop and report if you hit the round limit ($limit).
 "@
 }
 
@@ -874,6 +892,10 @@ function Get-ConsolidationPrompt {
     param($Plan, $Standards, $Wave, $NextWave)
     $limit = Get-Field $Standards 'roundLimitConsolidation' 4
     $branch = $Wave.integrationBranch
+    # See Get-PackagePrompt's identical resolution: a wave appended onto
+    # another plan's file names its own tracking issue and display name here.
+    $planIssue = Get-Field $Wave 'planIssue' $Plan.planIssue
+    $planName = Get-Field $Wave 'planName' $Plan.name
     # Package sessions get plan.conventions via Get-PackagePrompt; a
     # consolidation session needs it too - it is the one that opens the
     # wave -> main PR and writes that PR's body, and is the audience for
@@ -888,14 +910,14 @@ function Get-ConsolidationPrompt {
         "Do not remove Docker resources yourself and never run docker system, volume, network or image prune: once you are done, the orchestrator removes the Docker resources that this wave's package worktrees created. "
     } else { '' }
     $tail = if ($null -ne $NextWave) {
-        "After the merge: close the wave issue, comment on wave plan #$($Plan.planIssue), delete the wave branch, and create $($NextWave.integrationBranch) from current origin/main and push it - no commit, no PR, so wave $($NextWave.number) can start immediately."
+        "After the merge: close the wave issue, comment on wave plan #$planIssue, delete the wave branch, and create $($NextWave.integrationBranch) from current origin/main and push it - no commit, no PR, so wave $($NextWave.number) can start immediately."
     } else {
-        "After the merge: close the wave issue, delete the wave branch, and close wave plan #$($Plan.planIssue) - $($Plan.name) is then complete."
+        "After the merge: close the wave issue, delete the wave branch, and close wave plan #$planIssue - $planName is then complete."
     }
     return @"
 /pickup
 
-Start the consolidation of wave $($Wave.number) of $($Plan.name) (wave issue #$($Wave.waveIssue), wave plan #$($Plan.planIssue)). First check: every package of this wave is merged and no PR against $branch is still open. Then merge origin/main into $branch (a merge commit, no rebase, no force-push), note every conflict resolution, run both suites, and open the PR $branch -> main, with Closes for every spec issue in this wave. ${conventions}Then the review loop with round limit $limit instead of 2: all THREE reviewers (review-go, review-tests, review-docs) get the full diff main...$branch and the list of package PRs. Merge with a merge commit once all three approve in the same round and the suite is green. Whatever is still open after round $limit becomes an issue and is named with its risk in the report. ${dockerNote}$tail Stop and report if you hit the round limit ($limit).
+Start the consolidation of wave $($Wave.number) of $planName (wave issue #$($Wave.waveIssue), wave plan #$planIssue). First check: every package of this wave is merged and no PR against $branch is still open. Then merge origin/main into $branch (a merge commit, no rebase, no force-push), note every conflict resolution, run both suites, and open the PR $branch -> main, with Closes for every spec issue in this wave. ${conventions}Then the review loop with round limit $limit instead of 2: all THREE reviewers (review-go, review-tests, review-docs) get the full diff main...$branch and the list of package PRs. Merge with a merge commit once all three approve in the same round and the suite is green. Whatever is still open after round $limit becomes an issue and is named with its risk in the report. ${dockerNote}$tail Stop and report if you hit the round limit ($limit).
 "@
 }
 
