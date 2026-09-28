@@ -74,6 +74,9 @@ whenever the diff touches routing, handlers, or middleware:
   (`docs/specs/02-data-model.md`).
 - Uploaded images stripped of EXIF, with orientation applied to pixels first
   (`docs/specs/04-backend-api-conventions.md`).
+- A migration the previous release's binary cannot serve against carries the
+  classic marker (`docs/specs/38-release-pipeline-and-nas-runner.md`); a diff
+  adding a migration without it must say why it is rolling-safe.
 
 ## Rules
 

@@ -113,6 +113,27 @@ func TestASchemaMismatchIsFatalAndNonRetryable(t *testing.T) {
 	assert.Equal(t, 1, exitCodeFor(errors.New("dial tcp: connection refused")))
 }
 
+// TestPlanClassicErrorExitsWithTheSpecsDistinctCodeAndPrintsNothing is the
+// cmd/inventory half of migrate plan's classic outcome
+// (docs/specs/38-release-pipeline-and-nas-runner.md, decision D3): a `sh`
+// script under `set -eu` reads only the process's exit code, so classic must
+// map to migrate.ExitClassic rather than the generic 1 a plain error would
+// get, and errorMessage must print nothing extra — migrate.Plan has already
+// written the whole report to stdout before returning this error.
+func TestPlanClassicErrorExitsWithTheSpecsDistinctCodeAndPrintsNothing(t *testing.T) {
+	t.Parallel()
+
+	err := &migrate.PlanClassicError{}
+
+	assert.Equal(t, migrate.ExitClassic, exitCodeFor(err))
+	assert.Equal(t, 3, migrate.ExitClassic, "the exit code is part of the deploy pipeline's contract; changing it changes what deploy/synology/update reads")
+	assert.Empty(t, errorMessage(err))
+
+	wrapped := fmt.Errorf("running migrate plan: %w", err)
+	assert.Equal(t, migrate.ExitClassic, exitCodeFor(wrapped))
+	assert.Empty(t, errorMessage(wrapped))
+}
+
 // TestRunRejectsUnknownCommand keeps a typo from being mistaken for `serve`,
 // which would start a server the operator did not ask for.
 func TestRunRejectsUnknownCommand(t *testing.T) {

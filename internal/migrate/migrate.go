@@ -5,7 +5,7 @@
 // that migrating needs no host toolchain — the same image that serves traffic
 // applies the schema (docs/specs/01-architecture-and-deployment.md).
 //
-// Two entry points, for the two halves of an upgrade:
+// Three entry points:
 //
 //   - Run applies migrations: `inventory migrate up`, step 3 of the upgrade
 //     procedure.
@@ -13,6 +13,10 @@
 //     this binary ships and refuses a mismatch, so skipping step 3 is loud
 //     rather than weird (docs/specs/18-operations-and-observability.md). It is
 //     read-only and is called by `serve` before the listener starts.
+//   - Plan (plan.go) answers the question step 3 itself does not: whether the
+//     pending migrations need a rolling or a classic deploy
+//     (docs/specs/38-release-pipeline-and-nas-runner.md). `inventory migrate
+//     plan` is deploy/synology/update's `--auto` flag.
 package migrate
 
 import (

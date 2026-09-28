@@ -70,7 +70,12 @@ func main() {
 	slog.SetDefault(logging.New(os.Stdout))
 
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, errorMessage(err))
+		// migrate plan's classic outcome is reported this way too — see
+		// errorMessage — but it has already written its full report to
+		// stdout, so there is nothing left to say on stderr.
+		if msg := errorMessage(err); msg != "" {
+			fmt.Fprintln(os.Stderr, msg)
+		}
 		os.Exit(exitCodeFor(err))
 	}
 }
@@ -119,12 +124,22 @@ func exitCodeFor(err error) int {
 	if errors.As(err, &schema) {
 		return config.ExitConfig
 	}
+	// migrate plan's classic outcome (docs/specs/38-release-pipeline-and-nas-runner.md,
+	// decision D3) is not a failure — it is the other of the two ordinary
+	// answers, alongside rolling — but its consumer, deploy/synology/update,
+	// reads only the exit code, so it still needs one distinct from 0.
+	var classic *migrate.PlanClassicError
+	if errors.As(err, &classic) {
+		return migrate.ExitClassic
+	}
 	return 1
 }
 
 // errorMessage renders err for the operator. A configuration failure and a
 // schema mismatch are printed bare, because each message is already the full
-// remediation block and prefixing it would bury the first line.
+// remediation block and prefixing it would bury the first line. A
+// PlanClassicError prints nothing at all: migrate.Plan has already written
+// its report to stdout, and that report is the whole story.
 func errorMessage(err error) string {
 	var missing *config.MissingError
 	if errors.As(err, &missing) {
@@ -133,6 +148,10 @@ func errorMessage(err error) string {
 	var schema *migrate.SchemaMismatchError
 	if errors.As(err, &schema) {
 		return schema.Error()
+	}
+	var classic *migrate.PlanClassicError
+	if errors.As(err, &classic) {
+		return ""
 	}
 	return "inventory: " + err.Error()
 }
@@ -174,6 +193,7 @@ Commands:
   setup                Interactive first-run wizard; writes .env
   migrate up           Apply pending database migrations
   migrate status       Show migration state
+  migrate plan         List pending migrations and the deploy mode they need
   recompute-progress   Rebuild gamification XP/level/streak from scratch
 `)
 }
@@ -213,6 +233,14 @@ func runMigrate(ctx context.Context, args []string) error {
 	if len(args) > 0 {
 		action = args[0]
 	}
+
+	// plan is not a goose action — it never touches the schema — so it is
+	// routed to its own entry point rather than into Run's up/down/status/
+	// version switch.
+	if action == "plan" {
+		return migrate.Plan(ctx, cfg.DatabaseURL, os.Stdout)
+	}
+
 	if err := migrate.Run(ctx, cfg.DatabaseURL, action, os.Stdout); err != nil {
 		return err
 	}

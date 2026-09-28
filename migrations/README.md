@@ -131,3 +131,20 @@ The contract for all of this, including `migrate plan`'s output and exit codes
 and the tag message that can force a classic deploy where no marker asks for
 one, is
 [`docs/specs/38-release-pipeline-and-nas-runner.md`](../docs/specs/38-release-pipeline-and-nas-runner.md).
+
+### `migrate plan`
+
+```console
+$ docker compose -f docker-compose.yml run --rm app migrate plan
+migrate plan: classic (2 pending: 00015_widen_quantity.sql, 00016_drop_legacy_note.sql)
+  00015_widen_quantity.sql
+  00016_drop_legacy_note.sql
+$ echo $?
+3
+```
+
+With nothing pending the line is exactly `migrate plan: nothing pending`, with
+no file list — not a `(0 pending: )` rendering of rolling — and the exit code
+is `0`, the same as rolling. `deploy/synology/update --auto` is the one
+consumer that reads the exit code rather than this output; a person reads the
+lines above it.
