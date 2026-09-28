@@ -1940,6 +1940,13 @@ test("a create whose own reload fails keeps the dialog open on a dismissal that 
 
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("alert")).toContainText("Could not reach the server");
+  // review-tests round 1, should-fix: the banner has to name the *reload*, not
+  // the create. This attempt's mutate() succeeded and only its redraw failed —
+  // two different statements, which get two different sentences (#347) — so
+  // asserting the network-error substring alone would pass equally for a banner
+  // that said "Could not add “Chalk Niche”.", which would be false.
+  await expect(dialog.getByRole("alert")).toContainText("Could not refresh the list.");
+  await expect(dialog.getByRole("alert")).not.toContainText("Could not add");
 
   // And a dismissal made with the banner in front of the user closes, with the
   // location that really was created still preselected.
@@ -2056,6 +2063,104 @@ test("two failing creates each get their own banner, and a dismissal that saw on
   // Neither create happened, so neither name is offered.
   await expect(first.locator('[data-role="location"] option', { hasText: "Hollow Bin" })).toHaveCount(0);
   await expect(first.locator('[data-role="location"] option', { hasText: "Mossy Ledge" })).toHaveCount(0);
+});
+
+// review-tests round 1, blocking: `nodeFailureMessage` and `nodeName` in
+// web/static/js/tree-modal.js — the recursive lookup that gives a failed RENAME
+// or MOVE the name in its banner — had no coverage at all. Every other failure
+// journey in this file drives a failing *add*, and an add takes its name straight
+// from what the user typed, never consulting the tree. A bug in the traversal, or
+// in the fallback ordering, would therefore mislabel every rename and move banner
+// with the whole suite staying green.
+//
+// Both halves are written so a broken lookup FAILS them rather than merely
+// rendering something else, which is the only way this is a guard and not a
+// screenshot:
+//
+// - The rename asserts the node's OLD name. tree.js hands `onRename` the id and
+//   the NEW name, and `nodeFailureMessage` falls back to that new name when the
+//   lookup misses — so a lookup returning undefined renders "Could not rename
+//   “Shelf Bin”.", the name the user typed, and the assertion on "Door Bin" fails.
+//   The negative assertion on the typed name pins that from the other side.
+// - The move has no name to fall back to at all, so a miss renders the generic
+//   "Could not save your change." instead of naming the node.
+//
+// The node is "Door Bin" — a child of "Fridge", not a root — on purpose:
+// `nodeName` has to recurse into `node.children` to find it, so a lookup that
+// scanned only the root array would pass a root-node version of this test and
+// fail this one. That fixture row already exists for #174 item 2; nothing is
+// added to seed.sql.
+//
+// Both PATCHes are aborted, so neither ever reaches the server and nothing is
+// written to the shared "E2E Household" — every rename below exists only in this
+// browser.
+test("a failed rename and a failed move each name the node they were about", async ({ page }) => {
+  await logInAsBob(page);
+  await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOCATION_MODAL_JOB}`);
+  const first = page.locator("#rows .review-row").first();
+
+  await first.locator('[data-role="location-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Fridge");
+
+  // Expand Fridge to reach its child. Same pattern create-and-list.spec.js uses
+  // for a nested node.
+  const node = (name) =>
+    dialog.locator(".tree-node").filter({ has: dialog.locator(".tree-name", { hasText: new RegExp(`^${name}$`) }) });
+  await node("Fridge").locator(".tree-toggle").click();
+  await expect(node("Door Bin")).toHaveCount(1);
+
+  // Only PATCH fails; every GET, the post-mutation reloads included, goes through.
+  await page.route(`**/api/storages/${HOUSEHOLD}/locations/**`, async (route) => {
+    if (route.request().method() !== "PATCH") {
+      await route.continue();
+      return;
+    }
+    await route.abort("failed");
+  });
+
+  // The rename. tree.js's inline editor commits on blur, and Enter blurs it.
+  await node("Door Bin").getByRole("button", { name: "Rename" }).click();
+  const renameInput = dialog.locator(".tree-rename-input");
+  await expect(renameInput).toHaveValue("Door Bin");
+  await renameInput.fill("Shelf Bin");
+  await renameInput.press("Enter");
+
+  // Named by the node as it was on screen, not by what was typed into the box.
+  await expect(dialog.getByRole("alert")).toContainText("Could not rename “Door Bin”.");
+  await expect(dialog.getByRole("alert")).not.toContainText("Shelf Bin");
+  await expect(dialog.getByRole("alert")).toContainText("Could not reach the server");
+  // The rename did not happen, so the tree still shows the old name — its reload
+  // succeeded and redrew from the server, which is also what re-creates the row
+  // the move below acts on.
+  await expect(node("Door Bin")).toHaveCount(1);
+  await expect(dialog.locator(".tree")).not.toContainText("Shelf Bin");
+
+  // The move, to the root, through the picker rather than drag-and-drop — the
+  // keyboard-reachable path, and the one that hands onMove an id and nothing else.
+  await node("Door Bin").getByRole("button", { name: "Move to…" }).click();
+  const movePicker = page
+    .locator("dialog")
+    .filter({ has: page.getByRole("heading", { name: "Move to…" }) });
+  await expect(movePicker).toBeVisible();
+  await movePicker.locator("select").selectOption("");
+  await movePicker.getByRole("button", { name: "Move", exact: true }).click();
+
+  // A second banner, naming the node again — not the generic
+  // "Could not save your change." a failed lookup would fall back to.
+  await expect(dialog.locator(".alert")).toHaveCount(2);
+  await expect(dialog.locator(".alert").nth(0)).toContainText("Could not rename “Door Bin”.");
+  await expect(dialog.locator(".alert").nth(1)).toContainText("Could not move “Door Bin”.");
+  await expect(dialog.getByRole("alert")).not.toContainText("Could not save your change.");
+
+  // Both failures were latched before any dismissal, so the first Escape's
+  // snapshot carries both and closes — and nothing was created, so the field is
+  // exactly as it was.
+  await page.unroute(`**/api/storages/${HOUSEHOLD}/locations/**`);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(first.locator('[data-role="location"] option', { hasText: "Shelf Bin" })).toHaveCount(0);
 });
 
 // #352: the opening reload() at the bottom of openTreeManager is deliberately
