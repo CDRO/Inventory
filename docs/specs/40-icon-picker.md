@@ -92,7 +92,8 @@ already is.
 100 characters (`VARCHAR(100)`, matching the schema above) — `422` on a
 missing/empty field or on either exceeding the limit, the same shape
 every other length-bounded field in this system already rejects
-(`16-product-maintenance.md`'s `icon_name` cap is the closest precedent).
+(`02-data-model.md`'s `VARCHAR(100)` columns are the existing precedent
+for this exact limit).
 On a valid body, inserts with `ON CONFLICT (icon_name, alias) DO
 NOTHING`, the same insert-and-ignore shape `catalog_products` already
 uses. Any authenticated storage member may call this — it is additive,
