@@ -294,6 +294,7 @@ type fakeAPI struct {
 	*fakeBarcodes
 	*fakeBarcodePrompt
 	*fakeInventoryStore
+	*fakeIcons
 }
 
 // newFakeAPI builds the whole fake store around an auth fake, with every other
@@ -311,6 +312,7 @@ func newFakeAPI(auth *fakeAuth) fakeAPI {
 		fakeBarcodes:       newFakeBarcodes(),
 		fakeBarcodePrompt:  newFakeBarcodePrompt(),
 		fakeInventoryStore: &fakeInventoryStore{},
+		fakeIcons:          &fakeIcons{},
 	}
 }
 
@@ -371,6 +373,7 @@ type apiFixture struct {
 	barcodes      *fakeBarcodes
 	barcodePrompt *fakeBarcodePrompt
 	inventory     *fakeInventoryStore
+	icons         *fakeIcons
 	storageID     uuid.UUID
 	user          *store.User
 	session       *store.Session
@@ -399,6 +402,7 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 	barcodes := newFakeBarcodes()
 	barcodePrompt := newFakeBarcodePrompt()
 	inventory := &fakeInventoryStore{}
+	icons := &fakeIcons{}
 	user, session := auth.addUser(t, false)
 	storageID := uuid.New()
 	auth.addMember(storageID, user.ID)
@@ -432,6 +436,7 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 			fakeBarcodes:       barcodes,
 			fakeBarcodePrompt:  barcodePrompt,
 			fakeInventoryStore: inventory,
+			fakeIcons:          icons,
 		},
 		Matcher:       matcher,
 		Images:        images,
@@ -466,6 +471,7 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 		barcodes:      barcodes,
 		barcodePrompt: barcodePrompt,
 		inventory:     inventory,
+		icons:         icons,
 		storageID:     storageID, user: user, session: session,
 	}
 }
@@ -573,6 +579,9 @@ func storageRoutes(base string) []struct {
 		// 404 for a non-member are pinned by the same two tests that pin them
 		// for every other storage-scoped route.
 		{http.MethodPatch, base + "/membership", `{"start_page":"inventory"}`},
+		// The local icon library (docs/specs/42-local-icon-library.md).
+		{http.MethodPost, base + "/icons", ""},
+		{http.MethodGet, base + "/icons/" + id + "/svg", ""},
 	}
 }
 

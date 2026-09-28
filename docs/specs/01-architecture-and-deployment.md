@@ -1104,7 +1104,7 @@ $ cd /volume1/docker/inventory        # the clone; adjust the path
 $ DC="docker-compose -p inventory -f docker-compose.yml -f docker-compose.nas.yml"
 $ $DC run --rm setup           # writes .env
 $ $DC build
-$ $DC run --rm app migrate up  # also creates the initial admin
+$ $DC run --rm app migrate up  # also creates the initial admin and imports the icon library
 $ TS_AUTHKEY=tskey-auth-… $DC up -d
 ```
 

@@ -112,6 +112,7 @@ type APIStore interface {
 	BarcodePromptStore
 	InventoryStore
 	MembershipStore
+	IconStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -276,6 +277,7 @@ func NewRouter(d Deps) http.Handler {
 		locations := NewLocationHandler(d.Store, errs)
 		batches := NewBatchHandler(d.Store, errs)
 		gamification := NewGamificationHandler(d.Store, errs)
+		icons := NewIconHandler(d.Store, errs)
 
 		// The session lifecycle (docs/specs/03-auth-and-multi-tenancy.md).
 		//
@@ -447,6 +449,15 @@ func NewRouter(d Deps) http.Handler {
 			// batch PATCH above, and a split disposes of one; destroying is the
 			// single operation that addresses a container by its own id.
 			sr.Post("/containers/{id}/destroy", batches.DestroyContainer)
+
+			// The local icon library (docs/specs/42-local-icon-library.md):
+			// uploading an icon the vendored set has nothing close enough
+			// for, and serving one uploaded icon's SVG body. Storage-scoped
+			// like the alias endpoint 40 adds beside this, even though the
+			// icons table itself is global — the route only needs to prove
+			// the caller belongs to some storage.
+			sr.Post("/icons", icons.Upload)
+			sr.Get("/icons/{id}/svg", icons.ServeSVG)
 
 			expiry := NewExpiryHandler(d.Store, errs)
 			sr.Patch("/inventory-batches/{id}/expiry", expiry.PatchBatchExpiry)
