@@ -287,6 +287,9 @@ Before the orchestrator can work through a wave, these must exist:
                                              //   bonus wave tracked by its own issue rather than the
                                              //   file-wide plan issue, e.g. one appended after that plan
                                              //   issue already closed
+      "planName": null,                     // optional; overrides plan.name alongside planIssue - set
+                                             //   both together or neither, so "wave N of <name>" never
+                                             //   names a plan the wave was deliberately kept out of
       "integrationBranch": "integration/specs-13-20-welle-2",
       "sequential": false,                  // true: packages run one after another, not in parallel
       "dockerCleanup": true,                // true: after the consolidation, remove the Docker

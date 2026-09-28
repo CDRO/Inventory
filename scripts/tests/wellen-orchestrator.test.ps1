@@ -544,20 +544,31 @@ $overrideWave = [pscustomobject]@{
     number            = 16
     waveIssue         = 366
     planIssue         = 366
+    planName          = 'PLANNAME-MARKER-b7c2'
     integrationBranch = 'integration/x'
     dockerCleanup     = $true
 }
 $overridePackagePrompt = Get-PackagePrompt -Plan $conventionsPlan -Standards $conventionsStandards -Wave $overrideWave -Package $conventionsPackage
 Assert ($overridePackagePrompt -match 'wave plan #366') 'Get-PackagePrompt uses wave.planIssue when set'
 Assert ($overridePackagePrompt -notmatch 'wave plan #999') 'Get-PackagePrompt does not also mention plan.planIssue when overridden'
+Assert ($overridePackagePrompt -match 'PLANNAME-MARKER-b7c2') 'Get-PackagePrompt uses wave.planName when set'
+Assert ($overridePackagePrompt -notmatch 'Test Plan') 'Get-PackagePrompt does not also mention plan.name when overridden'
 
 $overrideConsolidationPromptLast = Get-ConsolidationPrompt -Plan $conventionsPlan -Standards $conventionsStandards -Wave $overrideWave -NextWave $null
 Assert ($overrideConsolidationPromptLast -match 'close wave plan #366') 'Get-ConsolidationPrompt (last wave) closes the overriding wave.planIssue, not plan.planIssue'
 Assert ($overrideConsolidationPromptLast -notmatch '#999') 'Get-ConsolidationPrompt (last wave) never mentions the stale plan.planIssue when overridden'
+# review-go's round-2 finding on PR #369: the planIssue fix alone still left
+# $Plan.name interpolated unconditionally, so the generated close-comment
+# read "close wave plan #366 - Deferred follow-ups ... is then complete" -
+# the wrong plan's name attached to the right issue number. Pin both halves.
+Assert ($overrideConsolidationPromptLast -match 'PLANNAME-MARKER-b7c2 is then complete') 'Get-ConsolidationPrompt (last wave) declares the overriding wave.planName complete, not plan.name'
+Assert ($overrideConsolidationPromptLast -notmatch 'Test Plan') 'Get-ConsolidationPrompt (last wave) does not also mention plan.name when overridden'
 
 $nextWaveStub = [pscustomobject]@{ number = 17; integrationBranch = 'integration/y' }
 $overrideConsolidationPromptNext = Get-ConsolidationPrompt -Plan $conventionsPlan -Standards $conventionsStandards -Wave $overrideWave -NextWave $nextWaveStub
 Assert ($overrideConsolidationPromptNext -match 'comment on wave plan #366') 'Get-ConsolidationPrompt (with a next wave) comments on the overriding wave.planIssue, not plan.planIssue'
+Assert ($overrideConsolidationPromptNext -match 'wave 16 of PLANNAME-MARKER-b7c2') 'Get-ConsolidationPrompt (with a next wave) also uses wave.planName in its opening sentence'
+Assert ($overrideConsolidationPromptNext -notmatch 'Test Plan') 'Get-ConsolidationPrompt (with a next wave) does not also mention plan.name when overridden'
 
 Write-Host "== Invoke-Wave (parallel branch): teardown follows ACTUAL close order (#188) =="
 

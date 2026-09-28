@@ -497,6 +497,7 @@
       "number": 16,
       "waveIssue": 366,
       "planIssue": 366,
+      "planName": "Welle 16 (Follow-ups round 2): leftovers from the closed plan #176",
       "integrationBranch": "integration/followups-welle-16",
       "sequential": true,
       "dockerCleanup": true,
