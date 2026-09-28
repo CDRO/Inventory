@@ -3,9 +3,18 @@
 #
 #   sh deploy/synology/update                 # rolling update (the default)
 #   sh deploy/synology/update --classic       # stop, migrate, start (see below)
+#   sh deploy/synology/update --auto          # let `migrate plan` choose the mode
+#   sh deploy/synology/update --ref <tag|sha> # deploy that ref instead of pulling
+#   sh deploy/synology/update --backup        # archive the instance before migrating
 #   sh deploy/synology/update --no-pull       # do not run `git pull`
 #   sh deploy/synology/update --force         # swap even if Compose sees no change
 #   sh deploy/synology/update --prune         # afterwards, remove dangling images
+#
+# The release pipeline (docs/specs/38-release-pipeline-and-nas-runner.md) runs
+#
+#   sh deploy/synology/update --ref <tag> --auto --backup
+#
+# and reads nothing but this script's exit code and its last line.
 #
 # Rolling update:
 #   1. git pull --ff-only, then check the pulled compose files, pull the sidecar
@@ -31,6 +40,45 @@
 # the app and the sidecar first, then migrates, then starts everything. If the
 # migration fails the stack stays stopped, and the script says so.
 #
+# --ref <tag|sha> replaces the pull: fetch origin with its tags, verify the ref
+# resolves, check it out DETACHED, and stamp the build with it - VERSION=<tag>,
+# or the short sha when the ref is not a tag, which docker-compose.yml passes
+# into the image and GET /healthz reports back. What is deployed is then one
+# named commit rather than wherever a branch happened to point. The refusal to
+# deploy a clone with local changes to tracked files applies here exactly as it
+# does to the pull; a ref that does not resolve is a refusal before the build.
+# --ref and --no-pull contradict each other and are rejected together.
+#
+# --auto takes the mode from `inventory migrate plan`, which is run after the
+# build: exit 3 (a pending migration the previous release cannot serve) takes
+# the classic path, exit 0 takes the rolling one, and any other exit code aborts
+# the run before anything is migrated. DEPLOY_MODE=classic in the environment
+# forces classic without consulting the plan at all - that is how an annotated
+# tag's `deploy: classic` line reaches this script. Nothing forces rolling.
+# --auto and --classic contradict each other and are rejected together.
+#
+# --backup runs the `backup` service (docs/specs/15-backup-restore-and-export.md)
+# into ./backups BEFORE the schema is touched, on every path that migrates. A
+# backup that fails, or that exits 0 without writing an archive, aborts the run
+# with nothing migrated and - on the classic path - nothing stopped either:
+# migrations only go forward, so the archive is the only way back across one.
+# Afterwards the newest BACKUP_KEEP archives are kept and the older ones are
+# deleted; BACKUP_KEEP comes from the environment, then from .env, then 5. A
+# half-written archive (.inventory-backup-<stamp>.tar.gz.part) is never deleted.
+# The `backup` service has no depends_on, so on a first start with nothing
+# running at all, take the backup after the stack is up instead of passing this.
+#
+# The last line of every run that got past its own command line is a summary the
+# caller can read without parsing anything else:
+#
+#   update: done mode=rolling ref=v1.4.0 version=v1.4.0 backup=inventory-backup-2026-09-28-0300.tar.gz
+#   update: failed mode=rolling ref=v1.4.0 version=v1.4.0 backup=none phase=drain
+#
+# On success the word after `update:` is the phase reached (`done`); on failure
+# `phase=` names the one it stopped in, which is the lookup key of the table in
+# docs/specs/38-release-pipeline-and-nas-runner.md, "Failure and rollback". It
+# goes to stdout in both cases; the recovery messages keep going to stderr.
+#
 # Nothing to do: after the build, Compose is asked (up --dry-run) whether it would
 # recreate or start anything. If not, the script exits without touching anything.
 #
@@ -38,8 +86,10 @@
 # the pid, so a run killed hard is reported as gone instead of guessed about.
 #
 # Environment: TS_AUTHKEY is passed through to the very first start; HEALTH_TIMEOUT
-# and DRAIN_TIMEOUT are seconds (defaults 120 and 60). DOCKER_COMPOSE and
-# INVENTORY_PROJECT exist for testing (defaults: docker-compose, inventory).
+# and DRAIN_TIMEOUT are seconds (defaults 120 and 60); DEPLOY_MODE=classic forces
+# the classic path under --auto; BACKUP_KEEP is the archive retention of --backup
+# (default 5). DOCKER_COMPOSE and INVENTORY_PROJECT exist for testing (defaults:
+# docker-compose, inventory).
 #
 # Every compose call carries both -f files, so the dev override is never merged
 # in; the script refuses to run if the merged model lists traefik. See
@@ -55,29 +105,27 @@ DRAIN_TIMEOUT=${DRAIN_TIMEOUT:-60}
 die() { echo "update: $*" >&2; exit 1; }
 say() { echo "==> $*"; }
 
+# The whole leading comment block, which is where every option is documented.
+# Read from the block itself rather than from a fixed line range, so that adding
+# an option cannot leave --help printing half of it.
 usage() {
-  sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'
+  awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
 }
 
-pull=1 classic=0 force=0 prune=0
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --no-pull) pull=0 ;;
-    --classic) classic=1 ;;
-    --force) force=1 ;;
-    --prune) prune=1 ;;
-    -h|--help) usage; exit 0 ;;
-    *) die "unknown option: $1 (try --help)" ;;
-  esac
-  shift
-done
+# --- What this run is, for the summary line -----------------------------------
 
-cd "$(dirname "$0")/../.." || die "cannot enter the clone"
-ROOT=$(pwd)
-DC="$COMPOSE -p $PROJECT -f docker-compose.yml -f docker-compose.nas.yml"
-# The same command with absolute paths, for the hints printed to the operator: it
-# works from any directory, which the relative one above does not.
-DC_HINT="$COMPOSE -p $PROJECT -f $ROOT/docker-compose.yml -f $ROOT/docker-compose.nas.yml"
+mode=unknown       # rolling | classic | first-start | nothing, once it is known
+phase=preflight    # how far the run got; named by the failure summary
+archive=none       # the pre-upgrade archive --backup wrote
+want_summary=1     # --help is the one end that prints no summary
+
+print_summary() {
+  if [ "$1" -eq 0 ]; then
+    echo "update: done mode=$mode ref=${ref:-none} version=${VERSION:-dev} backup=$archive"
+  else
+    echo "update: failed mode=$mode ref=${ref:-none} version=${VERSION:-dev} backup=$archive phase=$phase"
+  fi
+}
 
 # --- Cleanup and lock ---------------------------------------------------------
 
@@ -88,7 +136,7 @@ have_lock=0
 armed=0        # 1 while a second app instance started by this run may need removing
 old_ids=       # the app instance(s) that were running before this run started one
 recover=       # what an abort from here on leaves behind, and the way out of it
-pulled_note=   # names the commit `git pull` moved to, for a refusal after it
+pulled_note=   # names the commit the clone moved to, for a refusal after that
 
 # Every app container of the project, in any state and with its full id.
 #
@@ -128,12 +176,49 @@ on_exit() {
     rm -f "$lockdir/holder" 2>/dev/null || true
     rmdir "$lockdir" 2>/dev/null || true
   fi
+  # Last, so that it really is the last line - including after a signal, which is
+  # the one end none of the `exit 0`s below could print for.
+  [ "$want_summary" -eq 0 ] || print_summary "$rc"
   exit "$rc"
 }
 trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
+
+# --- Options ------------------------------------------------------------------
+# Parsed after the traps are in place, so that even a refusal over the command
+# line itself ends through on_exit and prints the summary line.
+
+pull=1 classic=0 force=0 prune=0 auto=0 backup=0 ref= keep=5
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-pull) pull=0 ;;
+    --classic) classic=1 ;;
+    --auto) auto=1 ;;
+    --backup) backup=1 ;;
+    --ref) shift; [ $# -gt 0 ] || die "--ref needs a tag or a commit (try --help)"; ref=$1 ;;
+    --force) force=1 ;;
+    --prune) prune=1 ;;
+    -h|--help) want_summary=0; usage; exit 0 ;;
+    *) die "unknown option: $1 (try --help)" ;;
+  esac
+  shift
+done
+
+# Contradictions rather than preferences: letting one of the two win silently
+# would deploy something the caller did not ask for.
+[ -z "$ref" ] || [ "$pull" -eq 1 ] \
+  || die "--ref and --no-pull cannot be combined: --ref is how this run gets the code."
+[ "$classic" -eq 0 ] || [ "$auto" -eq 0 ] \
+  || die "--classic and --auto cannot be combined: --auto is what decides the mode."
+
+cd "$(dirname "$0")/../.." || die "cannot enter the clone"
+ROOT=$(pwd)
+DC="$COMPOSE -p $PROJECT -f docker-compose.yml -f docker-compose.nas.yml"
+# The same command with absolute paths, for the hints printed to the operator: it
+# works from any directory, which the relative one above does not.
+DC_HINT="$COMPOSE -p $PROJECT -f $ROOT/docker-compose.yml -f $ROOT/docker-compose.nas.yml"
 
 # --- Preconditions ------------------------------------------------------------
 
@@ -142,6 +227,27 @@ v=$($COMPOSE version --short 2>/dev/null | sed 's/^v//') || true
 major=${v%%.*}; rest=${v#*.}; minor=${rest%%.*}
 { [ "$major" -gt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -ge 24 ]; }; } \
   || die "Compose $v is too old: these files need >= 2.24 (the one bundled with Container Manager is 2.20)"
+
+# --backup keeps the newest $keep archives. The value is resolved and checked
+# here rather than where it is used: under `set -eu` a non-numeric one would
+# otherwise blow the script up between a successful backup and `migrate up`,
+# which is the single worst moment to die with an unexplained arithmetic error.
+#
+# One key is read out of .env, never the whole file. Sourcing it would import
+# every other key into this script's environment - VERSION among them, which
+# --ref sets deliberately and a stray line in .env would then silently override,
+# mislabelling the image that is being deployed.
+if [ "$backup" -eq 1 ]; then
+  keep=${BACKUP_KEEP:-}
+  if [ -z "$keep" ] && [ -f .env ]; then
+    keep=$(sed -n 's/^BACKUP_KEEP=//p' .env | tail -n 1 | tr -d '\r')
+  fi
+  keep=${keep:-5}
+  case "$keep" in
+    ''|*[!0-9]*) die "BACKUP_KEEP is \"$keep\": it has to be a whole number (5 when it is unset)." ;;
+  esac
+  [ "$keep" -ge 1 ] || die "BACKUP_KEEP is $keep: at least the archive this run takes has to be kept."
+fi
 
 # The holder file turns "another update is running" from a guess into a fact. A
 # run killed hard (SIGKILL, a power cut) leaves the directory behind, and on a NAS
@@ -202,6 +308,60 @@ is_running() { [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = 
 # it is reported instead, the same way the retirement steps below report theirs.
 maybe_prune() { [ "$prune" -eq 0 ] || docker image prune -f || echo "    warning: could not prune dangling images" >&2; }
 
+# Retention for --backup: keep the newest $keep archives in ./backups.
+#
+# The archive names carry a zero-padded UTC stamp (scripts/backup), so a reverse
+# lexical sort is a newest-first sort and no mtime has to be trusted. A partial
+# archive is never a candidate: the backup service writes
+# `.inventory-backup-<stamp>.tar.gz.part` while tar runs and renames it into
+# place only once tar has succeeded, so deleting one would sabotage a backup that
+# is still being written - possibly somebody else's, running right now. Nothing
+# else in ./backups is touched either: an operator's own file there is not this
+# script's to retire.
+prune_backups() {
+  dir=$ROOT/backups
+  [ -d "$dir" ] || return 0
+  kept=0
+  for f in $(ls -a "$dir" 2>/dev/null | sort -r); do
+    case "$f" in
+      *.part) continue ;;                  # a backup that is still being written
+      .*) continue ;;                      # `.`, `..`, and hidden files
+      inventory-backup-*.tar.gz) ;;        # an archive this script may retire
+      *) continue ;;                       # anything else is not ours
+    esac
+    kept=$((kept + 1))
+    [ "$kept" -gt "$keep" ] || continue
+    rm -f "$dir/$f" && echo "    removed old backup $f" \
+      || echo "    warning: could not remove the old backup $f" >&2
+  done
+}
+
+# The pre-upgrade archive. Called on every path that migrates, and before the
+# classic path stops anything, so that "the backup failed" leaves the old release
+# serving and the schema untouched - the row this fills in in spec 38's failure
+# table. A service that exits 0 without writing an archive counts as a failure
+# too: the archive is the point, not the exit code.
+run_backup() {
+  [ "$backup" -eq 1 ] || return 0
+  phase=backup
+  say "Taking the pre-upgrade backup (--backup)"
+  rc=0
+  out=$($DC run --rm -T backup) || rc=$?
+  [ -z "$out" ] || printf '%s\n' "$out"
+  [ "$rc" -eq 0 ] || die "the backup failed (the backup service exited $rc). Nothing was migrated."
+  # scripts/backup ends with `backup: wrote /backups/<name> (<size>)`, and
+  # /backups is ./backups on this side of the mount. $archive is only set once
+  # an archive is known to exist, so a run that aborts here reports backup=none
+  # rather than naming one nobody can restore from.
+  found=$(printf '%s\n' "$out" | sed -n 's/^backup: wrote \([^ ]*\).*$/\1/p' | tail -n 1)
+  found=${found##*/}
+  [ -n "$found" ] || die "the backup service named no archive. Nothing was migrated."
+  [ -f "$ROOT/backups/$found" ] \
+    || die "the backup service named $found, but $ROOT/backups does not hold it. Nothing was migrated."
+  archive=$found
+  prune_backups
+}
+
 # The number of pending jobs, or nothing when it cannot be read.
 pending_jobs() {
   $DC exec -T db sh -c "psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -tAc \"SELECT count(*) FROM jobs WHERE status = 'pending'\"" 2>/dev/null \
@@ -261,8 +421,8 @@ fi
 
 if [ "$pull" -eq 1 ]; then
   # The clone is meant to carry no local edit (that is what the layered compose
-  # file is for). What is deployed must be what was pulled, so refuse instead of
-  # building someone's leftovers; --no-pull deploys the tree as it is.
+  # file is for). What is deployed must be what was pulled or fetched, so refuse
+  # instead of building someone's leftovers; --no-pull deploys the tree as it is.
   # Status 1 is "there are differences". Anything else is git itself failing - no
   # commit yet, a broken index, not a repository at all - which must not be
   # reported as an edit the operator can commit away. git's own message stays on
@@ -275,33 +435,93 @@ if [ "$pull" -eq 1 ]; then
        die "the clone has local changes to tracked files (listed above). Commit, stash or discard them, or use --no-pull to deploy the tree as it is." ;;
     *) die "'git diff --quiet HEAD --' failed with status $rc (its own message is above): $ROOT does not look like a usable clone. Fix that, or use --no-pull to deploy the tree as it is." ;;
   esac
-  say "git pull --ff-only ($(git rev-parse --abbrev-ref HEAD))"
+
+  phase=fetch
   before=$(git rev-parse HEAD)
-  # --no-rebase: a user's pull.rebase setting must not turn this into a rebase.
-  git pull --ff-only --no-rebase
-  after=$(git rev-parse HEAD)
-  if [ "$before" != "$after" ]; then
+  if [ -n "$ref" ]; then
+    # A release is one named commit, not "whatever the branch points at by the
+    # time the NAS gets round to pulling it". The checkout is detached on
+    # purpose: a clone a release has been deployed onto is not tracking a branch
+    # any more, and pretending otherwise is how the next `git pull` deploys
+    # something nobody tagged.
+    say "git fetch origin --tags, then checkout --detach $ref"
+    git fetch origin --tags \
+      || die "'git fetch origin --tags' failed (git's own message is above). Nothing was built or migrated."
+    git rev-parse --verify --quiet "$ref^{commit}" >/dev/null \
+      || die "the ref '$ref' does not exist in this clone after fetching origin. Nothing was built or migrated."
+    git checkout --detach "$ref" \
+      || die "could not check out '$ref' (git's own message is above). Nothing was built or migrated."
+    after=$(git rev-parse HEAD)
     echo "    $(git rev-parse --short "$before") -> $(git rev-parse --short "$after")"
     pulled_note=" The clone was moved to $(git rev-parse --short "$after") (from $(git rev-parse --short "$before"))."
+    # The image is stamped with the release's own name: a tag deploys under the
+    # tag, anything else under its short sha. docker-compose.yml passes VERSION
+    # into the Dockerfile and GET /healthz reports it back
+    # (docs/specs/18-operations-and-observability.md).
+    if git rev-parse --verify --quiet "refs/tags/$ref" >/dev/null 2>&1; then
+      VERSION=$ref
+    else
+      VERSION=$(git rev-parse --short "$ref")
+    fi
+    export VERSION
   else
-    echo "    already up to date"
+    say "git pull --ff-only ($(git rev-parse --abbrev-ref HEAD))"
+    # --no-rebase: a user's pull.rebase setting must not turn this into a rebase.
+    git pull --ff-only --no-rebase
+    after=$(git rev-parse HEAD)
+    if [ "$before" != "$after" ]; then
+      echo "    $(git rev-parse --short "$before") -> $(git rev-parse --short "$after")"
+      pulled_note=" The clone was moved to $(git rev-parse --short "$after") (from $(git rev-parse --short "$before"))."
+    else
+      echo "    already up to date"
+    fi
   fi
 fi
 
+phase=model
 check_model
 
+phase=build
 say "Pulling the sidecar image and building the app image"
 $DC pull ts-inventory
 $DC build
 
+# --- Which path, under --auto -------------------------------------------------
+
+if [ "$auto" -eq 1 ]; then
+  if [ "${DEPLOY_MODE:-}" = classic ]; then
+    # The tag override (docs/specs/38, decision D3) is one-way and cannot be
+    # argued with, so the plan is not consulted at all: no answer it could give
+    # would change the mode, and a plan that fails for its own reasons must not
+    # turn a deliberately careful deploy into a refusal.
+    say "DEPLOY_MODE=classic: the classic path is forced (the tag override)"
+    classic=1
+  else
+    phase=plan
+    say "Asking 'migrate plan' which path this release needs (--auto)"
+    rc=0
+    $DC run --rm -T app migrate plan || rc=$?
+    case $rc in
+      0) classic=0 ;;
+      3) classic=1 ;;
+      *) die "could not plan the migration: migrate plan exited $rc" ;;
+    esac
+  fi
+fi
+
 # --- No app yet: first start --------------------------------------------------
 
 if [ -z "$old" ]; then
+  mode=first-start
   say "No app instance is running: migrating and starting the stack"
+  run_backup
+  phase=migrate
   $DC run --rm -T app migrate up
+  phase=start
   $DC up -d
   $DC ps
   maybe_prune
+  phase=done
   exit 0
 fi
 
@@ -326,12 +546,26 @@ if [ "$force" -eq 0 ]; then
   states=$(echo "$plan" | sed -n 's/.*Container  *[^ ]*  *\([A-Za-z][A-Za-z]*\) *$/\1/p')
   seen=$(echo "$states" | grep -c .) || seen=0
   if [ "$seen" -ge 1 ] && [ "$seen" -eq "$lines" ] && ! echo "$states" | grep -qvx Running; then
+    mode=nothing
     say "Compose would change nothing (same image, same configuration): nothing to swap (use --force to swap anyway)"
     $DC ps
     maybe_prune
+    phase=done
     exit 0
   fi
 fi
+
+# --- The pre-upgrade backup ---------------------------------------------------
+# Before the classic path's `stop` as much as before either `migrate up`: spec
+# 38's failure table promises that a failed backup leaves the old release
+# untouched, and that is only true while nothing has been stopped yet.
+
+if [ "$classic" -eq 1 ]; then
+  mode=classic
+else
+  mode=rolling
+fi
+run_backup
 
 # --- Classic update -----------------------------------------------------------
 
@@ -343,24 +577,30 @@ if [ "$classic" -eq 1 ]; then
   # stop has returned, and claiming it earlier would send the operator looking for
   # a stopped stack that never stopped.
   recover="this run was stopping the app and the sidecar, and did not start them again. Check with: $DC_HINT ps - and start them with: $DC_HINT up -d"
+  phase=stop
   say "Classic update: stopping the app and the sidecar"
   $DC stop ts-inventory app
   recover="the app and the sidecar are STOPPED. Fix the cause and run this script again, or start them with: $DC_HINT up -d"
+  phase=migrate
   say "Migrating"
   $DC run --rm -T app migrate up || die "the migration failed."
+  phase=start
   say "Starting the stack"
   $DC up -d
   recover=
   $DC ps
   maybe_prune
+  phase=done
   exit 0
 fi
 
 # --- Rolling update -----------------------------------------------------------
 
+phase=migrate
 say "Migrating (the old app keeps serving; the release's migrations must run against it)"
 $DC run --rm -T app migrate up
 
+phase=drain
 say "Waiting for pending jobs to finish (up to ${DRAIN_TIMEOUT}s)"
 rc=0
 wait_no_pending || rc=$?
@@ -381,6 +621,7 @@ if [ "$now" != "$old" ]; then
   die "the app container changed while this run was pulling, building and migrating (it was $old, it is now ${now:-none}). Nothing was swapped (the database is migrated). Check 'docker ps' and run this again."
 fi
 
+phase=start
 say "Starting a second app instance from the new image"
 # From here until the old instance is retired, anything that ends this run (a
 # failed start, an error, Ctrl-C, a dropped SSH session) removes the new instance.
@@ -411,6 +652,7 @@ fi
 # The old instance kept accepting jobs while the new one started, and stopping it
 # cancels the jobs it is working on (they are failed as interrupted). Wait for
 # them once more, so that stopping it interrupts nothing that is known to run.
+phase=drain
 say "Waiting once more for pending jobs before retiring the old instance (up to ${DRAIN_TIMEOUT}s)"
 rc=0
 wait_no_pending || rc=$?
@@ -427,11 +669,13 @@ esac
 # SSH session - leaves the tailnet URL dead; the trap says so and how to fix it.
 armed=0
 recover="the app was updated, but the sidecar was not recreated: it still holds the retired instance's network namespace, so the tailnet URL is down. Run: $DC_HINT up -d --no-deps --force-recreate ts-inventory"
+phase=retire
 say "Retiring the old instance"
 docker stop -t 30 "$old" >/dev/null 2>&1 || echo "    warning: could not stop the old instance $old" >&2
 docker rm -f "$old" >/dev/null 2>&1 || echo "    warning: could not remove the old instance $old" >&2
 $DC up -d --no-deps --no-recreate --scale app=1 app || echo "    warning: could not settle the app at one instance" >&2
 
+phase=sidecar
 say "Recreating the sidecar (it shared the old instance's network namespace)"
 # Joining the namespace of an app container that has only just started can fail
 # once; the new app is already serving, so retry a few times before giving up.
@@ -443,6 +687,7 @@ until $DC up -d --no-deps --force-recreate ts-inventory; do
   sleep 3
 done
 recover=
+phase=done
 
 $DC ps
 maybe_prune

@@ -123,6 +123,9 @@ until it is recreated. The script prints that one command when it exits that way
 | `--classic` | Stop app and sidecar, migrate, start everything. See below. |
 | `--force` | Swap even if Compose sees nothing to change. |
 | `--prune` | Afterwards, remove dangling images. |
+| `--ref <tag\|sha>` | Deploy that ref instead of pulling: fetch, verify, check out detached, and build it as `VERSION=<tag>` (or the short sha). Refuses `--no-pull`. |
+| `--auto` | Let `migrate plan` choose between the rolling and the classic path. Refuses `--classic`. |
+| `--backup` | Archive the instance into `./backups` before migrating; a failed backup aborts the update. |
 | `-h`, `--help` | Print the header of the script. |
 
 | Environment | Meaning |
@@ -131,6 +134,8 @@ until it is recreated. The script prints that one command when it exits that way
 | `HEALTH_TIMEOUT`, `DRAIN_TIMEOUT` | Seconds; defaults 120 and 60. |
 | `DOCKER_COMPOSE` | The compose command (default `docker-compose`). Set it to the full path of the standalone binary where `PATH` does not have it. |
 | `INVENTORY_PROJECT` | The project name (default `inventory`). For testing; leave it alone on the NAS. |
+| `DEPLOY_MODE` | `classic` forces the classic path under `--auto` (the annotated tag's `deploy: classic` line). Nothing forces rolling. |
+| `BACKUP_KEEP` | How many `--backup` archives to keep in `./backups`; read from the environment, then from `.env`, then 5. |
 
 **Nothing to do.** After the build, the script asks Compose (`up --dry-run`) whether
 it would recreate, create or start anything. If not — same image, same
@@ -161,6 +166,116 @@ $ TS_AUTHKEY=tskey-auth-… sh deploy/synology/update --no-pull
 **Refuses to run** unless the merged model lists `app`, `db` and `ts-inventory`
 and does not list `traefik` (the NAS layer is not active), and unless Compose is at
 least 2.24.
+
+### Deploying a release: `--ref`, `--auto`, `--backup`
+
+The release pipeline
+([`38-release-pipeline-and-nas-runner.md`](../../docs/specs/38-release-pipeline-and-nas-runner.md))
+runs one command on the NAS, and reads nothing but its exit code and its last
+line:
+
+```console
+$ sh deploy/synology/update --ref v1.4.0 --auto --backup
+```
+
+**`--ref <tag|sha>`** replaces the pull. It fetches `origin` with its tags,
+verifies the ref resolves, checks it out **detached**, and stamps the build with
+it: `VERSION=<tag>` for a tag, the short sha for anything else, which
+`docker-compose.yml` passes into the image and `GET /healthz` reports back. What
+is deployed is then one named commit instead of wherever a branch happened to
+point. The clean-clone refusal applies exactly as it does to the pull, and a ref
+that does not resolve is a refusal *before* anything is built or migrated. Since
+`--ref` is how the run gets its code, `--ref` and `--no-pull` together are an
+error. A clone left detached this way keeps deploying by tag; `git switch main`
+puts it back on the branch for a plain `update`.
+
+**`--auto`** takes the choice between rolling and classic away from the
+operator. After the build it runs `inventory migrate plan`, which reads the
+`-- +inventory:classic` marker of the pending migrations:
+
+| `migrate plan` exits | What `--auto` does |
+|---|---|
+| `0` | rolling — no pending migration the previous release cannot serve, or nothing pending at all |
+| `3` | classic — a pending migration carries the marker |
+| anything else | aborts before anything is migrated: `could not plan the migration: migrate plan exited <n>` |
+
+`DEPLOY_MODE=classic` in the environment forces the classic path without
+consulting the plan at all — that is how an annotated tag whose message carries
+`deploy: classic` reaches this script. **Nothing forces rolling**: the override
+is one-way, and an operator who believes a marker is wrong edits the migration
+and cuts a new tag. `--auto` and `--classic` together are an error.
+
+**`--backup`** runs the `backup` service
+([`15-backup-restore-and-export.md`](../../docs/specs/15-backup-restore-and-export.md))
+into `./backups` **before the schema is touched**, on every path that migrates —
+and, on the classic path, before anything is stopped, so that a failed backup
+leaves the old release serving. A backup that fails, or that exits 0 without
+writing an archive, **aborts the update with nothing migrated**: migrations only
+go forward, so that archive is the only way back across one. Afterwards the
+newest `BACKUP_KEEP` archives are kept (default 5; from the environment, else
+from `.env`) and the older ones are deleted. A half-written
+`.inventory-backup-<stamp>.tar.gz.part` is never deleted — it belongs to a backup
+that is still running — and neither is anything else you keep in `./backups`.
+
+The `backup` service has no `depends_on`, on purpose (a backup that quietly
+starts the database it was meant to dump is how a failing backup goes
+unnoticed), so on a **first start** with nothing running at all it has no
+database to reach. Start the stack without `--backup` that one time.
+
+**The summary line.** The last line of every run that got past its own command
+line says what happened, in one line:
+
+```
+update: done mode=rolling ref=v1.4.0 version=v1.4.0 backup=inventory-backup-2026-09-28-0300.tar.gz
+update: failed mode=rolling ref=v1.4.0 version=v1.4.0 backup=none phase=drain
+```
+
+`mode` is `rolling`, `classic`, `first-start` or `nothing`. On success the word
+after `update:` is the phase reached (`done`); on failure `phase=` names the one
+it stopped in — the lookup key of the table below. It goes to stdout either way;
+the recovery messages keep going to stderr. The exit code is `0` on success
+**and** on nothing-to-do, `1` on every refusal and abort, and the signal exits
+(`130`, `143`, `129`) are unchanged.
+
+### When a deploy fails
+
+A failed deploy is a **stop**, not a rollback: in most rows below the previous
+release is still serving, which is the point of the rolling design. Read
+`phase=` off the summary line and look it up:
+
+| `phase=` | What is serving | What the database is | The way through |
+|---|---|---|---|
+| `preflight` | the old release, untouched | untouched | Fix what it named: Compose < 2.24, the lock, two app instances or a leftover stopped one, a dirty clone, a bad `BACKUP_KEEP`. |
+| `fetch` | the old release, untouched | untouched | The ref does not resolve, or `git fetch` failed. Nothing was built. |
+| `model` | the old release, untouched | untouched — but the clone now stands at the new ref | The merged model is not the NAS one. The message names the commit the clone moved to. |
+| `build` | the old release, untouched | untouched | Fix the build. |
+| `plan` | the old release, untouched | untouched | `migrate plan` could not answer. Nothing was migrated. |
+| `backup` | the old release, untouched | untouched | The archive was not taken, so the run stopped before `migrate up`. |
+| `migrate` | the old release (rolling); stopped (classic) | possibly **partially** migrated: goose applies each migration in its own transaction and stops at the one that failed | Forward-only. Fix the migration and run again, or restore the archive. |
+| `drain` | the old release | migrated | Jobs would not drain, or the count could not be read. Re-tag with `deploy: classic`, or deploy by hand with `--classic`. |
+| `start` | the old release; the new instance is removed again | migrated | The new instance never became healthy. Its last 30 log lines are on stderr. |
+| `retire`, `sidecar` | the **new** release, but the tailnet URL is down until the sidecar is recreated | migrated | Run the `--force-recreate ts-inventory` command the exit trap printed. |
+
+**Rollback is restoring the pre-upgrade archive** ("Going back" below;
+[`15-backup-restore-and-export.md`](../../docs/specs/15-backup-restore-and-export.md)
+has the procedure) — that is what `--backup` takes it for, and the summary line
+names it. Going back across a release that migrated **nothing** needs no restore
+at all: deploy the older tag, and
+`git diff --stat <older tag> <tag> -- migrations/` printing nothing is how you
+know that is the case.
+
+### Deploying by hand
+
+When the runner is down, or before there is one, the same command from `sudo -i`
+in the clone is the whole procedure — it is also what this script always was:
+
+```console
+$ cd /volume1/docker/inventory
+$ sh deploy/synology/update --ref v1.4.0 --auto --backup
+```
+
+Leave `--ref` off to deploy the branch tip (`git pull --ff-only`), and `--auto`
+off to choose the path yourself with `--classic` or the default rolling.
 
 ### From Task Scheduler
 
@@ -257,6 +372,12 @@ real one. In a scratch clone (`git clone` of the branch, a dummy `.env`, and
 | The lock directory created by hand | The script refuses, names it, and says whether the pid inside it is still alive. |
 | `--classic` with a failing migration | Stack stays stopped and the message says so, with the `up -d` that starts it again. |
 | `--prune` on each of the four ends: first start, "nothing to swap", `--classic`, rolling | A dangling image the build left behind is gone in all four cases. |
+| `--ref` to a tag that exists (`git tag -a v0.0.1-scratch -m x`) | Fetches, detaches onto it, prints `<old> -> <new>`, and the built image reports that version; the summary line says `ref=v0.0.1-scratch version=v0.0.1-scratch`. |
+| `--ref` to a ref that does not exist | Refuses after the fetch and before the build; nothing is built or migrated, and the summary says `phase=fetch`. |
+| `--backup` on a running stack | An archive appears in `./backups`, the summary names it, and it was written before `migrate up` ran. |
+| `--backup` with the database stopped (`dc stop db`) | The backup fails, the run aborts with "Nothing was migrated", no `migrate up` ran, and on `--classic` nothing was stopped either. |
+| `--backup` with six archives already in `./backups` and a `.part` beside them | The newest five survive, the older ones are gone, and the `.part` is untouched. |
+| `--auto` on a scratch clone | Runs `migrate plan` after the build and takes the path its exit code names; an exit code that is neither `0` nor `3` aborts before anything is migrated. `DEPLOY_MODE=classic … --auto` takes the classic path without running the plan at all. |
 | `traefik` in the merged model (drop the `-f docker-compose.nas.yml`) | Refuses; no container is touched, and after a pull that moved the clone the message names the commit it moved to. |
 | Compose older than 2.24 (`DOCKER_COMPOSE=` the Container Manager binary) | Refuses before it touches anything. |
 | `kill` (SIGTERM) of the run between the health check and step 6 | Exit 143; the new instance is removed, the old app and the sidecar keep their ids, and the lock directory is gone. |
