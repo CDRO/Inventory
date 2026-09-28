@@ -999,4 +999,24 @@ INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, create
   ('00000000-0000-7000-8000-000000000139', '00000000-0000-7000-8000-00000000010b', '00000000-0000-7000-8000-000000000119',  6, 'purchase', '00000000-0000-7000-8000-000000000003')
 ON CONFLICT (id) DO NOTHING;
 
+-- Two products dedicated to the icon picker (docs/specs/40-icon-picker.md).
+-- ...0150 and ...0151 are the next free ids after ...0139, the container
+-- batches block above.
+--
+-- Their own rows rather than reusing an existing one, same reasoning as
+-- every block above: the suite runs fullyParallel, and one scenario searches
+-- and picks (a global icon_aliases write, since icon_aliases and icons are
+-- both global tables — docs/specs/02-data-model.md's catalog_products
+-- exception) while the other clears, so sharing a product would let the
+-- order they run in decide the outcome.
+--
+-- ...0150 starts with no icon: the scenario asserts one arriving from a
+-- direct-name search hit. ...0151 starts with 'noto:cheese-wedge', the same
+-- vendored identifier every other icon fixture in this file already uses, so
+-- clearing it — and observing it stay cleared — is observable.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock, icon_name) VALUES
+  ('00000000-0000-7000-8000-000000000150', '00000000-0000-7000-8000-000000000010', 'E2E Icon Picker Search Source', NULL, 'non_perishable', 0, NULL),
+  ('00000000-0000-7000-8000-000000000151', '00000000-0000-7000-8000-000000000010', 'E2E Icon Picker Clear Source',  NULL, 'non_perishable', 0, 'noto:cheese-wedge')
+ON CONFLICT (id) DO NOTHING;
+
 COMMIT;

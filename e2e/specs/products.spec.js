@@ -741,6 +741,8 @@ test('"+ Add product" is refused with no name, and nothing is created', async ({
 const PICTURE_PICKER_PRODUCT = "00000000-0000-7000-8000-0000000000fa";
 const PICTURE_CLEAR_PRODUCT = "00000000-0000-7000-8000-0000000000fb";
 const EDIT_FORM_SYNC_PRODUCT = "00000000-0000-7000-8000-000000000101";
+const ICON_PICKER_SEARCH_PRODUCT = "00000000-0000-7000-8000-000000000150";
+const ICON_PICKER_CLEAR_PRODUCT = "00000000-0000-7000-8000-000000000151";
 
 // A product of Alice's "E2E Other Household" (...011), used only as a product
 // id from *another* storage. Bob is not a member there, so the image route
@@ -800,13 +802,17 @@ test("clearing a product's picture goes through the image route and shows on the
   await expect(page.locator('[data-role="product-picture"]')).toContainText("No picture yet.");
 });
 
-// The regression test for #251: the edit form's `icon` input used to be
-// seeded from product.icon_name once, at render, and never resynced when the
-// picture block cleared it — so an unrelated-field Save right after a clear
-// silently reinstated the icon by diffing against that stale DOM value.
-// Its own dedicated product: the suite runs fullyParallel and this scenario
-// both clears the picture and saves, like the other picture scenarios above.
-test("clearing a picture through the UI does not leave the edit form's icon stale for the next Save", async ({
+// The regression test for #251, updated for docs/specs/40-icon-picker.md: the
+// edit form no longer holds icon_name in an input Save reads at all — a pick
+// or a clear writes it immediately, through its own PATCH, exactly like a
+// picture change already does — so the original bug (a stale DOM value
+// resurrecting the icon on the next unrelated-field Save) can no longer occur
+// by construction. This keeps the regression's shape: clear the picture,
+// confirm icon_name went with it, then do an unrelated-field Save and confirm
+// it stays cleared. Its own dedicated product: the suite runs fullyParallel
+// and this scenario both clears the picture and saves, like the other
+// picture scenarios above.
+test("clearing a picture through the UI does not leave icon_name to resurface on the next Save", async ({
   page,
 }) => {
   await logIn(page);
@@ -824,23 +830,85 @@ test("clearing a picture through the UI does not leave the edit form's icon stal
   await page.locator('[data-role="change-picture"]').click();
   await page.locator('[data-role="picture-none"]').click();
   await expect(page.locator('[data-role="picture-status"]')).toContainText("Picture removed.");
+  await expect(page.locator('[data-role="current-icon"]')).toContainText("No icon set.");
 
-  // Before the fix this still read "noto:cheese-wedge": setPicture's
-  // re-render is deliberately narrow (it must not discard unsaved edits) and
-  // never touched the form.
-  await expect(page.locator("#p-icon")).toHaveValue("");
-
-  // An unrelated-field save. Before the fix, save() diffed this stale input
-  // against product.icon_name (now null), saw a difference, and sent
-  // icon_name back to the server — resurrecting the icon the clear just
-  // removed.
+  // An unrelated-field save. Save's body no longer mentions icon_name at all
+  // (docs/specs/40-icon-picker.md), so there is nothing left in it to
+  // resurrect the icon the clear just removed.
   await page.locator("#p-min-stock").fill("3");
-  await page.locator('form:has(#p-icon)').getByRole("button", { name: "Save" }).click();
+  await page.locator("form:has(#p-name)").getByRole("button", { name: "Save" }).click();
   await expect(page.locator("#status")).toContainText("Saved.");
 
   const after = await fetchProduct(page, EDIT_FORM_SYNC_PRODUCT);
   expect(after.icon_name).toBeNull();
   expect(after.min_stock).toBe(3);
+});
+
+// docs/specs/40-icon-picker.md's own acceptance criteria: searching, picking
+// a direct-name hit, and confirming the pick silently recorded a new alias by
+// searching the same term again.
+test("picking a direct-name icon hit sets it and silently records a new alias for next time", async ({
+  page,
+}) => {
+  await logIn(page);
+
+  const before = await fetchProduct(page, ICON_PICKER_SEARCH_PRODUCT);
+  expect(before.icon_name).toBeNull(); // the fixture must start out unset
+
+  await openProduct(page, "E2E Icon Picker Search Source");
+  await page.locator('[data-role="change-icon"]').click();
+  await page.locator('[data-role="icon-search"]').fill("cheese");
+
+  const hit = page.getByRole("button", { name: "Use the noto:cheese-wedge icon" });
+  await expect(hit).toBeVisible();
+  await hit.click();
+
+  await expect(page.locator('[data-role="current-icon"]')).toContainText("noto:cheese-wedge");
+
+  const after = await fetchProduct(page, ICON_PICKER_SEARCH_PRODUCT);
+  expect(after.icon_name).toBe("noto:cheese-wedge");
+
+  // No confirmation step, no checkbox — the picker records the alias on its
+  // own the moment a direct-name hit is picked. Confirmed against the search
+  // endpoint directly, not the DOM: the point is to prove the alias actually
+  // landed in icon_aliases, not that the picker can render its own state.
+  const res = await page.request.get(`${BASE}/icon-suggestions?query=cheese`);
+  expect(res.status()).toBe(200);
+  const body = await res.json();
+  expect(body.suggestions[0].icon_name).toBe("noto:cheese-wedge");
+  expect(body.suggestions[0].matched_alias).toBe("cheese");
+});
+
+// The other half of docs/specs/40-icon-picker.md's acceptance criteria:
+// clearing an icon is a one-click action distinct from search. Also covers
+// the picker's opening state on a product that already has an icon: "shows
+// the product's current icon (if any) highlighted" — asserted here, before
+// the clear, since this fixture is the one seeded with an icon to begin with.
+test("clearing an icon through the picker removes it", async ({ page }) => {
+  await logIn(page);
+
+  const before = await fetchProduct(page, ICON_PICKER_CLEAR_PRODUCT);
+  expect(before.icon_name).toBe("noto:cheese-wedge"); // the fixture must start out set
+
+  await openProduct(page, "E2E Icon Picker Clear Source");
+  await page.locator('[data-role="change-icon"]').click();
+
+  // Selected by icon identity, not by the aria-label's "Use the … icon" text:
+  // "noto:cheese-wedge" may independently have gained an alias by the time
+  // this runs (the suite is fullyParallel and icon_aliases is global — the
+  // other icon-picker scenario records "cheese" as one), which would render
+  // this same result as an alias hit with a different label wording. Either
+  // way it is still the same icon, so it must still be the one highlighted.
+  const current = page.locator('[data-role="icon-suggestion"][data-icon-name="noto:cheese-wedge"]');
+  await expect(current).toBeVisible();
+  await expect(current).toHaveAttribute("aria-pressed", "true");
+
+  await page.locator('[data-role="icon-none"]').click();
+
+  await expect(page.locator('[data-role="current-icon"]')).toContainText("No icon set.");
+
+  const after = await fetchProduct(page, ICON_PICKER_CLEAR_PRODUCT);
+  expect(after.icon_name).toBeNull();
 });
 
 test("the image route answers 404 for a product in another storage, not 403", async ({ page }) => {

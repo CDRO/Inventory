@@ -17,7 +17,9 @@ import (
 	"github.com/CDRO/Inventory/internal/store"
 )
 
-// fakeIcons is an in-memory IconStore (docs/specs/42-local-icon-library.md).
+// fakeIcons is an in-memory IconStore (docs/specs/42-local-icon-library.md)
+// and IconSuggestionStore (docs/specs/40-icon-picker.md) — the same fake
+// covers both, since a real Store implements both against the same tables.
 type fakeIcons struct {
 	createErr  error
 	lastCreate store.NewIcon
@@ -25,6 +27,15 @@ type fakeIcons struct {
 
 	svgs   map[uuid.UUID]string
 	svgErr error
+
+	aliasHits    []store.IconSuggestion
+	aliasErr     error
+	nameHits     []store.IconSuggestion
+	nameErr      error
+	createAlias  error
+	lastAliasFor string
+	lastAlias    string
+	lastAliasBy  uuid.UUID
 }
 
 func (f *fakeIcons) CreateIcon(_ context.Context, in store.NewIcon) (*store.Icon, error) {
@@ -51,6 +62,19 @@ func (f *fakeIcons) IconSVG(_ context.Context, id uuid.UUID) (string, error) {
 		return "", store.ErrNotFound
 	}
 	return body, nil
+}
+
+func (f *fakeIcons) SearchIconAliases(_ context.Context, _ string, _ int) ([]store.IconSuggestion, error) {
+	return f.aliasHits, f.aliasErr
+}
+
+func (f *fakeIcons) SearchIconsByName(_ context.Context, _ string, _ int) ([]store.IconSuggestion, error) {
+	return f.nameHits, f.nameErr
+}
+
+func (f *fakeIcons) CreateIconAlias(_ context.Context, iconName, alias string, createdBy uuid.UUID) error {
+	f.lastAliasFor, f.lastAlias, f.lastAliasBy = iconName, alias, createdBy
+	return f.createAlias
 }
 
 // doMultipart posts a multipart/form-data body carrying fields, and a file
