@@ -1,17 +1,17 @@
 {
-  "cache_version": "v27",
+  "cache_version": "v29",
   "digests": {
-    "/": "518b589cd4cb1e0fced63a0984380199b0bb909c8eaf86fe5ffd1f06b0c63631",
-    "/categories.html": "b5ff21e56455bb62a150577f01f60e6111b7e6e3c9a2fbd47478388b68229e22",
-    "/css/base.css": "c2a5c9568a13e7afe9bf037509ef10155a8998d78af20b17d8e273c54e9b3d43",
+    "/": "c7ecaf956a6eedf333caaf56a24a203bd228855e0161781649c20466a86a6f88",
+    "/categories.html": "1ace1541fdc390ce3231aa6affb84e3d5b262a85ca42935ea17dc6f811217d44",
+    "/css/base.css": "09c89a7c998dea2d8094caf02785bd463cf24fa98c23f53d97da6a816523c0c3",
     "/css/components.css": "4c57177d1866d973dabaaf68e3477e63d3001e8f25bdbde9374a6c937ea47131",
     "/css/tokens.css": "782346dd8139048a2c12ef5aec77da0ac845986b1fec3f04fcebd86be9830f29",
     "/i18n/de.json": "485e8b4c7d9d008ed1b54cf1ee486ff5103b31559a9e7341b76867190edd21b7",
     "/i18n/en.json": "9c4a5d69985df7cb29d5c4b56f4138de577aa3ccdd719b39dd21a3c9b93d1b00",
     "/icons/icon-192.png": "d799f02deeeab9a0ecd434f1befe77216343cf126f5ffbf8d2f4626e4066b504",
     "/icons/icon-512.png": "18269146796b30ebc06f32e941436aa720277860f58f1e682182c2c050751db5",
-    "/inbox.html": "c7039f75dfca15472c668a3faf6f0e060bfffa222e1af0ff1477c96b179133d7",
-    "/ingest.html": "2b2f7ab845521e5eb5e5e3462a9d984f68bd814ad833b767e9c8e451fee624db",
+    "/inbox.html": "afcc9c6420522ae9f7e08ffc2c1882c6c161b516b3654f96fc77249b2a1f5ac6",
+    "/ingest.html": "31bdbeac025d0eff76f8b617714c7c722cd3b3c1fedce9f29b19546a29fa4bc8",
     "/inventory.html": "66cb9056cd1bbfcb4f2f352963af05da766e417a96de9317ba1225d19ad8f202",
     "/js/api.js": "fb510de70b9e4b85b8cfc0636ee494db3c1da4753053630c0948a41ae069c14a",
     "/js/audited.js": "b34a8ed0b44249cb3fce75dc059bfd21d5a4648b6cafecef178d755cc9545f92",
@@ -32,12 +32,12 @@
     "/js/storage-switcher.js": "d961f13db131470179074b4a46269b0093fcdab5689928a3632e1a83412925d2",
     "/js/tree-modal.js": "6ecbbf8030781739dfb769964c06373d820fb202a245fdcc9690dab5428b91d1",
     "/js/tree.js": "ecb3098b2b0bb8f27aeb25b820e65f99dd5c61db3c410624bb7a015d8620b54f",
-    "/locations.html": "36e40ceeb1d4ec71e14d8b0c285bf34eaa9bb05cfdcd5067ac6230ea54ee8e49",
+    "/locations.html": "3af1e5eb19ca7655fa6dd1b02715e750ca674b2e7e6e77e6df932e206b6a666b",
     "/manifest.json": "906b08dadcbeed57072d9d43cb55fae9c62ffe802228f3b6fc05d78d2fa37d88",
-    "/products.html": "3d9f37a14206618ccf1a8dfb72235b6b9c42f54ef1d5debfb34496e86f5bc3d0",
-    "/review.html": "8f86723e1820e0ba70f6217a452b21950253954a3ceccdefa101e3dc446d1a98",
-    "/shopping-list.html": "5beb81d37eafd39cec978fd38bbd12fb9cf3eca322edac260847372409c6b635",
-    "/stocktake.html": "b9a217de36fa6fd953ba9c8a7c31e5d1f4b2fcc6d374102afde3d8a73175b0c3",
-    "/storages.html": "3ffc33d9aee93d08d2f3c0694032185e528c72efa25a1a952866958296c87c30"
+    "/products.html": "f78c8433df565112d0472570903364bb501e52d858d374f244e31b9d0d07b49f",
+    "/review.html": "8087c9e6a611f4ebd5dbf03aa5504904728cf125c2fb81bc6cbcf524d5ff0f06",
+    "/shopping-list.html": "0ef0e85c084f4ff568a1ded9d885b6cd6c8e76182334546f91c30d393bfe356e",
+    "/stocktake.html": "f4f5a9df4113d9bea80aebf4276f970fd38647cf87021d49646ac9fd5d46b193",
+    "/storages.html": "b3c2c42e1a2d2f5ce9df9ed5361fd6f20422878e1667269742d2542a5015eba1"
   }
 }

@@ -162,6 +162,36 @@ for (const { file, label } of PAGES) {
   });
 }
 
+// Wide layout is now every page's default (docs/specs/05-frontend-pwa-foundations.md,
+// "Layout width" amendment): `.shell--wide` caps `<header>`/`<main>` at 80rem
+// (1280px at the browser's default 16px root) rather than `.shell`'s 40rem
+// (640px). Reuses PAGES plus the pages that loop doesn't cover (storages.html
+// has no nav bar of its own to mark, and review.html/consume-review.html
+// aren't nav destinations) — inventory.html was already wide before this
+// change (spec 33) and is included here as a control, not a new assertion.
+const WIDE_PAGES = [
+  ...PAGES.map((p) => p.file),
+  "storages.html",
+  "review.html",
+  "consume-review.html",
+];
+
+for (const file of WIDE_PAGES) {
+  test(`${file}'s header and main are capped at 80rem, not 40rem`, async ({ page }) => {
+    await logIn(page, "e2e-start-multi");
+    await expect(page.locator("#main")).toContainText("Choose a storage");
+    await page.goto(`/${file}?storage=${START_TWO}`);
+
+    const header = page.locator("header").first();
+    await expect(header).toBeVisible();
+    expect(await header.evaluate((el) => getComputedStyle(el).maxWidth)).toBe("1280px");
+
+    const main = page.locator("main#main");
+    await expect(main).toBeVisible();
+    expect(await main.evaluate((el) => getComputedStyle(el).maxWidth)).toBe("1280px");
+  });
+}
+
 // At phone width the bar scrolls sideways and the page body does not. A bar
 // that simply overflowed would look the same in a screenshot and make every
 // page horizontally scrollable, which is the failure this pins.

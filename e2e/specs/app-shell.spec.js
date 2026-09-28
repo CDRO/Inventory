@@ -37,6 +37,14 @@ test("the login page loads with no console errors", async ({ page }) => {
   // building this page: a module that fails to resolve throws in the
   // browser console, not in anything a Go test could see.
   expect(consoleErrors, `unexpected console errors: ${consoleErrors.join("; ")}`).toEqual([]);
+
+  // Wide layout is now every page's default (docs/specs/05-frontend-pwa-foundations.md,
+  // "Layout width" amendment) — index.html has no <header>, just this <main>,
+  // so it gets its own check rather than joining start-page.spec.js's
+  // WIDE_PAGES loop, which needs a login.
+  expect(await page.locator("main.shell").evaluate((el) => getComputedStyle(el).maxWidth)).toBe(
+    "1280px",
+  );
 });
 
 test("every shared JS module is reachable and served as JavaScript", async ({ request }) => {
