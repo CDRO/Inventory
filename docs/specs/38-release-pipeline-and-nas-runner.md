@@ -34,18 +34,19 @@ refusal paths and its guarantees are the ones
 `01-architecture-and-deployment.md` already specifies, and this spec restates
 them per phase rather than replacing them.
 
-**Nothing described here exists yet.** `inventory migrate plan`, the `--ref`,
+**Everything described here now exists.** `inventory migrate plan`, the `--ref`,
 `--auto` and `--backup` flags of `deploy/synology/update`,
 `deploy/synology/runner/`, `.github/workflows/release.yml` and
-`scripts/dev release` are all still to be built, by four packages that each own
-one layer. Every criterion under "Acceptance criteria" names the package that
+`scripts/dev release` were built by four packages that each own one layer.
+Every criterion under "Acceptance criteria" names the package that
 delivers it — **H14** (`migrate plan`), **H15** (the update script), **H16**
 (the runner container), **H17** (`release.yml` and `scripts/dev release`) — so
-a package can point at its own subset of this spec. Until they land, the manual
-procedure in `01-architecture-and-deployment.md` and
-`18-operations-and-observability.md` is what is true, and it stays the
-documented fallback afterwards: a NAS whose runner is down is deployed by hand,
-with the same script.
+a package can point at its own subset of this spec. An ordinary release on that
+NAS is now `scripts/dev release <tag>` (`deploy/synology/README.md`, "A release,
+start to finish"). The manual procedure in
+`01-architecture-and-deployment.md` and `18-operations-and-observability.md`
+stays the documented fallback: a NAS whose runner is down is deployed by hand,
+with the same script, as is any deployment that is not that NAS.
 
 Background — **not** contract — is the harness optimization plan (issue #293)
 and the decisions it records as **D3** (classic-deploy signalling) and **D4**

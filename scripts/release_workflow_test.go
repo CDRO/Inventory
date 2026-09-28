@@ -126,15 +126,62 @@ func TestReleaseWorkflowNeverChecksOutTheRepository(t *testing.T) {
 	}
 }
 
+// jobBlock returns the body of one top-level job of a workflow - the lines
+// from `  <name>:` up to the next job at the same two-space indentation.
+//
+// Scoping matters for every assertion about the deploy job: the
+// repository/actor guard is deliberately spelled out TWICE in release.yml,
+// once on `gate` and once on `deploy`, and a whole-file `strings.Contains`
+// therefore cannot tell "both guards present" from "the one on deploy was
+// deleted". The copy on `deploy` is the one that decides whether GitHub runs
+// code as root on the NAS.
+func jobBlock(t *testing.T, body, name string) string {
+	t.Helper()
+	// A Windows checkout hands these files back with CRLF: `.gitattributes`
+	// normalises *.go, not *.yml. Splitting on "\n" would leave a trailing
+	// "\r" on every line and no job header would ever match.
+	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
+	start := -1
+	for i, line := range lines {
+		if line == "  "+name+":" {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("release.yml has no top-level job %q - this test can no longer find what it guards", name)
+	}
+	for i := start + 1; i < len(lines); i++ {
+		line := lines[i]
+		// The next top-level job: two spaces, then a key, and nothing else.
+		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ") &&
+			strings.HasSuffix(strings.TrimSpace(line), ":") && !strings.HasPrefix(strings.TrimSpace(line), "#") {
+			return strings.Join(lines[start:i], "\n")
+		}
+	}
+	return strings.Join(lines[start:], "\n")
+}
+
 // The guards spec 38's H17 criteria name, each of which is a line somebody
 // could reasonably delete while tidying and nothing else would notice.
+//
+// Each is asserted against the job that actually carries it rather than
+// against the whole file, so that deleting it from `deploy` fails this test
+// even when an identical line survives elsewhere in the workflow.
 func TestReleaseDeployJobKeepsItsGuards(t *testing.T) {
 	body := workflowFiles(t)["release.yml"]
+	deploy := jobBlock(t, body, "deploy")
+
+	// The trigger is the workflow's, not the deploy job's.
+	if !strings.Contains(body, `tags: ["v*"]`) {
+		t.Error(`release.yml no longer contains tags: ["v*"] - the trigger is a tag push only, ` +
+			"which is what stops a fork from starting a release on this repository")
+	}
+
 	for _, want := range []struct {
 		text string
 		why  string
 	}{
-		{`tags: ["v*"]`, "the trigger is a tag push only - a fork cannot push a tag to this repository"},
 		{"runs-on: [self-hosted, nas]", "the deploy job runs on the labelled NAS runner"},
 		{"environment: production", "every deploy leaves a deployment record and can be given a required reviewer"},
 		{"group: nas-deploy", "two tags pushed minutes apart queue instead of interleaving (decision D4)"},
@@ -144,8 +191,8 @@ func TestReleaseDeployJobKeepsItsGuards(t *testing.T) {
 		{"--ref \"$TAG\" --auto --backup", "the exact command spec 38 says the deploy job runs"},
 		{"DEPLOY_MODE: ${{ needs.gate.outputs.deploy_mode }}", "the tag message's classic override reaches the script"},
 	} {
-		if !strings.Contains(body, want.text) {
-			t.Errorf("release.yml no longer contains %q - %s", want.text, want.why)
+		if !strings.Contains(deploy, want.text) {
+			t.Errorf("release.yml's `deploy` job no longer contains %q - %s", want.text, want.why)
 		}
 	}
 }
@@ -253,6 +300,30 @@ func TestReleaseGateLooksRunsUpByTheTagsCommit(t *testing.T) {
 	if !strings.Contains(body, "actions: read") {
 		t.Error("release.yml no longer requests `actions: read` - the gate's run lookup would 403 " +
 			"on a repository whose default workflow permission is read-only contents")
+	}
+}
+
+// The other half of the gate's decision, and the half that fails OPEN when it
+// breaks: filtering by `head_sha` asks about the right commit, but only
+// `.conclusion == "success"` asks whether that commit was actually green.
+// Widen it to `.conclusion != null`, or to `.status == "completed"` - both
+// plausible while chasing a flaky lookup - and a commit whose `test` run went
+// RED counts as a green run, the reusable calls are skipped as unnecessary,
+// and `deploy` puts it on the NAS. The `-gt 0` is what turns the count into
+// the decision.
+func TestReleaseGateCountsOnlySuccessfulRuns(t *testing.T) {
+	gate := jobBlock(t, workflowFiles(t)["release.yml"], "gate")
+	for _, want := range []struct {
+		text string
+		why  string
+	}{
+		{`select(.conclusion == "success")`, "only a SUCCESSFUL run may satisfy the gate; a red or cancelled run must not"},
+		{`-gt 0`, "the count of successful runs is what decides whether the reusable call is skipped"},
+	} {
+		if !strings.Contains(gate, want.text) {
+			t.Errorf("release.yml's `gate` job no longer contains %q - %s. A commit whose test or e2e "+
+				"run failed could then be read as green and deployed to the NAS.", want.text, want.why)
+		}
 	}
 }
 
