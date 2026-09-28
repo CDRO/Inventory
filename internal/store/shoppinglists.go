@@ -28,6 +28,7 @@ const (
 // the ones shopping_list_items.status accepts.
 type ShoppingListItemStatus string
 
+// ShoppingListItemStatus values.
 const (
 	ItemExactMatch ShoppingListItemStatus = "exact_match"
 	ItemNewItem    ShoppingListItemStatus = "new_item"

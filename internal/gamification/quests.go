@@ -8,6 +8,7 @@ import "sort"
 // params, so renaming one is a breaking API change.
 type GeneratorKind string
 
+// GeneratorKind values.
 const (
 	GeneratorStaleLocation      GeneratorKind = "stale_location"
 	GeneratorMissingExpiry      GeneratorKind = "missing_expiry"

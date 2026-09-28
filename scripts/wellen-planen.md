@@ -18,10 +18,14 @@ and reviewers" below.
 
 > **There is more than one plan file now.** `scripts/wellen.json` is the
 > Extended-core plan (#97, complete — kept as its record, not extended);
-> `scripts/wellen-followups.json` is the deferred-follow-ups plan (#176);
+> `scripts/wellen-followups.json` holds the deferred-follow-ups plan (#176,
+> complete as of its own 15 waves) plus, appended after it, standalone bonus
+> waves tracked by their own issue via the wave-level `planIssue` override
+> (see "Wave-file schema") rather than by reopening #176;
 > `scripts/wellen-harness.json` is the harness optimization plan (#293,
 > `docs/plans/2026-09-harness-optimization.md`), which starts only after
-> #176's last wave has closed. A
+> #176's last wave has closed and gets its own file rather than more bonus
+> waves appended to `wellen-followups.json`. A
 > finished plan's file stays where it is rather than being emptied, so **every
 > command that names a wave or a slug needs `-WaveFile` unless it means
 > `wellen.json`** — that default is silent, and a bare `-Wave 2` against the
@@ -53,7 +57,13 @@ starts. The one other thing it does is that Docker cleanup, and that is
 deliberate: removing Docker resources is mechanical and must be exact, and a
 session that is told to tidy up Docker is a session that might run a prune.
 **Planning a new wave therefore means: extend the JSON file and set up the
-GitHub prerequisites. The script itself is never changed.**
+GitHub prerequisites. The script itself is never changed** to plan a wave
+that fits the existing schema. The rare exception is a wave that needs a
+schema field the script has no way to honor yet — the wave-level `planIssue`
+override below is the one example so far, added because nothing in the
+original schema let a bonus wave name a tracking issue other than the
+file-wide `plan.planIssue`. That is a schema change, reviewed like any other
+code change, not a planning-session shortcut.
 
 Docker isolation between parallel package worktrees (`COMPOSE_PROJECT_NAME`,
 `HTTP_PORT`, `TRAEFIK_PORT`) is automatic and needs no attention when
@@ -276,6 +286,14 @@ Before the orchestrator can work through a wave, these must exist:
     {
       "number": 2,                          // unique and strictly ascending
       "waveIssue": 93,                      // wave issue; closed = wave done
+      "planIssue": null,                    // optional; overrides plan.planIssue for this wave's own
+                                             //   prompts (package and consolidation) - for a standalone
+                                             //   bonus wave tracked by its own issue rather than the
+                                             //   file-wide plan issue, e.g. one appended after that plan
+                                             //   issue already closed
+      "planName": null,                     // optional; overrides plan.name alongside planIssue - set
+                                             //   both together or neither, so "wave N of <name>" never
+                                             //   names a plan the wave was deliberately kept out of
       "integrationBranch": "integration/specs-13-20-welle-2",
       "sequential": false,                  // true: packages run one after another, not in parallel
       "dockerCleanup": true,                // true: after the consolidation, remove the Docker
@@ -406,7 +424,9 @@ Before assigning packages to a wave, check what each one touches:
    ```
    `-Validate` checks the schema, naming the path of every finding;
    `-DryRun` additionally shows which sessions would start with which
-   model/effort/advisor — neither starts anything.
+   model/effort/advisor — neither starts anything. Run `scripts/doctor` first,
+   too — it catches a broken Docker/gh/claude setup before the orchestrator
+   opens a single window.
 6. Report to the user what was planned, and the command that starts it. Do
    **not** start the orchestrator yourself — that is the user's call.
 
@@ -433,3 +453,38 @@ first integration branch), extend scripts/wellen.json, and check with
 planned waves with packages and model/effort per session, issues and
 branches created, and the command that starts the orchestrator.
 ```
+
+## Attention
+
+Every package and consolidation session runs with two hooks configured in
+`.claude/settings.json`: a `Notification` hook and a `Stop` hook, both
+invoking `scripts/hooks/notify.ps1 <event> <title>`, which raises a Windows
+toast — carrying the session's console window title, the same "Wave N -
+Spec X (#issue)" string the orchestrator sets per package — so a session
+that is blocked on a permission prompt, or has finished, is noticed within
+seconds instead of at the next glance across nine open windows. The hook is
+built to never block or fail the session it is attached to: every path
+through it, including a missing toast backend or a thrown exception, falls
+through to `exit 0` within about two seconds (`scripts/tests/hooks.test.ps1`
+covers this). `.claude/settings.json`'s `permissions.allow` list is the
+other half of the same concern, and in wave 6 it becomes load-bearing rather
+than a convenience: headless sessions there run with `--permission-mode
+dontAsk --permission-prompts none` (H19, decision D10 of the harness
+optimization plan — `docs/plans/2026-09-harness-optimization.md` once #293's
+plan PR merges; until then it lives on branch `harness/optimization-plan`,
+PR #319), under which anything not on the allowlist is *denied*, never
+prompted, so a session started that way cannot fall back on a human
+noticing a stuck prompt. That is also why `permissions.allow` carries two
+plain tool-name entries, `Edit` and `Write`, with no path restriction:
+decision D10 extends the allowlist to the edit tools themselves, not just
+Bash prefixes, for the same reason. Both interactive and headless sessions
+read the same list; keeping it in step with what the loop actually runs is
+not optional maintenance. **If a package's ship, pickup, review or
+orchestrator loop needs a command that is not already allowed, add it to
+`.claude/settings.json` in the same PR that starts using it** —
+narrowly scoped to the actual subcommand (`Bash(gh issue edit:*)`, not a
+bare `Bash(gh:*)`), read-only or otherwise a standard, non-destructive step
+of one of those loops, and never widening the deny list's own set of
+force-push, `reset --hard`, any `docker … prune`, `docker volume rm`, or
+reading `.env` — those stay denied regardless of what else the allowlist
+grows to cover.

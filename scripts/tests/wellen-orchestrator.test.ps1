@@ -424,6 +424,52 @@ Write-Output "Done: 1 container(s), 0 network(s), 1 volume(s), 0 image tag(s) pr
     Remove-Item -Force -Path $script:LogFile -ErrorAction SilentlyContinue
 }
 
+Write-Host "== Resolve-WaveFilePath (#283): a relative -WaveFile must survive Start-Job's own cwd =="
+
+# Invoke-WaveDockerCleanup hands $WaveFile to Start-Job, which runs in its own
+# working directory - a relative path resolves fine in the caller's location
+# but not there, so cleanup silently no-op'd on every wave (#283). The fix
+# resolves once, at startup, before the value can ever reach a job.
+$planDir283 = Join-Path $env:TEMP "wotest-283-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Force -Path $planDir283 | Out-Null
+$planFile283 = Join-Path $planDir283 'wellen.json'
+Set-Content -Path $planFile283 -Value '{}' -Encoding ASCII
+try {
+    $absolute = (Get-Item -LiteralPath $planFile283).FullName
+    Assert ((Resolve-WaveFilePath -Path $absolute) -eq $absolute) 'an already-absolute path resolves to itself'
+
+    Push-Location $planDir283
+    try {
+        $resolvedFromRelative = Resolve-WaveFilePath -Path '.\wellen.json'
+        Assert ([System.IO.Path]::IsPathRooted($resolvedFromRelative)) 'a relative -WaveFile resolves to an absolute path'
+        Assert ($resolvedFromRelative -eq $absolute) 'the resolved relative path matches the resolved absolute path'
+    } finally {
+        Pop-Location
+    }
+
+    $threw = $false
+    try { Resolve-WaveFilePath -Path (Join-Path $planDir283 'does-not-exist.json') | Out-Null } catch { $threw = $true }
+    Assert $threw 'a missing wave file fails fast at startup, not silently inside a later Start-Job'
+
+    # The actual #283 failure mode: prove Invoke-WaveDockerCleanup's Start-Job
+    # only ever receives the resolved, absolute form - never whatever relative
+    # spelling the caller originally passed as -WaveFile - by having the stub
+    # report back what it actually received.
+    $jobDir = Join-Path $env:TEMP "wotest-283-job-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Force -Path $jobDir | Out-Null
+    $script:DockerCleanupScript = New-Stub 'echoes-wavefile' 'Write-Output "WAVEFILE=$WaveFile"'
+    $savedWaveFile = $script:WaveFile
+    $script:WaveFile = $absolute
+    Reset-Log
+    try { Invoke-WaveDockerCleanup -Wave (New-TestWave) } finally { $script:WaveFile = $savedWaveFile }
+    $log = Get-LogText
+    Assert ($log -match [regex]::Escape("WAVEFILE=$absolute")) 'Invoke-WaveDockerCleanup passes the resolved, absolute WaveFile into the job'
+} finally {
+    Remove-Item -Recurse -Force -Path $planDir283 -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force -Path $jobDir -ErrorAction SilentlyContinue
+    Remove-Item -Force -Path $script:LogFile -ErrorAction SilentlyContinue
+}
+
 Write-Host "== Get-PackagePrompt / Get-ConsolidationPrompt: plan.conventions reaches both =="
 
 # #255 and #246 were both hazards a consolidation session hit that
@@ -479,6 +525,50 @@ $packagePromptEmpty = Get-PackagePrompt -Plan $emptyPlan -Standards $conventions
 $consolidationPromptEmpty = Get-ConsolidationPrompt -Plan $emptyPlan -Standards $conventionsStandards -Wave $conventionsWave -NextWave $null
 Assert ($packagePromptEmpty -notmatch '  ') 'empty plan.conventions leaves no double space in Get-PackagePrompt'
 Assert ($consolidationPromptEmpty -notmatch '  ') 'empty plan.conventions leaves no double space in Get-ConsolidationPrompt'
+
+Write-Host "== Get-PackagePrompt / Get-ConsolidationPrompt: wave.planIssue overrides plan.planIssue =="
+
+# PR #369 (welle 16) appended a wave onto a plan file whose own plan.planIssue
+# (#176) had already closed - review-docs caught, on a real diff, that both
+# prompt builders would still tell their sessions to close/comment on #176,
+# the wrong (and already-closed) issue, and never mention the wave's own
+# tracking issue at all. Same shape of bug as the plan.conventions gap above:
+# a field that exists in the data model but that neither prompt builder read.
+# No wave.planIssue set anywhere here proves nothing new by itself, so this
+# also asserts the ABSENCE case falls back to plan.planIssue, not just that
+# the override wins when present.
+Assert ($packagePrompt -match 'wave plan #999') 'Get-PackagePrompt falls back to plan.planIssue when the wave sets no override'
+Assert ($consolidationPrompt -match 'wave plan #999') 'Get-ConsolidationPrompt falls back to plan.planIssue when the wave sets no override'
+
+$overrideWave = [pscustomobject]@{
+    number            = 16
+    waveIssue         = 366
+    planIssue         = 366
+    planName          = 'PLANNAME-MARKER-b7c2'
+    integrationBranch = 'integration/x'
+    dockerCleanup     = $true
+}
+$overridePackagePrompt = Get-PackagePrompt -Plan $conventionsPlan -Standards $conventionsStandards -Wave $overrideWave -Package $conventionsPackage
+Assert ($overridePackagePrompt -match 'wave plan #366') 'Get-PackagePrompt uses wave.planIssue when set'
+Assert ($overridePackagePrompt -notmatch 'wave plan #999') 'Get-PackagePrompt does not also mention plan.planIssue when overridden'
+Assert ($overridePackagePrompt -match 'PLANNAME-MARKER-b7c2') 'Get-PackagePrompt uses wave.planName when set'
+Assert ($overridePackagePrompt -notmatch 'Test Plan') 'Get-PackagePrompt does not also mention plan.name when overridden'
+
+$overrideConsolidationPromptLast = Get-ConsolidationPrompt -Plan $conventionsPlan -Standards $conventionsStandards -Wave $overrideWave -NextWave $null
+Assert ($overrideConsolidationPromptLast -match 'close wave plan #366') 'Get-ConsolidationPrompt (last wave) closes the overriding wave.planIssue, not plan.planIssue'
+Assert ($overrideConsolidationPromptLast -notmatch '#999') 'Get-ConsolidationPrompt (last wave) never mentions the stale plan.planIssue when overridden'
+# review-go's round-2 finding on PR #369: the planIssue fix alone still left
+# $Plan.name interpolated unconditionally, so the generated close-comment
+# read "close wave plan #366 - Deferred follow-ups ... is then complete" -
+# the wrong plan's name attached to the right issue number. Pin both halves.
+Assert ($overrideConsolidationPromptLast -match 'PLANNAME-MARKER-b7c2 is then complete') 'Get-ConsolidationPrompt (last wave) declares the overriding wave.planName complete, not plan.name'
+Assert ($overrideConsolidationPromptLast -notmatch 'Test Plan') 'Get-ConsolidationPrompt (last wave) does not also mention plan.name when overridden'
+
+$nextWaveStub = [pscustomobject]@{ number = 17; integrationBranch = 'integration/y' }
+$overrideConsolidationPromptNext = Get-ConsolidationPrompt -Plan $conventionsPlan -Standards $conventionsStandards -Wave $overrideWave -NextWave $nextWaveStub
+Assert ($overrideConsolidationPromptNext -match 'comment on wave plan #366') 'Get-ConsolidationPrompt (with a next wave) comments on the overriding wave.planIssue, not plan.planIssue'
+Assert ($overrideConsolidationPromptNext -match 'wave 16 of PLANNAME-MARKER-b7c2') 'Get-ConsolidationPrompt (with a next wave) also uses wave.planName in its opening sentence'
+Assert ($overrideConsolidationPromptNext -notmatch 'Test Plan') 'Get-ConsolidationPrompt (with a next wave) does not also mention plan.name when overridden'
 
 Write-Host "== Invoke-Wave (parallel branch): teardown follows ACTUAL close order (#188) =="
 

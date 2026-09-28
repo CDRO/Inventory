@@ -1,10 +1,10 @@
--- E2E fixture: fourteen user rows (two of them admins) across thirteen
+-- E2E fixture: fifteen user rows (two of them admins) across fourteen
 -- storages (docs/specs/05-frontend-pwa-foundations.md).
 --
 -- It began as "a known admin, two ordinary users, and two storages with small
 -- inventories of their own", and those first two storages — "E2E Household"
 -- and "E2E Other Household" — are still what most journeys run against. The
--- other eleven exist because of the rule spec 05 states and every block below
+-- other twelve exist because of the rule spec 05 states and every block below
 -- follows: a journey that writes state another journey would observe gets its
 -- **own** seeded user and storage, because the suite runs files in parallel.
 -- That is why this file grows by a block rather than by a row.
@@ -116,7 +116,13 @@ INSERT INTO users (id, username, password_hash, display_name, is_admin) VALUES
   -- no longer guarantees once barcode-recall.spec.js's earlier tests have
   -- shown her the offer. Nothing else in this suite may log in as this user,
   -- or its seen_at would advance before #157's assertion runs.
-  ('00000000-0000-7000-8000-00000000000e', 'e2e-barcode-first', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Barcode First User', false)
+  ('00000000-0000-7000-8000-00000000000e', 'e2e-barcode-first', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Barcode First User', false),
+  -- e2e-barcode-scanned-first belongs only to "E2E Barcode Scanned First"
+  -- (below), dedicated to #233: the same NULL-seen_at need as
+  -- e2e-barcode-first (#157), but that user cannot be reused here — its own
+  -- test in this same serial file already burns its seen_at past NULL before
+  -- #233's test would run.
+  ('00000000-0000-7000-8000-00000000000f', 'e2e-barcode-scanned-first', '$argon2id$v=19$m=19456,t=2,p=1$2wl6xn6XAM82zaixEVbcsA$W5rfKKaXBdXrHWnIN1cvo5O3JPmyC8+Q9Fjq/eAPe9U', 'E2E Barcode Scanned First User', false)
 ON CONFLICT DO NOTHING;
 
 -- Two storages, so the "member of storage A gets 404 for storage B"
@@ -201,7 +207,11 @@ INSERT INTO storages (id, name) VALUES
   -- page.request API calls and a decode-fallback check that render no offer
   -- at all. Dana stays unusable here either way, but stating which tests do
   -- it keeps the reason checkable if the file leaves serial mode.
-  ('00000000-0000-7000-8000-00000000001c', 'E2E Barcode First')
+  ('00000000-0000-7000-8000-00000000001c', 'E2E Barcode First'),
+  -- "E2E Barcode Scanned First" (...01d), e2e-barcode-scanned-first's alone,
+  -- for #233: the same reasoning as "E2E Barcode First" above, for
+  -- offerScannedBarcode instead of offerBarcodeCapture.
+  ('00000000-0000-7000-8000-00000000001d', 'E2E Barcode Scanned First')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO storage_members (storage_id, user_id) VALUES
@@ -215,7 +225,8 @@ INSERT INTO storage_members (storage_id, user_id) VALUES
   ('00000000-0000-7000-8000-000000000016', '00000000-0000-7000-8000-000000000009'), -- e2e-inventory: E2E Inventory, and nothing else
   ('00000000-0000-7000-8000-00000000001a', '00000000-0000-7000-8000-00000000000c'), -- e2e-stocktake: E2E Stocktake, and nothing else
   ('00000000-0000-7000-8000-00000000001b', '00000000-0000-7000-8000-00000000000d'), -- e2e-stocktake-empty: E2E Stocktake Empty, and nothing else
-  ('00000000-0000-7000-8000-00000000001c', '00000000-0000-7000-8000-00000000000e')  -- e2e-barcode-first: E2E Barcode First, and nothing else
+  ('00000000-0000-7000-8000-00000000001c', '00000000-0000-7000-8000-00000000000e'), -- e2e-barcode-first: E2E Barcode First, and nothing else
+  ('00000000-0000-7000-8000-00000000001d', '00000000-0000-7000-8000-00000000000f')  -- e2e-barcode-scanned-first: E2E Barcode Scanned First, and nothing else
 ON CONFLICT DO NOTHING;
 
 -- The start-page memberships (docs/specs/34-navigation-and-start-page.md),
@@ -301,12 +312,17 @@ ON CONFLICT (id) DO NOTHING;
 --
 -- This is why "computed relative to now(), so the fixture never goes stale"
 -- is only half true, and the half that applies depends on the ASSERTION, not
--- on the fixture. The E2E Stocktake block below holds seven now()-relative
+-- on the fixture. The E2E Stocktake block below holds six now()-relative
 -- timestamps under plain DO NOTHING and is genuinely drift-proof, because
 -- everything asserted over it is RELATIVE: stocktake.js's stalestFirst() is a
--- sort plus slice(0, STALEST_LIMIT) with no threshold anywhere, so all seven
+-- sort plus slice(0, STALEST_LIMIT) with no threshold anywhere, so all six
 -- rows ageing together changes neither the order nor the top-N, and that
 -- file's test reads each item's name span rather than its audited phrase.
+-- The seventh row, Pantry, is never audited (last_audited_at NULL) and leads
+-- that ranking anyway, through stalestFirst()'s never-audited partition
+-- (`!node.last_audited_at` sorts before any timestamp comparison) rather than
+-- through its own timestamp — it has none. Don't "fix" that tie-break; it
+-- is not one.
 -- This block is the opposite case — one row whose exact rendered phrase is
 -- asserted — and an absolute assertion over a frozen relative timestamp is
 -- the combination that rots. Copy the pattern that matches your assertion.
@@ -643,6 +659,14 @@ INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) V
   ('00000000-0000-7000-8000-000000000055', '00000000-0000-7000-8000-00000000001c', 'First-Timer Control Beans',   NULL, 'long_shelf_life', 0)
 ON CONFLICT (id) DO NOTHING;
 
+-- Two products in "E2E Barcode Scanned First" (...01d), for #233: the same
+-- pre-coded/control pair as "E2E Barcode First" above, but for
+-- offerScannedBarcode's miss-path offer instead of offerBarcodeCapture's.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
+  ('00000000-0000-7000-8000-000000000056', '00000000-0000-7000-8000-00000000001d', 'Scanned First-Timer Pre-coded Beans', NULL, 'long_shelf_life', 0),
+  ('00000000-0000-7000-8000-000000000057', '00000000-0000-7000-8000-00000000001d', 'Scanned First-Timer Control Beans',   NULL, 'long_shelf_life', 0)
+ON CONFLICT (id) DO NOTHING;
+
 -- One consumption proposal (docs/specs/09-consumption-logging.md), in the
 -- shape internal/consume writes: no location placement, a stage-1-only match
 -- against this storage's own products. Row 0 matches Greek Yogurt, which has
@@ -862,4 +886,43 @@ INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, create
   ('00000000-0000-7000-8000-0000000000fe', '00000000-0000-7000-8000-0000000000fc', '00000000-0000-7000-8000-0000000000fd', 4, 'purchase', '00000000-0000-7000-8000-000000000003')
 ON CONFLICT (id) DO NOTHING;
 
+
+-- Two more products in "E2E Household", dedicated to #248: the custom-upload
+-- half of the same picture-change path #135 shipped the picker half of.
+-- ...ff and ...100 are the next free ids after ...fe, the inventory_logs row of
+-- #224's "E2E Empty Submit Move Source" immediately above — and the first ids
+-- in this file to leave the two-hex-digit tail, which is only a formatting
+-- change, not a new range with rules of its own.
+--
+-- Same reasoning as the ...fa/...fb block: the shared Household storage,
+-- because e2e-bob's only membership is this one, and nothing here writes
+-- durable per-user state. Two products rather than one because the suite runs
+-- fullyParallel and both scenarios write a picture — one through the route
+-- directly, one through the file control on the detail page — so sharing a row
+-- would let the order they run in decide the outcome.
+--
+-- Neither starts with a picture: what both assert is one arriving, and a
+-- fixture that already had one would let a route that wrote nothing pass.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock, icon_name) VALUES
+  ('00000000-0000-7000-8000-0000000000ff', '00000000-0000-7000-8000-000000000010', 'E2E Picture Upload Source',    NULL, 'non_perishable', 0, NULL),
+  ('00000000-0000-7000-8000-000000000100', '00000000-0000-7000-8000-000000000010', 'E2E Picture Upload UI Source', NULL, 'non_perishable', 0, NULL)
+ON CONFLICT (id) DO NOTHING;
+
+-- One more product in "E2E Household", dedicated to #251: the edit form's
+-- icon input going stale after a picture clear, and an unrelated-field Save
+-- resurrecting it. ...101 is the next free id after ...100, "E2E Picture
+-- Upload UI Source" immediately above.
+--
+-- Same reasoning as the ...fa/...fb and ...ff/...100 blocks above: the
+-- shared Household storage, because e2e-bob's only membership is this one,
+-- and nothing here writes durable per-user state. Its own row rather than
+-- reusing ...fb: that fixture's clear is already read by two scenarios
+-- above, and this suite runs fullyParallel, and this scenario additionally
+-- saves the row, which neither of those does.
+--
+-- Starts with an icon_name, like ...fb, so that clearing it — and it staying
+-- cleared through the save that follows — is observable.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock, icon_name) VALUES
+  ('00000000-0000-7000-8000-000000000101', '00000000-0000-7000-8000-000000000010', 'E2E Picture Edit Form Sync Source', NULL, 'non_perishable', 0, 'noto:cheese-wedge')
+ON CONFLICT (id) DO NOTHING;
 COMMIT;

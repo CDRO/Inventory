@@ -606,9 +606,11 @@ test("a batch two locations deep renders its full path, root first", async ({ pa
 // docs/specs/16-product-maintenance.md describes the detail view as showing
 // the image "with the change paths from 07 — suggestion picker, custom
 // upload". Spec 16 shipped the edit surface without them; these cover the
-// half that has a route to call.
+// suggestion-picker half, which was the only one with a route to call when
+// they were written. The custom upload is #248's block at the end of this
+// file.
 //
-// What is deliberately NOT asserted is a picture actually arriving. This
+// What is deliberately NOT asserted here is a picture actually arriving. This
 // stack configures no SerpAPI key and no Iconify reachability
 // (docker-compose.e2e.yml: "external services are not stubbed here yet"), so
 // the suggestion list is empty or the provider is unreachable, and pinning a
@@ -619,12 +621,20 @@ test("a batch two locations deep renders its full path, root first", async ({ pa
 
 const PICTURE_PICKER_PRODUCT = "00000000-0000-7000-8000-0000000000fa";
 const PICTURE_CLEAR_PRODUCT = "00000000-0000-7000-8000-0000000000fb";
+const EDIT_FORM_SYNC_PRODUCT = "00000000-0000-7000-8000-000000000101";
 
 // A product of Alice's "E2E Other Household" (...011), used only as a product
 // id from *another* storage. Bob is not a member there, so the image route
 // must answer exactly as it does for an id that does not exist at all.
 const FOREIGN_PRODUCT = "00000000-0000-7000-8000-000000000042";
 const FOREIGN_STORAGE = "00000000-0000-7000-8000-000000000011";
+
+// A product id that is never seeded, in the same spirit as the unknown
+// storage id used below: it has to stay unseeded for the tests that use it to
+// mean anything, so do not give this id a fixture row. Shared by the
+// product-dimension 404 tests for both the image route (below) and the
+// upload route (further down this file).
+const UNKNOWN_PRODUCT = "00000000-0000-7000-8000-0000000000ed";
 
 test("the product detail view offers a picture change that reaches the suggestions endpoint", async ({
   page,
@@ -671,6 +681,49 @@ test("clearing a product's picture goes through the image route and shows on the
   await expect(page.locator('[data-role="product-picture"]')).toContainText("No picture yet.");
 });
 
+// The regression test for #251: the edit form's `icon` input used to be
+// seeded from product.icon_name once, at render, and never resynced when the
+// picture block cleared it — so an unrelated-field Save right after a clear
+// silently reinstated the icon by diffing against that stale DOM value.
+// Its own dedicated product: the suite runs fullyParallel and this scenario
+// both clears the picture and saves, like the other picture scenarios above.
+test("clearing a picture through the UI does not leave the edit form's icon stale for the next Save", async ({
+  page,
+}) => {
+  await logIn(page);
+  // No provider key in this stack; mocked the same way the picker's own
+  // "can still be removed" tests above are, so the clear button's presence
+  // does not depend on a live provider.
+  await page.route((url) => url.pathname.endsWith("/image-suggestions"), (route) =>
+    route.fulfill({ json: { suggestions: [] } }),
+  );
+
+  const before = await fetchProduct(page, EDIT_FORM_SYNC_PRODUCT);
+  expect(before.icon_name).toBe("noto:cheese-wedge"); // the fixture must start out set
+
+  await openProduct(page, "E2E Picture Edit Form Sync Source");
+  await page.locator('[data-role="change-picture"]').click();
+  await page.locator('[data-role="picture-none"]').click();
+  await expect(page.locator('[data-role="picture-status"]')).toContainText("Picture removed.");
+
+  // Before the fix this still read "noto:cheese-wedge": setPicture's
+  // re-render is deliberately narrow (it must not discard unsaved edits) and
+  // never touched the form.
+  await expect(page.locator("#p-icon")).toHaveValue("");
+
+  // An unrelated-field save. Before the fix, save() diffed this stale input
+  // against product.icon_name (now null), saw a difference, and sent
+  // icon_name back to the server — resurrecting the icon the clear just
+  // removed.
+  await page.locator("#p-min-stock").fill("3");
+  await page.locator('form:has(#p-icon)').getByRole("button", { name: "Save" }).click();
+  await expect(page.locator("#status")).toContainText("Saved.");
+
+  const after = await fetchProduct(page, EDIT_FORM_SYNC_PRODUCT);
+  expect(after.icon_name).toBeNull();
+  expect(after.min_stock).toBe(3);
+});
+
 test("the image route answers 404 for a product in another storage, not 403", async ({ page }) => {
   await logIn(page);
 
@@ -687,6 +740,16 @@ test("the image route answers 404 for a product in another storage, not 403", as
   const body = await res.json();
   expect(body.error.code).toBe("not_found");
   expect(body.error.debug_reason).toBeUndefined(); // APP_ENV=prod in this stack
+
+  // The absolute shape above is not the whole invariant: a foreign product id
+  // and a genuinely nonexistent one in the SAME accessible storage must be
+  // indistinguishable, or the response becomes an oracle for which product
+  // ids exist in another storage (mirrors the storage-dimension test below).
+  const unknownRes = await page.request.patch(`${BASE}/products/${UNKNOWN_PRODUCT}/image`, {
+    data: { image: null, icon_name: null },
+  });
+  expect(unknownRes.status()).toBe(404);
+  expect(await unknownRes.json()).toEqual(body);
 });
 
 // The other half of the same invariant, which the test above does not reach:
@@ -793,3 +856,394 @@ for (const [name, fulfil] of [
     await expect.poll(() => sent).toEqual({ image: null, icon_name: null });
   });
 }
+
+// #249 and #252: renderImagePicker's in-flight guard used to be scoped to one
+// call of the function, so it stopped a double click within one open picker
+// but not a close-and-reopen of the same logical picker. Both regression
+// tests below hold a mocked response open and release it on a schedule the
+// test controls, rather than racing real timing, which would be flaky in
+// either direction — the same technique ingestion.spec.js uses for its own
+// overlapping-request races: the #252 test below holds two overlapping
+// fetches via a `releases` array, matching "closing the location modal while
+// two creates overlap..."; the #249 test holds a single one via one
+// `releaseFirst`/`...Held` promise, matching the simpler "closing the
+// location modal while its create POST is still in flight...".
+
+// #252: a reopen started before the first invocation's suggestions fetch has
+// resolved must not let that stale fetch land its own row beside the
+// reopened picker's.
+test("reopening the picker while its suggestions fetch is in flight does not duplicate the row", async ({
+  page,
+}) => {
+  await logIn(page);
+
+  // Each suggestions fetch this test triggers is held open independently,
+  // released in an order the test controls below.
+  const releases = [];
+  await page.route((url) => url.pathname.endsWith("/image-suggestions"), async (route) => {
+    await new Promise((resolve) => releases.push(resolve));
+    await route.fulfill({
+      json: {
+        suggestions: [{ url: `/api/storages/${STORAGE_ID}/images/${SUGGESTION_HASH_A}`, type: "photo" }],
+      },
+    });
+  });
+
+  await openProduct(page, "E2E Picture Picker Source");
+
+  // Invocation 1 opens the picker; its fetch starts and is held.
+  await page.locator('[data-role="change-picture"]').click();
+  await expect.poll(() => releases.length).toBe(1);
+
+  // Invocation 2 re-invokes the same picker before invocation 1's fetch has
+  // resolved — clearing the container and starting its own held fetch.
+  await page.locator('[data-role="change-picture"]').click();
+  await expect.poll(() => releases.length).toBe(2);
+
+  // Invocation 1's stale fetch resolves after invocation 2 already owns the
+  // container — the exact ordering #252 describes — then invocation 2's own
+  // fetch resolves.
+  releases[0]();
+  releases[1]();
+
+  await expect(page.locator('[data-role="picture-suggestion"]')).toHaveCount(1);
+  await expect(page.locator('[data-role="picture-none"]')).toHaveCount(1);
+});
+
+// #249: a write started by one invocation must still block a write from a
+// later reopen of the same logical picker, not just a second click inside
+// the same open picker.
+test("a suggestion click after a reopen is refused while an earlier write from the same picker is still in flight", async ({
+  page,
+}) => {
+  await logIn(page);
+  await mockSuggestions(page, [
+    { url: `/api/storages/${STORAGE_ID}/images/${SUGGESTION_HASH_A}`, type: "photo" },
+  ]);
+
+  // The first PATCH this test triggers is held open until released below. A
+  // second entry in `sent` would mean the fix let a reopened picker's click
+  // start a write while the first one was still outstanding.
+  const sent = [];
+  let releaseFirst;
+  const firstHeld = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  await page.route(`**/products/${PICTURE_PICKER_PRODUCT}/image`, async (route) => {
+    if (route.request().method() !== "PATCH") return route.fallback();
+    sent.push(route.request().postDataJSON());
+    if (sent.length === 1) await firstHeld;
+    await route.fulfill({ json: { image_url: null, icon_name: null } });
+  });
+
+  await openProduct(page, "E2E Picture Picker Source");
+  await page.locator('[data-role="change-picture"]').click();
+
+  const choice = page.locator('[data-role="picture-suggestion"]');
+  await expect(choice).toBeVisible();
+  await choice.click(); // the held first PATCH
+
+  await expect.poll(() => sent.length).toBe(1);
+
+  // The "close and reopen mid-write" from #249: re-invoke the same logical
+  // picker and click its suggestion again while the first write is still
+  // unresolved.
+  await page.locator('[data-role="change-picture"]').click();
+  await expect(choice).toBeVisible();
+  await choice.click();
+
+  // The guard's refusal is synchronous, so this only gives a bug a chance to
+  // show up rather than racing the fix.
+  await page.waitForTimeout(200);
+  expect(sent.length, "the reopened picker's click must be refused, not raced").toBe(1);
+
+  // Let the held write finish so the mocked route's own promise chain settles
+  // cleanly rather than leaving it dangling when the test ends. Nothing below
+  // this point is a further check of the guard — that was already proven by
+  // the assertion above.
+  releaseFirst();
+  await expect.poll(() => sent.length).toBe(1);
+});
+
+// #254: the picker's rollback contract. choose() (js/image-picker.js) catches
+// a failed write and undoes the optimistic selection, and setPicture
+// (js/pages/products.js) deliberately rethrows so that catch fires — every
+// picker journey above this one exercises only a successful PATCH, so nothing
+// before this test would notice if the rethrow were removed, the catch made
+// to swallow, or the rollback stopped restoring the previous selection.
+//
+// The PATCH is mocked to fail, so nothing is written and no fixture is
+// mutated — the same reasoning the failed-upload test below gives for
+// sharing PICTURE_PICKER_PRODUCT rather than taking a dedicated one.
+test("a failed write rolls the picker's selection back to its pre-click state", async ({ page }) => {
+  await logIn(page);
+  await mockSuggestions(page, [
+    { url: `/api/storages/${STORAGE_ID}/images/${SUGGESTION_HASH_A}`, type: "photo" },
+  ]);
+  await page.route(`**/products/${PICTURE_PICKER_PRODUCT}/image`, async (route) => {
+    if (route.request().method() !== "PATCH") return route.fallback();
+    await route.fulfill({
+      status: 500,
+      json: { error: { code: "internal", message: "The server could not save that picture." } },
+    });
+  });
+
+  await openProduct(page, "E2E Picture Picker Source");
+  await page.locator('[data-role="change-picture"]').click();
+
+  const choice = page.locator('[data-role="picture-suggestion"]');
+  await expect(choice).toHaveCount(1);
+  await expect(choice).toHaveAttribute("aria-pressed", "false"); // pre-click: nothing chosen yet
+
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (res) =>
+        res.url().endsWith(`/products/${PICTURE_PICKER_PRODUCT}/image`) &&
+        res.request().method() === "PATCH",
+    ),
+    choice.click(),
+  ]);
+  expect(response.status()).toBe(500);
+
+  // The caller's own words, through the error catalog — proof the rethrow and
+  // the catch actually ran, not just that a button's class changed.
+  await expect(page.locator('[data-role="picture-status"]')).toContainText(
+    "The server could not save that picture.",
+  );
+
+  // Rolled back to the pre-click state: nothing was selected before the
+  // click, so nothing is selected after the failed write either.
+  await expect(choice).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator('[data-role="picture-none"]')).toHaveAttribute("aria-pressed", "false");
+
+  // And the picture block still shows the server's actual picture — none —
+  // rather than the clicked suggestion.
+  await expect(page.locator('[data-role="product-picture"]')).toContainText("No picture yet.");
+
+  const product = await fetchProduct(page, PICTURE_PICKER_PRODUCT);
+  expect(product.image_url).toBeNull();
+  expect(product.icon_name).toBeNull();
+});
+
+// --- #248: the custom-upload change path ------------------------------------
+//
+// Spec 07's other change path: "pick one of the 3, upload a custom photo
+// instead (`POST /api/storages/{storage_id}/products/{id}/image` multipart)".
+// Unlike the picker's half above, this one needs no provider at all — the photo
+// comes from the caller — so these scenarios *can* assert a picture actually
+// arriving, and do.
+//
+// One product per scenario, for the reason the ...fa/...fb block in
+// e2e/fixtures/seed.sql gives: both of these write a picture, and this suite
+// runs fullyParallel.
+
+const PICTURE_UPLOAD_PRODUCT = "00000000-0000-7000-8000-0000000000ff";
+const PICTURE_UPLOAD_UI_PRODUCT = "00000000-0000-7000-8000-000000000100";
+
+// A real, decodable 1x1 PNG — the same fixture ingestion.spec.js uses where an
+// image has to survive an actual decode. It has to be a real one here: the
+// server reads the format from the magic bytes and re-encodes the pixels
+// (internal/httpapi/upload.go), so a stand-in would be refused as a 422.
+const TINY_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+  "base64",
+);
+
+function photoUpload(buffer) {
+  return { multipart: { image: { name: "IMG_0042.png", mimeType: "image/png", buffer } } };
+}
+
+test("a custom photo upload becomes the product's picture and is served back", async ({ page }) => {
+  await logIn(page);
+
+  const before = await fetchProduct(page, PICTURE_UPLOAD_PRODUCT);
+  expect(before.image_url, "the fixture must start out with no picture").toBeNull();
+
+  const res = await page.request.post(
+    `${BASE}/products/${PICTURE_UPLOAD_PRODUCT}/image`,
+    photoUpload(TINY_PNG),
+  );
+  expect(res.status(), await res.text()).toBe(200);
+  const body = await res.json();
+
+  // The address is the server's own, under this storage, and the name is
+  // generated — never what the request called the file.
+  expect(body.image_url).toMatch(
+    new RegExp(`^${BASE}/product-images/[0-9a-f-]+\\.png$`),
+  );
+  expect(body.image_url).not.toContain("IMG_0042");
+  expect(body.icon_name).toBeNull();
+
+  const after = await fetchProduct(page, PICTURE_UPLOAD_PRODUCT);
+  expect(after.image_url).toBe(body.image_url);
+
+  // And the file is really there: permanent storage, served back through the
+  // storage-scoped picture route rather than merely recorded on the row.
+  const served = await page.request.get(body.image_url);
+  expect(served.status()).toBe(200);
+  expect(served.headers()["content-type"]).toBe("image/png");
+});
+
+test("the upload route answers 404 for a product in another storage, not 403", async ({ page }) => {
+  await logIn(page);
+
+  const res = await page.request.post(
+    `${BASE}/products/${FOREIGN_PRODUCT}/image`,
+    photoUpload(TINY_PNG),
+  );
+
+  // Same-storage validation on the new route too: the session IS a member of
+  // the storage in the path, the product simply belongs to a different one
+  // (docs/specs/03-auth-and-multi-tenancy.md).
+  expect(res.status()).toBe(404);
+  const body = await res.json();
+  expect(body.error.code).toBe("not_found");
+  expect(body.error.debug_reason).toBeUndefined(); // APP_ENV=prod in this stack
+});
+
+test("the upload route answers 404 for a storage the session is not a member of", async ({
+  page,
+}) => {
+  await logIn(page); // e2e-bob, a member of "E2E Household" only
+
+  const inaccessible = await page.request.post(
+    `/api/storages/${FOREIGN_STORAGE}/products/${FOREIGN_PRODUCT}/image`,
+    photoUpload(TINY_PNG),
+  );
+  const unknown = await page.request.post(
+    `/api/storages/00000000-0000-7000-8000-0000000000ee/products/${FOREIGN_PRODUCT}/image`,
+    photoUpload(TINY_PNG),
+  );
+
+  expect(inaccessible.status()).toBe(404);
+  expect(unknown.status()).toBe(404);
+  // Identical either way, body included, or membership becomes discoverable by
+  // probing.
+  expect(await inaccessible.json()).toEqual(await unknown.json());
+});
+
+test("the detail view's upload control posts the chosen photo and shows it", async ({ page }) => {
+  await logIn(page);
+  await openProduct(page, "E2E Picture Upload UI Source");
+
+  const upload = page.locator('[data-role="picture-upload"]');
+  await expect(upload).toBeHidden(); // closed until the change affordance is used
+
+  // The same click that opens the picker reveals the upload control, and
+  // reveals it without waiting on the suggestions request — which in this
+  // stack has no provider to reach.
+  await page.locator('[data-role="change-picture"]').click();
+  await expect(upload).toBeVisible();
+
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (res) =>
+        res.url().endsWith(`/products/${PICTURE_UPLOAD_UI_PRODUCT}/image`) &&
+        res.request().method() === "POST",
+    ),
+    page
+      .locator('[data-role="upload-picture"]')
+      .setInputFiles({ name: "IMG_0043.png", mimeType: "image/png", buffer: TINY_PNG }),
+  ]);
+  expect(response.status()).toBe(200);
+
+  // The picture is re-rendered from what the route answered, and the edit form
+  // beside it survives — renderPicture redraws the picture alone.
+  const picture = page.locator('[data-role="product-picture"] img');
+  await expect(picture).toHaveAttribute(
+    "src",
+    new RegExp(`^${BASE}/product-images/[0-9a-f-]+\\.png$`),
+  );
+  await expect(page.locator('[data-role="picture-status"]')).toContainText("Picture updated.");
+  await expect(page.locator("#p-name")).toHaveValue("E2E Picture Upload UI Source");
+
+  // And the row really changed, read back from the server rather than from the
+  // DOM this page just updated.
+  const product = await fetchProduct(page, PICTURE_UPLOAD_UI_PRODUCT);
+  expect(product.image_url).not.toBeNull();
+  expect(product.icon_name).toBeNull();
+});
+
+// The product-level half of #248's item 2, which the storage-level test above
+// does not reach: there the storage varies and the product id is held
+// constant, so it proves nothing about telling one product id from another.
+// Here the storage is Bob's own in both requests and only the product id
+// changes — one that exists in Alice's storage, one that exists nowhere.
+//
+// What this catches: a `GetProduct` pre-check added ahead of the write that
+// answers the two cases differently — a different error code, a 422 for one
+// and a 404 for the other, a message that names the product. Any of those
+// hands a member of one storage a working oracle for which product ids exist
+// in another (docs/specs/03-auth-and-multi-tenancy.md).
+test("the upload route cannot tell an unknown product from one in another storage", async ({
+  page,
+}) => {
+  await logIn(page);
+
+  const foreign = await page.request.post(
+    `${BASE}/products/${FOREIGN_PRODUCT}/image`,
+    photoUpload(TINY_PNG),
+  );
+  const unknown = await page.request.post(
+    `${BASE}/products/${UNKNOWN_PRODUCT}/image`,
+    photoUpload(TINY_PNG),
+  );
+
+  expect(foreign.status()).toBe(404);
+  expect(unknown.status()).toBe(404);
+  expect(await foreign.json()).toEqual(await unknown.json());
+});
+
+// The failure path through the control itself, which the success scenario
+// above cannot reach. Both of the guards renderPictureUpload leans on are
+// only observable here: the input is cleared *before* the write, and the
+// in-flight guard is released whether the write succeeded or not.
+//
+// The POST is mocked, so nothing is written and no fixture is mutated — which
+// is why this shares the picker's product rather than taking one of its own.
+// The seed file's one-product-per-scenario rule is about scenarios that write.
+test("a failed upload says so and leaves the control ready to try again", async ({ page }) => {
+  await logIn(page);
+
+  let attempts = 0;
+  await page.route(`**/products/${PICTURE_PICKER_PRODUCT}/image`, async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    attempts += 1;
+    await route.fulfill({
+      status: 413,
+      json: { error: { code: "payload_too_large", message: "The uploaded file is too large." } },
+    });
+  });
+
+  await openProduct(page, "E2E Picture Picker Source");
+  await page.locator('[data-role="change-picture"]').click();
+
+  const input = page.locator('[data-role="upload-picture"]');
+  await input.setInputFiles({ name: "IMG_0044.png", mimeType: "image/png", buffer: TINY_PNG });
+
+  // The server's own words, through the error catalog rather than a generic
+  // "something went wrong" (docs/specs/19-localization.md).
+  await expect(page.locator('[data-role="picture-status"]')).toContainText(
+    "The uploaded file is too large.",
+  );
+  // Still no picture: a failed write must not leave the page claiming one.
+  await expect(page.locator('[data-role="product-picture"]')).toContainText("No picture yet.");
+
+  // Both guards the control leans on, asserted on what each one actually
+  // changes.
+  //
+  // The clear-before-write, read through `files` rather than `value`:
+  // Playwright's setInputFiles never populates a file input's `value`, so
+  // `toHaveValue("")` reads "" whether the handler cleared the control or not
+  // and would pass against the very regression it is meant to catch. `files`
+  // is what `value = ""` empties, and it is what a browser consults when
+  // deciding whether re-picking the same file is a change at all.
+  await expect.poll(() => input.evaluate((el) => el.files.length)).toBe(0);
+
+  // And the in-flight guard released, so the same file picked a second time
+  // really does reach the route a second time. A regression leaving
+  // `uploading` or `disabled` stuck true after a rejected request fails here.
+  await expect(input).toBeEnabled();
+  await input.setInputFiles({ name: "IMG_0044.png", mimeType: "image/png", buffer: TINY_PNG });
+  await expect.poll(() => attempts).toBe(2);
+});

@@ -31,7 +31,8 @@
 #
 # The `backup` service below belongs to the second thing this file drives: the
 # backup/restore round trip (docs/specs/15-backup-restore-and-export.md, issue
-# #133), run by the `restore-round-trip` job in .github/workflows/e2e.yml. It
+# #133), run by .github/workflows/restore.yml's `restore-round-trip` job
+# (moved there from e2e.yml by H8, decision D8). It
 # destroys this project's volumes half way through, on purpose, so it must
 # never run beside another session's E2E stack — a machine has a single E2E
 # project, shared by every checkout on it (`name:` below), and a `down -v` here
@@ -134,8 +135,8 @@ services:
     volumes:
       # The uploads tree as a named volume rather than the container's own
       # writable layer, because the restore round trip
-      # (.github/workflows/e2e.yml's `restore-round-trip` job, issue #133) has
-      # to destroy it with `down -v` and get it back out of an archive — which
+      # (.github/workflows/restore.yml's `restore-round-trip` job, issue #133)
+      # has to destroy it with `down -v` and get it back out of an archive — which
       # a container layer cannot demonstrate, since it is recreated empty
       # either way. docker-compose.yml mounts uploads on `app` exactly like
       # this, so the E2E stack is now a truer copy of the stack spec 15's
@@ -171,6 +172,16 @@ services:
 
   db:
     image: postgres:16-alpine
+    # Speed flags for a throwaway database (docs/plans/2026-09-harness-
+    # optimization.md, decision D5). This database is already destroyed on
+    # every `down -v` (see the anonymous-volume comment below), so trading
+    # crash durability for write speed costs nothing this stack keeps:
+    # fsync=off and full_page_writes=off mean a host crash or power loss can
+    # lose or corrupt recent writes instead of losing nothing, and
+    # synchronous_commit=off means any crash can lose the last commit window
+    # - none of which this database survives a `down -v` for anyway. Kept in
+    # step with docker-compose.override.yml's own copy of the same flags.
+    command: postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off
     environment:
       POSTGRES_USER: e2e
       POSTGRES_PASSWORD: e2e
@@ -200,8 +211,9 @@ services:
       retries: 10
 
   # Whole-instance backup and restore, for the restore round trip
-  # (docs/specs/15-backup-restore-and-export.md, issue #133). Under the same
-  # `tools` profile as `e2e`, so `up -d` never starts it.
+  # (docs/specs/15-backup-restore-and-export.md, issue #133,
+  # .github/workflows/restore.yml). Under the same `tools` profile as `e2e`,
+  # so `up -d` never starts it.
   #
   # A deliberate copy of docker-compose.yml's `backup` service — same image,
   # same entrypoint, the same three mounts, and the same deliberate absence of

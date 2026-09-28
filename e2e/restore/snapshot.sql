@@ -1,7 +1,7 @@
 -- The assertion of the backup/restore round trip
 -- (docs/specs/15-backup-restore-and-export.md, issue #133).
 --
--- Run twice by the `restore-round-trip` job in .github/workflows/e2e.yml —
+-- Run twice by the `restore-round-trip` job in .github/workflows/restore.yml —
 -- once against the seeded instance before it is destroyed, once against the
 -- instance restored from the archive — and the two outputs are compared. The
 -- restore is correct exactly when the two files are identical:

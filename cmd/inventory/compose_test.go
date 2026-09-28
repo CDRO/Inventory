@@ -168,7 +168,7 @@ func TestNASVariantGivesBackupTheBindMountedUploads(t *testing.T) {
 
 // TestE2EBackupServiceMatchesTheProductionOne guards a copy.
 //
-// The restore round trip (.github/workflows/e2e.yml, issue #133) needs a
+// The restore round trip (.github/workflows/restore.yml, issue #133) needs a
 // `backup` service in the E2E stack, and docker-compose.e2e.yml carries its
 // own rather than reusing the base file's, because that stack has no .env to
 // read credentials from. Two declarations of one service is a thing that
@@ -254,7 +254,8 @@ func TestE2EAppMountsTheUploadsTheRoundTripDestroys(t *testing.T) {
 // Locally every documented command passes `-p inventory-e2e`, because a
 // checkout's COMPOSE_PROJECT_NAME beats a file's `name:`. CI passes no `-p` at
 // all: a runner has no `.env`, so this one line is the whole of the separation
-// there, across some forty invocations in .github/workflows/e2e.yml.
+// there, across every invocation in .github/workflows/e2e.yml and
+// .github/workflows/restore.yml (H8 split the round trip into the latter).
 //
 // Which makes it the rare line whose removal breaks nothing visibly. Delete or
 // rename it and every suite stays green — no Go code reads it, neither
@@ -292,6 +293,79 @@ func TestE2EComposeFilePinsItsProjectName(t *testing.T) {
 
 	assert.True(t, pinned,
 		"docker-compose.e2e.yml must pin the project name at the top level: CI passes no -p, so without this line the E2E stack shares the default project with docker-compose.yml and db reuses the dev stack's data directory (#190)")
+}
+
+// The three tests below are decision D5 of docs/plans/2026-09-harness-
+// optimization.md expressed as tests: throwaway databases (the dev override,
+// the E2E stack) trade crash durability for write speed, and production
+// (docker-compose.yml, docker-compose.nas.yml) does not. The negative
+// assertion on docker-compose.yml is the half that fails silently — a flag
+// added there by mistake would not break a single test in this repository
+// and would only ever be noticed by a crash on the operator's NAS losing
+// data it was supposed to keep.
+
+// TestProductionDatabaseKeepsDurabilityDefaults guards docker-compose.yml and
+// docker-compose.nas.yml: the base file's `db` service must carry no `command:`
+// at all, so Postgres runs on its own durability defaults, and the NAS overlay
+// must not add one either.
+func TestProductionDatabaseKeepsDurabilityDefaults(t *testing.T) {
+	t.Parallel()
+
+	prodBlock := composeService(t, "docker-compose.yml", "db")
+	assert.NotContains(t, prodBlock, "command:",
+		"production's db service must run Postgres on its own defaults - a command: line here would trade a NAS operator's crash durability for speed nobody asked for")
+	for _, flag := range []string{"fsync=off", "synchronous_commit=off", "full_page_writes=off"} {
+		assert.NotContains(t, prodBlock, flag,
+			"production's db service must not carry the throwaway-database speed flag %q", flag)
+	}
+
+	nasBlock := composeService(t, "docker-compose.nas.yml", "db")
+	assert.NotContains(t, nasBlock, "command:",
+		"the NAS overlay must not add a command: to db either - it only replaces the data directory with a bind mount")
+}
+
+// TestDevOverrideDatabaseTradesDurabilityForSpeed is decision D5's dev-loop
+// half: docker-compose.override.yml's db service carries the three speed
+// flags, merged onto docker-compose.yml's db (image, env, healthcheck and the
+// persistent pgdata volume all still come from there - see the override
+// file's own comment on this service).
+func TestDevOverrideDatabaseTradesDurabilityForSpeed(t *testing.T) {
+	t.Parallel()
+
+	block := composeService(t, "docker-compose.override.yml", "db")
+	assert.Contains(t, block, "command: postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off",
+		"the dev override's db service must set all three speed flags in one command:, or Compose's scalar-replace semantics mean only the last one written survives")
+}
+
+// TestE2EDatabaseMatchesTheOverrideDatabaseSpeedFlags is decision D5's E2E
+// half, pulled forward from the override's own service rather than hardcoded
+// so what this test actually catches is the two drifting apart - a literal
+// copy of today's flags would keep passing after either file changed under it.
+func TestE2EDatabaseMatchesTheOverrideDatabaseSpeedFlags(t *testing.T) {
+	t.Parallel()
+
+	overrideBlock := composeService(t, "docker-compose.override.yml", "db")
+	e2eBlock := composeService(t, "docker-compose.e2e.yml", "db")
+
+	assert.Contains(t, e2eBlock, lineFrom(t, overrideBlock, "command:"),
+		"the E2E stack's db service has drifted from the dev override's own speed flags")
+}
+
+// TestCIComposeAddsTmpfsToDatabaseOnly guards the new docker-compose.ci.yml:
+// override-style, and its only content is a tmpfs data directory on db, never
+// a service this package does not own.
+func TestCIComposeAddsTmpfsToDatabaseOnly(t *testing.T) {
+	t.Parallel()
+
+	block := composeService(t, "docker-compose.ci.yml", "db")
+	assert.Contains(t, block, "target: /var/lib/postgresql/data",
+		"docker-compose.ci.yml must replace the data directory at the same mount target docker-compose.yml's pgdata volume uses, or Compose's merge-by-target-path would keep both")
+	assert.Contains(t, block, "type: tmpfs",
+		"a CI runner's whole VM is destroyed at the end of the job, so the data directory belongs in memory, not on the runner's disk")
+
+	normalized := strings.ReplaceAll(repoFile(t, "docker-compose.ci.yml"), "\r\n", "\n")
+	assert.NotContains(t, normalized, "\n  app:",
+		"docker-compose.ci.yml is scoped to db only - an app service here would belong to a different package's file")
 }
 
 // TestBackupArchivesAreNotCommittable — an archive holds the whole database

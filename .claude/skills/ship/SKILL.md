@@ -33,44 +33,39 @@ Update `.claude/worklog.md` as you go.
 Everything runs in Docker — no host toolchain
 (`docs/specs/01-architecture-and-deployment.md`).
 
-Run it so the **full log lands on disk and only the signal enters context**:
+Run `scripts/dev check` (`sh scripts/dev check` if the executable bit is
+missing, #336) before `scripts/dev test`; do not push on a nonzero exit — it
+is the mechanical half of what a reviewer's round would otherwise catch (H6).
+
+Run the suite so the **full log lands on disk and only the signal enters context**:
 
 ```bash
-docker compose run --rm app go test ./... > .claude/last-test.log 2>&1
-echo "exit=$?"
-grep -E '^(--- )?FAIL|^panic:|^\s+.*\.go:[0-9]+' .claude/last-test.log | head -40
-tail -3 .claude/last-test.log
+scripts/dev test                      # docker compose run --rm app go test ./...
+scripts/dev test ./internal/store/    # one package while iterating; the full suite before pushing
 ```
 
-A green suite costs three lines instead of several hundred; a red one shows the
-failures and their file:line. The complete output stays in
-`.claude/last-test.log` (gitignored) — read it when a failure needs more than
-the excerpt. Never summarize a run you did not perform, and never report an
-exit code you did not see.
+`scripts/dev test` (`scripts/dev.d/test`) runs the documented command, writes
+the complete output to `.claude/last-test.log` (gitignored) and prints only
+the `FAIL`/`panic:` lines with their file:line, the last three lines and
+`exit=<code>` — a green suite costs four lines instead of several hundred; a
+red one shows the failures. Read the log when a failure needs more than the
+excerpt. Never summarize a run you did not perform, and never report an exit
+code you did not see.
 
 Do not push a red suite; the test reviewer will block and the round is wasted.
 
 **If this session has no working local `docker compose`** (no daemon, no
 `CAP_NET_ADMIN` — see issue #48), there is no local suite to run before the
 first push. Use the `test` GitHub Actions workflow as a pre-PR fallback
-instead of skipping this step. Two things `gh run watch` needs help with
-outside an interactive terminal — every agent session: it requires an
-explicit run id, and `gh run list` can briefly still show only an older run
-from the same branch right after dispatch, so poll by the exact commit SHA
-under test rather than trusting "the newest run in the list":
+instead of skipping this step. `scripts/dev ci-status` (`scripts/dev.d/ci-status`)
+is the dispatch-and-poll recipe as a command: it dispatches the workflow on
+the branch, finds the run by the exact commit SHA (never "the newest run in
+the list", which can briefly still be an older one right after a dispatch),
+and blocks on `gh run watch --exit-status`, so its exit code is the run's:
 
 ```bash
 git push -u origin spec/<NN>-<slug>
-gh workflow run test.yml --ref spec/<NN>-<slug>
-SHA=$(git rev-parse HEAD)
-RUN_ID=""
-for i in $(seq 1 10); do
-  RUN_ID=$(gh run list --workflow=test.yml --branch spec/<NN>-<slug> --event workflow_dispatch \
-    --limit 5 --json databaseId,headSha -q ".[] | select(.headSha == \"$SHA\") | .databaseId" | head -1)
-  [ -n "$RUN_ID" ] && break
-  sleep 3
-done
-gh run watch "$RUN_ID" --exit-status   # blocks until the run finishes; non-zero = red
+scripts/dev ci-status "$(git rev-parse HEAD)" --dispatch spec/<NN>-<slug>   # non-zero = red
 ```
 
 Slower than local Docker — each round-trip is a push and a runner boot — but
@@ -109,6 +104,12 @@ EOF
 
 ## 5. Review round
 
+Generate the packet once before spawning the three reviewers —
+`scripts/dev packet <PR>` on round 1, `scripts/dev packet <PR> --since
+<previous round's head SHA>` on round ≥ 2 — so all three read one file
+instead of each re-gathering the PR, the issue, the spec and the diff
+themselves (`scripts/dev.d/packet`, H7).
+
 Spawn **all three reviewers in one message** so they run in parallel:
 
 - `review-go`
@@ -125,25 +126,27 @@ number. Each posts its own PR comment and returns a short summary.
 ## 6. The gate — read verdicts back from GitHub
 
 ```bash
-gh pr view <PR> --comments
+scripts/dev gate <PR>
 ```
 
-**Decide from the posted comments, not from what the agents told you.** A
-subagent's report is not visible to the user and is easy to remember
-generously; the comment on the PR is the record, and it is what the user will
-read later. Re-read it.
+**Decide from this, not from what the agents told you.** A subagent's report
+is not visible to the user and is easy to remember generously; the verdict
+marker each reviewer posts on the PR is the record, and for the merge
+decision itself `scripts/dev gate` (`scripts/dev.d/gate`, H5) reads only
+those markers back from GitHub — never the prose above them, and never a
+comment whose `sha=` does not match the PR's current head commit, so a stale
+approval from before your last push can never count. (The one exception: on
+a PR against `main`, its documentation-only fallback also reads the current
+round's own test-reviewer comment for a `**Suite:**` line — never a stale
+one — see the command's own `--help`.)
 
-Merge only when **all** of these hold:
-
-- three `VERDICT: APPROVE` headers for the current round — one per reviewer
-- the test reviewer's `**Suite:**` line shows a passing local exit code, **or**
-  — when local `docker compose` cannot reach a daemon at all — a completed,
-  successful run of the `test` GitHub Actions workflow against the PR's head
-  commit (`.claude/agents/review-tests.md` covers when this fallback applies)
-- no unaddressed blocking finding anywhere in the current round
-
-A missing reviewer comment is not an approval. Two approvals and a silence is
-not a pass.
+It prints one line per reviewer and then exactly one of `MERGE`, `WAIT
+<reviewers>` or `BLOCK <reviewers>`, exiting 0, 3 or 4 respectively. Merge
+only on `MERGE`. `WAIT` means a reviewer has not posted a verdict for the
+current head commit yet — that is not an approval, however many times it ran
+before. On a PR against `main`, `MERGE` also depends on the `test` check
+(pending or failed keeps it from printing `MERGE`; see the command's own
+`--help` for the docs-only exception).
 
 ## 7. If anything blocks
 
@@ -152,7 +155,8 @@ not a pass.
 2. If you believe a finding is wrong, **reply to it on the PR** with your
    reasoning (`gh pr comment`) instead of ignoring it. A disputed finding that
    is argued in the open is resolved; one that is silently skipped is not.
-3. Re-run tests, push, increment the round, and re-review from step 5.
+3. Re-run tests, push, increment the round, re-review from step 5, then
+   re-run `scripts/dev gate`.
 4. **Round cap: 2.** After two review passes, stop. Do not run a third.
    Open a GitHub issue for whatever is still outstanding — the finding, its
    file and line, a reproduction if there is one, and why it was deferred —

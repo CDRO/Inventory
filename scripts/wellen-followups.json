@@ -373,6 +373,166 @@
           "focus": "Determine, with a real docker compose ... up (not only config), what an E2E run is actually named and isolated as in each invocation style this plan's own tooling uses: from a package worktree (which has its own COMPOSE_PROJECT_NAME written into .env by Set-WorktreeEnvOverrides), from the main checkout, and from a scratch clone with no .env at all. docker-compose.e2e.yml pins name: inventory-e2e with a comment explaining why (without it the file would share the default inventory project with docker-compose.yml/override.yml and Compose would recreate containers by name across configs) - but a worktree's own COMPOSE_PROJECT_NAME overrides a file's name:, confirmed on #140 with a single config call but never against a real up, so whether a package session running the E2E suite from inside its own worktree actually gets an isolated project per worktree, or still shares the literal inventory-e2e project, is still genuinely open. Make the answer deliberate rather than emergent: either give the E2E stack a real per-worktree project name on purpose, or establish plainly that it must stay the one shared project and that two worktrees may never run the E2E suite concurrently (today's de facto answer, enforced by nothing outside a sequential wave). Then correct docker-compose.e2e.yml's own name: comment, and the three documentation pointers that currently describe this as open: scripts/wellen-orchestrator.ps1's DOCKER CLEANUP header block, its Stop-PackageStack comment, and scripts/wellen-planen.md's Docker cleanup after a wave per-package paragraph. This is the only package in this plan touching docker-compose.e2e.yml - wave 10's #195/#209 package was told explicitly to leave that file alone so it could not land ahead of this investigation. No application code changes; this is Docker-configuration and documentation only."
         }
       ]
+    },
+    {
+      "number": 12,
+      "waveIssue": 284,
+      "integrationBranch": "integration/followups-welle-12",
+      "sequential": false,
+      "dockerCleanup": true,
+      "packages": [
+        {
+          "specIssue": 233,
+          "slug": "f12-barcode-offer-scanned-test",
+          "branch": "followups/f12-barcode-offer-scanned-test",
+          "spec": "Issue 233: barcode offer scanned-code test",
+          "focus": "offerScannedBarcode in web/static/js/barcode-offer.js (the miss-path offer for a code already scanned) has the identical hasBarcodeAlready-then-shouldOffer ordering and the identical failure mode as offerBarcodeCapture, whose equivalent property #157 already pinned in wave 6 - but offerScannedBarcode itself has no test at all for it, not even the weaker no-dialog-appears check. Mirror #157's test exactly: assert the side effect (barcode_prompt_seen_at, or the first_time flag derived from it, unaffected by an offerScannedBarcode call against a product that already has a code) rather than dialog absence, using a fixture user whose seen_at is still NULL - do not reuse whichever user #157's own test already claimed. docs/specs/20-barcode-recall.md's criterion is the same one #157 pinned: barcode_prompt_seen_at is set exactly once, on the first time the offer is SHOWN. No production code change - if you find yourself editing barcode-offer.js, you have misread the issue."
+        },
+        {
+          "specIssue": 243,
+          "slug": "f12-spike31-reference-fixes",
+          "branch": "followups/f12-spike31-reference-fixes",
+          "spec": "Issues 243, 244: spike 31 reference and gate fixes",
+          "focus": "Two small corrections to docs/spikes/31-on-device-expiry-reminders.md, both from round-1 review of #130's own revision (PR #241/#242) - close both #243 and #244 in this PR. #243: line 219's Not verified section says the ntfy iOS delay finding about spec 17 is below - it is actually in Options inside the constraints, around lines 45-56, above this section, which is the file's last (line 222 of 222). The gate item at line 186 added by the same diff gets the identical referent right as above; fix line 219 to match. #244: issue #130's original gate-1 ask had three sub-items - a threshold so gate 1 could fail, recording OS and browser versions, and saying where the measurement probe lives. PR #241 (commit 6f79d2d) fixed the first two but never addressed or declined the third; add a sentence stating where the probe lives, or say explicitly that this revision defers the decision and why. docs/spikes/ is not a contract (CLAUDE.md) - this is tidying a spike's own internal accuracy and one open gate item, not promoting or implementing anything on-device."
+        },
+        {
+          "specIssue": 239,
+          "slug": "f12-spec05-fixture-and-layout",
+          "branch": "followups/f12-spec05-fixture-and-layout",
+          "spec": "Issues 239, 245: spec 05 fixture and file-layout accuracy",
+          "focus": "Two documentation-accuracy fixes to docs/specs/05-frontend-pwa-foundations.md, in different sections - close both #239 and #245 in this PR. #239 (lines 265-273): the E2E fixture description says two admins, three ordinary users, and three storages, but e2e/fixtures/seed.sql now holds fourteen user rows (two admins) and thirteen storages, grown across every wave that added its own fixture block. Update the counts to match current seed.sql, and verify whether the parenthetical detail about the bootstrap admin and one ordinary user belonging to no storage (the docs/specs/29-first-run-admin-guidance.md starting position) is still accurate before rewriting around it. #245 (File layout tree): the tree lists every other shared js/ module but omits js/register-sw.js, even though the wave-7 i18n amendment note added under this same tree already cites it as an established convention (every page imports js/i18n.js before rendering, the same way every page already imports js/register-sw.js first) - verify that claim is true (grep for the import across web/static/js/pages/) and add the missing file-layout entry. Documentation only, no code change, no test."
+        },
+        {
+          "specIssue": 259,
+          "slug": "f12-store-count2-second-collision",
+          "branch": "followups/f12-store-count2-second-collision",
+          "spec": "Issue 259: second store test collision",
+          "focus": "go test -count=2 ./internal/store/ is still red on a clean tree after #217's fix for TestExportStorageCarriesNoCredentialMaterial - two more tests collide with their own prior run on the second invocation, reproduced with docker compose run --rm app go test -count=2 ./internal/store/. Neither matches #217's truncated-UUIDv7-as-timestamp mechanism (that fix's own PR deliberately left them out under the no-widening-scope rule), so diagnose each independently before assuming the same fix applies twice. Read #217's own PR for the established pattern (randomSuffix() is the package's existing answer to exactly this class of collision) and check whether either failing test already has access to it or needs the same substitution. CI runs -count=1 so this has never broken the merge gate, but a reviewer or maintainer who repeats a run to probe for flakiness gets a red suite that has nothing to do with their change. No production code change - this is test-value generation only, same as #217. Verify with go test -count=2 ./internal/store/, not just -count=1."
+        },
+        {
+          "specIssue": 263,
+          "slug": "f12-gemini-livetest-and-exitcode-docs",
+          "branch": "followups/f12-gemini-livetest-and-exitcode-docs",
+          "spec": "Issues 263, 265: GEMINI_LIVE_TEST and exitCodeFor docs",
+          "focus": "Two small, unrelated doc-accuracy fixes bundled for efficiency - close both #263 and #265 in this PR. #263: GEMINI_LIVE_TEST=1 (internal/vision/live_test.go:26-40, introduced by #196 in wave 9) gates both live Gemini tests but is documented nowhere outside that one file - a contributor who wants to exercise the live contract test has no way to discover the flag exists. Add it to wherever this project documents environment variables and test-running conventions (check README.md and docs/specs/01-architecture-and-deployment.md for the existing pattern other flags use). #265: cmd/inventory/main.go's exitCodeFor doc comment (added by wave 9's #219 fix) says its two messages name the fix and point at README.md rather than an exact command - true for migrate.SchemaMismatchError's behind case, but config.MissingError's message (internal/config/config.go:87) DOES name an exact command (docker compose run --rm setup) before deferring only the start step, and SchemaMismatchError's own ahead case points at docs/specs/15-backup-restore-and-export.md, not README.md. Reword the comment to state the three cases (behind, ahead, missing config) separately and accurately rather than one sentence trying to cover all of them. No behavior change in either fix - doc comments and documentation only."
+        }
+      ]
+    },
+    {
+      "number": 13,
+      "waveIssue": 285,
+      "integrationBranch": "integration/followups-welle-13",
+      "sequential": true,
+      "dockerCleanup": true,
+      "packages": [
+        {
+          "specIssue": 248,
+          "slug": "f13-product-picture-custom-upload",
+          "branch": "followups/f13-product-picture-custom-upload",
+          "spec": "Issue 248: product picture custom-upload route",
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "Build the backend route the custom-upload half of the product detail view's picture-change path needs (spec 07, spec 16) - #135 in wave 8 shipped only the suggestion-picker half because there was nothing to wire an upload to. No existing route accepts a multipart image upload against an EXISTING product: PATCH /api/storages/{storage_id}/products/{product_id}/image (internal/httpapi/products.go, ProductHandler.SetImage) accepts only a suggestion hash or an icon_name JSON body, and the three ReadImageUpload callers (POST /ingest/shelf-photos, /ingest/product-photos, /consume/photos) each create a review job, none writes a product picture directly. Add a route that takes a photo file and attaches it to an existing product, using ReadImageUpload (internal/httpapi/upload.go) for the read - the single upload path that already strips EXIF with orientation applied to pixels FIRST - rather than a second implementation of that invariant. Same-storage validation and the identical 404 for an unknown and an inaccessible product, exactly like every other route under /api/storages/{storage_id}/ (docs/specs/03-auth-and-multi-tenancy.md). internal/httpapi/router.go is append-only - add the one route, do not restructure anything else in it (the same rule #135's own package was held to). Wire the frontend once the route exists: renderPicture in web/static/js/pages/products.js already owns the change affordance and status line, and web/static/js/image-picker.js already owns the picker beside which the new upload control belongs - keep both existing paths (suggestion picker, and whatever #135 shipped) working exactly as they do now."
+        },
+        {
+          "specIssue": 249,
+          "slug": "f13-image-picker-guards-and-rollback-test",
+          "branch": "followups/f13-image-picker-guards-and-rollback-test",
+          "spec": "Issues 249, 252, 254: image-picker guards and rollback test",
+          "focus": "Three findings against web/static/js/image-picker.js from round-2 review of #135/PR #247 and round-1 of the wave-8 consolidation PR #250, all deferred under the two-round cap - close all three (#249, #252, #254) in this PR. #249 and #252 share a root cause: renderImagePicker guards concurrent writes with a settling flag scoped to ONE invocation of the function, so it stops a double click within one open picker but not two open-and-close cycles - #249's failure surface is two image PATCHes racing (open picker, click suggestion A while its PATCH is in flight, close and reopen, click suggestion B before A's PATCH returns - both requests land, ordering is whatever the network gives you); #252's is a duplicated row (reopening the picker during its own suggestions fetch shows two rows and can leave two aria-pressed buttons). Fix the guard so it survives across reopens of the same logical picker instance, not just within one render call. #254: the picker's rollback contract - choose() catches a failed write and undoes the optimistic selection, and setPicture in web/static/js/pages/products.js deliberately rethrows so that catch fires - is exercised by no test; all nine existing E2E journeys exercise only the success path. Add an E2E test that forces a write failure (route interception) and asserts the optimistic selection is undone and the picker returns to its pre-click state. Read #135's and #247's own PR bodies for the picker's existing design before changing its shape. This package runs first among the wave-13 image-picker work since #248 (running before you) added a new caller of this file - check what it left before changing the guard."
+        },
+        {
+          "specIssue": 251,
+          "slug": "f13-product-detail-icon-and-404-test",
+          "branch": "followups/f13-product-detail-icon-and-404-test",
+          "spec": "Issues 251, 253: product detail icon staleness and 404 test",
+          "focus": "Two small findings from round-1 reviews of the wave-8 consolidation (PR #250), both non-blocking should-fixes - close both #251 and #253 in this PR. #251: renderDetail in web/static/js/pages/products.js builds the picture block and the edit form as siblings in one call, and the edit form's icon input is seeded from product.icon_name ONCE at renderEditForm - setPicture (which mutates product.icon_name) re-renders only the picture block, never the edit form, so clearing a picture leaves the edit form's icon input showing the old value, and the next Save silently reinstates the icon the user just removed. Resync the edit form's icon input whenever setPicture changes product.icon_name, or re-derive it from the product object at Save time rather than trusting a stale form field. #253: e2e/specs/products.spec.js:639's foreign-product 404 test asserts the image route answers 404 for a storage the session is not a member of, but never compares that response against the 404 for a genuinely nonexistent product in the SAME storage - the two must be identical per the 404-not-403 silent invariant (CLAUDE.md), and this test cannot currently tell a correctly-indistinguishable pair from two different 404 bodies that both happen to be status 404. Add the comparison assertion, mirroring how the storage-dimension test elsewhere in the same file already does this with toEqual. No behavior change for #253 - test strengthening only. Runs last in this wave, after #248 and the image-picker package, since it touches the same products.js file."
+        }
+      ]
+    },
+    {
+      "number": 14,
+      "waveIssue": 286,
+      "integrationBranch": "integration/followups-welle-14",
+      "sequential": false,
+      "dockerCleanup": true,
+      "packages": [
+        {
+          "specIssue": 275,
+          "slug": "f14-tree-modal-failure-tracking-and-reload-race",
+          "branch": "followups/f14-tree-modal-failure-tracking-and-reload-race",
+          "spec": "Issues 275, 280, 281, 282: tree-modal failure tracking and reload race",
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "Three real gaps and one stale-docs finding in web/static/js/tree-modal.js's concurrent-mutation handling, all found during wave 11's own package (#221/#227, PR #274) and consolidation (PR #279) reviews and deferred under the two-round cap - close all four (#275, #280, #281, #282) in this PR. Read #144/#154 (wave 5), #221/#227 (wave 11) and this issue's own three related ones in full before changing anything; this is the third consecutive round of findings against this file's mutation-tracking mechanism. #275 and #281 share a root cause: pendingMutationFailed is one shared boolean, not tracked per attempt. #275: finalize's pendingMutationFailed check is meant to keep the dialog open once so the user sees a failed mutation's error, but it is consume-once - two overlapping dismissals (e.g. Done then Esc before the mutation settles) both reach finalize() in the same settle's microtask batch, the first consumes the flag and correctly stays open, the second finds it already cleared and closes the dialog before the error is ever painted. #281: runMutation resets pendingMutationFailed to false on ENTRY, so if mutation A fails and the user has not yet dismissed it, starting mutation B (easy - the add-root form reopens instantly on submit) wipes A's failure flag and its visible error banner; if B then succeeds, Done closes the dialog with the user never having been forced to see that A silently did not happen. Fix by tracking failures per attempt (a Set of failed attempts alongside pendingMutations, or an unacknowledged-failure count) rather than one shared boolean, and have finalize refuse to close while any is outstanding; clearMessages on a new mutation's entry should not erase a different mutation's still-unacknowledged banner. #280: runMutation removes its attempt from the pendingMutations Set in a finally BEFORE awaiting reload() - so requestClose can see the set empty and finalize while a post-mutation reload GET is still in flight, landing that reload's render or error on an already-removed dialog. This is the identical failure shape #221 fixed for the create itself, one step further along for the reload; #221's own new comment claims the Set rewrite closes this class of race in general, which this specific window shows is not yet true. Fix by keeping the attempt tracked until its reload has also finished, not just its own mutate() call. #282: four comment lines in e2e/specs/ingestion.spec.js (line 443, and 517/519/522 added by the very commit that removed the single slot) still describe pendingMutation as a single slot in the present tense; reword to past tense (was a single slot / a single slot could not survive) - test-file prose only, no assertion or selector depends on it. Add E2E regression tests for #275 and #280 following the existing overlap-test pattern in e2e/specs/ingestion.spec.js (page.route to hold mutations open, release in the order that reproduces each race). No server code, no CLAUDE.md silent invariant - this is client-side bookkeeping."
+        }
+      ]
+    },
+    {
+      "number": 15,
+      "waveIssue": 287,
+      "integrationBranch": "integration/followups-welle-15",
+      "sequential": true,
+      "dockerCleanup": true,
+      "packages": [
+        {
+          "specIssue": 206,
+          "slug": "f15-spec36-e2e-coverage",
+          "branch": "followups/f15-spec36-e2e-coverage",
+          "spec": "Issue 206: spec 36 E2E coverage",
+          "focus": "Close the specs-36-specific items of #205 (read #205 in full first - it is the umbrella issue both this package and #207 must account against). Item 9: js/photo-picker.js's and js/camera.js's SHELL_ASSETS/CACHE_VERSION membership (docs/specs/05, 36, 37's own requirement) is enforced by nothing - web/embed_test.go, web/i18n_test.go and e2e/specs/pwa.spec.js do not check it, and a miss fails silently per the spec's own words. Add one assertion in pwa.spec.js on the shell cache's keys that closes this for both files. Item 10: the picker's two controls' 44x44 CSS-pixel minimum hit area and the one-thumbnail-per-row rule have no assertion; add boundingBox() checks and an img[src^=blob:] count - low effort, low risk. Item 11: the spec's Android sentence (a HEIC or WebP pick still reaches the server) is probably over-pessimistic since some Android pickers transcode too, but it errs in the safe direction - record on real Android hardware what the picker actually does and correct the spec's wording only if you can verify it, otherwise leave the conservative statement as-is and say in the PR that you could not verify it further. Close #206 in this PR; #205 stays open until #207 (the next package in this wave) also closes its half."
+        },
+        {
+          "specIssue": 207,
+          "slug": "f15-spec37-e2e-coverage",
+          "branch": "followups/f15-spec37-e2e-coverage",
+          "spec": "Issue 207: spec 37 E2E coverage",
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "Close the specs-37-specific items of #205 (read #205 in full first, and #206's own PR in this wave for what it already added to e2e/specs/ingestion.spec.js's photo-capture setup). Seven missing E2E journeys, per #205's own measured findings: (1) takePhoto() rejection falling back to the canvas grab - stub ImageCapture.prototype.takePhoto to reject, press Shutter once, assert one image/jpeg row; (2) getUserMedia entirely absent (the real plain-HTTP home-network case, not just a rejecting stub) - Object.defineProperty(navigator, mediaDevices, {value: undefined}) in an init script, assert a filechooser event fires on a synchronous click with element() = #photos-camera; (3) the barcode scan sheet's Camera control opening the OS input via waitForEvent(filechooser) after tapping dialog [data-role=pick-camera] - the existing sheet journey covers only its library input; (4) Shutter disabled until videoWidth > 0 - the current journey only observes it BECOMING enabled, so a regression that enables it at open would pass; pin HTMLVideoElement.prototype.videoWidth at 0 in an init script until released and assert toBeDisabled(), or state plainly in the PR that this gate is implementation-reviewed instead; (5) capture numbering continuing across separate viewfinder sessions - the existing stream-released journey already opens three sessions with one shot each, add the assertion that the three files are capture-1.jpg through capture-3.jpg in that order; (6) no fallback when createImageBitmap rejects or toBlob yields null on a large bitmap - decide and state whether to fall back to the raw frame or cap the canvas size, since #205 flags this as unmeasured; (7) the ImageCapture acceptance bullet in spec 37 bundles four criteria (the flip button, the hint-not-shown-on-takePhoto rule, the rejection fallback, and the base capture behavior) into one - split them into separate rows in your PR body's acceptance table rather than the spec text itself. Also the two nits #205 names: no hint shown when a takePhoto() rejection falls back to the canvas, and bitmap.close() after drawing - fix both if cheap, or note explicitly why not. Everything #205 marks Not verifiable in this stack (iOS capture forcing the camera, Android ignoring multiple with capture, iOS HEIC to JPEG transcoding, takePhoto() rejection on real Android hardware, activation expiry across a permission prompt on iOS, sensor resolution through normalisation, EXIF orientation via imageOrientation: from-image) stays out of scope for this package - record what you can on real hardware if you have access, otherwise leave it as recorded in #205. Close #207 and #205 both in this PR - #205 is the umbrella issue and its last remaining half closes here."
+        }
+      ]
+    },
+    {
+      "number": 16,
+      "waveIssue": 366,
+      "planIssue": 366,
+      "planName": "Welle 16 (Follow-ups round 2): leftovers from the closed plan #176",
+      "integrationBranch": "integration/followups-welle-16",
+      "sequential": true,
+      "dockerCleanup": true,
+      "packages": [
+        {
+          "specIssue": 348,
+          "slug": "f16-sw-cache-bust-and-digest-guard",
+          "branch": "followups/f16-sw-cache-bust-and-digest-guard",
+          "spec": "Issues 348, 349: sw.js HTTP-cache-bust investigation and digest guard",
+          "focus": "Two findings against web/static/sw.js from round 2 of PR #346 (wave 14) - close both #348 and #349 in this PR. #348 first, since its answer may change how urgent #349's guard is: install's cache.open(CACHE_NAME).then(cache => cache.addAll(SHELL_ASSETS)) issues ordinary fetches served by the browser's HTTP cache, not the Cache API - so a CACHE_VERSION bump could repopulate the new shell cache with OLD bytes if the HTTP cache still holds a fresh entry, silently defeating the bump. Do not reason from the code alone: check what Go's http.FileServer actually sends for /js/* and /css/* (Cache-Control, ETag, Last-Modified - docs/specs/01 and docs/specs/05), then drive a real browser - install the worker, edit a shell file's content, bump CACHE_VERSION, reload, assert the NEW bytes are what the new shell cache holds. e2e/specs/pwa.spec.js already has the shell-cache seeding and inspection machinery (including an inventory-shell-v0-simulated-stale fixture) to build this on. If real, fix with a cache-busting install (addAll with cache: reload requests, or a build-stamped query) plus a test that fails without it; if not real in this stack, say so plainly with what you checked and close #348 as verified-non-issue. #349: nothing catches the actual mistake this project has made five times (four commits to tree-modal.js, one to PR #346 itself, per the issue's own list) - a SHELL_ASSETS file's content changing without a CACHE_VERSION bump. Add a deterministic guard (not a browser test): hash every path in SHELL_ASSETS, store the digest set in a checked-in manifest beside CACHE_VERSION, fail go test ./... when a digest changes but the version string does not. SHELL_ASSETS is parsed from sw.js as text, same as web's existing tests already do for other non-Go files. Also add the one CLAUDE.md invariant line #349 identifies as missing: a content edit to a file already listed in SHELL_ASSETS needs a CACHE_VERSION bump too, not just adding or renaming one - the current wording only covers creation, which is why five commits in a row read it the narrow way and missed it."
+        },
+        {
+          "specIssue": 363,
+          "slug": "f16-camera-capture-after-exit-test",
+          "branch": "followups/f16-camera-capture-after-exit-test",
+          "spec": "Issue 363: camera capture-after-exit regression test",
+          "focus": "Deferred from PR #360 (wave 15 consolidation) round 2 under the two-review-pass cap - non-blocking, the code is correct today, this is a missing regression guard. capture() in web/static/js/camera.js deliberately lets a shot that finishes encoding AFTER Done/Esc/backdrop closes the viewfinder still land in the picker (spec 37 criterion 4), while suppressing the failure status and skipping the canvas grab for a shot that has not yet started - only the suppression half has a test (e2e/specs/ingestion.spec.js:722). Add the mirror-image journey the issue already specifies in full: stub ImageCapture.prototype.takePhoto to return a promise that resolves only when window.__resolveTakePhoto() is called (same enforced-ordering pattern as the existing test - never a timer, which passes whenever the timer wins the race and tests nothing), open the viewfinder, click Shutter, click Done, assert the viewfinder is gone and the list is still empty, call window.__resolveTakePhoto(), assert exactly one row named capture-1.jpg with a thumbnail appears. Verify by falsification the same way commit d842190 did for the other half: temporarily replace the guard with flip()'s outright return after the await, rebuild the app image (web/static is embedded, so a rebuild is required), confirm the new journey fails, then revert. No production code change unless the falsification step surprises you."
+        },
+        {
+          "specIssue": 347,
+          "slug": "f16-tree-modal-error-attribution",
+          "branch": "followups/f16-tree-modal-error-attribution",
+          "spec": "Issues 347, 351, 352: tree-modal error attribution and two regression tests",
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "The fourth round of findings against web/static/js/tree-modal.js's mutation tracking, all deferred from PR #346 (wave 14) and PR #350 (wave 14 consolidation) under the two-review-pass cap - close all three (#347, #351, #352) in this PR. #347: the dialog has one shared errorBox, and #281's own fix (a later mutation's success must never silently erase an earlier one's failure) means the box keeps showing the FIRST failure's text while unacknowledgedFailures still latches every failed attempt - correct, but the box cannot say which attempt a message belongs to, and when two mutations fail the later showError overwrites the earlier one's text outright even though both tokens stay latched and finalize still refuses to close over either. Fix by moving to per-attempt messages - a list of banners keyed by attempt token, or one banner naming the failed operation (\"Could not rename 'Pantry'\"), cleared individually as each is acknowledged - which needs a real design decision about what an acknowledged-but-still-open failure should look like, since neither #275, #280, #281 nor #282 specified one. New user-visible strings go through spec 19's catalogs (en.json and de.json) as usual. #351: finalize's own comment claims a specific two-concurrent-failures behavior (both tokens latch, the later message's text wins, the dialog still won't close over either) that nothing in e2e/specs/ingestion.spec.js exercises - all four existing tests drive at most one failing mutation. Add the test the issue specifies: two creates, both failing, dismissals interleaved so only the second is acknowledged, assert the dialog stays open, then that a further dismissal closes it - use an aborted POST as the existing tests do, so nothing is written to the shared E2E Household fixture. #352: the opening reload() in openTreeManager is deliberately excluded from #280's mutation-tracking fix (tracking it would make Esc block on a slow initial render, and nothing is at stake in that window since createdIds resolves from its own array) - but nothing proves a dismissal issued while that GET is still in flight actually closes the dialog immediately. Add the test the issue specifies: hold the opening GET with page.route, open the modal, press Escape while it is still held, assert the dialog is hidden before releasing the GET, release afterwards and assert nothing throws. Fix #347's UI change first if you want #351/#352's tests to exercise the final error-box shape, though neither test asserts on error-box content, only on open/closed state, so ordering within this package is not load-bearing."
+        },
+        {
+          "specIssue": 272,
+          "slug": "f16-e2e-skip-not-fail-docs",
+          "branch": "followups/f16-e2e-skip-not-fail-docs",
+          "spec": "Issue 272: E2E used-stack re-run can silently skip, not just fail",
+          "focus": "Deferred from wave 10's consolidation (PR #271). docs/specs/01-architecture-and-deployment.md's \"Running the E2E suite\" section already states that a used-stack re-run fails roughly 21 tests, but not the quieter half: e2e/specs/barcode-recall.spec.js runs under test.describe.configure({ mode: \"serial\" }), so when its first test fails against a used stack the REST of the file is SKIPPED, not failed, landing in a green-looking \"did not run\" count rather than a red one - measured live during wave 10's consolidation (140 failed, 14 did not run against a two-hour-old stack; 154 passed, 0 failed after a proper reset). A reviewer who reads only the failure count can conclude the suite is merely flaky when a subset never ran at all. Add the one or two sentences the issue specifies to that same section: a used-stack re-run can make a serial spec file skip rather than fail, so a did not run count is as much a reset signal as a failure count is. Note, so you do not widen scope: issue #190 (whether the E2E stack is isolated per worktree) is already answered and closed via PR #277 - do not reopen that question or touch its own documentation pointers, this package is only the narrower did-not-run point #195/#209's own criteria left out on purpose. Also considered and worth a deliberate decision rather than a default: #272 additionally floats a DROP DATABASE/CREATE DATABASE reset recipe as an alternative to down -v for a session that must leave its containers standing - wave 10 declined to add a second competing recipe on the grounds that the section's whole point is that exactly one place holds the commands; keep that unless you have a strong reason otherwise."
+        }
+      ]
     }
   ]
 }

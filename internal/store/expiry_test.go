@@ -402,10 +402,12 @@ func TestAFailedSeedRollsBackTheStorage(t *testing.T) {
 	s := requireDB(t)
 	ctx := context.Background()
 
-	before := countRows(t, ctx, `SELECT count(*) FROM storages WHERE name = $1`, "Atomic Household")
+	name := "Atomic Household " + randomSuffix()
+
+	before := countRows(t, ctx, `SELECT count(*) FROM storages WHERE name = $1`, name)
 	require.Zero(t, before)
 
-	storage, err := s.CreateStorage(ctx, store.SystemActor, "Atomic Household")
+	storage, err := s.CreateStorage(ctx, store.SystemActor, name)
 	require.NoError(t, err)
 
 	// The storage and its whole tree land together.

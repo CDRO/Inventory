@@ -209,6 +209,42 @@ test("the service worker never serves a cached response for a path outside its a
   expect(seeded.body).not.toBe("planted-unlisted-route");
 });
 
+// #205 item 9: nothing else in the repo checks that a module a page actually
+// imports is also listed in sw.js's SHELL_ASSETS. Miss it and the install
+// still succeeds, the page still works on a fresh load, and only a client
+// that already had the old shell cached keeps serving the stale module — a
+// failure with no error anywhere, exactly as docs/specs/36-photo-source-picker.md
+// (js/photo-picker.js) itself warns. Both pages that import it — ingest.html
+// directly, and every page whose barcode scan sheet does — are proof the
+// asset is actually reachable from the cache SHELL_ASSETS fills, not just
+// present in the source list.
+//
+// js/camera.js is here for the same reason and on the same list: spec 37's own
+// acceptance criteria require it in SHELL_ASSETS, and its "Watch for" section
+// says outright that nothing enforces that. This assertion is that
+// enforcement, for both modules at once — they share one mechanism, one cache
+// and one failure mode, so a second copy of this journey would only be a
+// second thing to keep in step.
+test("photo-picker.js and camera.js — the modules ingest.html imports — are in the shell cache", async ({
+  page,
+}) => {
+  await page.goto("/index.html");
+  await page.evaluate(() => navigator.serviceWorker.ready);
+
+  const cached = await page.evaluate(async () => {
+    const names = await caches.keys();
+    const shellCaches = names.filter((name) => name.startsWith("inventory-shell-"));
+    if (shellCaches.length !== 1) return null;
+    const cache = await caches.open(shellCaches[0]);
+    const keys = await cache.keys();
+    return keys.map((request) => new URL(request.url).pathname);
+  });
+
+  expect(cached, "expected exactly one inventory-shell-* cache").not.toBeNull();
+  expect(cached).toContain("/js/photo-picker.js");
+  expect(cached).toContain("/js/camera.js");
+});
+
 // CACHE_VERSION bumps exist specifically so a browser that already has an
 // old-named cache gets it cleaned up on the next activation, rather than
 // carrying it forever. This proves that cleanup actually runs against a
