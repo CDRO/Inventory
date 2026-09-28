@@ -18,6 +18,7 @@ import { initGamification } from "../gamification.js";
 import { get } from "../api.js";
 import { el, text, clearChildren, qs } from "../dom.js";
 import { t, tCount, apiErrorMessage, formatDate } from "../i18n.js";
+import { productCell } from "../product-table.js";
 
 const NBSP = String.fromCharCode(0xa0);
 const PAGE_LIMIT = 200;
@@ -449,7 +450,7 @@ function renderSummary(filtered) {
 
 function renderBatchRow(row) {
   return el("tr", { "data-batch-id": row.id }, [
-    el("td", { "data-label": "" }, [productCell(row.image_url, row.product_name, row.product_id)]),
+    el("td", { "data-label": "" }, [productCell(row.image_url, row.product_name, { href: productHref(row.product_id) })]),
     el("td", { "data-label": t("inventory.columns.category") }, [text(row.category_name || "—")]),
     el("td", { "data-label": t("inventory.columns.location") }, [text(row.location_path.join(" › "))]),
     el("td", { "data-label": t("inventory.columns.quantity"), class: "inventory-table__qty" }, [text(String(row.quantity))]),
@@ -476,7 +477,7 @@ function renderGroupRow(group) {
   }, [text(expanded.open ? "▾" : "▸")]);
 
   const row = el("tr", {}, [
-    el("td", { "data-label": "" }, [toggle, productCell(group.imageUrl, group.productName, group.productId)]),
+    el("td", { "data-label": "" }, [toggle, productCell(group.imageUrl, group.productName, { href: productHref(group.productId) })]),
     el("td", { "data-label": t("inventory.columns.category") }, [text(group.categoryName || "—")]),
     el("td", { "data-label": t("inventory.columns.location") }, [
       text(tCount("inventory.locationsCount", group.locationIds.size)),
@@ -505,16 +506,12 @@ function renderGroupRow(group) {
   return fragment;
 }
 
-function productCell(imageUrl, name, productId) {
-  const thumb = imageUrl ? [el("img", { class: "inventory-table__thumb", src: imageUrl, alt: "" })] : [];
-  // A plain template, not withStorageParam, for the same reason
-  // stocktakeHref below gives: it would carry this page's own filter/sort
-  // query params into products.html, which has no use for them.
-  const href = `/products.html?storage=${encodeURIComponent(storageId)}&product=${encodeURIComponent(productId)}`;
-  return el("span", { class: "inventory-table__product" }, [
-    ...thumb,
-    el("a", { href }, [text(name)]),
-  ]);
+// productHref links a row's product into products.html — a plain template,
+// not withStorageParam, for the same reason stocktakeHref below gives: it
+// would carry this page's own filter/sort query params into products.html,
+// which has no use for them.
+function productHref(productId) {
+  return `/products.html?storage=${encodeURIComponent(storageId)}&product=${encodeURIComponent(productId)}`;
 }
 
 // stocktakeHref links a row's location to its stocktake sheet, the same

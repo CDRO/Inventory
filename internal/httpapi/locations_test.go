@@ -302,6 +302,30 @@ func newFakeAPI(auth *fakeAuth) fakeAPI {
 	}
 }
 
+// CreateProduct disambiguates fakeAPI's embedding of *fakeProductStore
+// (docs/specs/16-product-maintenance.md's standalone Create) and
+// *fakeReorderStore (docs/specs/10-reorder-and-shopping-export.md's "Add
+// item"), which both need it because the real store.Store satisfies both
+// ProductStore and ReorderStore with the one method — promotion cannot pick
+// between two fakes that each define it, so fakeAPI needs its own.
+//
+// It defers to fakeReorderStore's existing bookkeeping (created, createErr,
+// lastNew, createCalls — already asserted on by the reorder "Add item"
+// tests) and additionally appends the result to fakeProductStore's own
+// list, so a subsequent GetProduct/detail read — Create's own response, or
+// any other product route — sees what was just created, the same as a real
+// database would.
+func (f fakeAPI) CreateProduct(ctx context.Context, storageID uuid.UUID, in store.NewProduct) (*store.Product, error) {
+	p, err := f.fakeReorderStore.CreateProduct(ctx, storageID, in)
+	if err != nil {
+		return nil, err
+	}
+	f.fakeProductStore.mu.Lock()
+	f.fakeProductStore.products = append(f.fakeProductStore.products, *p)
+	f.fakeProductStore.mu.Unlock()
+	return p, nil
+}
+
 // apiFixture builds a router with a member session already established, and
 // returns everything a test needs to make a request as that member.
 type apiFixture struct {

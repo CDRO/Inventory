@@ -141,6 +141,22 @@ func (f *fakeMatcher) MatchProductCandidates(_ context.Context, _ uuid.UUID, tex
 	return result, nil
 }
 
+// MatchLocalProduct makes fakeMatcher also satisfy httpapi.LocalMatcher — the
+// stage-1-only slice products.go's Create needs
+// (docs/specs/16-product-maintenance.md). It answers from the same canned
+// f.result a test already sets for MatchProductCandidates: nothing here reads
+// the catalog, so the two stages sharing one fixture field costs nothing.
+func (f *fakeMatcher) MatchLocalProduct(_ context.Context, _ uuid.UUID, text string) (matching.Result, error) {
+	f.calls++
+	f.texts = append(f.texts, text)
+	if f.err != nil {
+		return matching.Result{}, f.err
+	}
+	result := f.result
+	result.Query = text
+	return result, nil
+}
+
 // TestCatalogResponsesCarryDisplayFieldsOnly is the privacy invariant on the
 // wire. A catalog row describes what a product *is*; a response that leaked its
 // id, its timestamps, or any count would tell a user that other households

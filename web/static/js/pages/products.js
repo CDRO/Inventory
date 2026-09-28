@@ -32,6 +32,11 @@ import { fetchLocations, appendLocationOptions, openLocationField } from "../loc
 import { clearChildren, el, text } from "../dom.js";
 import { openScanSheet } from "../barcode.js";
 import { renderImagePicker } from "../image-picker.js";
+import { productCell } from "../product-table.js";
+
+// The list search is debounced by this many ms — "as-you-type" per
+// docs/specs/16-product-maintenance.md, without a request per keystroke.
+const SEARCH_DEBOUNCE_MS = 250;
 
 // The server's bound (maxShelfLifeDays in internal/httpapi/expiry.go). The
 // input carries it so a browser flags an out-of-range number before a round
@@ -51,6 +56,8 @@ const detailContainer = document.querySelector("#detail");
 const errorBox = document.querySelector("#error");
 const statusLine = document.querySelector("#status");
 const filterInput = document.querySelector("#filter");
+const showAllButton = document.querySelector("#show-all");
+const addProductButton = document.querySelector("#add-product");
 const switcherContainer = document.querySelector("#storage-switcher");
 
 let storageId = null;
@@ -61,6 +68,15 @@ let categories = [];
 /** @type {{id: string, name: string, depth: number, path: string[]}[]} */
 let locations = [];
 let selectedId = null;
+
+// The list panel's search state. null means the filter-only default — no
+// products rendered (docs/specs/16-product-maintenance.md) — and a string is
+// the last query a request was actually made for, "" meaning "Show all
+// products". Kept so a save, a delete or a create elsewhere on the page can
+// refresh whatever is currently shown without guessing what that was.
+let currentListQuery = null;
+let searchGeneration = 0;
+let searchDebounceTimer = null;
 
 init();
 
@@ -96,7 +112,12 @@ async function init() {
   });
   initGamification(storageId);
 
-  filterInput.addEventListener("input", renderList);
+  filterInput.addEventListener("input", onFilterInput);
+  showAllButton.addEventListener("click", onShowAllClick);
+  addProductButton.addEventListener("click", () => {
+    selectedId = null;
+    showCreateForm();
+  });
 
   // A deep link from inventory.html's "Product" column
   // (docs/specs/33-inventory-overview-table.md) names the product to open
@@ -128,7 +149,12 @@ async function reload() {
     return;
   }
   clearError();
-  renderList();
+
+  // Whatever the list panel was showing (a search, "show all", or nothing)
+  // stays showing, refreshed — a save, a merge or a create elsewhere on the
+  // page must not silently revert it to the filter-only default.
+  if (currentListQuery === null) renderListDefault();
+  else await runSearch(currentListQuery);
 
   if (selectedId && !products.some((p) => p.id === selectedId)) {
     // The selected product is gone — merged away or deleted.
@@ -138,44 +164,107 @@ async function reload() {
   if (selectedId) await showDetail(selectedId);
 }
 
-function renderList() {
-  const needle = normalize(filterInput.value);
-  const shown = needle ? products.filter((p) => normalize(p.name).includes(needle)) : products;
-
-  clearChildren(listContainer);
-  if (products.length === 0) {
-    listContainer.append(
-      el("p", { class: "empty-state" }, [
-        text(t("products.list.empty")),
-      ]),
-    );
+// onFilterInput debounces the as-you-type search
+// (docs/specs/16-product-maintenance.md). Clearing the box returns to the
+// filter-only empty state immediately — never back to "show all", which is a
+// person's explicit choice each time, not a state the page remembers.
+function onFilterInput() {
+  clearTimeout(searchDebounceTimer);
+  const query = filterInput.value.trim();
+  if (query === "") {
+    renderListDefault();
     return;
   }
-  if (shown.length === 0) {
+  searchDebounceTimer = setTimeout(() => runSearch(query), SEARCH_DEBOUNCE_MS);
+}
+
+// onShowAllClick loads and renders every product in the storage — the same
+// request the old default page load made, now reached by an explicit click
+// rather than happening on its own.
+function onShowAllClick() {
+  clearTimeout(searchDebounceTimer);
+  filterInput.value = "";
+  runSearch("");
+}
+
+// renderListDefault is the filter-only default: no products rendered until a
+// search or "Show all products" (docs/specs/16-product-maintenance.md).
+// `searchGeneration` is bumped so a search already in flight cannot land
+// after the box was cleared and overwrite this state with stale rows.
+function renderListDefault() {
+  currentListQuery = null;
+  searchGeneration++;
+  clearChildren(listContainer);
+  const key = products.length === 0 ? "products.list.empty" : "products.list.prompt";
+  listContainer.append(el("p", { class: "empty-state" }, [text(t(key))]));
+}
+
+// runSearch is the one path to the list table, for both a typed search and
+// "Show all products" (query === ""): a filtered GET request built the same
+// way every other filtered-and-reloaded listing on this system already is
+// (docs/specs/33-inventory-overview-table.md's pattern), replacing the empty
+// state with matching rows.
+async function runSearch(query) {
+  currentListQuery = query;
+  const generation = ++searchGeneration;
+
+  let rows;
+  try {
+    rows = (await get(`${basePath()}?q=${encodeURIComponent(query)}`)).items;
+  } catch (err) {
+    if (generation !== searchGeneration) return; // superseded by a newer search
+    showError(err);
+    return;
+  }
+  if (generation !== searchGeneration) return; // superseded by a newer search
+  clearError();
+
+  clearChildren(listContainer);
+  if (rows.length === 0) {
     listContainer.append(el("p", { class: "empty-state" }, [text(t("products.list.noMatch"))]));
     return;
   }
+  listContainer.append(renderProductListTable(rows));
+}
 
-  for (const product of shown) {
-    listContainer.append(
-      el(
-        "button",
-        {
-          type: "button",
-          class: product.id === selectedId ? "btn btn--block btn--primary" : "btn btn--block btn--ghost",
-          onclick: () => showDetail(product.id),
+// renderProductListTable is products.html's list table
+// (docs/specs/16-product-maintenance.md): the same row shape and CSS classes
+// as inventory.html's own table (docs/specs/33-inventory-overview-table.md),
+// not a second table implementation — js/product-table.js's productCell is
+// the piece the two pages actually share.
+function renderProductListTable(rows) {
+  return el("table", { class: "inventory-table" }, [
+    el("thead", {}, [
+      el("tr", {}, [
+        el("th", { scope: "col" }, [text(t("products.list.columns.product"))]),
+        el("th", { scope: "col" }, [text(t("products.list.columns.category"))]),
+        el("th", { scope: "col", class: "inventory-table__qty" }, [text(t("products.list.columns.stock"))]),
+      ]),
+    ]),
+    el("tbody", {}, rows.map(renderProductListRow)),
+  ]);
+}
+
+function renderProductListRow(row) {
+  return el("tr", { "data-product-id": row.id }, [
+    el("td", { "data-label": "" }, [
+      productCell(row.image_url, row.name, {
+        href: `${location.pathname}?storage=${encodeURIComponent(storageId)}&product=${encodeURIComponent(row.id)}`,
+        onclick: (event) => {
+          event.preventDefault();
+          showDetail(row.id);
         },
-        // Names go in through text(), never innerHTML: a product name is user
-        // text and may contain anything.
-        [text(product.name)],
-      ),
-    );
-  }
+      }),
+    ]),
+    el("td", { "data-label": t("products.list.columns.category") }, [text(row.category_name || "—")]),
+    el("td", { "data-label": t("products.list.columns.stock"), class: "inventory-table__qty" }, [
+      text(String(row.current_stock)),
+    ]),
+  ]);
 }
 
 async function showDetail(productId) {
   selectedId = productId;
-  renderList();
   clearStatus();
 
   let product;
@@ -575,6 +664,139 @@ function field(label, input, hint) {
   const children = [el("label", { for: input.id }, [text(label)]), input];
   if (hint) children.push(el("small", { class: "muted" }, [text(hint)]));
   return el("div", { class: "field" }, children);
+}
+
+// showCreateForm opens the standalone "+ Add product" entry point
+// (docs/specs/16-product-maintenance.md, "Creating a product") in the detail
+// panel — reachable without first typing a shopping-list line. It reuses the
+// same field set and image-picker call shopping-list.js's describeManually()
+// already uses (name, category, item type, min_stock, an optional picture)
+// rather than building a second form from scratch.
+function showCreateForm() {
+  clearStatus();
+  clearChildren(detailContainer);
+  detailContainer.append(renderCreateForm());
+}
+
+function renderCreateForm() {
+  const name = el("input", { type: "text", id: "np-name", required: true, maxlength: "255" });
+
+  const category = el("select", { id: "np-category" });
+  appendCategoryOptions(category, categories);
+
+  const itemType = el("select", { id: "np-item-type" });
+  for (const [value, labelKey] of ITEM_TYPES) {
+    itemType.append(el("option", { value }, [text(t(labelKey))]));
+  }
+  // The server's own default when item_type is omitted (internal/store/products.go).
+  itemType.value = "long_shelf_life";
+
+  const minStock = el("input", { type: "number", id: "np-min-stock", min: "0", step: "1", value: "0" });
+
+  // The picker needs something to search for, which a blank "+ Add product"
+  // form does not have yet — unlike describeManually(), which always opens
+  // with a line's own text already in the name field. Rather than firing it
+  // automatically off a blur (which would race the very click that leaves the
+  // name field to reach Save), it opens the same way the edit form's own
+  // picture change does: an explicit button, using whatever name has been
+  // typed by the time it is clicked.
+  const pictureBox = el("div", { class: "stack", hidden: true });
+  let pickedImage = null;
+  const addPictureButton = el(
+    "button",
+    {
+      type: "button",
+      class: "btn btn--ghost",
+      onclick: () => {
+        pictureBox.hidden = false;
+        renderImagePicker(pictureBox, {
+          storageId,
+          query: name.value.trim(),
+          keyPrefix: "products.pictures",
+          onPick: (hash) => {
+            pickedImage = hash;
+          },
+        });
+      },
+    },
+    [text(t("products.create.addPicture"))],
+  );
+
+  const errorLine = el("div", { class: "alert", role: "alert", hidden: true });
+
+  const form = el(
+    "form",
+    {
+      class: "stack",
+      onsubmit: (event) => {
+        event.preventDefault();
+        submitCreate({ name, category, itemType, minStock }, () => pickedImage, errorLine);
+      },
+    },
+    [
+      field(t("products.edit.name"), name),
+      field(t("products.edit.category"), category),
+      field(t("products.edit.itemTypeLabel"), itemType),
+      field(t("products.edit.minStock"), minStock),
+      el("div", { class: "field" }, [
+        el("label", {}, [text(t("products.create.picture"))]),
+        addPictureButton,
+        pictureBox,
+      ]),
+      errorLine,
+      el("div", { class: "row" }, [
+        el("button", { type: "submit", class: "btn btn--primary" }, [text(t("common.save"))]),
+        el(
+          "button",
+          { type: "button", class: "btn btn--ghost", onclick: () => clearChildren(detailContainer) },
+          [text(t("common.cancel"))],
+        ),
+      ]),
+    ],
+  );
+
+  return el("div", { class: "card stack" }, [
+    el("h3", {}, [text(t("products.create.title"))]),
+    form,
+  ]);
+}
+
+// submitCreate posts the new product. name is the only field the server
+// requires (docs/specs/16-product-maintenance.md); a close match to an
+// existing product's name comes back as that existing product instead of a
+// new one, which is shown exactly like a freshly created product would be —
+// the same "merge instead?" courtesy the rename path gives, applied here by
+// the server rather than the frontend.
+async function submitCreate(inputs, pickedImage, errorLine) {
+  const name = inputs.name.value.trim();
+  if (!name) {
+    errorLine.textContent = t("products.create.nameRequired");
+    errorLine.hidden = false;
+    return;
+  }
+
+  const body = { name, item_type: inputs.itemType.value };
+  if (inputs.category.value) body.category_id = inputs.category.value;
+  const minStock = Number.parseInt(inputs.minStock.value, 10);
+  body.min_stock = Number.isFinite(minStock) ? minStock : 0;
+  const hash = pickedImage();
+  if (hash) body.image = hash;
+
+  errorLine.hidden = true;
+  try {
+    const created = await post(basePath(), body);
+    clearError();
+    selectedId = created.id;
+    // After reload(), not before: reload() opens the new product's own detail
+    // view, and showDetail() clears the status line at its own start (#395)
+    // — set after it runs, so the confirmation is not wiped before anyone
+    // sees it.
+    await reload();
+    showStatus(t("products.create.saved", { name: created.name }));
+  } catch (err) {
+    errorLine.textContent = err instanceof ApiError ? apiErrorMessage(err) : t("products.error.network");
+    errorLine.hidden = false;
+  }
 }
 
 async function save(product, inputs) {
