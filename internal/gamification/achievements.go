@@ -7,6 +7,7 @@ import "fmt"
 // achievements_unlocked.achievement_key exactly.
 type AchievementKey string
 
+// AchievementKey values.
 const (
 	AchFirstShelf    AchievementKey = "first_shelf"
 	AchCartographer  AchievementKey = "cartographer"

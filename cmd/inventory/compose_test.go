@@ -168,7 +168,7 @@ func TestNASVariantGivesBackupTheBindMountedUploads(t *testing.T) {
 
 // TestE2EBackupServiceMatchesTheProductionOne guards a copy.
 //
-// The restore round trip (.github/workflows/e2e.yml, issue #133) needs a
+// The restore round trip (.github/workflows/restore.yml, issue #133) needs a
 // `backup` service in the E2E stack, and docker-compose.e2e.yml carries its
 // own rather than reusing the base file's, because that stack has no .env to
 // read credentials from. Two declarations of one service is a thing that
@@ -254,7 +254,8 @@ func TestE2EAppMountsTheUploadsTheRoundTripDestroys(t *testing.T) {
 // Locally every documented command passes `-p inventory-e2e`, because a
 // checkout's COMPOSE_PROJECT_NAME beats a file's `name:`. CI passes no `-p` at
 // all: a runner has no `.env`, so this one line is the whole of the separation
-// there, across some forty invocations in .github/workflows/e2e.yml.
+// there, across every invocation in .github/workflows/e2e.yml and
+// .github/workflows/restore.yml (H8 split the round trip into the latter).
 //
 // Which makes it the rare line whose removal breaks nothing visibly. Delete or
 // rename it and every suite stays green — no Go code reads it, neither

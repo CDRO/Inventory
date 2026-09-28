@@ -19,6 +19,7 @@ import (
 // their laptop (docs/specs/12-client-api-contract.md).
 type SessionKind string
 
+// SessionKind values.
 const (
 	SessionBrowser SessionKind = "browser"
 	SessionDevice  SessionKind = "device"

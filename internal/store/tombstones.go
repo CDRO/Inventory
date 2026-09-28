@@ -12,6 +12,7 @@ import (
 // on tombstones.entity_type.
 type EntityType string
 
+// EntityType values.
 const (
 	TombstoneProduct          EntityType = "product"
 	TombstoneCategory         EntityType = "category"

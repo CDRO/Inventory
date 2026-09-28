@@ -17,6 +17,7 @@ import (
 // (docs/specs/08-expiration-and-classification.md).
 type ItemType string
 
+// ItemType values.
 const (
 	ItemPerishable    ItemType = "perishable"
 	ItemLongShelfLife ItemType = "long_shelf_life"

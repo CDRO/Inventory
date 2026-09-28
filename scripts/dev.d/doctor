@@ -1,0 +1,11 @@
+#!/bin/sh
+# Check the environment for what a session, a wave or a container needs before it starts.
+#
+#   scripts/dev doctor [--json] [--fix]
+#
+# A thin forward to scripts/doctor, which is also runnable directly - see its
+# own header for the checks, the flags and the test seams.
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+exec sh "$root/scripts/doctor" "$@"
