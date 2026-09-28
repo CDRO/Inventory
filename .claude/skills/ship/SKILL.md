@@ -116,8 +116,10 @@ Spawn **all three reviewers in one message** so they run in parallel:
 - `review-tests`
 - `review-docs`
 
-Give each: the PR number, the issue number, the spec path, and the round
-number. Each posts its own PR comment and returns a short summary.
+Give each: the PR number, the issue number, the spec path, the round number,
+and — on round ≥ 2 — the head SHA the previous round reviewed (the `--since`
+value from step 7), so a reviewer can rebuild the packet itself if it is
+missing or stale. Each posts its own PR comment and returns a short summary.
 
 **Do not pass a `model` argument when spawning them.** The Agent tool's
 `model` parameter overrides frontmatter, which would silently undo the pinned
@@ -155,8 +157,16 @@ before. On a PR against `main`, `MERGE` also depends on the `test` check
 2. If you believe a finding is wrong, **reply to it on the PR** with your
    reasoning (`gh pr comment`) instead of ignoring it. A disputed finding that
    is argued in the open is resolved; one that is silently skipped is not.
-3. Re-run tests, push, increment the round, re-review from step 5, then
-   re-run `scripts/dev gate`.
+3. Re-run tests, push, then regenerate the packet for the new head —
+   `scripts/dev packet <PR> --since <the head SHA the previous round
+   reviewed>` — before re-reviewing from step 5, and re-run `scripts/dev
+   gate` after. The `--since` packet is what makes round ≥ 2 a delta review
+   (decision D9 of the harness plan): it inlines only the diff since that
+   SHA, points at the full diff instead of repeating it, and carries each
+   reviewer's own previous verdict, which their "Round 2 and later" sections
+   read to account for every round-1 blocking finding as `resolved` or
+   `still open` before they raise anything new. Increment the round number
+   you pass the reviewers.
 4. **Round cap: 2.** After two review passes, stop. Do not run a third.
    Open a GitHub issue for whatever is still outstanding — the finding, its
    file and line, a reproduction if there is one, and why it was deferred —

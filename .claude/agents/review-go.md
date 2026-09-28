@@ -95,6 +95,46 @@ whenever the diff touches routing, handlers, or middleware:
   `should-fix` (real but not shipping-critical), `nit` (style/preference — at
   most three, and never a reason to BLOCK).
 
+## Round 2 and later
+
+Round 1 reviewed the whole PR. Round ≥ 2 reviews the **delta** since the head
+you reviewed last (decision D9 of the harness plan), and it starts by
+accounting for what you already found. In order:
+
+1. Read your own previous verdict. The packet's "Previous round's verdicts"
+   section carries it. Read the PR's own comment history for it only when the
+   packet says it found no previous verdict comment, which it states in that
+   section when H5's marker is missing or the round is older than the packet.
+2. **Account for every round-1 blocking finding of yours before anything
+   else** — one line each, `resolved` or `still open`, with the `file:line`
+   that settles it. A finding whose code you cannot locate any more is `still
+   open`, not dropped. This list comes first so the round is auditable from
+   your comment alone, which is all the gate reads.
+   If you had no round-1 blocking findings at all, say exactly that in one
+   line, still before anything else.
+3. Review the delta diff the packet inlines (`--since <previous round's head
+   sha>`) in full — it is short, so read all of it, and read the surrounding
+   files for any hunk you cannot judge in isolation.
+4. **Re-read the whole PR diff** — the packet names the `git diff` command for
+   it instead of inlining it — only when the delta touches one of:
+   - `internal/httpapi/router.go`,
+   - any middleware,
+   - transaction code in `internal/store`,
+   - `migrations/`,
+   - or the packet reports a merge commit in the range, which means the base
+     branch was merged into the PR between rounds and the two-dot delta is
+     mostly upstream noise.
+
+   Those are the places where a fix regresses something silently instead of
+   redly (`CLAUDE.md`, "Invariants that fail silently", and D3 for migrations).
+   Everywhere else the delta plus the context you read around it *is* the
+   review; re-reading the whole diff there buys nothing.
+5. Do not re-litigate your round-1 should-fix or nit findings. They were not
+   blocking then, and raising them again costs a whole round.
+6. New blocking findings in the delta are legitimate — a fix that introduces a
+   bug is exactly what this round exists to catch. Mark each one
+   `(new in round <n>)` so it is not mistaken for a survivor of round 1.
+
 ## Output
 
 Post exactly this shape with `gh pr comment <PR> --body "..."`:
