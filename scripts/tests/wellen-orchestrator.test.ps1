@@ -5,12 +5,18 @@
     Get-SanitizedProjectName / Set-WorktreeEnvOverrides (#115),
     Stop-PackageStack, Invoke-WaveDockerCleanup and the wave file's
     "dockerCleanup" validation (#140 item 9) - plus Invoke-Wave's parallel
-    polling loop's teardown ordering (#188), which touches no Docker at all.
+    polling loop's teardown ordering (#188), which touches no Docker at all -
+    and, from H11 (#310): the "staleAfterMinutes" schema validation, the
+    doctor pre-flight (Invoke-DoctorPreflight, against a stub `sh` script),
+    the heartbeat's date-combining and WARN/toast-once-per-hour logic
+    (Get-LatestDate, Test-PackageStaleness), its date-parsing functions'
+    resilience to garbage native-command output, and the rounds-bookkeeping
+    parser (Get-RoundsFromComments) against a fixture comment set.
 
 .DESCRIPTION
     The script under test is a top-to-bottom orchestrator, not a module - its
-    own "Main flow" section unconditionally calls Import-WavePlan, checks
-    `docker info`, and (with -Validate) exits, which would make a plain
+    own "Main flow" section unconditionally calls Import-WavePlan, runs the
+    doctor pre-flight, and (with -Validate) exits, which would make a plain
     dot-source of the whole file run (part of) a real orchestration pass.
     This test instead dot-sources only the portion BEFORE the
     "# Main flow" marker comment - every function definition and the handful
@@ -44,8 +50,9 @@
     touched by this part.
 
     Run:  powershell -NoProfile -File scripts\tests\wellen-orchestrator.test.ps1
-    Needs Docker (the busybox image is pulled on first use). Takes about a
-    minute.
+    Needs Docker (the busybox image is pulled on first use) and `sh` on PATH
+    (Git for Windows - the doctor pre-flight tests run a stub through it, the
+    same way scripts/doctor itself runs). Takes about a minute.
 #>
 [CmdletBinding()]
 param()
@@ -77,7 +84,7 @@ $sourceText = Get-Content -LiteralPath $orchestratorScript -Raw
 $marker = '# Main flow'
 $splitAt = $sourceText.IndexOf($marker)
 if ($splitAt -lt 0) {
-    throw "Could not find the '# Main flow' marker in $orchestratorScript - has it moved? This test's dot-source split depends on it staying above every side-effecting call (docker info, Import-WavePlan, exit)."
+    throw "Could not find the '# Main flow' marker in $orchestratorScript - has it moved? This test's dot-source split depends on it staying above every side-effecting call (the doctor pre-flight, Import-WavePlan, exit)."
 }
 # Back up to the start of the "# ---" banner line above "# Main flow" so the
 # function block above it (Invoke-Package) is not cut mid-comment; harmless
@@ -95,6 +102,14 @@ $realScriptsDir = Split-Path $orchestratorScript -Parent
 $functionsOnly = $functionsOnly -replace '\$PSScriptRoot', "'$realScriptsDir'"
 $sb = [ScriptBlock]::Create($functionsOnly)
 . $sb
+
+# Saved once, here, before any test section shadows Invoke-Native (the #188
+# section near the end of this file already does, permanently, since a
+# `function` statement at this script's top level redefines it for
+# everything that runs afterward) - Invoke-DoctorPreflight (H11) needs the
+# REAL Invoke-Native to actually run its stub via `sh`, so it restores this
+# saved copy first.
+$script:RealInvokeNative = (Get-Item function:Invoke-Native).ScriptBlock
 
 $script:DryRun = $false
 # Redirect away from the real scripts/wellen-orchestrator.log (gitignored,
@@ -578,6 +593,333 @@ $threw = $false; $err = $null
 try { Invoke-Wave -Plan $null -Standards $null -Wave $wave -NextWave $null } catch { $threw = $true; $err = $_.Exception.Message }
 Assert (-not $threw) "the polling loop terminates without a shadowed helper throwing ($err)"
 Assert (($stopOrder -join ',') -eq 'iw-b,iw-a') "teardown fires in ACTUAL close order (iw-b, listed second, closes first) - got '$($stopOrder -join ',')'"
+
+Write-Host "== Invoke-Wave (unsequential branch) wiring: Test-PackageHeartbeat is actually called for a still-open package (H11) =="
+
+# The #188 test above already drives this same polling loop, but never
+# shadows or asserts on Test-PackageHeartbeat - it proves the loop's
+# teardown ordering, nothing about the heartbeat call this PR adds to it.
+# Deleting that call (and the staleAfterMinutes resolution above it) from
+# Invoke-Wave leaves every existing assertion in this file green - this test
+# is what actually fails if that happens.
+$heartbeatCallsUnseq = [System.Collections.Generic.List[string]]::new()
+function Test-PackageHeartbeat {
+    param($Package, [string]$WorktreePath, [int]$StaleAfterMinutes, [string]$WindowTitle)
+    $heartbeatCallsUnseq.Add($Package.slug)
+}
+$closedUnseq = @{}
+$pkgHbU = [pscustomobject]@{ spec = 'HBU'; specIssue = 100; slug = 'hbu-pkg'; branch = 'hbu-branch' }
+$waveHbU = [pscustomobject]@{ number = 20; waveIssue = 101; integrationBranch = 'hbu'; packages = @($pkgHbU) }
+function Test-IssueClosed { param([int]$Number) return [bool]$closedUnseq[$Number] }
+function Invoke-Package { param($Plan, $Standards, $Wave, $Package) }
+function Invoke-Native { param([scriptblock]$Command) $script:NativeExit = 0; return '999' }
+function Stop-PackageStack { param([string]$WorktreePath, [string]$Slug) $closedUnseq[$waveHbU.waveIssue] = $true }
+$script:sleepsHbU = 0
+function Start-Sleep {
+    param($Seconds)
+    $script:sleepsHbU++
+    if ($script:sleepsHbU -gt 3) { throw 'watchdog: unsequential heartbeat wiring test did not terminate' }
+    $closedUnseq[$pkgHbU.specIssue] = $true
+}
+$standardsHbU = [pscustomobject]@{ staleAfterMinutes = 45 }
+$threwHbU = $false
+try { Invoke-Wave -Plan $null -Standards $standardsHbU -Wave $waveHbU -NextWave $null } catch { $threwHbU = $true }
+Assert (-not $threwHbU) 'the unsequential branch terminates without throwing'
+Assert ($heartbeatCallsUnseq.Count -ge 1) 'Test-PackageHeartbeat is actually invoked for the still-open package while polling'
+Assert ($heartbeatCallsUnseq -contains 'hbu-pkg') 'and it is invoked for the right package'
+
+Write-Host "== Invoke-Wave (sequential branch) wiring: Wait-ForPackageIssueClosed actually calls Test-PackageHeartbeat (H11) =="
+
+# The sequential branch has no equivalent to the #188/unsequential tests at
+# all before this PR - Wait-ForPackageIssueClosed's own heartbeat call had
+# zero coverage (confirmed by grep in review). Same shape as the test above,
+# against a "sequential": true wave instead.
+$heartbeatCallsSeq = [System.Collections.Generic.List[string]]::new()
+function Test-PackageHeartbeat {
+    param($Package, [string]$WorktreePath, [int]$StaleAfterMinutes, [string]$WindowTitle)
+    $heartbeatCallsSeq.Add($Package.slug)
+}
+$closedSeq = @{}
+$pkgHbS = [pscustomobject]@{ spec = 'HBS'; specIssue = 200; slug = 'hbs-pkg'; branch = 'hbs-branch' }
+$waveHbS = [pscustomobject]@{ number = 21; waveIssue = 201; integrationBranch = 'hbs'; sequential = $true; packages = @($pkgHbS) }
+function Test-IssueClosed { param([int]$Number) return [bool]$closedSeq[$Number] }
+function Invoke-Package { param($Plan, $Standards, $Wave, $Package) }
+function Invoke-Native { param([scriptblock]$Command) $script:NativeExit = 0; return '999' }
+function Stop-PackageStack { param([string]$WorktreePath, [string]$Slug) $closedSeq[$waveHbS.waveIssue] = $true }
+$script:sleepsHbS = 0
+function Start-Sleep {
+    param($Seconds)
+    $script:sleepsHbS++
+    if ($script:sleepsHbS -gt 3) { throw 'watchdog: sequential heartbeat wiring test did not terminate' }
+    $closedSeq[$pkgHbS.specIssue] = $true
+}
+$standardsHbS = [pscustomobject]@{ staleAfterMinutes = 45 }
+$threwHbS = $false
+try { Invoke-Wave -Plan $null -Standards $standardsHbS -Wave $waveHbS -NextWave $null } catch { $threwHbS = $true }
+Assert (-not $threwHbS) 'the sequential branch terminates without throwing'
+Assert ($heartbeatCallsSeq.Count -ge 1) 'Wait-ForPackageIssueClosed actually invokes Test-PackageHeartbeat while waiting'
+Assert ($heartbeatCallsSeq -contains 'hbs-pkg') 'and it is invoked for the right package'
+
+Write-Host "== Import-WavePlan: staleAfterMinutes validation (H11) =="
+
+# staleAfterMinutes is optional everywhere - Get-Field returns $null when it
+# is absent, which Test-StaleAfterMinutes must accept without an error - and,
+# when present, must be a positive integer, not a string, decimal, or zero.
+$stalePlanDir = Join-Path $env:TEMP "wotest-staleplan-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Force -Path $stalePlanDir | Out-Null
+function New-StalePlanFile {
+    param([string]$StandardsExtra = '', [string]$PackageExtra = '')
+    $path = Join-Path $stalePlanDir "plan-$([guid]::NewGuid().ToString('N')).json"
+    Set-Content -Path $path -Encoding ASCII -Value @"
+{
+  "plan":      { "name": "t", "planIssue": 1 },
+  "standards": { "model": "claude-sonnet-5", "effort": "high",
+                 "consolidationModel": "claude-opus-5", "consolidationEffort": "xhigh"$StandardsExtra },
+  "waves": [
+    { "number": 1, "waveIssue": 2, "integrationBranch": "integration/t-1",
+      "packages": [ { "specIssue": 3, "slug": "ztx", "branch": "spec/ztx",
+                      "spec": "Spec X", "focus": "f"$PackageExtra } ] }
+  ]
+}
+"@
+    return $path
+}
+function Get-StalePlanError {
+    param([string]$StandardsExtra = '', [string]$PackageExtra = '')
+    try { Import-WavePlan -Path (New-StalePlanFile -StandardsExtra $StandardsExtra -PackageExtra $PackageExtra) | Out-Null; return $null }
+    catch { return $_.Exception.Message }
+}
+try {
+    Assert ($null -eq (Get-StalePlanError)) 'staleAfterMinutes absent everywhere validates (optional field)'
+    Assert ($null -eq (Get-StalePlanError -StandardsExtra ',"staleAfterMinutes": 45')) 'standards.staleAfterMinutes as a positive integer validates'
+    Assert ($null -eq (Get-StalePlanError -PackageExtra ',"staleAfterMinutes": 10')) 'a per-package staleAfterMinutes as a positive integer validates'
+
+    $err = Get-StalePlanError -StandardsExtra ',"staleAfterMinutes": 0'
+    Assert ($err -match 'standards\.staleAfterMinutes: must be a positive integer') "standards.staleAfterMinutes: 0 is rejected, with the field path ($err)"
+
+    $err = Get-StalePlanError -PackageExtra ',"staleAfterMinutes": 0'
+    Assert ($err -match 'waves\[0\]\.packages\[0\]\.staleAfterMinutes: must be a positive integer') "a per-package staleAfterMinutes: 0 is rejected, with the field path ($err)"
+
+    $err = Get-StalePlanError -StandardsExtra ',"staleAfterMinutes": "45"'
+    Assert ($err -match 'standards\.staleAfterMinutes: must be a positive integer') "a non-integer (string) standards.staleAfterMinutes is rejected ($err)"
+
+    $err = Get-StalePlanError -PackageExtra ',"staleAfterMinutes": 12.5'
+    Assert ($err -match 'waves\[0\]\.packages\[0\]\.staleAfterMinutes: must be a positive integer') "a non-integer (decimal) per-package staleAfterMinutes is rejected ($err)"
+} finally {
+    Remove-Item -Recurse -Force -Path $stalePlanDir -ErrorAction SilentlyContinue
+}
+
+Write-Host "== Get-LatestDate: the heartbeat picks the newest of the three sources (H11) =="
+
+$dOld = (Get-Date).AddMinutes(-60)
+$dMid = (Get-Date).AddMinutes(-30)
+$dNew = (Get-Date).AddMinutes(-5)
+Assert ((Get-LatestDate -Dates @($dMid, $dNew, $dOld)) -eq $dNew) 'the newest of three real dates wins, regardless of input order'
+Assert ((Get-LatestDate -Dates @($null, $dOld, $null)) -eq $dOld) 'null sources (a signal with nothing yet) are ignored'
+Assert ($null -eq (Get-LatestDate -Dates @($null, $null, $null))) 'all three sources empty returns null - no signal at all, not "now"'
+
+Write-Host "== Get-RoundsFromComments: H5 verdict markers -> rounds/blocks (H11) =="
+
+# The exact marker format scripts/dev.d/gate reads:
+#   <!-- verdict: APPROVE|BLOCK round=<n> sha=<head sha> reviewer=go|tests|docs -->
+# Round 1 has one BLOCK (tests); round 2's re-review is a clean sweep - the
+# fixture this acceptance criterion names: rounds=2, blocks=1.
+$roundsFixture = @(
+    'Looks mostly fine, one nit.',
+    '<!-- verdict: APPROVE round=1 sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa reviewer=go -->',
+    'The retry loop never terminates on a permanent error.',
+    '<!-- verdict: BLOCK round=1 sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa reviewer=tests -->',
+    '<!-- verdict: APPROVE round=1 sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa reviewer=docs -->',
+    'Fixed - the loop now gives up after 3 attempts.',
+    '<!-- verdict: APPROVE round=2 sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb reviewer=go -->',
+    '<!-- verdict: APPROVE round=2 sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb reviewer=tests -->',
+    '<!-- verdict: APPROVE round=2 sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb reviewer=docs -->'
+)
+$roundsInfo = Get-RoundsFromComments -CommentLines $roundsFixture -PrNumber '42'
+Assert ($roundsInfo.Rounds -eq 2) "rounds=2 from the fixture (got $($roundsInfo.Rounds))"
+Assert ($roundsInfo.Blocks -eq 1) "blocks=1 from the fixture (got $($roundsInfo.Blocks))"
+Assert ($roundsInfo.PrNumber -eq '42') 'the PR number passes through unchanged'
+$noMarkers = Get-RoundsFromComments -CommentLines @('nothing here') -PrNumber '1'
+Assert ($noMarkers.Rounds -eq 0 -and $noMarkers.Blocks -eq 0) 'no markers at all is rounds=0, blocks=0 - not an error'
+
+Write-Host "== Get-ParsedDateOrNull / Get-BranchLastCommitDate / Get-NewestReviewerCommentDate: garbage output never throws (H11) =="
+
+# The #188 test above already proves Invoke-Wave survives a shadowed
+# Invoke-Native that always returns a placeholder ('999') - this proves the
+# specific new functions that try to parse a DATE out of native output do the
+# same: a transient gh/git hiccup or an unparseable response must be "no
+# signal", never a thrown exception reaching into a multi-day run.
+Assert ($null -eq (Get-ParsedDateOrNull -Text 'not-a-date')) 'unparseable text returns null, not a throw'
+Assert ($null -eq (Get-ParsedDateOrNull -Text '')) 'empty text returns null'
+function Invoke-Native { param([scriptblock]$Command) $script:NativeExit = 0; return '999' }
+$threw = $false; $result = $null
+try { $result = Get-BranchLastCommitDate -Branch 'some-branch' } catch { $threw = $true }
+Assert (-not $threw) 'Get-BranchLastCommitDate does not throw on unparseable gh/git output'
+Assert ($null -eq $result) 'and reports no signal'
+$threw = $false; $result = $null
+try { $result = Get-NewestReviewerCommentDate -Branch 'some-branch' } catch { $threw = $true }
+Assert (-not $threw) 'Get-NewestReviewerCommentDate does not throw on unparseable gh output'
+Assert ($null -eq $result) 'and reports no signal'
+
+Write-Host "== Register-PackageStartIfUnknown: seeds a floor on restart, without clobbering one that already exists (H11) =="
+
+# Invoke-Package's restart-meets-existing-worktree path (.RESTART SAFETY)
+# calls this so a package with none of the three real heartbeat signals is
+# still eventually flagged stale after a restart, instead of never at all -
+# round-1 review's finding (review-go). Not overwriting an existing floor
+# matters too: a second restart, or this same process noticing the same
+# package again on a later poll, must not keep pushing "started" into the
+# future and resetting the clock.
+$script:PackageStartedAt = @{}
+Register-PackageStartIfUnknown -Slug 'restart-pkg'
+Assert ($script:PackageStartedAt.ContainsKey('restart-pkg')) 'seeds a floor for a package with none yet'
+$seededAt = $script:PackageStartedAt['restart-pkg']
+Assert (((Get-Date).ToUniversalTime() - $seededAt).TotalSeconds -lt 10) 'the seeded floor is "now" (UTC), not some arbitrary past or future time'
+
+$earlierFloor = (Get-Date).ToUniversalTime().AddMinutes(-45)
+$script:PackageStartedAt['restart-pkg'] = $earlierFloor
+Register-PackageStartIfUnknown -Slug 'restart-pkg'
+Assert ($script:PackageStartedAt['restart-pkg'] -eq $earlierFloor) 'a package that already has a floor keeps it - a later call never overwrites it'
+
+Write-Host "== Get-PackageLastActivity: actually wired to all three heartbeat sources (H11) =="
+
+# Get-LatestDate on its own only proves the "pick the newest" combinator
+# works in isolation - this file's own history (#255/#246: a prompt builder
+# that was supposed to reference a field and simply never did, shipped with
+# a fully green suite) is exactly the class of gap that leaves unguarded.
+# Shadowing the three source functions with distinct, known dates proves
+# Get-PackageLastActivity actually calls all three and returns their
+# maximum, not just one of them by coincidence. Placed AFTER the garbage-
+# output section above, deliberately: that section needs the REAL
+# Get-BranchLastCommitDate/Get-NewestReviewerCommentDate still in place, and
+# these shadows (like every other top-level `function` redefinition in this
+# file) persist for the rest of the run once defined.
+$commitDate = (Get-Date).ToUniversalTime().AddMinutes(-40)
+$worklogDate = (Get-Date).ToUniversalTime().AddMinutes(-10)
+$commentDate = (Get-Date).ToUniversalTime().AddMinutes(-25)
+function Get-BranchLastCommitDate { param([string]$Branch) return $commitDate }
+function Get-WorklogLastWriteDate { param([string]$WorktreePath) return $worklogDate }
+function Get-NewestReviewerCommentDate { param([string]$Branch) return $commentDate }
+$activityPackage = [pscustomobject]@{ slug = 'gpla-test'; branch = 'x' }
+Assert ((Get-PackageLastActivity -Package $activityPackage -WorktreePath 'C:\anything') -eq $worklogDate) `
+    'picks the newest of all three real sources (the worklog mtime, here the most recent)'
+
+# With only one source populated, that lone source wins - proves the other
+# two are actually consulted (and correctly ignored when empty), not just the
+# first one returned.
+function Get-BranchLastCommitDate { param([string]$Branch) return $null }
+function Get-WorklogLastWriteDate { param([string]$WorktreePath) return $null }
+Assert ((Get-PackageLastActivity -Package $activityPackage -WorktreePath 'C:\anything') -eq $commentDate) `
+    'with only the PR-comment source populated, that source wins'
+
+Write-Host "== Test-PackageStaleness: WARN + toast once per hour, never acts on it (H11) =="
+
+$script:PackageStartedAt = @{}
+$script:PackageLastWarnedAt = @{}
+$script:toastCalls = 0
+function Invoke-Native { param([scriptblock]$Command) $script:toastCalls++; $script:NativeExit = 0; return '' }
+$hbPackage = [pscustomobject]@{ slug = 'hb-test'; branch = 'x'; specIssue = 1; spec = 'X' }
+$staleSince = (Get-Date).ToUniversalTime().AddMinutes(-50)
+try {
+    Reset-Log
+    Test-PackageStaleness -Package $hbPackage -LastActivity $staleSince -StaleAfterMinutes 45 -WindowTitle 'Wave 1 - X (#1)'
+    Assert ((Get-LogText) -match 'looks stale') 'past the threshold: logs a WARN'
+    Assert ($script:toastCalls -eq 1) 'and raises exactly one toast'
+
+    Reset-Log
+    Test-PackageStaleness -Package $hbPackage -LastActivity $staleSince -StaleAfterMinutes 45 -WindowTitle 'Wave 1 - X (#1)'
+    Assert ((Get-LogText) -notmatch 'looks stale') 'a second check within the same hour logs nothing more'
+    Assert ($script:toastCalls -eq 1) 'and does not toast again'
+
+    # Simulate an hour having passed since the last warning.
+    $script:PackageLastWarnedAt[$hbPackage.slug] = (Get-Date).AddMinutes(-61)
+    Reset-Log
+    Test-PackageStaleness -Package $hbPackage -LastActivity $staleSince -StaleAfterMinutes 45 -WindowTitle 'Wave 1 - X (#1)'
+    Assert ((Get-LogText) -match 'looks stale') 'after an hour has passed, it warns again'
+    Assert ($script:toastCalls -eq 2) 'and toasts again'
+
+    Reset-Log
+    Test-PackageStaleness -Package $hbPackage -LastActivity ((Get-Date).ToUniversalTime()) -StaleAfterMinutes 45 -WindowTitle 'Wave 1 - X (#1)'
+    Assert ((Get-LogText) -notmatch 'looks stale') 'fresh activity is never flagged stale'
+
+    # No signal at all (LastActivity $null) and no recorded start time either
+    # (a package Test-PackageStaleness has never been told about) must not
+    # warn - there is nothing to compare against, and inventing "now" as the
+    # floor would flag every brand-new package as stale on its very first poll.
+    $unknownPackage = [pscustomobject]@{ slug = 'hb-unknown'; branch = 'y'; specIssue = 2; spec = 'Y' }
+    Reset-Log
+    Test-PackageStaleness -Package $unknownPackage -LastActivity $null -StaleAfterMinutes 45 -WindowTitle 'Wave 1 - Y (#2)'
+    Assert ((Get-LogText) -notmatch 'looks stale') 'no signal and no recorded start time: never warns'
+
+    # The PackageStartedAt floor: no signal yet, but a start time was
+    # recorded (Invoke-Package's own bookkeeping) - and it is already past
+    # the threshold.
+    $script:PackageStartedAt[$unknownPackage.slug] = (Get-Date).ToUniversalTime().AddMinutes(-50)
+    Reset-Log
+    Test-PackageStaleness -Package $unknownPackage -LastActivity $null -StaleAfterMinutes 45 -WindowTitle 'Wave 1 - Y (#2)'
+    Assert ((Get-LogText) -match 'looks stale') 'no signal yet, but past the recorded start-time floor: warns'
+} finally {
+    Remove-Item -Force -Path $script:LogFile -ErrorAction SilentlyContinue
+}
+
+Write-Host "== Invoke-DoctorPreflight (H11): fails fast with the doctor's own message, never with a generic one =="
+
+# Restore the REAL Invoke-Native - every section above this one (the #188
+# section pre-existing this file, and the garbage-output/staleness sections
+# just above) leaves a shadowed one in place, and this test needs the real
+# thing to actually invoke the stub below via `sh`.
+Set-Item function:Invoke-Native -Value $script:RealInvokeNative
+
+function New-DoctorStub {
+    param([string]$Body)
+    $dir = Join-Path $env:TEMP "wotest-doctor-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $path = Join-Path $dir 'doctor-stub'
+    [IO.File]::WriteAllText($path, ($Body -replace "`r`n", "`n"))
+    return $path
+}
+$savedDoctorScript = $script:DoctorScript
+try {
+    $script:DoctorScript = New-DoctorStub @'
+#!/bin/sh
+echo " 1. docker daemon                              FAIL - start Docker Desktop or the docker daemon"
+exit 1
+'@
+    Reset-Log
+    $threw = $false; $err = $null
+    try { Invoke-DoctorPreflight } catch { $threw = $true; $err = $_.Exception.Message }
+    Assert $threw 'a failing doctor stub stops the pre-flight before any worktree or session'
+    Assert ($err -match 'start Docker Desktop or the docker daemon') "the thrown message carries the doctor's own remediation text ($err)"
+
+    $script:DoctorScript = New-DoctorStub @'
+#!/bin/sh
+echo " 1. docker daemon                              ok"
+exit 0
+'@
+    Reset-Log
+    $threw = $false
+    try { Invoke-DoctorPreflight } catch { $threw = $true }
+    Assert (-not $threw) 'a passing doctor stub does not throw'
+    Assert ((Get-LogText) -match 'scripts/doctor: all checks passed') 'and logs that the pre-flight passed'
+} finally {
+    $script:DoctorScript = $savedDoctorScript
+    Remove-Item -Force -Path $script:LogFile -ErrorAction SilentlyContinue
+}
+
+Write-Host "== Start-ClaudeSession -DryRun: shows the resolved stale threshold per package (H11) =="
+
+$script:DryRun = $true
+Reset-Log
+$dryRunSessionLog = ''
+try {
+    Start-ClaudeSession -WorktreePath 'C:\does-not-matter' -PromptText 'p' -WindowTitle 'Wave 1 - Test (#1)' `
+        -Model 'claude-sonnet-5' -Effort 'high' -AdvisorModel $null -StaleAfterMinutes 30
+    $dryRunSessionLog = Get-LogText
+} finally {
+    $script:DryRun = $false
+    Remove-Item -Force -Path $script:LogFile -ErrorAction SilentlyContinue
+}
+Assert ($dryRunSessionLog -match 'stale threshold 30min') "-DryRun's per-package line shows the resolved stale threshold"
 
 Write-Host ""
 if ($script:failures -gt 0) {

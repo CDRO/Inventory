@@ -10,14 +10,21 @@
 
         powershell -NoProfile -File scripts/hooks/notify.ps1 <event> [title]
 
-    <event> is the hook name Claude Code passes ("Notification" or "Stop"),
-    shown verbatim so the toast says which one fired. [title] is the
-    last-resort fallback; the toast body prefers, in order: the CURRENT
+    <event> is either a hook name Claude Code passes ("Notification" or
+    "Stop"), shown verbatim so the toast says which one fired, or "stale"
+    (H11: the orchestrator's own heartbeat, scripts/wellen-planen.md's "What
+    the orchestrator watches"). [title] is the last-resort fallback for
+    Notification/Stop; the toast body there prefers, in order: the CURRENT
     console window's title (since the orchestrator sets it per package to
-    "Wave N - Spec X (#issue)", scripts/wellen-planen.md - nothing else here
-    can say which of nine open windows fired), then the hook's own stdin
-    JSON ("message"/"title"/"reason", whichever is present - a Notification
-    event carries the actual prompt text there), then [title] itself.
+    "Wave N - Spec X (#issue)" and each session runs in its OWN console, so
+    nothing else here can say which of nine open windows fired), then the
+    hook's own stdin JSON ("message"/"title"/"reason", whichever is present -
+    a Notification event carries the actual prompt text there), then [title]
+    itself. A "stale" call is different: it is made from the ORCHESTRATOR's
+    own console about a DIFFERENT session entirely, so the current-console
+    preference would report the orchestrator's own title, not the stale
+    package's - [title] (the package's window title, passed explicitly) is
+    used as the toast body directly instead.
 
     Must NEVER block or fail the session, and must return within about 2
     seconds even if the toast backend hangs: the actual toast call runs as a
@@ -69,6 +76,20 @@ function Get-ToastBody {
     return $Fallback
 }
 
+function Get-ToastBodyForEvent {
+    # A "stale" call (H11's heartbeat) is made from the ORCHESTRATOR's own
+    # console about a DIFFERENT session entirely, so Get-ToastBody's "the
+    # current console's own title wins" preference would report the
+    # orchestrator's own title, not the stale package's - $Fallback (the
+    # package's window title, passed explicitly as [title]) is used as the
+    # toast body directly instead, bypassing Get-ToastBody altogether.
+    # Every other event (Notification, Stop) keeps Get-ToastBody's own
+    # preference, since those DO fire from inside the session they are about.
+    param([string]$EventName, [string]$Fallback)
+    if ($EventName -eq 'stale') { return $Fallback }
+    return Get-ToastBody -Fallback $Fallback
+}
+
 function Send-Toast {
     # Isolated so the test can substitute a fake backend without a real
     # Windows toast subsystem (CI, a locked-down account, no BurntToast
@@ -112,7 +133,7 @@ try {
 }
 
 $toastTitle = "Claude Code - $EventName"
-$toastBody = Get-ToastBody -Fallback (Get-StdinMessage -Raw $stdinRaw -Fallback $FallbackTitle)
+$toastBody = Get-ToastBodyForEvent -EventName $EventName -Fallback (Get-StdinMessage -Raw $stdinRaw -Fallback $FallbackTitle)
 
 try {
     $job = Start-Job -ScriptBlock ${function:Send-Toast} -ArgumentList $toastTitle, $toastBody
