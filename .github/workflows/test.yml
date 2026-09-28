@@ -59,6 +59,16 @@
 # `actions/cache` below are runner-side tooling, not a host toolchain — they
 # move bytes into caches, they don't compile or run anything themselves. No
 # Go, Node, or Postgres is installed on the runner directly.
+#
+# Everything above is about the `test` job. This workflow also carries a second,
+# unrelated job, `runner-image` (H16, #315): it builds the self-hosted NAS
+# runner's image and runs that image's own start-up smoke test, and it does so
+# only on a commit that changed `deploy/synology/runner/**`. It lives here rather
+# than in a workflow of its own because GitHub's path filters are per workflow,
+# not per job, so its own file would have had to duplicate these triggers and
+# the reasons for them; the trade-off is that a commit which is not about the
+# runner still starts that job for a few seconds before it says so and builds
+# nothing. Its own comment block, above the job, has the rest.
 name: test
 
 on:
