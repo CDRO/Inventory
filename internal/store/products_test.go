@@ -48,6 +48,84 @@ func TestListProductsIsEmptyNotNilForAnUnknownStorage(t *testing.T) {
 	assert.Empty(t, products)
 }
 
+// TestSearchProductsFiltersByNameAndIsStorageScoped is the database half of
+// products.html's list table (docs/specs/16-product-maintenance.md): an
+// empty query is "Show all products", a non-empty one is a case-insensitive
+// substring match, and another storage's products never leak in.
+func TestSearchProductsFiltersByNameAndIsStorageScoped(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	other := newStorage(t, ctx)
+
+	for _, name := range []string{"Barilla Penne", "Oat Milk", "Whole Milk"} {
+		_, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: name})
+		require.NoError(t, err)
+	}
+	_, err := s.CreateProduct(ctx, other, store.NewProduct{Name: "Their Milk"})
+	require.NoError(t, err)
+
+	all, err := s.SearchProducts(ctx, storageID, "")
+	require.NoError(t, err)
+	names := make([]string, len(all))
+	for i, p := range all {
+		names[i] = p.Name
+	}
+	assert.Equal(t, []string{"Barilla Penne", "Oat Milk", "Whole Milk"}, names, "empty query is every product, alphabetical")
+
+	filtered, err := s.SearchProducts(ctx, storageID, "milk")
+	require.NoError(t, err)
+	require.Len(t, filtered, 2, "case-insensitive substring match, storage-scoped")
+	filteredNames := []string{filtered[0].Name, filtered[1].Name}
+	assert.ElementsMatch(t, []string{"Oat Milk", "Whole Milk"}, filteredNames)
+
+	none, err := s.SearchProducts(ctx, storageID, "cheese")
+	require.NoError(t, err)
+	assert.Empty(t, none)
+}
+
+// TestSearchProductsComputesCategoryAndStockLive: the two fields the plain
+// id-and-name list never carried, each computed the same way an existing
+// summary query already does (category via a join, current_stock via a live
+// sum — ReorderProducts's own rule, "the number must never be able to
+// drift").
+func TestSearchProductsComputesCategoryAndStockLive(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Pantry"})
+	require.NoError(t, err)
+	category, err := s.CreateCategory(ctx, storageID, store.NewCategory{Name: "Dairy"})
+	require.NoError(t, err)
+
+	categorized, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Milk", CategoryID: &category.ID})
+	require.NoError(t, err)
+	_, err = s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: categorized.ID, LocationID: location.ID, Quantity: 4, Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+
+	uncategorized, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Bread"})
+	require.NoError(t, err)
+
+	rows, err := s.SearchProducts(ctx, storageID, "")
+	require.NoError(t, err)
+
+	byID := map[string]store.ProductSummary{}
+	for _, r := range rows {
+		byID[r.ID.String()] = r
+	}
+
+	milk := byID[categorized.ID.String()]
+	require.NotNil(t, milk.CategoryName)
+	assert.Equal(t, "Dairy", *milk.CategoryName)
+	assert.Equal(t, 4, milk.CurrentStock)
+
+	bread := byID[uncategorized.ID.String()]
+	assert.Nil(t, bread.CategoryName)
+	assert.Equal(t, 0, bread.CurrentStock, "no batches at all sums to zero")
+}
+
 // TestSetProductCategoryAsUserPaysOnlyForClosingTheGap mirrors
 // UpdateProductMinStockAsUser's rule (docs/specs/51-gamification-scoring.md):
 // the reward is for closing a gap, not for tuning a value that was already

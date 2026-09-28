@@ -46,7 +46,10 @@ async function logIn(page, username = "e2e-stocktake") {
 test("Count this shelf on the product page corrects the quantity, and Back returns to the product page", async ({ page }) => {
   await logIn(page);
   await page.goto(`/products.html?storage=${STORAGE}`);
-  await page.getByRole("button", { name: PRODUCT_NAME, exact: true }).click();
+  // The list defaults to filter-only (docs/specs/16-product-maintenance.md):
+  // a search finds the row, which is a link now, not a button.
+  await page.locator("#filter").fill(PRODUCT_NAME);
+  await page.getByRole("link", { name: PRODUCT_NAME, exact: true }).click();
 
   // The stock card no longer claims locations or expiry dates are edited on
   // the stocktake sheet — only quantities are, corrected shelf by shelf.
@@ -69,8 +72,11 @@ test("Count this shelf on the product page corrects the quantity, and Back retur
 
   // Back lands on products.html with no ?product=, so the detail view — and
   // the batch row inside it — is not shown until the product is selected
-  // again (products.js only auto-opens one from a ?product= deep link).
-  await page.getByRole("button", { name: PRODUCT_NAME, exact: true }).click();
+  // again (products.js only auto-opens one from a ?product= deep link, and
+  // the list itself is filter-only by default, so it has to be searched for
+  // again too).
+  await page.locator("#filter").fill(PRODUCT_NAME);
+  await page.getByRole("link", { name: PRODUCT_NAME, exact: true }).click();
   await expect(row).toContainText("7 × Fridge");
 });
 

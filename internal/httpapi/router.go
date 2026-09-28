@@ -502,7 +502,14 @@ func NewRouter(d Deps) http.Handler {
 			// and batch-picker need (docs/specs/09-consumption-logging.md), plus
 			// the two narrow product-editing writes spec 52's "uncategorized"
 			// and "imageless" quests need to be closeable at all.
-			products := NewProductHandler(d.Store, d.ImageCache, d.ProductImages, errs)
+			// d.Matcher is declared only as Matcher (MatchProductCandidates) —
+			// the stage-1-only narrowing Create needs is a runtime assertion,
+			// the same pattern internal/consume/proposal.go's own dependency
+			// narrowing uses. Its concrete type (*matching.Service) always
+			// satisfies it; a fake that does not is the "absent collaborator,
+			// absent route" case below, same as everywhere else in this file.
+			localMatcher, _ := d.Matcher.(LocalMatcher)
+			products := NewProductHandler(d.Store, localMatcher, d.ImageCache, d.ProductImages, errs)
 			sr.Get("/products", products.List)
 			sr.Get("/products/{product_id}/batches", products.Batches)
 			sr.Patch("/products/{product_id}/category", products.SetCategory)
@@ -524,6 +531,14 @@ func NewRouter(d Deps) http.Handler {
 			sr.Patch("/products/{product_id}", products.Update)
 			sr.Post("/products/{product_id}/merge", products.Merge)
 			sr.Delete("/products/{product_id}", products.Delete)
+			// The standalone "+ Add product" entry point ("Creating a
+			// product", docs/specs/16-product-maintenance.md) needs the
+			// matcher's stage 1 to dedup against, so it follows the same
+			// "absent collaborator, absent route" rule as the shopping-list
+			// group below.
+			if localMatcher != nil {
+				sr.Post("/products", products.Create)
+			}
 
 			if d.Matcher != nil {
 				lists := NewShoppingListHandler(d.Store, d.Matcher, d.ImageCache, d.ProductImages, errs)

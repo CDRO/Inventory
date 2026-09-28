@@ -70,9 +70,13 @@ async function logIn(page) {
   expect(res.status(), "fixture login").toBe(200);
 }
 
+// The list defaults to filter-only (docs/specs/16-product-maintenance.md): no
+// products render until a search or "Show all products", and once shown, a
+// row is a link (js/product-table.js's productCell), not a button.
 async function openProduct(page, name) {
   await page.goto(`/products.html?storage=${STORAGE_ID}`);
-  await page.getByRole("button", { name, exact: true }).click();
+  await page.locator("#filter").fill(name);
+  await page.getByRole("link", { name, exact: true }).click();
 }
 
 function batchRow(page, batchId) {
@@ -599,6 +603,121 @@ test("a batch two locations deep renders its full path, root first", async ({ pa
 
   const row = batchRow(page, NESTED_LOCATION_BATCH);
   await expect(row).toContainText("6 × Fridge › Door Bin");
+});
+
+// --- New features W2: product list default-to-filter, standalone add-product
+// entry point (docs/specs/16-product-maintenance.md, "The product list" and
+// "Creating a product") ------------------------------------------------------
+
+test("the list renders nothing until a search or Show all products, and clearing the search box never falls back to show-all", async ({
+  page,
+}) => {
+  await logIn(page);
+  await page.goto(`/products.html?storage=${STORAGE_ID}`);
+
+  const list = page.locator("#list");
+  await expect(list).toContainText("Type to search");
+  await expect(list.locator("table")).toHaveCount(0);
+
+  await page.locator("#filter").fill("E2E Split Source");
+  await expect(list.locator("table")).toBeVisible();
+  await expect(list.getByRole("link", { name: "E2E Split Source", exact: true })).toBeVisible();
+  // A search only ever shows what matched — the other fixture products in
+  // this same storage must not also appear.
+  await expect(list.getByRole("link", { name: "E2E Move Source", exact: true })).toHaveCount(0);
+
+  // Clearing the box returns to the filter-only empty state, not to "show
+  // all" (docs/specs/16-product-maintenance.md is explicit this is never
+  // remembered).
+  await page.locator("#filter").fill("");
+  await expect(list).toContainText("Type to search");
+  await expect(list.locator("table")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Show all products", exact: true }).click();
+  await expect(list.locator("table")).toBeVisible();
+  await expect(list.getByRole("link", { name: "E2E Split Source", exact: true })).toBeVisible();
+  await expect(list.getByRole("link", { name: "E2E Move Source", exact: true })).toBeVisible();
+});
+
+// The table itself: same row shape as inventory.html's own table
+// (docs/specs/33-inventory-overview-table.md) — a thumbnail-or-nothing
+// product cell, a category column and a current-stock column — reusing the
+// same `.inventory-table` markup rather than a second implementation.
+test("the list table shows category and current total stock, not just a name", async ({ page }) => {
+  await logIn(page);
+  await page.goto(`/products.html?storage=${STORAGE_ID}`);
+
+  await page.locator("#filter").fill("E2E Move Source");
+  const row = page.locator("tr", { has: page.getByRole("link", { name: "E2E Move Source", exact: true }) });
+  await expect(row).toBeVisible();
+  // E2E Move Source has no category in the fixture and 2 in stock
+  // (MOVE_BATCH, e2e/fixtures/seed.sql).
+  await expect(row).toContainText("—");
+  await expect(row).toContainText("2");
+});
+
+test('a standalone "+ Add product" creates a product with just a name, no batch required', async ({ page }) => {
+  await logIn(page);
+  await page.goto(`/products.html?storage=${STORAGE_ID}`);
+
+  await page.getByRole("button", { name: "+ Add product", exact: true }).click();
+  await page.locator("#np-name").fill("E2E Standalone New Product");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+
+  await expect(page.locator("#status")).toContainText("E2E Standalone New Product");
+  // The detail view opens on the product just created.
+  await expect(page.locator("#detail h3").first()).toHaveText("E2E Standalone New Product");
+  await expect(page.locator("#detail")).toContainText("Nothing on the shelf.");
+
+  const list = await page.request.get(`${BASE}/products?q=${encodeURIComponent("E2E Standalone New Product")}`);
+  expect(list.status()).toBe(200);
+  const items = (await list.json()).items;
+  expect(items).toHaveLength(1);
+  expect(items[0].current_stock).toBe(0);
+});
+
+// The "merge instead?" courtesy applied at creation time
+// (docs/specs/16-product-maintenance.md): a name the matching service
+// resolves to a confident local match returns that existing product instead
+// of inserting a near-duplicate. Read-only from this test's own perspective —
+// a matched create never writes anything — so reusing SPLIT_PRODUCT's exact
+// name here does not race the split/move tests that mutate its batches.
+test("adding a product whose name exactly matches an existing one returns the existing product instead of a duplicate", async ({
+  page,
+}) => {
+  await logIn(page);
+  await page.goto(`/products.html?storage=${STORAGE_ID}`);
+
+  await page.getByRole("button", { name: "+ Add product", exact: true }).click();
+  await page.locator("#np-name").fill("E2E Split Source");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+
+  await expect(page.locator("#detail h3").first()).toHaveText("E2E Split Source");
+
+  // Scoped to this exact name rather than the whole storage's product count,
+  // which other tests in this file insert into concurrently
+  // (`fullyParallel`, playwright.config.js): exactly one row for this name,
+  // and it is the fixture's own SPLIT_PRODUCT, not a new id.
+  const search = await page.request.get(`${BASE}/products?q=${encodeURIComponent("E2E Split Source")}`);
+  const items = (await search.json()).items;
+  expect(items).toHaveLength(1);
+  expect(items[0].id).toBe(SPLIT_PRODUCT);
+});
+
+test('"+ Add product" is refused with no name, and nothing is created', async ({ page }) => {
+  await logIn(page);
+  await page.goto(`/products.html?storage=${STORAGE_ID}`);
+
+  await page.getByRole("button", { name: "+ Add product", exact: true }).click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+
+  // Native validation (the name input carries `required`) blocks the submit
+  // before it ever reaches the server, the same pattern the split/move forms'
+  // own empty-submit tests above rely on. The form itself staying up (rather
+  // than a store-wide count, which other tests insert into concurrently) is
+  // what proves nothing was created.
+  expect(await page.locator("#np-name").evaluate((el) => el.validity.valid)).toBe(false);
+  await expect(page.getByRole("heading", { name: "Add a product" })).toBeVisible();
 });
 
 // --- #135: the picture-change path ------------------------------------------

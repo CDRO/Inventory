@@ -677,6 +677,59 @@ func (s *Store) ListProducts(ctx context.Context, storageID uuid.UUID) ([]Produc
 	return out, rows.Err()
 }
 
+// ProductSummary is one row of products.html's list table
+// (docs/specs/16-product-maintenance.md, "The product list"): what the table
+// needs to render — thumbnail/icon, name, category, current total stock —
+// computed once per query rather than once per product the way the detail
+// view's batches and logs are.
+type ProductSummary struct {
+	ID           uuid.UUID
+	Name         string
+	CategoryName *string
+	ImageURL     *string
+	IconName     *string
+	CurrentStock int
+}
+
+// SearchProducts returns storageID's products as summary rows for the list
+// table, ordered by name. query, once trimmed, is a case-insensitive
+// substring match against name — the same ILIKE pattern
+// ListInventoryBatches's own Q filter already uses
+// (docs/specs/33-inventory-overview-table.md); an empty query returns every
+// product, which is what "Show all products" is: this same method with
+// nothing to filter by.
+//
+// current_stock is computed in the same query via a left join and a sum,
+// never read from a stored counter — the identical reason ReorderProducts
+// computes it live (docs/specs/10-reorder-and-shopping-export.md): the number
+// must never be able to drift from the batches it is supposed to summarize.
+func (s *Store) SearchProducts(ctx context.Context, storageID uuid.UUID, query string) ([]ProductSummary, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT p.id, p.name, c.name, p.image_url, p.icon_name,
+		       coalesce(sum(b.quantity), 0) AS current_stock
+		  FROM products p
+		  LEFT JOIN categories c ON c.id = p.category_id
+		  LEFT JOIN inventory_batches b ON b.product_id = p.id
+		 WHERE p.storage_id = $1
+		   AND ($2 = '' OR p.name ILIKE '%' || $2 || '%')
+		 GROUP BY p.id, p.name, c.name
+		 ORDER BY p.name`, storageID, query)
+	if err != nil {
+		return nil, fmt.Errorf("store: search products: %w", err)
+	}
+	defer rows.Close()
+
+	out := []ProductSummary{}
+	for rows.Next() {
+		var r ProductSummary
+		if err := rows.Scan(&r.ID, &r.Name, &r.CategoryName, &r.ImageURL, &r.IconName, &r.CurrentStock); err != nil {
+			return nil, fmt.Errorf("store: scan product summary: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // CurrentStock is the live sum of a product's batches
 // (docs/specs/10-reorder-and-shopping-export.md). It is computed, never stored:
 // a denormalised counter is a number that can drift away from the rows it
