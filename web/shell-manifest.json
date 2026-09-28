@@ -1,9 +1,9 @@
 {
-  "cache_version": "v28",
+  "cache_version": "v29",
   "digests": {
     "/": "c7ecaf956a6eedf333caaf56a24a203bd228855e0161781649c20466a86a6f88",
     "/categories.html": "1ace1541fdc390ce3231aa6affb84e3d5b262a85ca42935ea17dc6f811217d44",
-    "/css/base.css": "c2a5c9568a13e7afe9bf037509ef10155a8998d78af20b17d8e273c54e9b3d43",
+    "/css/base.css": "09c89a7c998dea2d8094caf02785bd463cf24fa98c23f53d97da6a816523c0c3",
     "/css/components.css": "4c57177d1866d973dabaaf68e3477e63d3001e8f25bdbde9374a6c937ea47131",
     "/css/tokens.css": "782346dd8139048a2c12ef5aec77da0ac845986b1fec3f04fcebd86be9830f29",
     "/i18n/de.json": "485e8b4c7d9d008ed1b54cf1ee486ff5103b31559a9e7341b76867190edd21b7",
