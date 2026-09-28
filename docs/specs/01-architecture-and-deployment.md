@@ -448,7 +448,7 @@ with it.
 │   └── explanations/           # human-facing explanations — NOT for agents, see its README
 ├── cmd/
 │   └── inventory/
-│       └── main.go             # entrypoint; subcommands: serve (default), setup, migrate, recompute-progress
+│       └── main.go             # entrypoint; subcommands: serve (default), setup, migrate, recompute-progress, icons import (42)
 ├── internal/
 │   ├── config/                 # env loading + DB-backed settings overrides
 │   ├── httpapi/                # chi routers, handlers, middleware (auth, storage scoping)

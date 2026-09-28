@@ -46,6 +46,12 @@ shown as a segmented control above the shutter:
   the proposal and re-queues the photo under the other mode, rather than
   silently flipping the sign of a reviewed list.
 
+*(Extended by [`41-mixed-photo-classification.md`](41-mixed-photo-classification.md):
+a photo that looks like a shopping list rather than what its sticky mode
+declared gets a banner on its own review screen offering to process it as
+one — the mode itself is still decided before the photo and never
+re-asked; this is a review-screen offer, not a per-photo question.)*
+
 ## Upload flow
 
 1. `POST /api/storages/{storage_id}/consume/photos` — multipart upload of

@@ -88,6 +88,12 @@ jars sit in the cellar and one is carried to the kitchen: that is a
 `PATCH /api/storages/{storage_id}/inventory-batches/{id}` additionally
 accepts `{location_id}` to move an entire batch, logged the same way.
 
+*(Extended by [`39-batch-containers.md`](39-batch-containers.md): the
+split endpoint gains an optional `container_disposition` field, and the
+PATCH endpoint gains `container_label`/`container_type`, for a batch's
+optional container — orthogonal to `location_id`, so nothing above
+changes.)*
+
 A product that exists in several places is therefore simply several
 batches — the "cucumber jars in `Fridge` *and* `Cellar`" case from the
 PRD — and every one of them has an unambiguous location.
@@ -137,6 +143,11 @@ asked after every shot.
    returns `503 model_unavailable` (`01-architecture-and-deployment.md`);
    the UI presents that as a configuration problem for the admin, not as a
    failed photo.
+
+*(Extended by [`41-mixed-photo-classification.md`](41-mixed-photo-classification.md):
+the same analysis call also detects whether the photo looks like a
+shopping list rather than a shelf, adding two optional fields to the
+response schema below — no second call, no change to steps 1-4 above.)*
 
 ## Gemini prompt/response contract
 
