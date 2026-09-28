@@ -396,3 +396,170 @@ real one. In a scratch clone (`git clone` of the branch, a dummy `.env`, and
 | `install-shell`, then `install-shell` again, then `--remove` | One marked block in `~/.profile`; `dc` is an alias; the backup matches the original; `--remove` takes the block out and creates no file when there is none; an unbalanced marker leaves the profile byte-identical. |
 
 Clean up with `dc down -v` in the scratch clone and delete it.
+
+## A release, start to finish
+
+The release pipeline
+([`38-release-pipeline-and-nas-runner.md`](../../docs/specs/38-release-pipeline-and-nas-runner.md))
+turns the procedure above into one command typed on the PC. **The tag is the
+release**: pushing an annotated `vYYYY.MM.DD` tag is the whole trigger, and
+nobody opens an SSH session to the NAS for an ordinary release any more.
+
+Nothing about the manual procedure is retired. "Deploying by hand" above is
+still the documented fallback when the runner is down, and it is the same
+script with the same flags.
+
+### 1. Cut the tag, from the PC
+
+```console
+$ scripts/dev release v2026.09.30
+```
+
+It refuses rather than creating a tag the pipeline would only reject:
+
+| It stops with | Because |
+|---|---|
+| `'…' is not a release tag name` | Releases are `vYYYY.MM.DD`, or `vYYYY.MM.DD.n` for the n-th of one day. |
+| `a release is cut from main` | `HEAD` is on a branch. Merge it first. |
+| `the clone is not clean` | A release tags exactly what was reviewed and pushed. |
+| `HEAD (…) is not origin/main (…)` | GitHub has to already have the commit — a tag on a commit it has never seen has no CI runs to be green. |
+| `tag … already exists` | Releases are not re-pointed. Use `.1` for the next one today. |
+| `no test.yml run for …` | Nothing green for this commit. It names the `scripts/dev ci-status … --dispatch main` that starts one. |
+| `the e2e.yml run for … did not succeed` | It was red. Fix it and tag the fix. |
+
+On success it prints the commit it tagged and the URL of the release run:
+
+```console
+release: pushed v2026.09.30 -> 3f9c1a…
+release: https://github.com/CDRO/Inventory/actions/runs/1234567890
+```
+
+`-m "<message>"` writes your own tag annotation instead of the default
+`Release <tag>`.
+
+### 2. Watch the run
+
+Open that URL, or `gh run watch <id> --exit-status`. Four jobs:
+
+- **`gate`** — a hosted runner, under a minute. It resolves the tag to its
+  commit and looks for a successful `test` and `e2e` run **for that exact
+  commit**. Its job summary says whether each was reused or is being run here.
+- **`test` / `e2e`** — skipped when the gate found green runs, which is the
+  normal case for a commit that came through a pull request. When they do run,
+  they run on the tag, and a red one stops the release before anything reaches
+  the NAS.
+- **`deploy`** — the NAS runner. It runs
+  `sh deploy/synology/update --ref <tag> --auto --backup` in the clone and
+  reads nothing but its exit code and its summary line, which it copies into
+  the job summary.
+
+`restore.yml` starts on the same tag and runs beside all of this. It is not an
+interlock: what it proves is that a restore works, and the archive `--backup`
+just took is the rollback. A red restore run is a reason to stop releasing
+until it is green, not a reason to distrust this deploy.
+
+### 3. What `/healthz` shows
+
+The deploy job's last step asserts it, so a green job already means it:
+
+```json
+{"status":"ok","vision":"ok","version":"v2026.09.30"}
+```
+
+`version` is the tag, because `--ref` builds with `VERSION=<tag>`. The job
+prints the whole JSON into its summary. A job that fails **here** — script
+exit 0, version wrong — means the stack is up but not on this release; look at
+whether the build actually rebuilt (`dc images app`) before deploying
+anything else.
+
+To ask the NAS yourself, from a root shell in the clone:
+
+```console
+$ dc exec -T db wget -qO- "http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(dc ps -q app)"):8000/healthz"
+```
+
+### 4. When the gate fails
+
+Nothing has reached the NAS, and nothing on it has changed. The tag exists and
+is pointing at a commit that is not releasable.
+
+- **A red `test` or `e2e` job**: fix the code, merge it, and cut a **new** tag.
+  Do not move the old one — "what is `v2026.09.30`" must not depend on when you
+  asked. `v2026.09.30.1` is the next one that day.
+- **The tag was pushed by hand** onto a commit with no green runs: the gate ran
+  both workflows on the tag itself, which is slower but not wrong. That is what
+  `scripts/dev release` exists to avoid.
+- **The deploy job never starts** and the run sits in `Queued`: no runner with
+  the `nas` label is online. See [`runner/README.md`](runner/README.md),
+  "When something is wrong"; the release is not lost, and the job picks up when
+  the runner comes back.
+
+Delete a tag you decided against with `git push origin :refs/tags/<tag>` and
+`git tag -d <tag>` — before the deploy job runs, not after.
+
+### 5. When the deploy fails
+
+The pipeline changes nothing about what a failed update leaves behind. Read
+`phase=` off the summary line in the job summary and look it up in
+**"When a deploy fails"** above — the same table, the same answers. A failed
+deploy job is a **stop**, not a rollback: in most of its rows the previous
+release is still serving.
+
+### Forcing classic
+
+The ordinary case needs no tag keyword at all: a migration the previous release
+cannot serve carries the marker
+
+```sql
+-- +inventory:classic
+```
+
+as the first non-blank line after `-- +goose Up`, `update --auto` reads it
+through `inventory migrate plan`, and the deploy takes the classic path by
+itself. That is a decision made in review, in the migration, and `review-go`
+checks every migration hunk for it.
+
+The tag keyword is the override for the case where that was missed and you have
+decided at release time that the deploy must stop the app first:
+
+```console
+$ scripts/dev release v2026.09.30.1 --classic
+```
+
+which puts the line
+
+```
+deploy: classic
+```
+
+into the tag's message. `release.yml` reads that message through the GitHub API
+— not from a checkout, which fetches annotated tags peeled and would lose it —
+and passes `DEPLOY_MODE=classic` to the script.
+
+**The override is one-way.** Nothing in a tag can force *rolling* over a
+marker. An operator who believes a marker is wrong edits the migration and cuts
+a new tag.
+
+### Going back to the previous release
+
+Two cases, and the cheap one is worth checking first — on the PC, in the clone:
+
+```console
+$ git diff --stat v2026.09.29 v2026.09.30 -- migrations/
+```
+
+**Nothing printed — the release migrated nothing.** Then the code alone can go
+back, and it is an ordinary deploy of the older tag. Push a new tag on the
+older commit so that the pipeline does it, or, from a root shell on the NAS:
+
+```console
+$ sh deploy/synology/update --ref v2026.09.29 --auto --backup
+```
+
+**Anything printed — the schema changed.** Then there is no way back through
+the code: migrations only go forward, and an old binary on a newer schema is a
+fatal start-up error by design (spec 18). Going back means **restoring the
+archive `--backup` took before this release migrated anything** — its name is
+on the deploy job's summary line, it is in `./backups`, and the procedure is
+["Going back"](#going-back) above together with
+[`15-backup-restore-and-export.md`](../../docs/specs/15-backup-restore-and-export.md).
