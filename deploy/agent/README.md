@@ -40,15 +40,33 @@ container mounts nothing beyond the socket, the repository, and its own
 
 ## Install and first run
 
-**1. Copy the env file and fill it in** (see the comments in each file for
-where each value comes from):
+**1. Copy the env file:**
 
 ```console
 $ cp deploy/agent/.env.agent.example deploy/agent/.env.agent
+```
+
+**2. Mint a Claude Code OAuth token, on the host, outside this container** —
+this is the one value in `.env.agent` that has no other source:
+
+```console
+$ claude setup-token
+```
+
+Follow the browser prompt; it prints a long-lived token. Paste it into
+`deploy/agent/.env.agent` as `CLAUDE_CODE_OAUTH_TOKEN=`. Treat it like any
+other credential — never commit it, never paste it anywhere but that
+gitignored file.
+
+**3. Fill in the rest of `deploy/agent/.env.agent`** — `GH_TOKEN` (`gh auth
+token` on the host is the easiest source) and your git identity. See the
+comments in `.env.agent.example` for where each value comes from:
+
+```console
 $ $EDITOR deploy/agent/.env.agent
 ```
 
-**2. Export `REPO_PATH`** to this repository's absolute path, from the
+**4. Export `REPO_PATH`** to this repository's absolute path, from the
 repository root. This is **not** read from `.env.agent` — Compose resolves
 `${REPO_PATH}` for the bind mount below before `env_file:` is ever applied
 inside the container, so it has to be a real shell variable at the moment
@@ -58,7 +76,7 @@ you run `docker compose`:
 $ export REPO_PATH=$(pwd)
 ```
 
-**3. Build and run:**
+**5. Build and run:**
 
 ```console
 $ docker compose -f deploy/agent/docker-compose.agent.yml run --rm agent
@@ -88,7 +106,7 @@ consequences:
 ## Verify
 
 **Doctor output with the socket mounted** (from the repository root, after
-steps 1–2 above):
+steps 1–4 above):
 
 ```console
 $ docker compose -f deploy/agent/docker-compose.agent.yml run --rm agent scripts/doctor
@@ -164,7 +182,7 @@ mounted primary checkout, never as a second mount.
 
 | The log says | What it means |
 |---|---|
-| `agent-entrypoint: FATAL: REPO_PATH must be set …` | You skipped step 2 above. `export REPO_PATH=$(pwd)` from the repository root, every session. |
+| `agent-entrypoint: FATAL: REPO_PATH must be set …` | You skipped step 4 above. `export REPO_PATH=$(pwd)` from the repository root, every session. |
 | `FAIL docker daemon … docker info failed` (socket present) | The socket is mounted but the host's Docker daemon is not answering, or `agent` still could not join its group — check `docker-compose.agent.yml`'s socket volume line. |
 | `FAIL docker daemon … docker info failed - start Docker Desktop …` (no `agent-entrypoint: joined …` line above it) | The socket is not mounted at all. Expected if you ran a bare `docker run` without the volume — see "Verify" above. |
 | `FAIL gh auth` / `FAIL claude CLI` / `FAIL git identity …` | `.env.agent` is missing a value, or wasn't loaded — check `docker compose config` shows it, and that `GH_TOKEN`/`CLAUDE_CODE_OAUTH_TOKEN`/`GIT_AUTHOR_NAME`+`GIT_AUTHOR_EMAIL` are all non-empty. |
