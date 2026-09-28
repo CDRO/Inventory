@@ -1844,8 +1844,19 @@ test("a failed create's error survives a second create starting and succeeding",
   // not in a transient window — B's reload has already redrawn the tree above,
   // and B cleared the banner (if it was going to) synchronously on submit, long
   // before that.
+  //
+  // And it now says which create it belongs to (#347), which is what makes it
+  // legible standing beside B's success rather than merely present: the banner
+  // names A, so it cannot be read as B having failed. Reverting showError to one
+  // shared box whose textContent is the reason alone is what fails this line.
+  await expect(dialog.getByRole("alert")).toContainText("Could not add “Warped Trunk”.");
   await expect(dialog.getByRole("alert")).toContainText("Could not reach the server");
-  await expect(dialog).not.toContainText("Warped Trunk");
+
+  // B is in the tree and A is not — asserted against the tree itself rather than
+  // the whole dialog, which legitimately contains A's name now that its banner
+  // names it.
+  await expect(dialog.locator(".tree")).toContainText("Tiled Alcove");
+  await expect(dialog.locator(".tree")).not.toContainText("Warped Trunk");
 
   // Having now been shown it, the user can close: this Done carries A's failure
   // in its own snapshot.
@@ -1938,11 +1949,195 @@ test("a create whose own reload fails keeps the dialog open on a dismissal that 
   await expect(first.locator('[data-role="location"] option:checked')).toContainText("Chalk Niche");
 });
 
+// #351: `finalize`'s own comment makes a claim specifically about the
+// two-failure case — that both tokens are latched, so the dialog refuses to
+// close over either — and nothing drove it. Every other failure journey in this
+// file has at most one failing mutation, so `finalize`'s per-token loop was
+// under-determined by the suite.
+//
+// The interleaving below is the one that discriminates: A and B are both in
+// flight, A fails, Done is clicked with A's banner up (so its snapshot is {A}
+// and B is still pending), then B fails. The waiting Done resumes with a
+// snapshot that has A and not B, and must not close.
+//
+// What that catches, precisely — since #351's own suggested falsifications turn
+// out not to be falsifications at all: nothing is ever removed from
+// `unacknowledgedFailures`, so a snapshot of it is always a subset of it, which
+// makes `size !== size` and "check the newest token" exactly equivalent to the
+// per-token loop, and none of the three closes here. What this test does fail
+// against is `finalize` closing when *any* acknowledged failure is present
+// rather than when all of them are (`[...unacknowledgedFailures].some(...)`,
+// which every existing test passes because their first dismissal snapshots
+// nothing at all), and against a showError that skipped B's
+// `unacknowledgedFailures.add` because a banner was already on screen — a
+// dedupe that only becomes tempting now that banners accumulate (#347).
+//
+// It is also #347's two-failure observable: both banners are readable and each
+// names its own create, which the single shared error box could not do — the
+// later text simply replaced the earlier one's.
+//
+// Both POSTs are aborted, so neither name below is ever written to the shared
+// "E2E Household": an aborted request never reaches the server.
+test("two failing creates each get their own banner, and a dismissal that saw only the first does not close", async ({
+  page,
+}) => {
+  await logInAsBob(page);
+  await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOCATION_MODAL_JOB}`);
+  const first = page.locator("#rows .review-row").first();
+
+  await first.locator('[data-role="location-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(dialog).toBeVisible();
+  // The opening reload has rendered, so every GET after this point is a
+  // mutation's own.
+  await expect(dialog).toContainText("Pantry");
+
+  // Each POST is held until this test releases it, in an order it controls, and
+  // then fails. Same pattern as "closing the location modal while two creates
+  // overlap" above, with an abort in place of that test's continue.
+  const releases = [];
+  await page.route(`**/api/storages/${HOUSEHOLD}/locations`, async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    await new Promise((resolve) => releases.push(resolve));
+    await route.abort("failed");
+  });
+
+  const addRoot = async (name) => {
+    await dialog.getByRole("button", { name: "Add top-level location" }).click();
+    await dialog.locator('input[aria-label="Name of the new top-level location"]').fill(name);
+    await dialog.locator("#location-modal-add-root-form button[type=submit]").click();
+  };
+
+  // Both attempts are started and both are parked in the route handler before
+  // either is released, which is what makes them genuinely concurrent rather
+  // than sequential.
+  await addRoot("Hollow Bin");
+  await addRoot("Mossy Ledge");
+  await expect.poll(() => releases.length).toBe(2);
+
+  // A fails. Its banner names A, and its token is latched.
+  releases[0]();
+  await expect(dialog.getByRole("alert")).toContainText("Could not add “Hollow Bin”.");
+
+  // Done, asked for with A's banner in front of the user and B still in flight:
+  // its snapshot is {A}, and it has to wait for B's attempt to settle.
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(dialog).toBeVisible();
+
+  // B now fails too. Waiting for its reload GET and then two animation frames
+  // puts the assertions strictly after the point at which a finalize satisfied
+  // by A alone would have removed the dialog.
+  const reloadDone = page.waitForResponse(
+    (response) =>
+      response.request().method() === "GET" && response.url().includes(`/api/storages/${HOUSEHOLD}/locations`),
+  );
+  releases[1]();
+  await reloadDone;
+  await page.unroute(`**/api/storages/${HOUSEHOLD}/locations`);
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+
+  // The waiting Done saw A and not B, so it does not get to close.
+  await expect(dialog).toBeVisible();
+
+  // And both failures are individually legible, each naming its own create
+  // (#347) — not one box holding whichever text was painted last.
+  await expect(dialog.locator(".alert")).toHaveCount(2);
+  await expect(dialog.locator(".alert").nth(0)).toContainText("Could not add “Hollow Bin”.");
+  await expect(dialog.locator(".alert").nth(1)).toContainText("Could not add “Mossy Ledge”.");
+
+  // A further dismissal, made with both banners in front of the user, snapshots
+  // both and closes — a pair of failures cannot trap the dialog open either.
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+
+  // Neither create happened, so neither name is offered.
+  await expect(first.locator('[data-role="location"] option', { hasText: "Hollow Bin" })).toHaveCount(0);
+  await expect(first.locator('[data-role="location"] option', { hasText: "Mossy Ledge" })).toHaveCount(0);
+});
+
+// #352: the opening reload() at the bottom of openTreeManager is deliberately
+// NOT tracked in pendingMutations and deliberately does not latch its failure,
+// unlike every reload a mutation issues (#280). tree-modal.js argues that at
+// length at the call site, and nothing held the code to it — so a later change
+// that "completed" #280's fix by tracking this call too would contradict the
+// documented decision, make Esc do nothing at all until a slow initial render
+// came back, and leave the whole suite green.
+//
+// This pins both halves of that decision: the dismissal wins the race against
+// the opening GET, and the render that lands afterwards — into nodes already
+// detached from the document — is harmless. The Escape is pressed and the dialog
+// asserted gone *before* the GET is released, which is the only ordering that
+// tests a race rather than an eventual outcome.
+test("Esc closes the location modal while its opening render is still in flight", async ({ page }) => {
+  await logInAsBob(page);
+  await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOCATION_MODAL_JOB}`);
+  const first = page.locator("#rows .review-row").first();
+  // review.html's own locations GET has to be done before the route below goes
+  // on, or it is that request the route holds rather than the modal's.
+  await expect(first.locator('[data-role="location"] option', { hasText: "Pantry" })).toHaveCount(1);
+
+  // A late render into detached nodes throws nothing by construction, so this is
+  // the assertion that the second half of the decision actually holds rather
+  // than a formality.
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+
+  // Only the first GET after this point is held — the modal's opening render.
+  // The caller's own post-close refresh (#227) is a later GET and goes straight
+  // through.
+  let releaseGet;
+  const getHeld = new Promise((resolve) => {
+    releaseGet = resolve;
+  });
+  let held = false;
+  await page.route(`**/api/storages/${HOUSEHOLD}/locations`, async (route) => {
+    if (route.request().method() === "GET" && !held) {
+      held = true;
+      await getHeld;
+    }
+    await route.continue();
+  });
+
+  await first.locator('[data-role="location-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Locations" });
+  await expect(dialog).toBeVisible();
+  // Open, and still loading: the tree cannot have been drawn from a GET that has
+  // not answered.
+  await expect(dialog).not.toContainText("Pantry");
+
+  // The dismissal wins. This closes while the opening GET is still outstanding —
+  // tracking that GET in pendingMutations is what makes this line hang until it
+  // times out.
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+
+  // Only now let the render come back, with the dialog already removed.
+  releaseGet();
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.unroute(`**/api/storages/${HOUSEHOLD}/locations`);
+  expect(pageErrors).toEqual([]);
+
+  // And the module is left in a usable state by that late render: dialogOpen was
+  // released on the close event, so the modal opens again and renders normally.
+  await first.locator('[data-role="location-add"]').click();
+  const reopened = page.getByRole("dialog", { name: "Locations" });
+  await expect(reopened).toBeVisible();
+  await expect(reopened).toContainText("Pantry");
+  await page.keyboard.press("Escape");
+  await expect(reopened).toBeHidden();
+});
+
 // docs/specs/26-location-quick-create.md's first acceptance criterion, for
 // `06` review specifically: "in a storage with zero locations ... the user
 // opens the modal, creates a root location, closes the modal, and that
-// location is immediately selectable — no page reload." The test above
-// covers the *second* bullet (an already-populated tree); this one starts
+// location is immediately selectable — no page reload." The "refreshing
+// every row from one GET" journey above covers the *second* bullet (an
+// already-populated tree) — named rather than called "the test above",
+// since the failure-tracking family between the two keeps growing; this
+// one starts
 // from "E2E Admin Household", which — despite the name — also has no
 // locations at all (the same as "E2E Zero-Locations Household" does), so
 // the placeholder-only select, the empty-tree message inside the modal, and

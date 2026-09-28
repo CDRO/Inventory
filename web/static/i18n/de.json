@@ -278,6 +278,11 @@
   "treeModal.categories.empty": "Noch keine Kategorien vorhanden. Füge unten eine auf oberster Ebene hinzu.",
   "treeModal.done": "Fertig",
   "treeModal.networkError": "Der Server konnte nicht erreicht werden. Bitte Verbindung prüfen und erneut versuchen.",
+  "treeModal.failed.add": "„{name}“ konnte nicht hinzugefügt werden.",
+  "treeModal.failed.rename": "„{name}“ konnte nicht umbenannt werden.",
+  "treeModal.failed.move": "„{name}“ konnte nicht verschoben werden.",
+  "treeModal.failed.change": "Deine Änderung konnte nicht gespeichert werden.",
+  "treeModal.failed.reload": "Die Liste konnte nicht aktualisiert werden.",
 
   "locationOptions.createdButRefreshFailed": "Ein Standort wurde erstellt, aber die Liste konnte nicht aktualisiert werden. Lade die Seite neu, um ihn zu sehen.",
   "locationOptions.networkError": "Der Server konnte nicht erreicht werden. Bitte Verbindung prüfen und erneut versuchen.",
@@ -296,6 +301,7 @@
   "categoryShelfLife.savedNoChange": "Haltbarkeit für {name} gespeichert. Keine bestehenden Ablaufdaten mussten geändert werden.",
   "categoryShelfLife.savedRecalculated.one": "Haltbarkeit für {name} gespeichert. 1 bestehendes Ablaufdatum wurde aktualisiert.",
   "categoryShelfLife.savedRecalculated.other": "Haltbarkeit für {name} gespeichert. {count} bestehende Ablaufdaten wurden aktualisiert.",
+  "categoryShelfLife.failed": "Die Haltbarkeit für „{name}“ konnte nicht gespeichert werden.",
 
   "settings.pageTitle": "Einstellungen · Inventory",
   "settings.title": "Einstellungen",

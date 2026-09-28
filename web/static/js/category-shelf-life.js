@@ -63,9 +63,12 @@ function shelfLifeLabel(node, inherited) {
  *
  * @param {Object} args
  * @param {() => string} args.basePath - e.g. () => `/api/storages/${id}/categories`.
- * @param {(mutate: () => Promise<void>) => Promise<void>} args.runMutation -
+ * @param {(mutate: () => Promise<void>, failureMessage: string) => Promise<void>} args.runMutation -
  *   applies one change and reloads the tree from the server's answer,
- *   exactly as every other tree mutation does.
+ *   exactly as every other tree mutation does. The second argument is a whole
+ *   localized sentence naming what this save was, for a caller that shows one
+ *   banner per failed attempt (js/tree-modal.js, #347); pages/categories.js has
+ *   a single shared error box, takes one argument, and ignores it.
  * @param {(message: string) => void} args.showStatus - shown once the save
  *   succeeds, naming how many existing expiry dates moved.
  * @param {() => Map<string, {days: number, from: string}|null>} args.getInherited
@@ -110,7 +113,7 @@ export function createShelfLifeDetail({ basePath, runMutation, showStatus, getIn
           if (!input.reportValidity()) return;
           const raw = input.value.trim();
           const value = raw === "" ? null : Number(raw);
-          runMutation(() => saveShelfLife(node, value));
+          runMutation(() => saveShelfLife(node, value), t("categoryShelfLife.failed", { name: node.name }));
         },
       },
       [
