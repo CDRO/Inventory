@@ -415,6 +415,22 @@ assert_contains "$calls" "issue #602" "the rendered prompt names the issue actua
 ghcalls=$(cat "$SCPATH/state/gh-calls.log")
 assert_contains "$ghcalls" "issue view 999 --json state" "the blocker (#999) state was actually consulted, not assumed"
 
+echo "== scenario: --issue <N> works exactly that issue, bypassing the queue's own routing =="
+setup_scenario oneissue
+# No gh-open-issues / gh-issue-bodies fixtures at all: --issue must never call
+# next_queue_issue's own "issue list"/"issue view --json body" machinery.
+printf '%s\n' "$FIXDIR/success.jsonl" > "$SCPATH/state/claude-queue"
+rc=$(run_loop --issue 703)
+out=$(cat "$SCPATH/state/output.log")
+assert "$rc" "--issue mode exits 0"
+gitcalls=$(cat "$SCPATH/state/git-calls.log")
+assert_contains "$gitcalls" "issue-703" "the worktree created is for the named issue, #703"
+calls=$(cat "$SCPATH/state/claude-calls.log")
+assert_contains "$calls" "issue #703" "the rendered prompt names issue #703"
+ghcalls=$(cat "$SCPATH/state/gh-calls.log")
+assert_not_contains "$ghcalls" "issue list" "no queue routing call is made in --issue mode"
+assert_not_contains "$ghcalls" "--json body" "no blocked-by body scan is made in --issue mode"
+
 echo
 echo "== summary: $passes passed, $failures failed =="
 [ "$failures" -eq 0 ]

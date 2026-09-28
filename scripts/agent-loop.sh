@@ -24,6 +24,12 @@
 # Usage:
 #   scripts/agent-loop.sh --wave-file <path> --wave <N> [options]
 #   scripts/agent-loop.sh --queue [options]
+#   scripts/agent-loop.sh --issue <N> [options]
+#
+# --issue <N> works exactly one named issue, bypassing --queue's own
+# lowest-numbered-unblocked routing - for an operator (or a first real
+# verification run) who already knows which issue to work, rather than
+# whichever one the queue would pick next.
 #
 # Options:
 #   --dry-run                     print the sessions that would run; start none
@@ -31,10 +37,10 @@
 #                                  is named in the result (default 60)
 #   --max-resume-attempts <N>     usage-limit backoffs before giving up on one
 #                                  issue and stopping the loop (default 24)
-#   --model <name>                --queue mode only: model for the session
+#   --model <name>                --queue/--issue only: model for the session
 #                                  (default claude-sonnet-5)
-#   --effort <level>               --queue mode only: effort (default high)
-#   --advisor <model>               --queue mode only: enable the advisor
+#   --effort <level>               --queue/--issue only: effort (default high)
+#   --advisor <model>               --queue/--issue only: enable the advisor
 #   -h, --help                     this text
 #
 # Safety, in order, before any worktree or session is created:
@@ -123,6 +129,7 @@ LIMIT_BACKOFF_MINUTES_DEFAULT=60
 mode=""
 wave_file=""
 wave_num=""
+issue_num=""
 dry_run=0
 limit_backoff_minutes=$LIMIT_BACKOFF_MINUTES_DEFAULT
 max_resume_attempts=$MAX_RESUME_ATTEMPTS_DEFAULT
@@ -136,6 +143,7 @@ while [ "$#" -gt 0 ]; do
     --wave-file) wave_file=$2; shift 2 ;;
     --wave) mode="wave"; wave_num=$2; shift 2 ;;
     --queue) mode="queue"; shift ;;
+    --issue) mode="issue"; issue_num=$2; shift 2 ;;
     --dry-run) dry_run=1; shift ;;
     --limit-backoff-minutes) limit_backoff_minutes=$2; shift 2 ;;
     --max-resume-attempts) max_resume_attempts=$2; shift 2 ;;
@@ -153,7 +161,9 @@ case "$mode" in
     [ -n "$wave_file" ] || die "--wave requires --wave-file <path>"
     [ -n "$wave_num" ] || die "internal error: wave mode with no wave number" ;;
   queue) : ;;
-  *) printf 'agent-loop: pass --wave-file <path> --wave <N>, or --queue\n' >&2; usage >&2; exit 2 ;;
+  issue)
+    [ -n "$issue_num" ] || die "--issue requires an issue number" ;;
+  *) printf 'agent-loop: pass --wave-file <path> --wave <N>, --queue, or --issue <N>\n' >&2; usage >&2; exit 2 ;;
 esac
 
 command -v jq >/dev/null 2>&1 || die "jq is required (present in deploy/agent's image; on another host, install it first)"
@@ -580,8 +590,10 @@ next_queue_issue() {
   return 1
 }
 
-run_queue_mode() {
-  spec_issue=$(next_queue_issue) || { log "no unblocked issue in the queue"; return 0; }
+work_single_issue() {
+  # $1 = the issue number to work, chosen by the caller (next_queue_issue's
+  # routing, or an operator naming one directly with --issue).
+  spec_issue=$1
   slug="issue-$spec_issue"
   branch="agent-loop/issue-$spec_issue"
   advisor_model=""
@@ -592,8 +604,14 @@ run_queue_mode() {
   [ "$rc" -eq 0 ] || die "stopping the loop: issue #$spec_issue hit an unhandled error"
 }
 
+run_queue_mode() {
+  spec_issue=$(next_queue_issue) || { log "no unblocked issue in the queue"; return 0; }
+  work_single_issue "$spec_issue"
+}
+
 # --- Entry point --------------------------------------------------------------
 case "$mode" in
   wave) run_wave_mode ;;
   queue) run_queue_mode ;;
+  issue) work_single_issue "$issue_num" ;;
 esac
