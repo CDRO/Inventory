@@ -56,6 +56,16 @@ func TestExitCodeForConfigFailure(t *testing.T) {
 			err:  errors.New("dial tcp: connection refused"),
 			want: 1,
 		},
+		{
+			// A migrate plan marker-placement error (docs/specs/38-release-pipeline-and-nas-runner.md)
+			// is a plain CLI error, not a schema mismatch — pinned so a future
+			// change cannot special-case it toward EX_CONFIG, which would make
+			// deploy/synology/update treat a marker typo as the NAS's fatal,
+			// unrecoverable schema-mismatch path instead of a plain exit 1.
+			name: "a migrate plan marker-placement error exits generically, not as EX_CONFIG",
+			err:  &migrate.MarkerPlacementError{Line: 4},
+			want: 1,
+		},
 	}
 
 	for _, tc := range tests {

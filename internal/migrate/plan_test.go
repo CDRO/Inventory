@@ -59,10 +59,12 @@ func TestPlanReportsRollingForPendingMigrationsWithoutTheMarker(t *testing.T) {
 	err := Plan(context.Background(), dsn, &out)
 
 	require.NoError(t, err)
-	got := out.String()
-	assert.Contains(t, got, "migrate plan: rolling (2 pending: 00002_second.sql, 00003_third.sql)\n")
-	assert.Contains(t, got, "00002_second.sql")
-	assert.Contains(t, got, "00003_third.sql")
+	assert.Equal(t,
+		"migrate plan: rolling (2 pending: 00002_second.sql, 00003_third.sql)\n"+
+			"  00002_second.sql\n"+
+			"  00003_third.sql\n",
+		out.String(),
+		"the per-file lines must follow the header independently of it")
 }
 
 // TestPlanReportsClassicWhenAPendingMigrationCarriesTheMarker is the spec's
@@ -87,9 +89,12 @@ func TestPlanReportsClassicWhenAPendingMigrationCarriesTheMarker(t *testing.T) {
 
 	var classicErr *PlanClassicError
 	require.ErrorAs(t, err, &classicErr)
-	got := out.String()
-	assert.Contains(t, got, "migrate plan: classic (2 pending: 00002_second.sql, 00003_classic.sql)\n")
-	assert.Contains(t, got, "00003_classic.sql")
+	assert.Equal(t,
+		"migrate plan: classic (2 pending: 00002_second.sql, 00003_classic.sql)\n"+
+			"  00002_second.sql\n"+
+			"  00003_classic.sql\n",
+		out.String(),
+		"the per-file lines must follow the header independently of it")
 }
 
 // TestPlanIgnoresAMarkerInAnAlreadyAppliedMigration is decision D3's rule that
@@ -112,7 +117,10 @@ func TestPlanIgnoresAMarkerInAnAlreadyAppliedMigration(t *testing.T) {
 	err := Plan(context.Background(), dsn, &out)
 
 	require.NoError(t, err, "the applied migration's marker must not force a classic deploy")
-	assert.Contains(t, out.String(), "migrate plan: rolling (1 pending: 00002_second.sql)\n")
+	assert.Equal(t,
+		"migrate plan: rolling (1 pending: 00002_second.sql)\n"+
+			"  00002_second.sql\n",
+		out.String())
 }
 
 // TestPlanRejectsAMalformedMarkerInThePendingFile is the acceptance
@@ -134,6 +142,8 @@ func TestPlanRejectsAMalformedMarkerInThePendingFile(t *testing.T) {
 	var placement *MarkerPlacementError
 	require.ErrorAs(t, err, &placement)
 	assert.Equal(t, 2, placement.Line)
+	assert.Contains(t, err.Error(), "00001_malformed.sql",
+		"the operator-facing message must name the pending file, not just the line")
 	assert.Empty(t, out.String(), "no report is printed once a marker error is found")
 }
 
@@ -156,6 +166,8 @@ func TestPlanRejectsAMarkerOutsideTheGooseUpBlock(t *testing.T) {
 	var placement *MarkerPlacementError
 	require.ErrorAs(t, err, &placement)
 	assert.Equal(t, 4, placement.Line)
+	assert.Contains(t, err.Error(), "00001_misplaced.sql",
+		"the operator-facing message must name the pending file, not just the line")
 }
 
 // TestPlanAcceptsACRLFTerminatedMarker is the CRLF-tolerance acceptance
@@ -176,7 +188,38 @@ func TestPlanAcceptsACRLFTerminatedMarker(t *testing.T) {
 
 	var classicErr *PlanClassicError
 	require.ErrorAs(t, err, &classicErr)
-	assert.Contains(t, out.String(), "migrate plan: classic (1 pending: 00001_crlf.sql)\n")
+	assert.Equal(t,
+		"migrate plan: classic (1 pending: 00001_crlf.sql)\n"+
+			"  00001_crlf.sql\n",
+		out.String())
+}
+
+// TestPlanRejectsAMarkerWithLeadingWhitespace is the regression for round 1's
+// blocking finding: a marker indented under "-- +goose Up" — plausible, since
+// the SQL that follows a real marker is itself indented in this repository's
+// own migrations — started with neither the exact marker (leading
+// whitespace) nor the bare "-- +inventory:" prefix (HasPrefix requires column
+// zero), so it fell through both branches silently and Plan reported
+// `rolling` for a migration that needed `classic`. Fixed by trimming and
+// lower-casing the line before checking whether it merely *looks like* an
+// attempt at the marker; acceptance itself stays byte-exact.
+func TestPlanRejectsAMarkerWithLeadingWhitespace(t *testing.T) {
+	dsn := newTestDatabase(t)
+	root := t.TempDir()
+	migrationsDir := filepath.Join(root, "migrations")
+	require.NoError(t, os.Mkdir(migrationsDir, 0o755))
+	chdir(t, root)
+
+	writeMigrationBytes(t, migrationsDir, "00001_indented.sql",
+		[]byte("-- +goose Up\n  -- +inventory:classic\nALTER TABLE items DROP COLUMN legacy_note;\n-- +goose Down\nSELECT 1;\n"))
+
+	var out bytes.Buffer
+	err := Plan(context.Background(), dsn, &out)
+
+	var placement *MarkerPlacementError
+	require.ErrorAs(t, err, &placement, "an indented marker must be a reported error, never silently read as no marker")
+	assert.Equal(t, 2, placement.Line)
+	assert.Empty(t, out.String())
 }
 
 // TestPlanTreatsADatabaseAheadOfTheBinaryAsFatal is spec 18's fatal, named
@@ -227,6 +270,29 @@ func TestParseClassicMarkerSkipsBlankLinesBeforeTheMarker(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.True(t, classic)
+}
+
+// TestParseClassicMarkerRejectsALeadingSpace is the round-1 regression at the
+// parser level: a namespace check anchored to column zero missed an indented
+// marker entirely, returning (false, nil) — no marker — instead of reporting
+// it. classicNamespace detection now trims the line first.
+func TestParseClassicMarkerRejectsALeadingSpace(t *testing.T) {
+	_, err := ParseClassicMarker([]byte("-- +goose Up\n  -- +inventory:classic\nSELECT 1;\n"))
+
+	var placement *MarkerPlacementError
+	require.ErrorAs(t, err, &placement)
+	assert.Equal(t, 2, placement.Line)
+}
+
+// TestParseClassicMarkerRejectsWrongCase is the same round-1 regression's
+// other half: the namespace check is now case-insensitive for detecting an
+// attempt, even though acceptance itself stays exact-case.
+func TestParseClassicMarkerRejectsWrongCase(t *testing.T) {
+	_, err := ParseClassicMarker([]byte("-- +goose Up\n-- +Inventory:Classic\nSELECT 1;\n"))
+
+	var placement *MarkerPlacementError
+	require.ErrorAs(t, err, &placement)
+	assert.Equal(t, 2, placement.Line)
 }
 
 // TestParseClassicMarkerRejectsATypoInTheDirective covers a namespace

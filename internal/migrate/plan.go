@@ -90,8 +90,9 @@ func (e *MarkerPlacementError) Error() string {
 // second statement on the line.
 //
 // A line that starts with the "-- +inventory:" namespace this package owns
-// but is not the exact, correctly placed marker — wrong position, wrong
-// spacing, trailing text, a typo in the directive name — is reported as a
+// but is not the exact, correctly placed marker — wrong position, leading or
+// trailing whitespace, wrong case, trailing text, a typo in the directive
+// name — is reported as a
 // *MarkerPlacementError rather than silently treated as no marker at all.
 func ParseClassicMarker(content []byte) (classic bool, err error) {
 	rawLines := strings.Split(string(content), "\n")
@@ -120,7 +121,18 @@ func ParseClassicMarker(content []byte) (classic bool, err error) {
 	}
 
 	for i, line := range lines {
-		namespaced := strings.HasPrefix(line, classicNamespace)
+		// Detecting an *attempt* at the marker has to be looser than
+		// accepting one: TrimSpace and ToLower catch a line indented under
+		// "-- +goose Up" (this repository's own SQL style) or typed in the
+		// wrong case, neither of which goose itself would reject either,
+		// since it is not goose's own directive. Without the trim, a line
+		// like "  -- +inventory:classic" starts with neither the exact
+		// marker nor classicNamespace, so it fell through both switch cases
+		// silently — read as no marker at all rather than reported — which
+		// is exactly the silent failure decision D3 exists to prevent.
+		// Acceptance itself stays byte-exact: only line == classicMarker,
+		// untrimmed, ever sets classic true.
+		namespaced := strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), strings.ToLower(classicNamespace))
 		switch {
 		case i == requiredLine && line == classicMarker:
 			classic = true
