@@ -79,6 +79,25 @@ on:
     branches: [main]
     paths-ignore: [docs/**, "**.md", .claude/**, LICENSE]
   workflow_dispatch:
+  # H17 (docs/specs/38-release-pipeline-and-nas-runner.md, "Trigger and gate"):
+  # `.github/workflows/release.yml` gates every release on a successful `test`
+  # and `e2e` run for the TAG'S EXACT COMMIT, and when there is none it runs
+  # this workflow on the tag itself and requires it to pass. That call is a
+  # `uses:` at job level, which only works against a workflow that declares
+  # `workflow_call`. No inputs and no secrets: the release gate needs this
+  # workflow exactly as a push or a dispatch gets it.
+  #
+  # Two things worth knowing about a call, neither of which changes this file's
+  # behaviour for anybody else. A called run inherits the CALLER's ref and
+  # event, so `actions/checkout` below checks out the tag and `github.ref` is
+  # the tag ref — which is the point, since the gate is asking about the tagged
+  # commit. And a called run is not a `test` workflow RUN of its own; its jobs
+  # belong to the release run, so the gate's own SHA lookup will never find it
+  # afterwards (release.yml's header says what that costs).
+  #
+  # The `paths-ignore` filters above apply to `push` and `pull_request` only —
+  # a call always runs, which is what a release gate needs.
+  workflow_call:
 
 # A push to the same PR within a minute cancels the still-running job for the
 # earlier push — nobody is waiting on a superseded diff. `main` is excluded

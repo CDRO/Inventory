@@ -109,6 +109,17 @@ services:
       # and a command added or edited there must be the one under test - not
       # the copy baked into the image at the last rebuild.
       - ./scripts:/src/scripts
+      # Same reason again, for scripts/release_workflow_test.go (H17): it
+      # reads .github/workflows/*.yml to hold the release pipeline to the
+      # properties that would otherwise break silently — that release.yml is
+      # the only workflow naming the self-hosted NAS runner, that its deploy
+      # job never checks out the repository, that its guards are still there.
+      # Unlike every mount above, this one has no copy in the image to fall
+      # back to: .dockerignore excludes .github from the build context, so the
+      # Dockerfile's builder stage (which runs `go test ./...`) never has these
+      # files at all and that test skips itself there. Without this line it
+      # would skip everywhere, which is a test that protects nothing.
+      - ./.github:/src/.github
     # Both sides read the same variable, not a fixed "8000:8000": the app
     # itself listens on $HTTP_PORT (internal/config/config.go), not a
     # hardcoded 8000, so the host and container sides must move together.

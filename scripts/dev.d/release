@@ -1,0 +1,185 @@
+#!/bin/sh
+# Cut a release: tag a green commit on main, push the tag, and name the run that deploys it.
+#
+#   scripts/dev release <vYYYY.MM.DD[.n]> [--classic] [-m <message>] [--attempts 3]
+#
+# The tag IS the release (docs/specs/38-release-pipeline-and-nas-runner.md,
+# "The release unit: an annotated tag"). Pushing it starts
+# .github/workflows/release.yml, which verifies the same things again on
+# GitHub and then runs `deploy/synology/update --ref <tag> --auto --backup` on
+# the NAS. This command is the half of that which belongs on the operator's
+# machine: it refuses to create a tag that the pipeline would only reject, and
+# it fails before the tag exists rather than after it has been pushed.
+#
+# It refuses, in this order, and creates nothing until all of them pass:
+#
+#   1. a tag name that is not vYYYY.MM.DD or vYYYY.MM.DD.n - dates, because
+#      there is no external API compatibility to promise and "how old is what
+#      is running" is the question a NAS is actually asked;
+#   2. a HEAD that is not a clean, fetched `main` - not on main, uncommitted
+#      changes to tracked files, untracked files, or a HEAD that is not
+#      exactly origin/main. What is released has to be what is reviewed and
+#      pushed, and a tag on a commit GitHub has never seen has no CI runs to
+#      be green;
+#   3. a HEAD whose `test` or `e2e` run is missing or not successful, which is
+#      `scripts/dev ci-status` asked once per workflow. Only a green commit
+#      may be tagged, and the pipeline's own gate checks it again - a tag
+#      pushed by hand gets no benefit of the doubt.
+#
+# A tag that already exists (here or on origin, which the fetch brings in) is
+# refused too: re-pointing a release tag would make "what is v2026.09.30"
+# depend on when you asked.
+#
+# --classic puts the line
+#
+#   deploy: classic
+#
+# into the tag message, which is how a release is forced onto the classic path
+# (stop, migrate, start) without renaming the version. It is only needed when
+# the pending migrations do NOT carry the `-- +inventory:classic` marker and
+# you have decided they should have: the ordinary case is the marker, and
+# `update --auto` reads it by itself. The override is one-way - nothing in a
+# tag can force ROLLING over a marker (decision D3).
+#
+# -m <message> writes your own annotation instead of the default `Release
+# <tag>`; with --classic the keyword line is appended to it unless it is
+# already there. --attempts is how many times (three seconds apart) the CI
+# lookup and the release-run lookup each poll; the default of 3 is for a
+# commit whose runs finished long ago, and a bigger number is for a commit
+# that was pushed a moment ago.
+#
+# Exit codes: 0 the tag was created and pushed; 1 a refusal, or git or gh
+# failed; 2 usage. A push that fails removes the local tag again, so a second
+# attempt is the same command rather than a cleanup first.
+set -u
+
+help() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
+
+# The sibling commands live beside this one; ci-status is the one it reuses,
+# rather than a second copy of the dispatch-and-poll recipe.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+die() { echo "release: $*" >&2; exit 1; }
+
+tag=""; classic=0; message=""; have_message=0; attempts=3
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --classic) classic=1; shift ;;
+    -m|--message)
+      [ $# -ge 2 ] || { echo "release: $1 needs a message" >&2; exit 2; }
+      message=$2; have_message=1; shift 2 ;;
+    --attempts)
+      case "${2:-}" in
+        ''|*[!0-9]*) echo "release: --attempts wants a number, got '${2:-}'" >&2; exit 2 ;;
+      esac
+      [ "$2" -gt 0 ] || { echo "release: --attempts wants at least 1" >&2; exit 2; }
+      attempts=$2; shift 2 ;;
+    -h|--help) help; exit 0 ;;
+    -*) echo "release: unknown option $1" >&2; exit 2 ;;
+    *)
+      [ -z "$tag" ] || { echo "release: one tag only" >&2; exit 2; }
+      tag=$1; shift ;;
+  esac
+done
+if [ -z "$tag" ]; then
+  echo "usage: scripts/dev release <vYYYY.MM.DD[.n]> [--classic] [-m <message>] [--attempts 3]" >&2
+  exit 2
+fi
+
+# --- 1. The tag name ----------------------------------------------------------
+# Globs rather than a regex: this runs under busybox sh and dash as well as
+# under Git Bash, and `case` is the one pattern match all three agree on.
+badname="'$tag' is not a release tag name - it is vYYYY.MM.DD, or vYYYY.MM.DD.n for the n-th release of one day"
+case "$tag" in
+  v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]) ;;
+  v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].*)
+    n=${tag##*.}
+    case "$n" in
+      ''|*[!0-9]*) die "$badname" ;;
+    esac ;;
+  *) die "$badname" ;;
+esac
+
+# --- 2. A clean, fetched main -------------------------------------------------
+
+branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) \
+  || die "this is not a git repository (or git is not on PATH)"
+[ "$branch" = main ] \
+  || die "a release is cut from main; HEAD is on '$branch'. Merge it first."
+
+dirty=$(git status --porcelain 2>/dev/null) \
+  || die "could not read the working tree's status"
+[ -z "$dirty" ] || die "the clone is not clean - a release tags exactly what was reviewed and pushed:
+$dirty"
+
+git fetch --quiet --tags origin \
+  || die "git fetch origin failed - the tag would be cut against a stale view of main"
+
+head=$(git rev-parse HEAD 2>/dev/null) || die "could not resolve HEAD"
+remote=$(git rev-parse origin/main 2>/dev/null) \
+  || die "origin/main does not resolve - has this clone ever fetched?"
+[ "$head" = "$remote" ] || die "HEAD ($head) is not origin/main ($remote).
+A release tag has to name a commit GitHub already has - push or pull first."
+
+if git rev-parse -q --verify "refs/tags/$tag" >/dev/null 2>&1; then
+  die "tag $tag already exists (locally, or on origin - the fetch above brings those in).
+Releases are not re-pointed; use $tag.1 for the next one today."
+fi
+
+# --- 3. Green test and e2e runs for exactly this commit -----------------------
+# `scripts/dev ci-status` is the lookup-by-SHA recipe as a command: it finds
+# the run by its exact head SHA rather than as "the newest run on the branch",
+# and it exits with the run's own conclusion. Exit 3 is its "no run at all"
+# answer, which is a different refusal from "the run was red".
+for wf in test.yml e2e.yml; do
+  rc=0
+  sh "$here/ci-status" "$head" --workflow "$wf" --attempts "$attempts" || rc=$?
+  case "$rc" in
+    0) ;;
+    3) die "no $wf run for $head. Only a green commit may be tagged - dispatch one with
+  scripts/dev ci-status $head --workflow $wf --dispatch main" ;;
+    *) die "the $wf run for $head did not succeed (ci-status exited $rc). Fix it, then tag the fix." ;;
+  esac
+done
+
+# --- The tag ------------------------------------------------------------------
+
+[ "$have_message" -eq 1 ] || message="Release $tag"
+
+# The keyword is a LINE, and appending a second one would be noise rather than
+# a stronger override - so a message that already carries it is left alone.
+if [ "$classic" -eq 1 ] && ! printf '%s\n' "$message" | grep -qx 'deploy: classic'; then
+  message="$message
+
+deploy: classic"
+fi
+
+git tag -a "$tag" -m "$message" || die "could not create the tag"
+
+if ! git push origin "refs/tags/$tag"; then
+  git tag -d "$tag" >/dev/null 2>&1
+  die "could not push $tag; the local tag was removed again, so this command can simply be repeated"
+fi
+
+echo "release: pushed $tag -> $head"
+
+# --- The run it started -------------------------------------------------------
+# Same reason ci-status polls: right after a push the run list can briefly show
+# only older runs. A tag push reports the tag name as the run's headBranch.
+# Not finding it is not a failure - the tag is pushed either way, and saying so
+# is more useful than a non-zero exit that suggests the release did not start.
+url=""
+i=0
+while [ "$i" -lt "$attempts" ]; do
+  url=$(gh run list --workflow release.yml --limit 10 --json headBranch,url \
+    -q ".[] | select(.headBranch == \"$tag\") | .url" 2>/dev/null | head -1)
+  [ -n "$url" ] && break
+  i=$((i + 1))
+  sleep 3
+done
+
+if [ -n "$url" ]; then
+  echo "release: $url"
+else
+  echo "release: the release run has not appeared yet - gh run list --workflow release.yml"
+fi
