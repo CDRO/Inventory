@@ -25,6 +25,18 @@ and rejected: the actual want is narrower — one batch, one optional
 container, whose remaining count *is* the batch's own quantity, nothing
 more.
 
+**Several identical containers of the same product need nothing extra.**
+Buying four 24-packs of beer for a party is already four independent
+`inventory_batches` rows today — `02-data-model.md`'s existing model
+never limited one product to one batch (the cucumber-jars-in-fridge-*and*-
+cellar case is the same mechanism). Each pack can carry its own
+container (`"Pack 1"`, `"Pack 2"`, …, or left unlabeled — nothing
+requires naming every one), fully independent of the other three:
+splitting two beers out of pack 1 never touches packs 2-4's quantities
+or containers. There is no "batch of batches" concept, and this spec
+does not add one — four packs are simply four rows, exactly as four
+distinct purchases already are.
+
 ## Schema
 
 Primary keys are UUIDv7, per `02-data-model.md`.

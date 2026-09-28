@@ -123,15 +123,16 @@ vanilla JavaScript with no build step — see
 | — | Batch containers: what a batch is held in, split/destroy semantics | `39-batch-containers.md` |
 | — | Icon picker with alias search, replacing free-text `icon_name` | `40-icon-picker.md` |
 | — | Mixed-batch photo classification: spotting a shopping list among shelf photos | `41-mixed-photo-classification.md` |
+| — | Local icon library: a vendored offline icon set, no external search dependency | `42-local-icon-library.md` |
 | — | *Later phase:* gamification of inventory upkeep | `50`, `51`, `52` |
 
 **Numbering:** `00`–`11` are the core system in build order; `12`–`20`, `24`,
-`26`–`30` and `32`–`41` are further accepted core work. **Specs and spikes
+`26`–`30` and `32`–`42` are further accepted core work. **Specs and spikes
 share one number space**: a number in `docs/specs/` is accepted work, a number
 in `docs/spikes/` is a candidate (`21`–`23`, `25` and `31` are currently
 claimed by spikes), and a promoted spike keeps its number as it moves folders.
-`42`–`49` are still free; numbers are never reused. `50`+ is a later, optional
-phase — nothing in `00`–`41` may depend on it, and the system must be complete and
+`43`–`49` are still free; numbers are never reused. `50`+ is a later, optional
+phase — nothing in `00`–`42` may depend on it, and the system must be complete and
 shippable with the `50` range unimplemented.
 
 **Candidate work** that has not been accepted lives in `docs/spikes/`, which is

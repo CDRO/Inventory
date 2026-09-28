@@ -189,6 +189,21 @@ cache below — the browser never contacts Iconify, SerpAPI, or Google.
   reasonable hit's rendered SVG/PNG URL). If no relevant icon is found,
   fall back to a generic "box"/"package" icon rather than omitting the
   suggestion.
+
+  **Flagged, not changed, by [`42-local-icon-library.md`](42-local-icon-library.md):**
+  that spec removes the *other* Iconify dependency this system had
+  (`40-icon-picker.md`'s live per-keystroke search) after Tizian said he
+  did not want a live call to Iconify for icon search and noted he'd
+  missed this same provider being used elsewhere too. This picture flow
+  is architecturally different — one server-side call per New Item
+  resolution, not per keystroke, and the result is downloaded and cached
+  on our own origin forever after, never hot-linked — but it is still a
+  live call to the same external host. Left as-is here because rewriting
+  shipped, already-in-production behavior is a bigger and riskier change
+  than proposing new specs, and deserves its own explicit decision rather
+  than a silent rewrite inside a documentation PR. If the same "no
+  Iconify, period" rule should extend here too, that is a follow-up spec
+  amendment, not something `42` decided on its own.
 - **2 real product photos** via **SerpAPI**'s Google Images engine
   (`https://serpapi.com/search?engine=google_images&q={text}&api_key=...`,
   `SERPAPI_API_KEY` from `01-architecture-and-deployment.md`), taking the
