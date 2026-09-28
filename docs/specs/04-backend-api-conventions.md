@@ -18,7 +18,8 @@ internal/
 ├── admin/                # server-rendered admin handlers (html/template)
 ├── store/                # pgx queries, one file per table group
 ├── vision/               # Gemini client, prompts, parsing, model resilience
-├── imagesearch/          # SerpAPI + Iconify clients
+├── imagesearch/          # SerpAPI + Iconify clients (07 image suggestions only — NOT the icon picker)
+├── iconlib/              # vendored offline icon set, embedded; no network at all (42)
 ├── matching/             # shared product matching (catalog-first, then trigram)
 ├── expiry/               # shelf-life resolution chain (08-expiration-and-classification.md)
 ├── jobs/                 # background job runner + job store
