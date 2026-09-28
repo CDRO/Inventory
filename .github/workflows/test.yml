@@ -432,14 +432,25 @@ jobs:
         if: steps.filter.outputs.changed == 'true'
         run: |
           set +e
-          docker run --rm \
+          out=$(docker run --rm \
             -e REPO_PATH="$GITHUB_WORKSPACE" \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             -w "$GITHUB_WORKSPACE" \
-            inventory-agent:local scripts/doctor
+            inventory-agent:local scripts/doctor 2>&1)
           status=$?
+          echo "$out"
           echo "exit status: $status"
           if [ "$status" -eq 0 ]; then
             echo "expected a non-zero exit (no socket, no credentials mounted) but got 0" >&2
             exit 1
           fi
+          # A non-zero exit alone would also pass for a crash unrelated to
+          # scripts/doctor itself (entrypoint.sh dying some other way before
+          # ever reaching the gate) - this is entrypoint.sh's own message for
+          # the gate specifically refusing, not just "something went wrong".
+          case "$out" in
+            *"agent-entrypoint: FATAL: scripts/doctor failed"*) ;;
+            *)
+              echo "expected the doctor-gate refusal message, got something else" >&2
+              exit 1 ;;
+          esac

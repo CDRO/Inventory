@@ -18,7 +18,13 @@ AGENT_USER=agent
 say() { printf 'agent-entrypoint: %s\n' "$*"; }
 die() { printf 'agent-entrypoint: FATAL: %s\n' "$*" >&2; exit 1; }
 
-: "${REPO_PATH:?REPO_PATH must be set to the absolute host path of this repository, see deploy/agent/README.md}"
+# Not `: "${REPO_PATH:?message}"`: bash's own parameter-expansion error prints
+# "<script>: line N: REPO_PATH: message" straight to stderr, bypassing die()
+# and its "agent-entrypoint: FATAL:" prefix entirely — the exact prefix
+# README.md's troubleshooting table documents for this failure.
+if [ -z "${REPO_PATH:-}" ]; then
+  die "REPO_PATH must be set to the absolute host path of this repository, see deploy/agent/README.md"
+fi
 
 if [ "$#" -eq 0 ]; then
   set -- claude
