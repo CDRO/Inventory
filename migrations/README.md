@@ -87,3 +87,47 @@ has run on the NAS must never be edited, only superseded. The application
 supplies every `id` as a UUIDv7 (`uuid.NewV7`), so new tables declare
 `id UUID PRIMARY KEY` with **no** default: a missing id has to fail loudly
 rather than fall back to a random v4 that breaks index locality.
+
+## The classic marker
+
+`deploy/synology/update --auto` decides between a rolling and a classic deploy
+by reading the pending migrations, so that decision is made here, in review,
+instead of on the NAS at the moment of the upgrade. The signal is one line: the
+exact
+
+```sql
+-- +inventory:classic
+```
+
+as the **first non-blank line after `-- +goose Up`**. The same line anywhere
+else in the file is an error, not a marker — `inventory migrate plan` refuses it
+rather than guessing. The `+inventory:` prefix sits outside goose's own
+`-- +goose` directive namespace, so goose reads the line as an ordinary SQL
+comment.
+
+**The rule.** A migration carries the marker when the *previous* release's
+binary cannot run correctly against the schema this one produces — which
+matters because the rolling update migrates while the old app is still serving,
+and keeps it serving until the new instance is healthy:
+
+- a drop or rename of a column, table or enum value it reads or writes;
+- a `NOT NULL` column without a default;
+- a constraint or trigger its writes would violate;
+- a backfill that must not race live writes.
+
+Additive changes — a new table, a new nullable column, a new index, an enum
+value nothing reads yet — need no marker, and an unnecessary one buys an
+interruption for nothing. `00014_job_lease.sql` above is the worked example of
+staying rolling on purpose: its backfill grants a grace claim to already-pending
+rows precisely so the update that applies it cannot fail the old instance's
+work.
+
+`review-go` checks every hunk under `migrations/` against that rule — a missing
+marker is a blocking review finding, an unneeded one a should-fix. No test can
+catch it, because the suite only ever runs the new binary against the new
+schema.
+
+The contract for all of this, including `migrate plan`'s output and exit codes
+and the tag message that can force a classic deploy where no marker asks for
+one, is
+[`docs/specs/38-release-pipeline-and-nas-runner.md`](../docs/specs/38-release-pipeline-and-nas-runner.md).

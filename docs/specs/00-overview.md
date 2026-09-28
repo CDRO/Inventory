@@ -119,15 +119,16 @@ vanilla JavaScript with no build step — see
 | — | Stocktake entry points: location chooser, links from products and inventory | `35-stocktake-entry-points.md` |
 | — | Photo source picker: library or camera, one control each | `36-photo-source-picker.md` |
 | — | In-page camera: a viewfinder on the capture screen, falling back to `36` | `37-in-page-camera.md` |
+| — | Release pipeline: a tag, a gate, and a self-hosted runner on the NAS | `38-release-pipeline-and-nas-runner.md` |
 | — | *Later phase:* gamification of inventory upkeep | `50`, `51`, `52` |
 
 **Numbering:** `00`–`11` are the core system in build order; `12`–`20`, `24`,
-`26`–`30` and `32`–`37` are further accepted core work. **Specs and spikes
+`26`–`30` and `32`–`38` are further accepted core work. **Specs and spikes
 share one number space**: a number in `docs/specs/` is accepted work, a number
 in `docs/spikes/` is a candidate (`21`–`23`, `25` and `31` are currently
 claimed by spikes), and a promoted spike keeps its number as it moves folders.
-`38`–`49` are still free; numbers are never reused. `50`+ is a later, optional
-phase — nothing in `00`–`37` may depend on it, and the system must be complete and
+`39`–`49` are still free; numbers are never reused. `50`+ is a later, optional
+phase — nothing in `00`–`38` may depend on it, and the system must be complete and
 shippable with the `50` range unimplemented.
 
 **Candidate work** that has not been accepted lives in `docs/spikes/`, which is
