@@ -902,7 +902,20 @@ function renderStockCard(product) {
   // (docs/specs/28-batch-move-quick-create.md, matching 26's refresh
   // contract) rather than one request per open field.
   const locationSelects = [];
-  const rows = product.batches.map((batch) => renderBatchRow(batch, locationSelects));
+  // Destroying a container clears it off every batch that referenced it, not
+  // just the one in view (docs/specs/39-batch-containers.md), so the
+  // confirmation has to be able to say how many. Counted over this product's
+  // own batches, which is where a shared container can come from at all — a
+  // split with container_disposition "both".
+  const containerUsage = new Map();
+  for (const batch of product.batches) {
+    if (batch.container_id) {
+      containerUsage.set(batch.container_id, (containerUsage.get(batch.container_id) ?? 0) + 1);
+    }
+  }
+  const rows = product.batches.map((batch) =>
+    renderBatchRow(batch, locationSelects, containerUsage.get(batch.container_id) ?? 0),
+  );
 
   const [hintBefore, hintAfter] = t("products.stock.hint").split("{link}");
   return el("div", { class: "card stack" }, [
@@ -936,13 +949,23 @@ function renderStockCard(product) {
  * guard in js/location-options.js) — a defense against a duplicate
  * *request*, not a validity check the server already owns.
  *
+ * It also carries the batch's container (docs/specs/39-batch-containers.md):
+ * what the stock is physically held in, orthogonal to where it sits. The
+ * container form upserts through the same PATCH the move uses — one label
+ * creates a container, a second renames that same row, null takes the batch out
+ * of it without destroying it — and "destroy" is the one separate endpoint,
+ * behind a confirmation because it clears the container off every batch that
+ * referenced it and cannot be undone by sending the label again.
+ *
  * @param {Object} batch
  * @param {HTMLSelectElement[]} locationSelects - every batch row's target-
  *   location field on the currently rendered product, shared so the "+ New
  *   location" trigger can refresh all of them from one GET
  *   (docs/specs/28-batch-move-quick-create.md).
+ * @param {number} containerBatchCount - how many of this product's batches
+ *   share this batch's container, so the destroy confirmation can say so.
  */
-function renderBatchRow(batch, locationSelects) {
+function renderBatchRow(batch, locationSelects, containerBatchCount) {
   const locationPath = locationPathFor(batch.location_id);
   const errorLine = el("div", { class: "alert", role: "alert", hidden: true });
 
@@ -969,6 +992,7 @@ function renderBatchRow(batch, locationSelects) {
     min: "1",
     step: "1",
     required: true,
+    "data-field": "quantity",
     "aria-label": t("products.batch.splitQuantityAriaLabel"),
     placeholder: t("products.batch.quantityPlaceholder"),
   });
@@ -994,19 +1018,50 @@ function renderBatchRow(batch, locationSelects) {
     }),
   );
   const splitSubmit = el("button", { type: "submit", class: "btn btn--primary" }, [text(t("products.batch.split"))]);
+
+  // Shown only when the source batch has a container: with nothing to dispose
+  // of, five radio buttons are five questions about nothing
+  // (docs/specs/39-batch-containers.md, "Product detail UI"). "source" is
+  // pre-selected because it is the server's default and the common case — the
+  // 24-pack that now holds 22 is still the 24-pack.
+  const dispositionRadios = [];
+  const splitDisposition = batch.container_id
+    ? el("fieldset", { class: "stack", "data-role": "container-disposition" }, [
+        el("legend", {}, [text(t("products.batch.disposition.legend"))]),
+        ...["source", "target", "both", "neither", "destroy"].map((value) => {
+          const radio = el("input", {
+            type: "radio",
+            name: `disposition-${batch.id}`,
+            value,
+            checked: value === "source",
+          });
+          dispositionRadios.push(radio);
+          return el("label", { class: "row" }, [radio, text(t(`products.batch.disposition.${value}`))]);
+        }),
+      ])
+    : null;
+
+  function chosenDisposition() {
+    const picked = dispositionRadios.find((radio) => radio.checked);
+    return picked ? picked.value : null;
+  }
+
   const splitForm = el(
     "form",
-    { class: "row", hidden: true, "data-role": "split-form" },
+    { class: "stack", hidden: true, "data-role": "split-form" },
     [
-      splitQuantity,
-      splitTarget,
-      splitLocationAdd,
-      splitSubmit,
-      el(
-        "button",
-        { type: "button", class: "btn btn--ghost", onclick: () => closeForms() },
-        [text(t("common.cancel"))],
-      ),
+      el("div", { class: "row" }, [
+        splitQuantity,
+        splitTarget,
+        splitLocationAdd,
+        splitSubmit,
+        el(
+          "button",
+          { type: "button", class: "btn btn--ghost", onclick: () => closeForms() },
+          [text(t("common.cancel"))],
+        ),
+      ]),
+      ...(splitDisposition ? [splitDisposition] : []),
     ],
   );
   splitForm.addEventListener("submit", async (event) => {
@@ -1018,11 +1073,14 @@ function renderBatchRow(batch, locationSelects) {
     if (!Number.isFinite(quantity) || !splitTarget.value) return;
     errorLine.hidden = true;
     splitSubmit.disabled = true;
+    const body = { quantity, target_location_id: splitTarget.value };
+    // Sent only when there was a container to decide about. The server treats
+    // the field as a no-op on a container-less batch either way, so this is
+    // about not claiming a decision nobody made.
+    const disposition = chosenDisposition();
+    if (disposition) body.container_disposition = disposition;
     try {
-      await post(`${batchesBasePath()}/${batch.id}/split`, {
-        quantity,
-        target_location_id: splitTarget.value,
-      });
+      await post(`${batchesBasePath()}/${batch.id}/split`, body);
       await reload();
     } catch (err) {
       fail(err);
@@ -1087,9 +1145,110 @@ function renderBatchRow(batch, locationSelects) {
     }
   });
 
+  // Container: label and type upsert through the batch PATCH
+  // (docs/specs/39-batch-containers.md). One label creates a container, a second
+  // renames that same row, and null takes the batch out of it without
+  // destroying it — three behaviours of one field, so one form drives all three.
+  const containerLabel = el("input", {
+    type: "text",
+    required: true,
+    maxlength: "255",
+    "data-field": "container-label",
+    "aria-label": t("products.batch.containerLabelAriaLabel"),
+    placeholder: t("products.batch.containerLabelPlaceholder"),
+    value: batch.container_label ?? "",
+  });
+  const containerType = el("input", {
+    type: "text",
+    "data-field": "container-type",
+    "aria-label": t("products.batch.containerTypeAriaLabel"),
+    placeholder: t("products.batch.containerTypePlaceholder"),
+    value: batch.container_type ?? "",
+  });
+  const containerSubmit = el("button", { type: "submit", class: "btn btn--primary" }, [
+    text(batch.container_id ? t("products.batch.containerRename") : t("products.batch.containerSave")),
+  ]);
+
+  // container_type is only ever sent alongside a label or on a batch that
+  // already has a container: the server answers 422 for a type with nothing to
+  // attach it to, and this form always has the label beside it, so that refusal
+  // is never reached from here by design rather than by a client-side check.
+  async function patchContainer(body, trigger) {
+    if (trigger.disabled) return;
+    errorLine.hidden = true;
+    trigger.disabled = true;
+    try {
+      await patch(`${batchesBasePath()}/${batch.id}`, body);
+      await reload();
+    } catch (err) {
+      fail(err);
+    } finally {
+      trigger.disabled = false;
+    }
+  }
+
+  const containerActions = [containerSubmit];
+  if (batch.container_id) {
+    const clearButton = el("button", { type: "button", class: "btn btn--ghost", "data-role": "container-clear" }, [
+      text(t("products.batch.containerClear")),
+    ]);
+    clearButton.addEventListener("click", () => patchContainer({ container_label: null }, clearButton));
+
+    const destroyButton = el("button", { type: "button", class: "btn btn--danger", "data-role": "container-destroy" }, [
+      text(t("products.batch.containerDestroy")),
+    ]);
+    destroyButton.addEventListener("click", async () => {
+      if (destroyButton.disabled) return;
+      // Confirmed because it is not undoable by sending the label again, and
+      // because it clears the container off every batch that referenced it —
+      // which the count names, since a batch list is exactly the surface where
+      // more than the row in view can be affected.
+      const warning = t("products.batch.containerDestroyConfirm", {
+        label: batch.container_label ?? "",
+        batches: tCount("products.batch.containerDestroyBatches", Math.max(containerBatchCount, 1)),
+      });
+      if (!confirm(warning)) return;
+      errorLine.hidden = true;
+      destroyButton.disabled = true;
+      try {
+        await post(`/api/storages/${storageId}/containers/${batch.container_id}/destroy`, {});
+        await reload();
+      } catch (err) {
+        fail(err);
+      } finally {
+        destroyButton.disabled = false;
+      }
+    });
+
+    containerActions.push(clearButton, destroyButton);
+  }
+
+  const containerForm = el(
+    "form",
+    { class: "row", hidden: true, "data-role": "container-form" },
+    [
+      containerLabel,
+      containerType,
+      ...containerActions,
+      el(
+        "button",
+        { type: "button", class: "btn btn--ghost", onclick: () => closeForms() },
+        [text(t("common.cancel"))],
+      ),
+    ],
+  );
+  containerForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const label = containerLabel.value.trim();
+    if (!label) return;
+    const kind = containerType.value.trim();
+    patchContainer({ container_label: label, container_type: kind === "" ? null : kind }, containerSubmit);
+  });
+
   function closeForms() {
     splitForm.hidden = true;
     moveForm.hidden = true;
+    containerForm.hidden = true;
     errorLine.hidden = true;
   }
 
@@ -1107,6 +1266,14 @@ function renderBatchRow(batch, locationSelects) {
           : t("products.batch.noExpiry"),
       ),
       text(batch.expiration_source === "user" ? t("products.batch.userSet") : ""),
+      // The container's label, or nothing at all when the batch is in nothing —
+      // docs/specs/39-batch-containers.md asks for exactly that, not an
+      // "in no container" line on every row of every product.
+      batch.container_label
+        ? el("span", { "data-role": "container-label" }, [
+            text(t("products.batch.inContainer", { label: batch.container_label })),
+          ])
+        : text(""),
     ]),
     el("div", { class: "row" }, [
       el("a", { class: "btn btn--ghost", href: stocktakeHref(batch.location_id) }, [
@@ -1140,6 +1307,20 @@ function renderBatchRow(batch, locationSelects) {
         },
         [text(t("products.batch.move"))],
       ),
+      el(
+        "button",
+        {
+          type: "button",
+          class: "btn btn--ghost",
+          "data-role": "container-toggle",
+          onclick: () => {
+            const opening = containerForm.hidden;
+            closeForms();
+            containerForm.hidden = !opening;
+          },
+        },
+        [text(batch.container_id ? t("products.batch.containerEdit") : t("products.batch.containerAdd"))],
+      ),
     ]),
   ]);
 
@@ -1148,6 +1329,7 @@ function renderBatchRow(batch, locationSelects) {
     errorLine,
     splitForm,
     moveForm,
+    containerForm,
   ]);
 }
 

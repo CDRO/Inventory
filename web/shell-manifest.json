@@ -1,13 +1,13 @@
 {
-  "cache_version": "v30",
+  "cache_version": "v31",
   "digests": {
     "/": "c7ecaf956a6eedf333caaf56a24a203bd228855e0161781649c20466a86a6f88",
     "/categories.html": "1ace1541fdc390ce3231aa6affb84e3d5b262a85ca42935ea17dc6f811217d44",
     "/css/base.css": "09c89a7c998dea2d8094caf02785bd463cf24fa98c23f53d97da6a816523c0c3",
     "/css/components.css": "4c57177d1866d973dabaaf68e3477e63d3001e8f25bdbde9374a6c937ea47131",
     "/css/tokens.css": "782346dd8139048a2c12ef5aec77da0ac845986b1fec3f04fcebd86be9830f29",
-    "/i18n/de.json": "7e576b85f036dc585ebeb4bab81500005b4f7b29a00c4b70a26e454c892da4cd",
-    "/i18n/en.json": "de4d82bdbfaa04a7a1203a312d10f5324821baef8cea2dd7b573b2d771918504",
+    "/i18n/de.json": "0c6373429c3ffc6fa0f3df714d5045a3d8eb03e9a3542c87a4c8fa2f20223090",
+    "/i18n/en.json": "046db5cb03271c9671f4b7bbad6264b8393eae4fe213d25958c0f629621d0c6b",
     "/icons/icon-192.png": "d799f02deeeab9a0ecd434f1befe77216343cf126f5ffbf8d2f4626e4066b504",
     "/icons/icon-512.png": "18269146796b30ebc06f32e941436aa720277860f58f1e682182c2c050751db5",
     "/inbox.html": "afcc9c6420522ae9f7e08ffc2c1882c6c161b516b3654f96fc77249b2a1f5ac6",

@@ -37,6 +37,15 @@ const (
 )
 
 // Batch is a quantity of one product at exactly one location.
+//
+// ContainerID is what the batch is physically held in, if anything
+// (docs/specs/39-batch-containers.md) — orthogonal to LocationID, which is
+// where that holding happens. ContainerLabel and ContainerType are that
+// container's own columns, joined in by the read paths that have a container to
+// join (loadBatch, ListProductBatches) and left nil by the ones that cannot:
+// an INSERT ... RETURNING cannot join, so a batch straight out of createBatch
+// carries its container id and no label. Every caller that hands a Batch to a
+// client goes through a joining path.
 type Batch struct {
 	ID               uuid.UUID
 	ProductID        uuid.UUID
@@ -45,6 +54,9 @@ type Batch struct {
 	ExpirationDate   *time.Time
 	ExpirationSource ExpirationSource
 	CreatedAt        time.Time
+	ContainerID      *uuid.UUID
+	ContainerLabel   *string
+	ContainerType    *string
 }
 
 // NewBatch is the input to CreateBatch.
@@ -134,7 +146,7 @@ func createBatch(ctx context.Context, tx pgx.Tx, storageID uuid.UUID, in NewBatc
 	row := tx.QueryRow(ctx, `
 		INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_date, expiration_source)
 		VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING id, product_id, location_id, quantity, expiration_date, expiration_source, created_at`,
+		RETURNING id, product_id, location_id, quantity, expiration_date, expiration_source, created_at, container_id`,
 		id, in.ProductID, in.LocationID, in.Quantity, in.ExpirationDate, string(in.ExpirationSource))
 
 	batch, err := scanBatch(row)
@@ -239,11 +251,17 @@ func (s *Store) ListProductBatches(ctx context.Context, storageID, productID uui
 		return nil, err
 	}
 
+	// LEFT JOIN, not JOIN: a container is optional, and a batch without one
+	// still belongs on this list. The join is what lets the product edit
+	// surface show "24-pack box" instead of a UUID
+	// (docs/specs/39-batch-containers.md, "Product detail UI").
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, product_id, location_id, quantity, expiration_date, expiration_source, created_at
-		  FROM inventory_batches
-		 WHERE product_id = $1
-		 ORDER BY expiration_date NULLS LAST, created_at`, productID)
+		SELECT b.id, b.product_id, b.location_id, b.quantity, b.expiration_date,
+		       b.expiration_source, b.created_at, b.container_id, c.label, c.container_type
+		  FROM inventory_batches b
+		  LEFT JOIN containers c ON c.id = b.container_id
+		 WHERE b.product_id = $1
+		 ORDER BY b.expiration_date NULLS LAST, b.created_at`, productID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list product batches: %w", err)
 	}
@@ -251,13 +269,31 @@ func (s *Store) ListProductBatches(ctx context.Context, storageID, productID uui
 
 	out := []Batch{}
 	for rows.Next() {
-		b, err := scanBatch(rows)
+		b, err := scanBatchWithContainer(rows)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, *b)
 	}
 	return out, rows.Err()
+}
+
+// SplitBatchInput is what a split needs beyond the batch it splits.
+//
+// A struct rather than three positional arguments: the disposition is the third
+// thing to describe the same operation, and a signature that reads
+// (quantity, target, disposition) is one a future fourth field turns into a
+// puzzle at every call site.
+type SplitBatchInput struct {
+	// Quantity is how much moves to the target, strictly between 1 and the
+	// source's current quantity − 1. Splitting the whole batch is a move.
+	Quantity int
+	// TargetLocationID is where the split-off portion lands. Checked against
+	// the storage, like every other id a caller supplies.
+	TargetLocationID uuid.UUID
+	// ContainerDisposition decides what happens to the source's container, if
+	// it has one. Empty means DispositionSource — the default the spec names.
+	ContainerDisposition ContainerDisposition
 }
 
 // SplitBatch moves quantity units of a batch to another location.
@@ -270,7 +306,23 @@ func (s *Store) ListProductBatches(ctx context.Context, storageID, productID uui
 // stays a date a person typed. Two log rows are written with reason 'move',
 // summing to zero, so product totals are unchanged while per-location figures
 // stay correct.
-func (s *Store) SplitBatch(ctx context.Context, storageID, batchID uuid.UUID, quantity int, targetLocationID uuid.UUID, userID *uuid.UUID) (*Batch, error) {
+//
+// The container the source is held in follows in.ContainerDisposition
+// (docs/specs/39-batch-containers.md): by default it stays with the stock that
+// stays behind — two beers into the fridge, and the 24-pack that now holds 22
+// is still the 24-pack. A source batch with no container makes every
+// disposition a no-op rather than an error, so a frontend that always sends the
+// field for symmetry does not have to special-case container-less batches. No
+// inventory_logs row is written for any of it: the container is not a quantity.
+func (s *Store) SplitBatch(ctx context.Context, storageID, batchID uuid.UUID, in SplitBatchInput, userID *uuid.UUID) (*Batch, error) {
+	disposition := in.ContainerDisposition
+	if disposition == "" {
+		disposition = DispositionSource
+	}
+	if !ValidContainerDisposition(disposition) {
+		return nil, fmt.Errorf("%w: unknown container_disposition %q", ErrValidation, string(disposition))
+	}
+
 	newBatchID, err := newID()
 	if err != nil {
 		return nil, err
@@ -281,13 +333,14 @@ func (s *Store) SplitBatch(ctx context.Context, storageID, batchID uuid.UUID, qu
 		var source Batch
 		var srcExpiration string
 		err := tx.QueryRow(ctx, `
-			SELECT b.id, b.product_id, b.location_id, b.quantity, b.expiration_date, b.expiration_source
+			SELECT b.id, b.product_id, b.location_id, b.quantity, b.expiration_date,
+			       b.expiration_source, b.container_id
 			  FROM inventory_batches b
 			  JOIN products p ON p.id = b.product_id
 			 WHERE b.id = $1 AND p.storage_id = $2
 			 FOR UPDATE OF b`, batchID, storageID).
 			Scan(&source.ID, &source.ProductID, &source.LocationID, &source.Quantity,
-				&source.ExpirationDate, &srcExpiration)
+				&source.ExpirationDate, &srcExpiration, &source.ContainerID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -297,40 +350,72 @@ func (s *Store) SplitBatch(ctx context.Context, storageID, batchID uuid.UUID, qu
 		source.ExpirationSource = ExpirationSource(srcExpiration)
 
 		// Splitting the whole batch is a move, which is a different operation.
-		if quantity < 1 || quantity > source.Quantity-1 {
+		if in.Quantity < 1 || in.Quantity > source.Quantity-1 {
 			return fmt.Errorf("%w: split quantity must be between 1 and %d", ErrValidation, source.Quantity-1)
 		}
-		if err := requireSameStorage(ctx, tx, treeLocations, storageID, targetLocationID); err != nil {
+		if err := requireSameStorage(ctx, tx, treeLocations, storageID, in.TargetLocationID); err != nil {
 			return err
 		}
 
 		if _, err := tx.Exec(ctx,
 			`UPDATE inventory_batches SET quantity = quantity - $1 WHERE id = $2`,
-			quantity, batchID); err != nil {
+			in.Quantity, batchID); err != nil {
 			return fmt.Errorf("store: debit source batch: %w", err)
 		}
 
+		// The source side of the disposition runs before the target row exists,
+		// and the target is then inserted with whatever the table says it
+		// should carry. That ordering is what keeps "destroy" honest: the
+		// destroy sweep clears container_id on every batch referencing the
+		// container, so a target inserted *before* it holding that container
+		// would be cleared by accident rather than by the rule.
+		targetContainerID := source.ContainerID
+		if source.ContainerID != nil {
+			switch disposition {
+			case DispositionSource, DispositionBoth:
+				// The source keeps it; nothing to write.
+			case DispositionTarget, DispositionNeither:
+				if err := detachBatchContainer(ctx, tx, batchID); err != nil {
+					return err
+				}
+			case DispositionDestroy:
+				// Clears the source too, since at this moment the source is
+				// the only batch referencing it.
+				if err := destroyContainer(ctx, tx, storageID, *source.ContainerID); err != nil {
+					return err
+				}
+			}
+			switch disposition {
+			case DispositionTarget, DispositionBoth:
+				// targetContainerID already holds it.
+			default:
+				targetContainerID = nil
+			}
+		}
+
 		row := tx.QueryRow(ctx, `
-			INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_date, expiration_source)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			RETURNING id, product_id, location_id, quantity, expiration_date, expiration_source, created_at`,
-			newBatchID, source.ProductID, targetLocationID, quantity,
-			source.ExpirationDate, string(source.ExpirationSource))
+			INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_date, expiration_source, container_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			RETURNING id, product_id, location_id, quantity, expiration_date, expiration_source, created_at, container_id`,
+			newBatchID, source.ProductID, in.TargetLocationID, in.Quantity,
+			source.ExpirationDate, string(source.ExpirationSource), targetContainerID)
 
 		created, err := scanBatch(row)
 		if err != nil {
 			return err
 		}
 
-		if err := writeLog(ctx, tx, source.ProductID, &batchID, -quantity, ReasonMove, userID); err != nil {
+		if err := writeLog(ctx, tx, source.ProductID, &batchID, -in.Quantity, ReasonMove, userID); err != nil {
 			return err
 		}
-		if err := writeLog(ctx, tx, source.ProductID, &created.ID, quantity, ReasonMove, userID); err != nil {
+		if err := writeLog(ctx, tx, source.ProductID, &created.ID, in.Quantity, ReasonMove, userID); err != nil {
 			return err
 		}
 
-		out = created
-		return nil
+		// Re-read through the joining path so the created batch carries its
+		// container's label, not just an id the caller would have to resolve.
+		out, err = loadBatch(ctx, tx, storageID, created.ID)
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -356,6 +441,29 @@ type BatchPatch struct {
 	Quantity *int
 	// LocationID is the shelf the whole batch moves to.
 	LocationID *uuid.UUID
+
+	// SetContainerLabel says the caller named container_label at all, which is
+	// the difference between "leave the container alone" and "this batch is in
+	// nothing" — a distinction a bare pointer cannot carry, and the same shape
+	// ProductPatch uses for its own nullable fields.
+	SetContainerLabel bool
+	// ContainerLabel is the label to upsert: a new container on the first set,
+	// a rename of the same row afterwards. Nil with SetContainerLabel means
+	// detach without destroying the container.
+	ContainerLabel *string
+
+	// SetContainerType says the caller named container_type at all.
+	SetContainerType bool
+	// ContainerType is the descriptive kind ("box", "bag"), or nil to clear it.
+	// Either way it needs a container to write to — an existing one or one this
+	// same patch creates — and is ErrValidation without.
+	ContainerType *string
+}
+
+// touchesContainer reports whether this patch says anything about the batch's
+// container.
+func (p BatchPatch) touchesContainer() bool {
+	return p.SetContainerLabel || p.SetContainerType
 }
 
 // UpdateBatch applies a BatchPatch in one transaction and returns the batch as
@@ -374,7 +482,7 @@ type BatchPatch struct {
 //   - ErrValidation for an empty patch, a negative quantity, or a patch that
 //     asks to empty a batch and move it in the same breath.
 func (s *Store) UpdateBatch(ctx context.Context, storageID, batchID uuid.UUID, patch BatchPatch, userID *uuid.UUID) (*Batch, error) {
-	if patch.Quantity == nil && patch.LocationID == nil {
+	if patch.Quantity == nil && patch.LocationID == nil && !patch.touchesContainer() {
 		return nil, fmt.Errorf("%w: a batch patch must name at least one field", ErrValidation)
 	}
 	// "The shelf is empty" and "carry it to the kitchen" contradict each
@@ -382,6 +490,12 @@ func (s *Store) UpdateBatch(ctx context.Context, storageID, batchID uuid.UUID, p
 	// Refusing is the only reading that cannot silently pick one.
 	if patch.Quantity != nil && *patch.Quantity == 0 && patch.LocationID != nil {
 		return nil, fmt.Errorf("%w: a batch set to zero is deleted, so it cannot also be moved", ErrValidation)
+	}
+	// Same contradiction, same refusal: a batch emptied to zero is deleted in
+	// this transaction, so there is no row left for a container to be attached
+	// to, renamed on, or cleared from.
+	if patch.Quantity != nil && *patch.Quantity == 0 && patch.touchesContainer() {
+		return nil, fmt.Errorf("%w: a batch set to zero is deleted, so its container cannot also be changed", ErrValidation)
 	}
 
 	var out *Batch
@@ -398,13 +512,40 @@ func (s *Store) UpdateBatch(ctx context.Context, storageID, batchID uuid.UUID, p
 			}
 		}
 
-		if patch.LocationID != nil {
-			moved, err := moveBatch(ctx, tx, storageID, batchID, *patch.LocationID, userID)
-			if err != nil {
+		// The container fields come before the move only so that the single
+		// loadBatch at the end can serve every branch; neither ordering is
+		// observable, because a container write touches no quantity and a move
+		// touches no container (docs/specs/39-batch-containers.md: an entire
+		// batch moving carries its container with it either way).
+		//
+		// The batch has not been resolved against the storage yet on a patch
+		// that names only container fields, so that happens first — a batch id
+		// from another storage must be the same ErrNotFound an unknown one is,
+		// before any container row is created.
+		if patch.touchesContainer() {
+			if _, err := loadBatch(ctx, tx, storageID, batchID); err != nil {
 				return err
 			}
-			out = moved
-			return nil
+			if patch.SetContainerLabel {
+				if patch.ContainerLabel == nil {
+					if err := detachBatchContainer(ctx, tx, batchID); err != nil {
+						return err
+					}
+				} else if err := upsertBatchContainerLabel(ctx, tx, storageID, batchID, *patch.ContainerLabel); err != nil {
+					return err
+				}
+			}
+			if patch.SetContainerType {
+				if err := setBatchContainerType(ctx, tx, storageID, batchID, patch.ContainerType); err != nil {
+					return err
+				}
+			}
+		}
+
+		if patch.LocationID != nil {
+			if _, err := moveBatch(ctx, tx, storageID, batchID, *patch.LocationID, userID); err != nil {
+				return err
+			}
 		}
 
 		batch, err := loadBatch(ctx, tx, storageID, batchID)
@@ -514,7 +655,7 @@ func moveBatch(ctx context.Context, tx pgx.Tx, storageID, batchID, targetLocatio
 
 	row := tx.QueryRow(ctx, `
 		UPDATE inventory_batches SET location_id = $1 WHERE id = $2
-		RETURNING id, product_id, location_id, quantity, expiration_date, expiration_source, created_at`,
+		RETURNING id, product_id, location_id, quantity, expiration_date, expiration_source, created_at, container_id`,
 		targetLocationID, batchID)
 
 	moved, err := scanBatch(row)
@@ -532,13 +673,19 @@ func moveBatch(ctx context.Context, tx pgx.Tx, storageID, batchID, targetLocatio
 	return moved, nil
 }
 
-// loadBatch reads one batch scoped to a storage. A batch belonging to another
-// storage is ErrNotFound, the same answer as one that does not exist.
+// loadBatch reads one batch scoped to a storage, with its container's label and
+// type joined in. A batch belonging to another storage is ErrNotFound, the same
+// answer as one that does not exist.
+//
+// This is the path every write returns through, so a caller that just set a
+// container label reads it back rather than an id it would have to resolve.
 func loadBatch(ctx context.Context, q querier, storageID, batchID uuid.UUID) (*Batch, error) {
-	return scanBatch(q.QueryRow(ctx, `
-		SELECT b.id, b.product_id, b.location_id, b.quantity, b.expiration_date, b.expiration_source, b.created_at
+	return scanBatchWithContainer(q.QueryRow(ctx, `
+		SELECT b.id, b.product_id, b.location_id, b.quantity, b.expiration_date,
+		       b.expiration_source, b.created_at, b.container_id, c.label, c.container_type
 		  FROM inventory_batches b
 		  JOIN products p ON p.id = b.product_id
+		  LEFT JOIN containers c ON c.id = b.container_id
 		 WHERE b.id = $1 AND p.storage_id = $2`, batchID, storageID))
 }
 
@@ -562,15 +709,38 @@ func writeLog(ctx context.Context, tx pgx.Tx, productID uuid.UUID, batchID *uuid
 	return nil
 }
 
+// scanBatch reads the eight inventory_batches columns, container_id last. It is
+// the scanner for the write paths — INSERT/UPDATE ... RETURNING cannot join
+// containers — so the Batch it returns carries a container id and no label.
 func scanBatch(row rowScanner) (*Batch, error) {
 	var b Batch
 	var source string
-	err := row.Scan(&b.ID, &b.ProductID, &b.LocationID, &b.Quantity, &b.ExpirationDate, &source, &b.CreatedAt)
+	err := row.Scan(&b.ID, &b.ProductID, &b.LocationID, &b.Quantity, &b.ExpirationDate,
+		&source, &b.CreatedAt, &b.ContainerID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: scan batch: %w", err)
+	}
+	b.ExpirationSource = ExpirationSource(source)
+	return &b, nil
+}
+
+// scanBatchWithContainer reads scanBatch's columns plus the joined
+// containers.label and containers.container_type, in that order. Both are NULL
+// for a batch with no container, which is why they are pointers rather than a
+// separate presence flag.
+func scanBatchWithContainer(row rowScanner) (*Batch, error) {
+	var b Batch
+	var source string
+	err := row.Scan(&b.ID, &b.ProductID, &b.LocationID, &b.Quantity, &b.ExpirationDate,
+		&source, &b.CreatedAt, &b.ContainerID, &b.ContainerLabel, &b.ContainerType)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: scan batch with container: %w", err)
 	}
 	b.ExpirationSource = ExpirationSource(source)
 	return &b, nil

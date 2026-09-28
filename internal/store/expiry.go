@@ -405,14 +405,21 @@ func (s *Store) SetBatchExpiration(ctx context.Context, storageID, batchID uuid.
 			UPDATE inventory_batches
 			   SET expiration_date = $1, expiration_source = 'user'
 			 WHERE id = $2
-			RETURNING id, product_id, location_id, quantity, expiration_date, expiration_source, created_at`,
+			RETURNING id, product_id, location_id, quantity, expiration_date, expiration_source, created_at, container_id`,
 			date, batchID)
 
 		batch, err := scanBatch(row)
 		if err != nil {
 			return err
 		}
-		out = batch
+		// Re-read through loadBatch so the batch this returns carries its
+		// container's label rather than a bare id: an UPDATE ... RETURNING
+		// cannot join containers, and every batch a client is handed has to
+		// look the same (docs/specs/39-batch-containers.md).
+		out, err = loadBatch(ctx, tx, storageID, batch.ID)
+		if err != nil {
+			return err
+		}
 
 		if userID != nil {
 			if err := recordContribution(ctx, tx, storageID, *userID, gamification.KindExpiryConfirmed, &batch.ID, nil); err != nil {
@@ -463,15 +470,17 @@ func (s *Store) ResetBatchExpirationToDerived(ctx context.Context, storageID, ba
 			UPDATE inventory_batches
 			   SET expiration_date = $1, expiration_source = 'derived'
 			 WHERE id = $2
-			RETURNING id, product_id, location_id, quantity, expiration_date, expiration_source, created_at`,
+			RETURNING id, product_id, location_id, quantity, expiration_date, expiration_source, created_at, container_id`,
 			date, batchID)
 
 		batch, err := scanBatch(row)
 		if err != nil {
 			return err
 		}
-		out = batch
-		return nil
+		// Same reason as SetBatchExpiration's re-read: the joined container
+		// label is part of every batch a client sees.
+		out, err = loadBatch(ctx, tx, storageID, batch.ID)
+		return err
 	})
 	if err != nil {
 		return nil, err
