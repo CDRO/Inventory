@@ -59,7 +59,7 @@ one that looks like diligence.
 
 **The security invariants.** These are cross-cutting, easy to break silently,
 and tests usually still pass when they are broken. Check each one explicitly
-whenever the diff touches routing, handlers, or middleware:
+whenever the diff touches routing, handlers, middleware, or `migrations/`:
 - `404`-not-`403` for both unknown and inaccessible storages and for the whole
   admin area — identical body, headers, and no timing tell
   (`docs/specs/03-auth-and-multi-tenancy.md`).
@@ -74,6 +74,9 @@ whenever the diff touches routing, handlers, or middleware:
   (`docs/specs/02-data-model.md`).
 - Uploaded images stripped of EXIF, with orientation applied to pixels first
   (`docs/specs/04-backend-api-conventions.md`).
+- A migration the previous release's binary cannot serve against carries the
+  classic marker (`docs/specs/38-release-pipeline-and-nas-runner.md`); a diff
+  adding a migration without it must say why it is rolling-safe.
 
 ## Rules
 
