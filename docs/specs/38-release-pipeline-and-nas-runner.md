@@ -270,6 +270,15 @@ parser, so a misplaced marker is reported rather than guessed at. The
 the pinned goose (v3.22.1, `go.mod`) reads it as an ordinary SQL comment and can
 never mistake it for a directive.
 
+**"Exact" is about the characters of the line, not its terminator.** The
+terminator is stripped before the comparison, so a CRLF checkout's trailing
+carriage return is tolerated: nothing pins `migrations/**` to LF in
+`.gitattributes`, and this repository is developed on Windows with
+`core.autocrlf=true`, so a parser that read the terminator as part of the line
+would reject every marker written here. Nothing else is tolerated — no leading
+whitespace, no trailing space or tab, no trailing comment, no second statement
+on the line.
+
 ### `inventory migrate plan`
 
 `migrate plan` is the single place that reads the marker. Its first line is
@@ -278,10 +287,20 @@ never mistake it for a directive.
 migrate plan: rolling|classic|nothing pending (<n> pending: 00015_x.sql, …)
 ```
 
-followed by one line per pending file. Its **exit code** is the
-machine-readable answer, because the consumer is a `sh` script under `set -eu`
-calling it through `docker-compose run`, which propagates the container's exit
-code — parsing stdout would mean parsing past Compose's own output:
+followed by one line per pending file. The parenthetical belongs to the two
+modes that have pending files; with nothing pending the whole line is exactly
+
+```
+migrate plan: nothing pending
+```
+
+and no file lines follow it — a `(0 pending: )` rendering of that case is not
+what this asks for.
+
+Its **exit code** is the machine-readable answer, because the consumer is a `sh`
+script under `set -eu` calling it through `docker-compose run`, which propagates
+the container's exit code — parsing stdout would mean parsing past Compose's own
+output:
 
 | Exit | Meaning |
 |---|---|
@@ -346,7 +365,8 @@ the script's own header is the source):
 
 | Phase reached | What is serving | What the database is |
 |---|---|---|
-| refusal before the fetch: dirty clone, unknown ref, two app instances, Compose < 2.24, `traefik` in the merged model | the old release, untouched | untouched |
+| refusal before the fetch: Compose < 2.24, the update lock already held, two app instances or a leftover stopped one, a dirty clone, an unknown ref | the old release, untouched | untouched |
+| refusal after the fetch, before the build: the merged model lists `traefik`, or lacks `app`, `db` or `ts-inventory` | the old release, untouched | untouched — but the clone now stands at the new ref. This check is made on the files that were just fetched, which is why it cannot happen any earlier |
 | the backup failed (`--backup`) | the old release, untouched | untouched — the run aborts before `migrate up` |
 | fetch, image pull or build failed | the old release, untouched | untouched |
 | `migrate up` failed | the old release | partially migrated: goose applies each pending migration in its own transaction and stops at the one that failed. Forward-only either way |
@@ -472,7 +492,9 @@ container; **H17** `release.yml` and `scripts/dev release`.
 - A marker in an **already applied** migration changes nothing — only pending
   files are read.
 - Tests cover all of the above, including a marker that differs only in spacing
-  or trailing text being rejected rather than accepted loosely.
+  or trailing text being rejected rather than accepted loosely — and a
+  CRLF-terminated marker being **accepted**, since the terminator is not part of
+  the line.
 - `review-go`'s checklist gains the migration rule ("a migration the previous
   binary cannot serve carries the classic marker"), and `migrations/README.md`
   gains the example output.
@@ -492,8 +514,10 @@ container; **H17** `release.yml` and `scripts/dev release`.
 - Exit `0` on success and on nothing-to-do; `1` on every refusal and abort; the
   existing signal exits unchanged.
 - Every new path has a case in `deploy/synology/update_test.go` beside the
-  existing stub-driven tests, and `deploy/synology/README.md` gains the
-  scratch-stack entries and the runbook sections listed above.
+  existing stub-driven tests — which for `VERSION=<ref>` means the compose stub
+  has to record the environment it was called with, not only its arguments —
+  and `deploy/synology/README.md` gains the scratch-stack entries and the
+  runbook sections listed above.
 - `.env.example` declares `BACKUP_KEEP` (commented, default `5`) — added by H13
   with this spec, so H15 only consumes it.
 
