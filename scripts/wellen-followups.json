@@ -496,8 +496,9 @@
     {
       "number": 16,
       "waveIssue": 366,
+      "planIssue": 366,
       "integrationBranch": "integration/followups-welle-16",
-      "sequential": false,
+      "sequential": true,
       "dockerCleanup": true,
       "packages": [
         {
@@ -519,6 +520,8 @@
           "slug": "f16-tree-modal-error-attribution",
           "branch": "followups/f16-tree-modal-error-attribution",
           "spec": "Issues 347, 351, 352: tree-modal error attribution and two regression tests",
+          "model": "claude-opus-5",
+          "effort": "xhigh",
           "focus": "The fourth round of findings against web/static/js/tree-modal.js's mutation tracking, all deferred from PR #346 (wave 14) and PR #350 (wave 14 consolidation) under the two-review-pass cap - close all three (#347, #351, #352) in this PR. #347: the dialog has one shared errorBox, and #281's own fix (a later mutation's success must never silently erase an earlier one's failure) means the box keeps showing the FIRST failure's text while unacknowledgedFailures still latches every failed attempt - correct, but the box cannot say which attempt a message belongs to, and when two mutations fail the later showError overwrites the earlier one's text outright even though both tokens stay latched and finalize still refuses to close over either. Fix by moving to per-attempt messages - a list of banners keyed by attempt token, or one banner naming the failed operation (\"Could not rename 'Pantry'\"), cleared individually as each is acknowledged - which needs a real design decision about what an acknowledged-but-still-open failure should look like, since neither #275, #280, #281 nor #282 specified one. New user-visible strings go through spec 19's catalogs (en.json and de.json) as usual. #351: finalize's own comment claims a specific two-concurrent-failures behavior (both tokens latch, the later message's text wins, the dialog still won't close over either) that nothing in e2e/specs/ingestion.spec.js exercises - all four existing tests drive at most one failing mutation. Add the test the issue specifies: two creates, both failing, dismissals interleaved so only the second is acknowledged, assert the dialog stays open, then that a further dismissal closes it - use an aborted POST as the existing tests do, so nothing is written to the shared E2E Household fixture. #352: the opening reload() in openTreeManager is deliberately excluded from #280's mutation-tracking fix (tracking it would make Esc block on a slow initial render, and nothing is at stake in that window since createdIds resolves from its own array) - but nothing proves a dismissal issued while that GET is still in flight actually closes the dialog immediately. Add the test the issue specifies: hold the opening GET with page.route, open the modal, press Escape while it is still held, assert the dialog is hidden before releasing the GET, release afterwards and assert nothing throws. Fix #347's UI change first if you want #351/#352's tests to exercise the final error-box shape, though neither test asserts on error-box content, only on open/closed state, so ordering within this package is not load-bearing."
         },
         {
