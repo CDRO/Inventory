@@ -61,6 +61,39 @@ func scriptCode(t *testing.T, name string) string {
 	return strings.Join(code, "\n")
 }
 
+// envDefault returns the default of a compose `NAME: ${NAME:-default}` line in
+// block — the value, not the syntax.
+//
+// The distinction is the whole reason this exists rather than a `Contains` for
+// `"${NAME:-"`: that prefix is a prefix of `${NAME:-}` too, so a check written
+// that way accepts an emptied default, which for several of these variables is
+// precisely the regression the setting is there to prevent. Returning the
+// default lets the caller assert something about it.
+func envDefault(t *testing.T, block, name string) string {
+	t.Helper()
+
+	value := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lineFrom(t, block, name+":")), name+":"))
+	prefix, suffix := "${"+name+":-", "}"
+	require.True(t, strings.HasPrefix(value, prefix) && strings.HasSuffix(value, suffix),
+		"%s must be written as an override with a default, ${%s:-<default>}, so the NAS needs no variable set and another value needs no edit to this file; got %q",
+		name, name, value)
+	return strings.TrimSuffix(strings.TrimPrefix(value, prefix), suffix)
+}
+
+// dockerfileEnv returns the value the Dockerfile's ENV assigns to name.
+//
+// The ENV is one instruction spanning several backslash-continued lines, so the
+// line for one variable ends in " \" for every variable but the last; both forms
+// are accepted rather than assumed.
+func dockerfileEnv(t *testing.T, dockerfile, name string) string {
+	t.Helper()
+
+	raw := strings.TrimSpace(lineFrom(t, dockerfile, name+"="))
+	value := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(raw, name+"="), `\`))
+	require.NotEmpty(t, value, "the Dockerfile's ENV must give %s a value", name)
+	return value
+}
+
 // TestRunnerMountsOnlyTheSocketTheCloneAndItsState is spec 38's "Mounts, and
 // nothing else" as a test.
 //
@@ -161,8 +194,22 @@ func TestRunnerIsItsOwnComposeProjectThatSurvivesAReboot(t *testing.T) {
 	// Not a hostname, not omitted: --replace replaces the registration OF THE
 	// SAME NAME, so a name that changes per container registers a new runner on
 	// every recreate and leaves the old ones behind as offline duplicates.
-	assert.Contains(t, block, "RUNNER_NAME: ${RUNNER_NAME:-",
-		"the runner's name must have a stable default")
+	//
+	// The DEFAULT is what is asserted, not the presence of the override syntax.
+	// A `Contains` check for the `${RUNNER_NAME:-` prefix passes just as happily
+	// against `${RUNNER_NAME:-}`, which is the one value that reintroduces the
+	// bug this setting exists to prevent — an empty default is exactly how
+	// config.sh ends up back at the container hostname.
+	//
+	// Equality against the image's own ENV rather than against the literal
+	// "nas-inventory": the invariant is "non-empty, and the same in both places
+	// it is written down". Renaming the runner deliberately means editing both,
+	// which is the point; renaming it in one place is the drift this catches.
+	name := envDefault(t, block, "RUNNER_NAME")
+	require.NotEmpty(t, name,
+		"an empty default is the regression: config.sh falls back to the container hostname, Docker regenerates it on every recreate, and --replace then reclaims nothing and registers a duplicate")
+	assert.Equal(t, dockerfileEnv(t, scriptCode(t, "deploy/synology/runner/Dockerfile"), "RUNNER_NAME"), name,
+		"the compose default and the image's own ENV default must not drift apart")
 }
 
 // TestRunnerRegistersPersistentlyAsRoot is decision D4, which spec 38 quotes
@@ -213,9 +260,16 @@ func TestRunnerImagePinsWhatItInstalls(t *testing.T) {
 	// The three tools deploy/synology/update needs. Two come with the base
 	// image, which is why the Dockerfile asserts them: a base that drops one
 	// must fail this build, in CI, rather than a release on the NAS.
+	//
+	// Asserted against the assertion's own loop line, not against the whole
+	// file: "docker" occurs in `docker-compose`, in `COMPOSE_VERSION` and in
+	// half the comments, so a whole-file Contains would stay green with the
+	// tool check deleted outright. Reading the line rather than matching it
+	// literally keeps it indifferent to the order of the three names.
+	toolCheck := lineFrom(t, dockerfile, "for t in ")
 	for _, tool := range []string{"git", "docker", "curl"} {
-		assert.Contains(t, dockerfile, tool,
-			"the Dockerfile must account for %s, which deploy/synology/update requires", tool)
+		assert.Contains(t, toolCheck, tool,
+			"the build must assert %s, which deploy/synology/update requires", tool)
 	}
 	assert.Contains(t, dockerfile, "the base image no longer ships",
 		"the tool check must fail the build loudly rather than leave the image short of a tool")
