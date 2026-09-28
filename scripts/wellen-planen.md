@@ -18,8 +18,11 @@ and reviewers" below.
 
 > **There is more than one plan file now.** `scripts/wellen.json` is the
 > Extended-core plan (#97, complete — kept as its record, not extended);
-> `scripts/wellen-followups.json` is the deferred-follow-ups plan (#176). A
-> finished plan's file stays where it is rather than being emptied, so **every
+> `scripts/wellen-followups.json` holds the deferred-follow-ups plan (#176,
+> complete as of its own 15 waves) plus, appended after it, standalone bonus
+> waves tracked by their own issue via the wave-level `planIssue` override
+> (see "Wave-file schema") rather than by reopening #176. A finished plan's
+> file stays where it is rather than being emptied, so **every
 > command that names a wave or a slug needs `-WaveFile` unless it means
 > `wellen.json`** — that default is silent, and a bare `-Wave 2` against the
 > wrong plan asks about a different wave entirely. Plans do not run
@@ -50,7 +53,13 @@ starts. The one other thing it does is that Docker cleanup, and that is
 deliberate: removing Docker resources is mechanical and must be exact, and a
 session that is told to tidy up Docker is a session that might run a prune.
 **Planning a new wave therefore means: extend the JSON file and set up the
-GitHub prerequisites. The script itself is never changed.**
+GitHub prerequisites. The script itself is never changed** to plan a wave
+that fits the existing schema. The rare exception is a wave that needs a
+schema field the script has no way to honor yet — the wave-level `planIssue`
+override below is the one example so far, added because nothing in the
+original schema let a bonus wave name a tracking issue other than the
+file-wide `plan.planIssue`. That is a schema change, reviewed like any other
+code change, not a planning-session shortcut.
 
 Docker isolation between parallel package worktrees (`COMPOSE_PROJECT_NAME`,
 `HTTP_PORT`, `TRAEFIK_PORT`) is automatic and needs no attention when
@@ -273,6 +282,11 @@ Before the orchestrator can work through a wave, these must exist:
     {
       "number": 2,                          // unique and strictly ascending
       "waveIssue": 93,                      // wave issue; closed = wave done
+      "planIssue": null,                    // optional; overrides plan.planIssue for this wave's own
+                                             //   prompts (package and consolidation) - for a standalone
+                                             //   bonus wave tracked by its own issue rather than the
+                                             //   file-wide plan issue, e.g. one appended after that plan
+                                             //   issue already closed
       "integrationBranch": "integration/specs-13-20-welle-2",
       "sequential": false,                  // true: packages run one after another, not in parallel
       "dockerCleanup": true,                // true: after the consolidation, remove the Docker
