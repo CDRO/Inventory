@@ -750,6 +750,60 @@ test("closing the viewfinder while a shot is still in flight reports no failure"
   await expect(rows).toHaveCount(0);
 });
 
+// The mirror image of the test above, and #363: a shot that finishes
+// encoding AFTER Done/Esc/backdrop closes the viewfinder must still land in
+// the picker — spec 37 criterion 4 requires every shot the person took to
+// survive an exit, and capture()'s guard is deliberately asymmetric for
+// exactly that reason (see the comment above `if (!closed) picker.setStatus`
+// in web/static/js/camera.js). Only the failure-suppression half had a test
+// before this one; nothing proved a completed shot wasn't also being
+// dropped.
+//
+// Same enforced-ordering stub as above, a resolve parked on `window` instead
+// of a reject, and never a timer — a timed stub passes whenever the timer
+// wins the race and tests nothing.
+test("a shot that finishes encoding after the viewfinder is closed still lands in the list", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.ImageCapture.prototype.takePhoto = () =>
+      new Promise((resolve) => {
+        // A real decodable PNG, not a text blob relabelled as one: normalise()
+        // feeds this straight to createImageBitmap(), which rejects garbage
+        // bytes outright — and a rejection here would take the *other* branch
+        // of the very guard this test exists to exercise (the canvas
+        // fallback, skipped once closed), making the test pass for the wrong
+        // reason.
+        window.__resolveTakePhoto = () => {
+          const canvas = document.createElement("canvas");
+          canvas.width = 2;
+          canvas.height = 2;
+          canvas.getContext("2d").fillRect(0, 0, 2, 2);
+          canvas.toBlob((blob) => resolve(blob), "image/png");
+        };
+      });
+  });
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  const dialog = await openViewfinder(page);
+  const rows = page.locator("#photo-list li");
+
+  await dialog.locator('[data-role="shutter"]').click();
+  // The press is in flight and nothing has landed yet: takePhoto() is parked.
+  await expect(rows).toHaveCount(0);
+
+  await dialog.locator('[data-role="done"]').click();
+  await expect(page.locator(VIEWFINDER)).toHaveCount(0);
+  await expect(rows).toHaveCount(0);
+
+  // Only now let the press succeed, with the dialog already gone. The shot
+  // still belongs in the picker.
+  await page.evaluate(() => window.__resolveTakePhoto());
+
+  await expect(rows).toHaveCount(1);
+  await expect(rows.nth(0)).toContainText("capture-1.jpg");
+  await expect(page.locator("#photo-list img[src^='blob:']")).toHaveCount(1);
+});
+
 // #205 item 4: the journeys above all wait for the Shutter to *become*
 // enabled, so a regression that enabled it the moment the dialog opened would
 // pass every one of them. This pins videoWidth at 0 and asserts the gate
