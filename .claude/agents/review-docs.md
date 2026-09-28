@@ -89,7 +89,9 @@ of the harness plan), with one part that never narrows: your stale-doc grep.
 In order:
 
 1. Read your own previous verdict from the packet's "Previous round's
-   verdicts" section; never re-derive it from the PR's comment history.
+   verdicts" section. Read the PR's own comment history for it only when the
+   packet says it found no previous verdict comment, which it states in that
+   section when H5's marker is missing or the round is older than the packet.
 2. **Account for every round-1 blocking finding of yours before anything
    else** — one line each, `resolved` or `still open`, with the `file:line`
    that settles it: the doc comment that now exists, the spec line that now

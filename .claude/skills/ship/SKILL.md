@@ -116,8 +116,10 @@ Spawn **all three reviewers in one message** so they run in parallel:
 - `review-tests`
 - `review-docs`
 
-Give each: the PR number, the issue number, the spec path, and the round
-number. Each posts its own PR comment and returns a short summary.
+Give each: the PR number, the issue number, the spec path, the round number,
+and — on round ≥ 2 — the head SHA the previous round reviewed (the `--since`
+value from step 7), so a reviewer can rebuild the packet itself if it is
+missing or stale. Each posts its own PR comment and returns a short summary.
 
 **Do not pass a `model` argument when spawning them.** The Agent tool's
 `model` parameter overrides frontmatter, which would silently undo the pinned
