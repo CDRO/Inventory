@@ -15,6 +15,7 @@ spec, not the older one bundled with Container Manager.
 | `update` | Updates the stack without replacing a working app by a broken one. |
 | `compose` | Optional shorthand: the compose prefix as a script. Nothing depends on it. |
 | `tailscale/serve.json` | The `tailscale serve` rule of the sidecar. |
+| `runner/` | The self-hosted GitHub Actions runner that deploys tagged releases onto this NAS — its own Compose project, its own README ([`runner/README.md`](runner/README.md)). It holds the Docker socket: read that README before you start it. |
 
 All three scripts must keep their executable bit and **LF** line endings
 (`.gitattributes` enforces that for the repository; a copy made by hand from a
