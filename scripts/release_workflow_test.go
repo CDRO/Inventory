@@ -1,0 +1,279 @@
+// The release pipeline's guarantees that live in YAML rather than in code.
+//
+// `.github/workflows/release.yml` is the one workflow that can cause GitHub to
+// run code on the NAS (docs/specs/38-release-pipeline-and-nas-runner.md, H17
+// and "Security posture"). Several of its properties are load-bearing and
+// would break silently: a second workflow naming the self-hosted runner, a
+// dropped repository/actor guard, an `actions/checkout` added to the deploy
+// job "so the script can be found". None of those fail a build, none fail the
+// E2E suite, and the first evidence of any of them would be a deploy that
+// migrated the wrong database or ran somebody's fork's code as root on the
+// NAS.
+//
+// Text assertions rather than a parsed document, for the reason
+// cmd/inventory/compose_test.go gives for the compose files: gopkg.in/yaml.v3
+// is an indirect dependency of this module, and promoting it to a direct one
+// to grep four lines is a worse trade than matching the lines. What is matched
+// is therefore kept to strings a human would also grep for.
+//
+// This file lives in package `scripts` because that is where the repository's
+// other tooling tests live and because a directory holding only test files is
+// not a package `go build ./...` accepts - the same reason compose_test.go
+// lives beside cmd/inventory's code.
+package scripts
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// workflowsDir is .github/workflows seen from this package's directory.
+const workflowsDir = "../.github/workflows"
+
+// workflowFiles reads every workflow, or skips the test when the directory is
+// not there at all.
+//
+// The skip is for exactly one caller: the Dockerfile's builder stage runs
+// `go test ./...` against the build context, and `.dockerignore` excludes
+// `.github` from it — workflow files have no business in a production image.
+// Everywhere the suite is actually a gate (a local `docker compose run --rm
+// app go test ./...`, a reviewer's run, and CI's `test` job, all of which
+// merge docker-compose.override.yml) the directory is bind-mounted and these
+// assertions run. A skip that spread beyond the image build would be a test
+// that protects nothing, which is why that mount carries a comment saying so.
+func workflowFiles(t *testing.T) map[string]string {
+	t.Helper()
+
+	entries, err := os.ReadDir(workflowsDir)
+	if os.IsNotExist(err) {
+		t.Skipf("%s is not present (the image build's context excludes it) - nothing to check here", workflowsDir)
+	}
+	if err != nil {
+		t.Fatalf("read %s: %v", workflowsDir, err)
+	}
+	out := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yml") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(workflowsDir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		out[e.Name()] = string(raw)
+	}
+	if len(out) == 0 {
+		t.Fatalf("no workflow files found in %s", workflowsDir)
+	}
+	return out
+}
+
+// Spec 38, "Security posture": after the repository goes private, runner
+// groups are not available on a Free plan, so ANY workflow on ANY branch could
+// name `runs-on: self-hosted` and land on the NAS runner. Nothing in GitHub's
+// configuration prevents that; the containment is that release.yml is the only
+// workflow that names it, and that a new one naming it is a review finding.
+// This test is that review finding, made mechanical.
+// Comment lines are excluded deliberately: test.yml's header explains the
+// runner-image job it carries, and prose about the runner is not a workflow
+// that can land on it.
+func TestReleaseIsTheOnlyWorkflowNamingASelfHostedRunner(t *testing.T) {
+	for name, body := range workflowFiles(t) {
+		names := false
+		for _, line := range strings.Split(body, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if strings.Contains(trimmed, "self-hosted") {
+				names = true
+			}
+		}
+		if name == "release.yml" {
+			if !names {
+				t.Error("release.yml no longer names the self-hosted runner - the deploy job cannot reach the NAS")
+			}
+			continue
+		}
+		if names {
+			t.Errorf("%s names a self-hosted runner. Only release.yml may: spec 38, \"Security posture\" - "+
+				"on a private repository without runner groups, this is the only thing keeping other "+
+				"workflows off the NAS.", name)
+		}
+	}
+}
+
+// The deploy job runs the clone's own script; a checkout would produce a
+// second tree whose bind mounts do not resolve to the real data, and the
+// migration would be applied to the wrong database
+// (docs/specs/01-architecture-and-deployment.md, "Synology NAS variant").
+// There is no checkout anywhere in this workflow - the gate reads the tag
+// through the API instead, which is also what keeps an annotated tag's message
+// readable (actions/checkout fetches annotated tags peeled).
+func TestReleaseWorkflowNeverChecksOutTheRepository(t *testing.T) {
+	body := workflowFiles(t)["release.yml"]
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue // the header explains at length why there is none
+		}
+		if strings.Contains(trimmed, "actions/checkout") {
+			t.Errorf("release.yml checks out the repository (%q). The deploy job runs the NAS clone's "+
+				"own script; a checkout is a second tree that migrates the wrong database.", trimmed)
+		}
+	}
+}
+
+// The guards spec 38's H17 criteria name, each of which is a line somebody
+// could reasonably delete while tidying and nothing else would notice.
+func TestReleaseDeployJobKeepsItsGuards(t *testing.T) {
+	body := workflowFiles(t)["release.yml"]
+	for _, want := range []struct {
+		text string
+		why  string
+	}{
+		{`tags: ["v*"]`, "the trigger is a tag push only - a fork cannot push a tag to this repository"},
+		{"runs-on: [self-hosted, nas]", "the deploy job runs on the labelled NAS runner"},
+		{"environment: production", "every deploy leaves a deployment record and can be given a required reviewer"},
+		{"group: nas-deploy", "two tags pushed minutes apart queue instead of interleaving (decision D4)"},
+		{"cancel-in-progress: false", "cancelling a deploy mid-migration must never be automatic"},
+		{"github.repository == 'CDRO/Inventory'", "a fork's copy of this file must not act on this NAS"},
+		{"github.actor == 'CDRO'", "a fork's copy of this file must not act on this NAS"},
+		{"--ref \"$TAG\" --auto --backup", "the exact command spec 38 says the deploy job runs"},
+		{"DEPLOY_MODE: ${{ needs.gate.outputs.deploy_mode }}", "the tag message's classic override reaches the script"},
+	} {
+		if !strings.Contains(body, want.text) {
+			t.Errorf("release.yml no longer contains %q - %s", want.text, want.why)
+		}
+	}
+}
+
+// The `if:` on `deploy` is the entire mechanism that makes
+// `needs: [gate, test, e2e]` stop a red run while still letting a SKIPPED
+// reusable call through. `!cancelled()` deliberately overrides GitHub's
+// default of skipping a job whose `needs` did not all succeed, which is what
+// makes the three `.result` clauses load-bearing rather than decorative:
+// delete them - a plausible tidy-up under the belief that `needs:` alone
+// enforces success - and a tag whose `test` job went red deploys to the NAS.
+// Nothing else in this repository would notice.
+func TestReleaseDeployRunsOnlyWhenTheGateAndBothCallsPassed(t *testing.T) {
+	body := workflowFiles(t)["release.yml"]
+	for _, want := range []struct {
+		text string
+		why  string
+	}{
+		{"needs: [gate, test, e2e]", "the deploy job waits for the gate AND for both reusable calls"},
+		{"!cancelled()", "a cancelled run must not fall through to the NAS"},
+		{"needs.gate.result == 'success'", "a failed gate stops the release"},
+		{"needs.test.result == 'success' || needs.test.result == 'skipped'", "a red `test` call stops the release; a skipped one does not"},
+		{"needs.e2e.result == 'success' || needs.e2e.result == 'skipped'", "a red `e2e` call stops the release; a skipped one does not"},
+		{"if: needs.gate.outputs.need_test == 'true'", "`test` runs exactly when the gate found no green run for the commit"},
+		{"if: needs.gate.outputs.need_e2e == 'true'", "`e2e` runs exactly when the gate found no green run for the commit"},
+	} {
+		if !strings.Contains(body, want.text) {
+			t.Errorf("release.yml no longer contains %q - %s", want.text, want.why)
+		}
+	}
+}
+
+// Decision D3, the consuming half. `scripts/dev_release_test.go` covers the
+// producing half - that `scripts/dev release --classic` writes the exact line
+// into the tag message - but the line only forces anything if the workflow
+// reads it the way the decision says, and both halves of that are a one-token
+// edit away from being silently wrong:
+//
+//   - the message must be read from the git DATABASE, because
+//     `actions/checkout` fetches annotated tags peeled and a checkout-based
+//     read would permanently and invisibly disable `--classic`;
+//   - the match must be `grep -qx` (whole line). Weakened to `grep -q`, the
+//     sentence "not deploy: classic yet" in a release note forces a stack
+//     restart - the exact failure the decision spells the rule out to avoid.
+func TestReleaseGateReadsTheTagMessageAsSpecifiedByD3(t *testing.T) {
+	body := workflowFiles(t)["release.yml"]
+	for _, want := range []struct {
+		text string
+		why  string
+	}{
+		{"git/ref/tags/$TAG", "the tag ref is resolved through the API, not from a checkout"},
+		{"git/tags/$obj", "the annotated tag OBJECT is read, which is where the message lives"},
+		{"grep -qx 'deploy: classic'", "the override is an exact LINE, never a substring"},
+		{"tr -d '\\r'", "a carriage return in the message does not hide the keyword"},
+	} {
+		if !strings.Contains(body, want.text) {
+			t.Errorf("release.yml no longer contains %q - %s", want.text, want.why)
+		}
+	}
+}
+
+// H17: "the job asserts that GET /healthz reports the tag as its version". A
+// deploy is not done because the script exited 0 - it is done when the NAS
+// serves the tag. Flip this comparison, or drop its `exit 1`, and a release
+// that left the previous version serving reports green.
+func TestReleaseAssertsHealthzReportsTheTag(t *testing.T) {
+	body := workflowFiles(t)["release.yml"]
+	for _, want := range []struct {
+		text string
+		why  string
+	}{
+		{`if [ "$version" != "$GITHUB_REF_NAME" ]; then`, "the version served is compared against the tag that triggered the run"},
+		{`"$version" != "$GITHUB_REF_NAME"`, "the comparison is inequality-then-fail, not equality-then-pass"},
+		{"/healthz", "the assertion probes the health endpoint"},
+	} {
+		if !strings.Contains(body, want.text) {
+			t.Errorf("release.yml no longer contains %q - %s", want.text, want.why)
+		}
+	}
+	// The `exit 1` has to be inside that branch: an assertion that reports the
+	// mismatch and exits 0 is not an assertion.
+	_, after, found := strings.Cut(body, `if [ "$version" != "$GITHUB_REF_NAME" ]; then`)
+	if !found {
+		return // already reported above
+	}
+	branch, _, closed := strings.Cut(after, "\n          fi")
+	if !closed {
+		t.Fatalf("release.yml's /healthz comparison has no closing `fi` at the expected indentation - "+
+			"this test can no longer tell what is inside the branch:\n%s", after)
+	}
+	if !strings.Contains(branch, "exit 1") {
+		t.Errorf("release.yml reports a /healthz version mismatch but does not fail the job:\n%s", branch)
+	}
+}
+
+// The gate's whole point is "for that exact SHA", never "the newest run on the
+// branch" - the trap test.yml's own header documents. `head_sha=` is the
+// query parameter that makes it exact.
+func TestReleaseGateLooksRunsUpByTheTagsCommit(t *testing.T) {
+	body := workflowFiles(t)["release.yml"]
+	if !strings.Contains(body, "runs?head_sha=$SHA") {
+		t.Error("release.yml's gate no longer filters the run lookup by head_sha - " +
+			"a release could be gated by a green run of a different commit")
+	}
+	if !strings.Contains(body, "actions: read") {
+		t.Error("release.yml no longer requests `actions: read` - the gate's run lookup would 403 " +
+			"on a repository whose default workflow permission is read-only contents")
+	}
+}
+
+// The two calls and the two callees have to agree, and a `workflow_call`
+// trigger removed from either workflow turns every release into a run that
+// fails at the `uses:` rather than into a slower one.
+func TestTestAndE2EAreCallableByTheReleaseGate(t *testing.T) {
+	files := workflowFiles(t)
+	release := files["release.yml"]
+
+	for _, wf := range []string{"test.yml", "e2e.yml"} {
+		if !strings.Contains(release, "uses: ./.github/workflows/"+wf) {
+			t.Errorf("release.yml no longer calls %s as a reusable workflow", wf)
+		}
+		body, ok := files[wf]
+		if !ok {
+			t.Fatalf("%s does not exist", wf)
+		}
+		if !strings.Contains(body, "workflow_call:") {
+			t.Errorf("%s no longer declares `workflow_call`, so release.yml's gate cannot run it "+
+				"on a tag whose commit has no green run", wf)
+		}
+	}
+}
