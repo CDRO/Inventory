@@ -130,6 +130,16 @@
   background: color-mix(in srgb, var(--color-success) 8%, var(--color-surface));
 }
 
+/* An offer rather than a problem: the mixed-photo classification banner
+   (docs/specs/41-mixed-photo-classification.md) sits above a review that is
+   perfectly usable as it is, so it must not read as an error the way the
+   danger-coloured .alert does. */
+.alert--offer {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+  background: color-mix(in srgb, var(--color-accent) 8%, var(--color-surface));
+}
+
 /* --- Storage switcher --- */
 
 .storage-switcher {

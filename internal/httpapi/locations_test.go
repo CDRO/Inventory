@@ -114,23 +114,35 @@ type fakeBatches struct {
 	moved    *store.Batch
 	moveErr  error
 
-	lastStorageID  uuid.UUID
-	lastBatchID    uuid.UUID
-	lastQuantity   int
-	lastTargetID   uuid.UUID
-	lastPatch      store.BatchPatch
-	lastActingUser *uuid.UUID
+	destroyErr error
+
+	lastStorageID   uuid.UUID
+	lastBatchID     uuid.UUID
+	lastQuantity    int
+	lastTargetID    uuid.UUID
+	lastPatch       store.BatchPatch
+	lastActingUser  *uuid.UUID
+	lastSplit       store.SplitBatchInput
+	destroyedIDs    []uuid.UUID
+	lastDestroyedIn uuid.UUID
 }
 
-func (f *fakeBatches) SplitBatch(_ context.Context, storageID, batchID uuid.UUID, quantity int, target uuid.UUID, userID *uuid.UUID) (*store.Batch, error) {
-	f.lastStorageID, f.lastBatchID, f.lastQuantity, f.lastTargetID, f.lastActingUser = storageID, batchID, quantity, target, userID
+func (f *fakeBatches) SplitBatch(_ context.Context, storageID, batchID uuid.UUID, in store.SplitBatchInput, userID *uuid.UUID) (*store.Batch, error) {
+	f.lastStorageID, f.lastBatchID, f.lastActingUser = storageID, batchID, userID
+	f.lastQuantity, f.lastTargetID, f.lastSplit = in.Quantity, in.TargetLocationID, in
 	if f.splitErr != nil {
 		return nil, f.splitErr
 	}
 	if f.split != nil {
 		return f.split, nil
 	}
-	return &store.Batch{ID: uuid.New(), LocationID: target, Quantity: quantity}, nil
+	return &store.Batch{ID: uuid.New(), LocationID: in.TargetLocationID, Quantity: in.Quantity}, nil
+}
+
+func (f *fakeBatches) DestroyContainer(_ context.Context, storageID, containerID uuid.UUID) error {
+	f.lastDestroyedIn = storageID
+	f.destroyedIDs = append(f.destroyedIDs, containerID)
+	return f.destroyErr
 }
 
 func (f *fakeBatches) UpdateBatch(_ context.Context, storageID, batchID uuid.UUID, patch store.BatchPatch, userID *uuid.UUID) (*store.Batch, error) {
@@ -282,15 +294,20 @@ type fakeAPI struct {
 	*fakeBarcodes
 	*fakeBarcodePrompt
 	*fakeInventoryStore
+	*fakeIcons
 }
 
 // newFakeAPI builds the whole fake store around an auth fake, with every other
 // resource empty.
 func newFakeAPI(auth *fakeAuth) fakeAPI {
+	// The job rows are shared: the shopping-list fake discards one when a
+	// photo is reclassified (docs/specs/41-mixed-photo-classification.md),
+	// and the job routes must then see it gone.
+	jobs := newFakeJobs()
 	return fakeAPI{
 		fakeAuth: auth, fakeLocations: &fakeLocations{}, fakeCategories: &fakeCategories{}, fakeBatches: &fakeBatches{},
-		fakeShoppingLists: &fakeShoppingLists{}, fakeExpiry: &fakeExpiry{},
-		fakeJobs: newFakeJobs(), fakeIdempotency: newFakeIdempotency(), fakeIngestStore: &fakeIngestStore{},
+		fakeShoppingLists: &fakeShoppingLists{jobs: jobs}, fakeExpiry: &fakeExpiry{},
+		fakeJobs: jobs, fakeIdempotency: newFakeIdempotency(), fakeIngestStore: &fakeIngestStore{},
 		fakeConsumeStore: &fakeConsumeStore{}, fakeProductStore: &fakeProductStore{},
 		fakeReorderStore: &fakeReorderStore{}, fakeAnalyticsStore: &fakeAnalyticsStore{},
 		fakeGamification: newFakeGamification(), fakeStocktake: &fakeStocktake{},
@@ -299,7 +316,32 @@ func newFakeAPI(auth *fakeAuth) fakeAPI {
 		fakeBarcodes:       newFakeBarcodes(),
 		fakeBarcodePrompt:  newFakeBarcodePrompt(),
 		fakeInventoryStore: &fakeInventoryStore{},
+		fakeIcons:          &fakeIcons{},
 	}
+}
+
+// CreateProduct disambiguates fakeAPI's embedding of *fakeProductStore
+// (docs/specs/16-product-maintenance.md's standalone Create) and
+// *fakeReorderStore (docs/specs/10-reorder-and-shopping-export.md's "Add
+// item"), which both need it because the real store.Store satisfies both
+// ProductStore and ReorderStore with the one method — promotion cannot pick
+// between two fakes that each define it, so fakeAPI needs its own.
+//
+// It defers to fakeReorderStore's existing bookkeeping (created, createErr,
+// lastNew, createCalls — already asserted on by the reorder "Add item"
+// tests) and additionally appends the result to fakeProductStore's own
+// list, so a subsequent GetProduct/detail read — Create's own response, or
+// any other product route — sees what was just created, the same as a real
+// database would.
+func (f fakeAPI) CreateProduct(ctx context.Context, storageID uuid.UUID, in store.NewProduct) (*store.Product, error) {
+	p, err := f.fakeReorderStore.CreateProduct(ctx, storageID, in)
+	if err != nil {
+		return nil, err
+	}
+	f.fakeProductStore.mu.Lock()
+	f.fakeProductStore.products = append(f.fakeProductStore.products, *p)
+	f.fakeProductStore.mu.Unlock()
+	return p, nil
 }
 
 // apiFixture builds a router with a member session already established, and
@@ -335,6 +377,7 @@ type apiFixture struct {
 	barcodes      *fakeBarcodes
 	barcodePrompt *fakeBarcodePrompt
 	inventory     *fakeInventoryStore
+	icons         *fakeIcons
 	storageID     uuid.UUID
 	user          *store.User
 	session       *store.Session
@@ -363,11 +406,16 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 	barcodes := newFakeBarcodes()
 	barcodePrompt := newFakeBarcodePrompt()
 	inventory := &fakeInventoryStore{}
+	icons := &fakeIcons{}
 	user, session := auth.addUser(t, false)
 	storageID := uuid.New()
 	auth.addMember(storageID, user.ID)
 
 	jobs := newFakeJobs()
+	// One set of job rows for the whole fake API: reclassifying a photo as a
+	// shopping list discards its job (docs/specs/41-mixed-photo-classification.md),
+	// and the job routes have to see that happen.
+	lists.jobs = jobs
 	idem := newFakeIdempotency()
 	ingestStore := &fakeIngestStore{}
 	ingester := &fakeIngester{available: true}
@@ -396,6 +444,7 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 			fakeBarcodes:       barcodes,
 			fakeBarcodePrompt:  barcodePrompt,
 			fakeInventoryStore: inventory,
+			fakeIcons:          icons,
 		},
 		Matcher:       matcher,
 		Images:        images,
@@ -430,6 +479,7 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 		barcodes:      barcodes,
 		barcodePrompt: barcodePrompt,
 		inventory:     inventory,
+		icons:         icons,
 		storageID:     storageID, user: user, session: session,
 	}
 }
@@ -537,6 +587,9 @@ func storageRoutes(base string) []struct {
 		// 404 for a non-member are pinned by the same two tests that pin them
 		// for every other storage-scoped route.
 		{http.MethodPatch, base + "/membership", `{"start_page":"inventory"}`},
+		// The local icon library (docs/specs/42-local-icon-library.md).
+		{http.MethodPost, base + "/icons", ""},
+		{http.MethodGet, base + "/icons/" + id + "/svg", ""},
 	}
 }
 

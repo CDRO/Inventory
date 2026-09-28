@@ -83,6 +83,13 @@ type fakeStore struct {
 	tree    []store.Location
 	expired map[uuid.UUID]string
 	cleared []uuid.UUID
+
+	// The shopping list a photographed list's job wrote, and the error to
+	// fail that write with.
+	listID        uuid.UUID
+	listSource    store.ShoppingListSource
+	listCreated   []store.NewShoppingListItem
+	createListErr error
 }
 
 func (f *fakeStore) LocationTree(context.Context, uuid.UUID) ([]store.Location, error) {
@@ -94,6 +101,14 @@ func (f *fakeStore) ExpiredJobImages(context.Context, time.Time, int) (map[uuid.
 func (f *fakeStore) ClearJobImage(_ context.Context, id uuid.UUID) error {
 	f.cleared = append(f.cleared, id)
 	return nil
+}
+func (f *fakeStore) CreateShoppingList(_ context.Context, storageID uuid.UUID, source store.ShoppingListSource, createdBy *uuid.UUID, items []store.NewShoppingListItem) (*store.ShoppingList, []store.ShoppingListItem, error) {
+	f.listSource, f.listCreated = source, items
+	if f.createListErr != nil {
+		return nil, nil, f.createListErr
+	}
+	f.listID = uuid.New()
+	return &store.ShoppingList{ID: f.listID, StorageID: storageID, Source: source, CreatedBy: createdBy}, nil, nil
 }
 
 type fakePhotos struct{ files map[string][]byte }

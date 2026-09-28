@@ -59,6 +59,14 @@ type fakeProductStore struct {
 	lastMergeSourceID *uuid.UUID
 	deleteErr         error
 	deleteCalls       int
+
+	// SearchProducts backs products.html's list table
+	// (docs/specs/16-product-maintenance.md). searchResult, when set,
+	// overrides the default (a name-substring filter over f.products).
+	searchErr       error
+	searchResult    []store.ProductSummary
+	lastSearchQuery string
+	searchCalls     int
 }
 
 func (f *fakeProductStore) ListProducts(_ context.Context, storageID uuid.UUID) ([]store.Product, error) {
@@ -66,6 +74,27 @@ func (f *fakeProductStore) ListProducts(_ context.Context, storageID uuid.UUID) 
 	defer f.mu.Unlock()
 	f.lastStorageID = storageID
 	return f.products, f.productsErr
+}
+
+func (f *fakeProductStore) SearchProducts(_ context.Context, storageID uuid.UUID, query string) ([]store.ProductSummary, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastStorageID, f.lastSearchQuery = storageID, query
+	f.searchCalls++
+	if f.searchErr != nil {
+		return nil, f.searchErr
+	}
+	if f.searchResult != nil {
+		return f.searchResult, nil
+	}
+	out := make([]store.ProductSummary, 0, len(f.products))
+	for _, p := range f.products {
+		if query != "" && !strings.Contains(strings.ToLower(p.Name), strings.ToLower(query)) {
+			continue
+		}
+		out = append(out, store.ProductSummary{ID: p.ID, Name: p.Name})
+	}
+	return out, nil
 }
 
 func (f *fakeProductStore) ProductsChangedSince(_ context.Context, storageID uuid.UUID, since time.Time) (*store.Delta[store.Product], error) {
@@ -206,6 +235,34 @@ func TestListProductsExposesOnlyIDAndName(t *testing.T) {
 	assert.NotContains(t, body, catalogID.String())
 	assert.NotContains(t, body, "category_id")
 	assert.NotContains(t, body, "catalog_id")
+}
+
+// TestSearchProductsRoutesThroughQParam — products.html's list table
+// (docs/specs/16-product-maintenance.md) reaches the same GET route as the
+// plain list, distinguished only by ?q= being present at all: absent is
+// today's id-and-name shape, present (even empty, "Show all products") is
+// the richer summary shape.
+func TestSearchProductsRoutesThroughQParam(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	f.products.products = []store.Product{{ID: uuid.New(), StorageID: f.storageID, Name: "Milk"}}
+
+	rec := f.do(http.MethodGet, f.base()+"/products?q=milk", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, f.storageID, f.products.lastStorageID)
+	assert.Equal(t, 1, f.products.searchCalls)
+	assert.Contains(t, rec.Body.String(), `"current_stock"`, "the summary shape, not the plain id-and-name one")
+
+	rec = f.do(http.MethodGet, f.base()+"/products?q=", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, 2, f.products.searchCalls, "an empty q is still the summary route — \"show all\"")
+	assert.Equal(t, "", f.products.lastSearchQuery)
+
+	rec = f.do(http.MethodGet, f.base()+"/products", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, 2, f.products.searchCalls, "no q at all is the plain id-and-name list, unchanged")
+	assert.NotContains(t, rec.Body.String(), "current_stock")
 }
 
 // TestListProductBatchesIsStorageScoped — a product in another storage is

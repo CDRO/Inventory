@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/CDRO/Inventory/internal/ingest"
 	"github.com/CDRO/Inventory/internal/matching"
 	"github.com/CDRO/Inventory/internal/store"
 )
@@ -28,6 +31,12 @@ type ShoppingListStore interface {
 	ShoppingListItemByID(ctx context.Context, storageID, itemID uuid.UUID) (*store.ShoppingListItem, error)
 	RematchShoppingListItem(ctx context.Context, storageID, itemID uuid.UUID, rawText string, status store.ShoppingListItemStatus, matchedProductID *uuid.UUID) (*store.ShoppingListItem, error)
 	ResolveShoppingListItem(ctx context.Context, storageID, itemID uuid.UUID, in store.ResolveLine, userID *uuid.UUID) (*store.ResolveResult, error)
+	// Job and CreateShoppingListFromJob are the reclassification path of
+	// docs/specs/41-mixed-photo-classification.md: read what an earlier
+	// analysis already found, then turn it into a list and discard the job
+	// that held it, in one transaction.
+	Job(ctx context.Context, storageID, id uuid.UUID) (*store.Job, error)
+	CreateShoppingListFromJob(ctx context.Context, storageID, jobID uuid.UUID, createdBy *uuid.UUID, items []store.NewShoppingListItem) (*store.ShoppingList, []store.ShoppingListItem, *string, error)
 	// FindCatalogProduct reads a catalog row by name — here, only ever a
 	// variant this line's card offered, never one a client names freely.
 	FindCatalogProduct(ctx context.Context, name string) (*store.CatalogProduct, error)
@@ -38,10 +47,36 @@ type Matcher interface {
 	MatchProductCandidates(ctx context.Context, storageID uuid.UUID, text string) (matching.Result, error)
 }
 
+// ListIngester starts the background job behind a photographed shopping list
+// (docs/specs/07-shopping-list-reconciliation.md, "Ingestion"). Available is
+// the same model check every other photo upload makes, asked before the body
+// is read so a deployment whose model has been withdrawn says so instead of
+// taking someone's 20MB photo first.
+type ListIngester interface {
+	Available(ctx context.Context) (model string, ok bool)
+	StartShoppingList(ctx context.Context, u ingest.Upload) (*store.Job, error)
+}
+
+// errListIngestUnavailable is logged when a list photo is uploaded on a
+// deployment whose upload volume could not be opened at startup
+// (cmd/inventory/main.go). It is the server's problem, not the uploader's, and
+// is answered as one.
+var errListIngestUnavailable = errors.New("httpapi: photographed shopping lists unavailable: upload volume unusable")
+
 // ShoppingListHandler serves docs/specs/07-shopping-list-reconciliation.md.
 type ShoppingListHandler struct {
-	store    ShoppingListStore
-	matcher  Matcher
+	store   ShoppingListStore
+	matcher Matcher
+	// ingester analyses a photographed list. Nil when the upload volume is
+	// unusable: a photo upload is then an internal error, and every other
+	// path on these routes works as before.
+	ingester ListIngester
+	// photos and cutouts are what a reclassified job leaves behind
+	// (docs/specs/41-mixed-photo-classification.md): its photo, and any
+	// background-removed picture a reviewer made from it before deciding the
+	// photo was a list after all. Either may be nil.
+	photos   PhotoStore
+	cutouts  CutoutStore
 	pictures productPictures
 	errors   *ErrorWriter
 }
@@ -49,9 +84,9 @@ type ShoppingListHandler struct {
 // NewShoppingListHandler wires the handlers to their collaborators. cache and
 // productImages may be nil: catalog cards then show no picture, and a picked
 // picture is refused rather than recorded by an evictable address.
-func NewShoppingListHandler(s ShoppingListStore, m Matcher, cache ImageCache, productImages PhotoStore, errs *ErrorWriter) *ShoppingListHandler {
+func NewShoppingListHandler(s ShoppingListStore, m Matcher, i ListIngester, cache ImageCache, productImages, photos PhotoStore, cutouts CutoutStore, errs *ErrorWriter) *ShoppingListHandler {
 	return &ShoppingListHandler{
-		store: s, matcher: m, errors: errs,
+		store: s, matcher: m, ingester: i, photos: photos, cutouts: cutouts, errors: errs,
 		pictures: productPictures{images: productImages, cache: cache},
 	}
 }
@@ -105,13 +140,22 @@ type shoppingListResponse struct {
 	Items     []shoppingListItemResponse `json:"items"`
 }
 
-// Create serves POST /api/storages/{storage_id}/shopping-lists.
+// Create serves POST /api/storages/{storage_id}/shopping-lists — all three
+// ways a list arrives (docs/specs/07-shopping-list-reconciliation.md,
+// "Ingestion", extended by docs/specs/41-mixed-photo-classification.md):
 //
-// Only the text source is implemented. The photo variant still needs its own
-// upload route and a Gemini prompt that reads a list's lines (the job runner and
-// the vision client it would use now exist, from photo ingestion); until then
-// it is refused explicitly rather than silently treated as text, which would
-// file an image's bytes as somebody's shopping.
+//   - a multipart photo upload, answered 202 with a job id: the photo is
+//     analysed in the background and its lines become a list exactly as typed
+//     lines do;
+//   - a JSON body with from_job_id, answered 201 with the list: a photo
+//     somebody already uploaded as a shelf, product or consumption photo that
+//     the analysis spotted as a list, reprocessed with no second upload and no
+//     second Gemini call;
+//   - a JSON body with raw_text, answered 201 with the list.
+//
+// The multipart branch is decided on Content-Type rather than on a source
+// field, because the body has to be read one way or the other before any field
+// in it can be seen.
 func (h *ShoppingListHandler) Create(w http.ResponseWriter, r *http.Request) {
 	storageID, ok := StorageIDFrom(r.Context())
 	if !ok {
@@ -119,25 +163,51 @@ func (h *ShoppingListHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if isMultipart(r) {
+		h.createFromPhoto(w, r, storageID)
+		return
+	}
+
 	var body struct {
 		Source  string `json:"source"`
 		RawText string `json:"raw_text"`
+		// FromJobID is read as a string, not a uuid.UUID, so that an
+		// unparseable id is 404 like every other id that names nothing here
+		// rather than a validation error confirming the field's shape.
+		FromJobID string `json:"from_job_id"`
 	}
 	if failure := decodeJSON(w, r, &body); failure != nil {
 		h.errors.WriteError(w, r, failure)
 		return
 	}
 
-	if body.Source == string(store.SourcePhoto) {
-		h.errors.WriteError(w, r, &Failure{
-			Status:  http.StatusNotImplemented,
-			Code:    "not_implemented",
-			Message: "Photographed shopping lists are not available yet.",
-			Reason:  "photo shopping lists need an upload route and a list-reading Gemini prompt",
-		})
+	if raw := strings.TrimSpace(body.FromJobID); raw != "" {
+		if body.Source != "" && body.Source != string(store.SourcePhoto) {
+			h.errors.WriteError(w, r, ValidationFailed(map[string][]string{
+				"source": {`A list made from a photo job is a photo list; source must be absent or "photo".`},
+			}, nil))
+			return
+		}
+		jobID, err := uuid.Parse(raw)
+		if err != nil {
+			h.errors.WriteError(w, r, NotFound("malformed job id"))
+			return
+		}
+		h.createFromJob(w, r, storageID, jobID)
 		return
 	}
-	if body.Source != "" && body.Source != string(store.SourceText) {
+
+	switch body.Source {
+	case "", string(store.SourceText):
+	case string(store.SourcePhoto):
+		// The endpoint does take photos now — just not as JSON. Naming which
+		// of the two photo shapes is missing is what keeps this from reading
+		// like the standing "not available yet" it replaces.
+		h.errors.WriteError(w, r, ValidationFailed(map[string][]string{
+			"source": {"Send the photo as a multipart upload, or give from_job_id."},
+		}, nil))
+		return
+	default:
 		h.errors.WriteError(w, r, ValidationFailed(
 			map[string][]string{"source": {`Must be "text" or "photo".`}}, nil))
 		return
@@ -159,27 +229,10 @@ func (h *ShoppingListHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// transaction with its statuses already decided. This is also the only
 	// place matching runs for these lines: it is explicitly not re-run when
 	// the list is read back.
-	items := make([]store.NewShoppingListItem, 0, len(lines))
-	results := make([]matching.Result, 0, len(lines))
-
-	for _, line := range lines {
-		text, _ := matching.ParseLine(line)
-
-		result, err := h.matcher.MatchProductCandidates(r.Context(), storageID, text)
-		if err != nil {
-			h.errors.WriteError(w, r, Internal(err))
-			return
-		}
-		results = append(results, result)
-
-		item := store.NewShoppingListItem{
-			RawText: line,
-			Status:  store.ShoppingListItemStatus(result.Status),
-		}
-		if result.Product != nil {
-			item.MatchedProductID = &result.Product.ProductID
-		}
-		items = append(items, item)
+	items, results, err := ingest.MatchLines(r.Context(), h.matcher, storageID, lines)
+	if err != nil {
+		h.errors.WriteError(w, r, Internal(err))
+		return
 	}
 
 	list, created, err := h.store.CreateShoppingList(r.Context(), storageID, store.SourceText, actingUser(r), items)
@@ -191,6 +244,153 @@ func (h *ShoppingListHandler) Create(w http.ResponseWriter, r *http.Request) {
 	response := buildListResponse(list, created, results)
 	h.showCatalogImages(r.Context(), storageID, response.Items, results)
 	writeJSON(w, http.StatusCreated, response)
+}
+
+// createFromPhoto accepts a photographed list and answers 202 with its job id,
+// the same background-job shape every other photo upload uses
+// (docs/specs/07-shopping-list-reconciliation.md, "Ingestion").
+//
+// The model check comes before the body is read, exactly as in
+// IngestHandler.upload and for the same reason: a deployment whose model has
+// been withdrawn should say so immediately rather than after accepting a 20MB
+// photo it cannot read.
+func (h *ShoppingListHandler) createFromPhoto(w http.ResponseWriter, r *http.Request, storageID uuid.UUID) {
+	user, ok := UserFrom(r.Context())
+	if !ok {
+		h.errors.WriteError(w, r, Unauthorized(ReasonSessionMissing))
+		return
+	}
+	if h.ingester == nil {
+		h.errors.WriteError(w, r, Internal(errListIngestUnavailable))
+		return
+	}
+	if model, available := h.ingester.Available(r.Context()); !available {
+		h.errors.WriteError(w, r, ModelUnavailable(model))
+		return
+	}
+
+	// Metadata is stripped here, before the photo is ever written
+	// (docs/specs/04-backend-api-conventions.md). A photographed list is
+	// somebody's handwriting in their own kitchen, and carries EXIF like any
+	// other photo does.
+	image, failure := ReadImageUpload(w, r, "image")
+	if failure != nil {
+		h.errors.WriteError(w, r, failure)
+		return
+	}
+
+	job, err := h.ingester.StartShoppingList(r.Context(), ingest.Upload{
+		StorageID: storageID,
+		Kind:      store.JobShoppingListPhoto,
+		CreatedBy: user.ID,
+		Filename:  image.Filename,
+		Image:     image.Data,
+	})
+	if err != nil {
+		h.errors.WriteError(w, r, FromStoreError(err, "shopping list photo could not be accepted"))
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, struct {
+		JobID uuid.UUID `json:"job_id"`
+	}{JobID: job.ID})
+}
+
+// createFromJob turns a photo that was uploaded as something else into the
+// shopping list it turned out to be
+// (docs/specs/41-mixed-photo-classification.md, "Finishing 07's photo
+// shopping-list path").
+//
+// Everything that disqualifies a job is 404, differing only in the dev-only
+// debug_reason: a job in another storage, one that never existed, one whose
+// analysis did not flag a list, and one already reclassified are
+// indistinguishable to a client (docs/specs/03-auth-and-multi-tenancy.md).
+// Reclassifying is not idempotent — the job is discarded by it — so a second
+// attempt is one of those 404s rather than a second list.
+//
+// No Gemini call happens here. The lines were extracted by the analysis this
+// job already paid for; only the matching service runs, exactly as it does for
+// a typed list.
+func (h *ShoppingListHandler) createFromJob(w http.ResponseWriter, r *http.Request, storageID, jobID uuid.UUID) {
+	job, err := h.store.Job(r.Context(), storageID, jobID)
+	if err != nil {
+		h.errors.WriteError(w, r, FromStoreError(err, "job not found in storage"))
+		return
+	}
+
+	lines, failure := reclassifiableLines(job)
+	if failure != nil {
+		h.errors.WriteError(w, r, failure)
+		return
+	}
+
+	items, results, err := ingest.MatchLines(r.Context(), h.matcher, storageID, lines)
+	if err != nil {
+		h.errors.WriteError(w, r, Internal(err))
+		return
+	}
+
+	list, created, image, err := h.store.CreateShoppingListFromJob(r.Context(), storageID, jobID, actingUser(r), items)
+	if err != nil {
+		h.errors.WriteError(w, r, FromStoreError(err, "job not found in storage, or no longer waiting for review"))
+		return
+	}
+
+	// The job's row is already gone, so these are best effort in the same way
+	// discarding a job is: an unreferenced file on disk is a smaller failure
+	// than a list that was never created.
+	if image != nil && h.photos != nil {
+		if err := h.photos.Remove(*image); err != nil {
+			h.errors.Log(r.Context(), "removing a reclassified job's photo failed", err)
+		}
+	}
+	removeJobCutouts(r.Context(), h.cutouts, h.errors, jobID)
+
+	response := buildListResponse(list, created, results)
+	h.showCatalogImages(r.Context(), storageID, response.Items, results)
+	writeJSON(w, http.StatusCreated, response)
+}
+
+// reclassifiableLines reads the lines an analysis already extracted, or says
+// why this job has none to give.
+//
+// A shopping-list photo job is excluded on purpose: it was uploaded as a list,
+// so it has no misclassification to correct, and its payload names a list that
+// already exists (docs/specs/41-mixed-photo-classification.md, "No reverse
+// check"). Every refusal here is the same 404.
+func reclassifiableLines(job *store.Job) ([]string, *Failure) {
+	switch job.Kind {
+	case store.JobShelfIngestion, store.JobProductPhoto, store.JobConsumptionPhoto:
+	default:
+		return nil, NotFound("job kind carries no shopping-list classification")
+	}
+	if job.Status != store.JobDone {
+		return nil, NotFound("job is not a proposal waiting for review")
+	}
+
+	var payload struct {
+		LooksLikeShoppingList bool     `json:"looks_like_shopping_list"`
+		ShoppingListLines     []string `json:"shopping_list_lines"`
+	}
+	if len(job.Payload) > 0 {
+		if err := json.Unmarshal(job.Payload, &payload); err != nil {
+			return nil, NotFound("job payload could not be read")
+		}
+	}
+	if !payload.LooksLikeShoppingList || len(payload.ShoppingListLines) == 0 {
+		return nil, NotFound("job was not classified as a shopping list")
+	}
+	if len(payload.ShoppingListLines) > maxShoppingListLines {
+		payload.ShoppingListLines = payload.ShoppingListLines[:maxShoppingListLines]
+	}
+	return payload.ShoppingListLines, nil
+}
+
+// isMultipart reports whether the request carries a multipart body, which is
+// the only shape a photo can arrive in here.
+func isMultipart(r *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return err == nil && strings.HasPrefix(mediaType, "multipart/")
 }
 
 // Get serves GET /api/storages/{storage_id}/shopping-lists/{id}.

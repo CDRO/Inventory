@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="/css/gamification.css">
 </head>
 <body>
-  <header class="shell row row--between">
+  <header class="shell shell--wide row row--between">
     <a id="wordmark" class="wordmark" href="/storages.html" data-i18n="common.appName">Inventory</a>
     <div class="row">
       <div id="storage-switcher" hidden></div>
@@ -23,9 +23,9 @@
     </div>
   </header>
 
-  <nav id="nav" class="shell nav" aria-label="Main" data-i18n-aria-label="nav.label" hidden></nav>
+  <nav id="nav" class="shell shell--wide nav" aria-label="Main" data-i18n-aria-label="nav.label" hidden></nav>
 
-  <main id="main" class="shell stack" aria-live="polite">
+  <main id="main" class="shell shell--wide stack" aria-live="polite">
     <h2 data-i18n="review.title">Review</h2>
 
     <div id="error" class="alert" role="alert" hidden></div>
@@ -36,6 +36,11 @@
         Nothing is added to your inventory until you confirm. Reject anything
         that is not really there; correct anything the photo got wrong.
       </p>
+      <!-- The mixed-photo classification offer
+           (docs/specs/41-mixed-photo-classification.md). Ahead of the rows,
+           empty and hidden until an analysis says this photo looks like a
+           shopping list; the review below it is never blocked by it. -->
+      <div id="shopping-list-banner" hidden></div>
       <div id="rows" class="review-list"></div>
       <div class="row">
         <button id="confirm" type="button" class="btn btn--primary" data-i18n="review.confirm">Confirm</button>

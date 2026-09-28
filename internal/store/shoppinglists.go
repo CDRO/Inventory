@@ -86,46 +86,127 @@ func (s *Store) CreateShoppingList(ctx context.Context, storageID uuid.UUID, sou
 	var created []ShoppingListItem
 
 	err = s.inTx(ctx, func(tx pgx.Tx) error {
-		row := tx.QueryRow(ctx, `
-			INSERT INTO shopping_lists (id, storage_id, source, created_by)
-			VALUES ($1, $2, $3, $4)
-			RETURNING id, storage_id, source, created_by, created_at`,
-			listID, storageID, string(source), createdBy)
+		var err error
+		list, created, err = insertShoppingList(ctx, tx, listID, storageID, source, createdBy, items)
+		return err
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return list, created, nil
+}
 
-		l, err := scanShoppingList(row)
+// CreateShoppingListFromJob turns an already-analysed photo job into a
+// shopping list and discards the job, in one transaction
+// (docs/specs/41-mixed-photo-classification.md, "Finishing 07's photo
+// shopping-list path"). The lines have already been extracted and matched by
+// the caller; no vision call happens here, and none happened a second time to
+// get here.
+//
+// Discarding is deletion, which is what "discarded" means in
+// docs/specs/06-vision-shelf-ingestion.md — the same state a rejected proposal
+// reaches, and the reason reclassifying is not idempotent: the row is gone, so
+// a second attempt finds nothing and is ErrNotFound, exactly like an id that
+// never existed.
+//
+// The row is locked and re-checked inside the transaction rather than trusted
+// from the caller's earlier read, so two people clicking "Process as shopping
+// list" on the same job produce one list, not two. A job in another storage,
+// one that no longer exists, and one that is no longer waiting for review are
+// all ErrNotFound: a client that may not have this job must not be able to
+// tell those apart (docs/specs/03-auth-and-multi-tenancy.md).
+//
+// It returns the discarded job's image filename, if it still had one, so the
+// caller can remove the photo after the commit — the same order
+// DeleteJob's callers use, because a file cannot join a transaction and an
+// unreferenced photo on disk is a smaller failure than a list that was never
+// created.
+func (s *Store) CreateShoppingListFromJob(ctx context.Context, storageID, jobID uuid.UUID, createdBy *uuid.UUID, items []NewShoppingListItem) (*ShoppingList, []ShoppingListItem, *string, error) {
+	if len(items) == 0 {
+		return nil, nil, nil, fmt.Errorf("%w: a shopping list needs at least one line", ErrValidation)
+	}
+
+	listID, err := newID()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	var list *ShoppingList
+	var created []ShoppingListItem
+	var image *string
+
+	err = s.inTx(ctx, func(tx pgx.Tx) error {
+		var status JobStatus
+		err := tx.QueryRow(ctx, `
+			SELECT status, image_filename FROM jobs WHERE id = $1 AND storage_id = $2 FOR UPDATE`,
+			jobID, storageID).Scan(&status, &image)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("store: lock job: %w", err)
+		}
+		// Only a proposal still waiting for review may be reclassified. One
+		// already applied, one being analysed again, and one whose analysis
+		// failed each have nothing to transfer.
+		if status != JobDone {
+			return ErrNotFound
+		}
+
+		list, created, err = insertShoppingList(ctx, tx, listID, storageID, SourcePhoto, createdBy, items)
 		if err != nil {
 			return err
 		}
-		list = l
-
-		for _, in := range items {
-			if in.MatchedProductID != nil {
-				if err := requireProductInStorage(ctx, tx, storageID, *in.MatchedProductID); err != nil {
-					return err
-				}
-			}
-
-			itemID, err := newID()
-			if err != nil {
-				return err
-			}
-
-			itemRow := tx.QueryRow(ctx, `
-				INSERT INTO shopping_list_items (id, shopping_list_id, raw_text, status, matched_product_id)
-				VALUES ($1, $2, $3, $4, $5)
-				RETURNING id, shopping_list_id, raw_text, status, matched_product_id, resolved_quantity, created_at`,
-				itemID, listID, in.RawText, string(in.Status), in.MatchedProductID)
-
-			item, err := scanShoppingListItem(itemRow)
-			if err != nil {
-				return err
-			}
-			created = append(created, *item)
+		if _, err := tx.Exec(ctx, `DELETE FROM jobs WHERE id = $1`, jobID); err != nil {
+			return fmt.Errorf("store: discard reclassified job: %w", err)
 		}
 		return nil
 	})
 	if err != nil {
+		return nil, nil, nil, err
+	}
+	return list, created, image, nil
+}
+
+// insertShoppingList writes one list and all of its lines inside an open
+// transaction. Both creation paths share it so that "all lines or no list" and
+// the same-storage check on every matched product are written once.
+func insertShoppingList(ctx context.Context, tx pgx.Tx, listID, storageID uuid.UUID, source ShoppingListSource, createdBy *uuid.UUID, items []NewShoppingListItem) (*ShoppingList, []ShoppingListItem, error) {
+	row := tx.QueryRow(ctx, `
+		INSERT INTO shopping_lists (id, storage_id, source, created_by)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, storage_id, source, created_by, created_at`,
+		listID, storageID, string(source), createdBy)
+
+	list, err := scanShoppingList(row)
+	if err != nil {
 		return nil, nil, err
+	}
+
+	created := make([]ShoppingListItem, 0, len(items))
+	for _, in := range items {
+		if in.MatchedProductID != nil {
+			if err := requireProductInStorage(ctx, tx, storageID, *in.MatchedProductID); err != nil {
+				return nil, nil, err
+			}
+		}
+
+		itemID, err := newID()
+		if err != nil {
+			return nil, nil, err
+		}
+
+		itemRow := tx.QueryRow(ctx, `
+			INSERT INTO shopping_list_items (id, shopping_list_id, raw_text, status, matched_product_id)
+			VALUES ($1, $2, $3, $4, $5)
+			RETURNING id, shopping_list_id, raw_text, status, matched_product_id, resolved_quantity, created_at`,
+			itemID, listID, in.RawText, string(in.Status), in.MatchedProductID)
+
+		item, err := scanShoppingListItem(itemRow)
+		if err != nil {
+			return nil, nil, err
+		}
+		created = append(created, *item)
 	}
 	return list, created, nil
 }

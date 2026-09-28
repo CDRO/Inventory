@@ -203,7 +203,8 @@ func TestSplitBatchRejectsForeignTargetLocation(t *testing.T) {
 	foreignKitchen, err := s.CreateLocation(ctx, storageB, store.NewLocation{Name: "Their Kitchen"})
 	require.NoError(t, err)
 
-	_, err = s.SplitBatch(ctx, storageA, batch.ID, 1, foreignKitchen.ID, nil)
+	_, err = s.SplitBatch(ctx, storageA, batch.ID,
+		store.SplitBatchInput{Quantity: 1, TargetLocationID: foreignKitchen.ID}, nil)
 
 	require.ErrorIs(t, err, store.ErrNotFound)
 

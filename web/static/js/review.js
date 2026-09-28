@@ -11,8 +11,8 @@
 // different endpoints (docs/specs/06-vision-shelf-ingestion.md,
 // 07-shopping-list-reconciliation.md, 09-consumption-logging.md).
 
-import { fromTemplate, clearChildren } from "./dom.js";
-import { applyI18n } from "./i18n.js";
+import { fromTemplate, clearChildren, el, text } from "./dom.js";
+import { applyI18n, t } from "./i18n.js";
 
 // Row decisions, mirroring the confirm payload shape in
 // docs/specs/09-consumption-logging.md: every row states exactly one of
@@ -230,4 +230,74 @@ function readFields(rowEl) {
     }
   }
   return out;
+}
+
+// Job kinds, as the API names them (docs/specs/04-backend-api-conventions.md),
+// mapped to the half of the banner's copy that names what the photo was
+// captured as. A person mid-run of twenty photos has to know which one in the
+// batch this is without hunting, which is why the mode is named rather than
+// left as a generic "this photo"
+// (docs/specs/41-mixed-photo-classification.md, "Review UI").
+const SHOPPING_LIST_BANNER_KINDS = {
+  shelf_ingestion: "shelf",
+  product_photo: "product",
+  consumption_photo: "consumption",
+};
+
+/**
+ * mountShoppingListBanner offers to reprocess a photo that the analysis
+ * spotted as a shopping list, on the review screen that photo would normally
+ * get (docs/specs/41-mixed-photo-classification.md, "Review UI: a distinct
+ * banner, never a silent reroute").
+ *
+ * It is an offer and never a gate: the proposal underneath stays fully
+ * reviewable, whether it came back with items or empty, and nothing is
+ * rerouted on its own. Dismissing it leaves the screen exactly as it was.
+ *
+ * Nothing here renders a single character of model output — not the
+ * transcribed lines, not a label. Every string is one of the page's own
+ * translations, so the banner cannot become an injection surface for what
+ * somebody's photo happened to contain.
+ *
+ * @param {Element} container - where the banner is rendered; emptied first.
+ * @param {Object} options
+ * @param {Object} options.payload - the job's payload, as the API returned it.
+ * @param {string} options.kind - the job's kind.
+ * @param {() => void} options.onProcess - "Process as shopping list".
+ * @returns {boolean} whether a banner was shown.
+ */
+export function mountShoppingListBanner(container, { payload, kind, onProcess }) {
+  if (!container) return false;
+  clearChildren(container);
+  container.hidden = true;
+
+  const mode = SHOPPING_LIST_BANNER_KINDS[kind];
+  const lines = payload?.shopping_list_lines;
+  if (!mode || !payload?.looks_like_shopping_list || !Array.isArray(lines) || lines.length === 0) {
+    return false;
+  }
+
+  const process = el("button", { type: "button", class: "btn btn--primary", "data-action": "process-as-list" }, [
+    text(t("review.shoppingList.process")),
+  ]);
+  process.addEventListener("click", () => onProcess());
+
+  const keep = el("button", { type: "button", class: "btn btn--ghost", "data-action": "keep-as-original" }, [
+    text(t(`review.shoppingList.keep.${mode}`)),
+  ]);
+  // "Keep as …" is purely a dismissal: the job keeps its kind, its proposal
+  // and its review, and nothing is sent anywhere.
+  keep.addEventListener("click", () => {
+    clearChildren(container);
+    container.hidden = true;
+  });
+
+  container.append(
+    el("div", { class: "alert alert--offer stack", role: "status" }, [
+      el("p", {}, [text(t(`review.shoppingList.notice.${mode}`))]),
+      el("div", { class: "row" }, [process, keep]),
+    ]),
+  );
+  container.hidden = false;
+  return true;
 }

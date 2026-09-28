@@ -455,7 +455,8 @@ with it.
 │   ├── admin/                  # server-rendered admin UI handlers (html/template)
 │   ├── store/                  # pgx queries, one file per table group
 │   ├── vision/                 # Gemini client, prompts, response parsing, model resilience
-│   ├── imagesearch/            # SerpAPI + Iconify clients
+│   ├── imagesearch/            # SerpAPI + Iconify clients (07 image suggestions only — NOT the icon picker)
+│   ├── iconlib/                # vendored offline icon set, embedded; no network at all (42)
 │   ├── matching/               # shared product matching (catalog-first, then trigram)
 │   ├── expiry/                 # shelf-life resolution chain (08-expiration-and-classification.md)
 │   ├── jobs/                   # background job runner + job store
@@ -1104,7 +1105,7 @@ $ cd /volume1/docker/inventory        # the clone; adjust the path
 $ DC="docker-compose -p inventory -f docker-compose.yml -f docker-compose.nas.yml"
 $ $DC run --rm setup           # writes .env
 $ $DC build
-$ $DC run --rm app migrate up  # also creates the initial admin
+$ $DC run --rm app migrate up  # also creates the initial admin and imports the icon library
 $ TS_AUTHKEY=tskey-auth-… $DC up -d
 ```
 

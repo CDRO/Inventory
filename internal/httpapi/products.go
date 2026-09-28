@@ -11,12 +11,19 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/CDRO/Inventory/internal/matching"
 	"github.com/CDRO/Inventory/internal/store"
 )
 
 // ProductStore is the slice of the store the product routes read and write.
 type ProductStore interface {
 	ListProducts(ctx context.Context, storageID uuid.UUID) ([]store.Product, error)
+	// SearchProducts backs products.html's list table
+	// (docs/specs/16-product-maintenance.md): a query-filtered read, richer
+	// than ListProducts's id-and-name shape, deliberately kept off the delta
+	// path (ProductsChangedSince) so a native client's sync payload never
+	// grows to carry it.
+	SearchProducts(ctx context.Context, storageID uuid.UUID, query string) ([]store.ProductSummary, error)
 	ProductsChangedSince(ctx context.Context, storageID uuid.UUID, since time.Time) (*store.Delta[store.Product], error)
 	ListProductBatches(ctx context.Context, storageID, productID uuid.UUID) ([]store.Batch, error)
 	SetProductCategoryAsUser(ctx context.Context, storageID, id uuid.UUID, categoryID *uuid.UUID, userID uuid.UUID) error
@@ -26,9 +33,20 @@ type ProductStore interface {
 	GetProduct(ctx context.Context, storageID, id uuid.UUID) (*store.Product, error)
 	CurrentStock(ctx context.Context, storageID, productID uuid.UUID) (int, error)
 	ListProductLogs(ctx context.Context, storageID, productID uuid.UUID, limit int) ([]store.ProductLog, error)
+	CreateProduct(ctx context.Context, storageID uuid.UUID, in store.NewProduct) (*store.Product, error)
 	UpdateProduct(ctx context.Context, storageID, id uuid.UUID, patch store.ProductPatch) (*store.Product, int, error)
 	MergeProducts(ctx context.Context, storageID, survivorID, sourceID uuid.UUID) (*store.MergeResult, error)
 	DeleteProduct(ctx context.Context, storageID, id uuid.UUID) (string, error)
+}
+
+// LocalMatcher is the stage-1-only slice of the matching service Create
+// needs. docs/specs/16-product-maintenance.md is explicit that creation
+// checks only this storage's own products before inserting — the anonymous
+// catalog never enters this decision, the same restraint
+// docs/specs/09-consumption-logging.md's MatchLocalProduct already documents
+// and internal/consume/proposal.go already narrows its own dependency to.
+type LocalMatcher interface {
+	MatchLocalProduct(ctx context.Context, storageID uuid.UUID, text string) (matching.Result, error)
 }
 
 // ProductHandler serves the two read-only product routes
@@ -41,14 +59,20 @@ type ProductStore interface {
 // the full PATCH, the merge, and the delete.
 type ProductHandler struct {
 	store    ProductStore
+	matcher  LocalMatcher
 	pictures productPictures
 	errors   *ErrorWriter
 }
 
 // NewProductHandler wires the product routes. cache and productImages may be
 // nil, in which case setting a picture is refused and setting an icon works.
-func NewProductHandler(s ProductStore, cache ImageCache, productImages PhotoStore, errs *ErrorWriter) *ProductHandler {
-	return &ProductHandler{store: s, errors: errs, pictures: productPictures{images: productImages, cache: cache}}
+// matcher may be nil, in which case Create must not be routed
+// ("absent collaborator, absent route", router.go).
+func NewProductHandler(s ProductStore, matcher LocalMatcher, cache ImageCache, productImages PhotoStore, errs *ErrorWriter) *ProductHandler {
+	return &ProductHandler{
+		store: s, matcher: matcher, errors: errs,
+		pictures: productPictures{images: productImages, cache: cache},
+	}
 }
 
 // productResponse is id and name only — everything the manual-correction
@@ -60,12 +84,31 @@ type productResponse struct {
 	Name string    `json:"name"`
 }
 
+// productSummaryResponse is one row of products.html's list table
+// (docs/specs/16-product-maintenance.md, "The product list"): thumbnail/icon,
+// name, category and current total stock, and nothing more — no
+// default_shelf_life_days, no batches, no logs, none of what the detail view
+// needs. catalog_id stays absent, as everywhere else in this package.
+type productSummaryResponse struct {
+	ID           uuid.UUID `json:"id"`
+	Name         string    `json:"name"`
+	CategoryName *string   `json:"category_name"`
+	ImageURL     *string   `json:"image_url"`
+	IconName     *string   `json:"icon_name"`
+	CurrentStock int       `json:"current_stock"`
+}
+
 // List serves GET /api/storages/{storage_id}/products.
 //
 // With ?updated_since=<RFC3339> it answers a delta instead: the products
 // changed since that instant, the ids of those deleted, and the cursor for
-// next time (docs/specs/12-client-api-contract.md). Without the parameter the
-// response is exactly what it has always been.
+// next time (docs/specs/12-client-api-contract.md). With ?q= (present at all,
+// even empty) it answers products.html's list table instead — the richer
+// summary shape, filtered by q when non-empty and "every product" when
+// empty ("Show all products", docs/specs/16-product-maintenance.md). Neither
+// parameter widens the other: a native client's delta sync never carries the
+// summary fields, and the summary route never carries a sync cursor. With
+// neither parameter the response is exactly what it has always been.
 func (h *ProductHandler) List(w http.ResponseWriter, r *http.Request) {
 	storageID, ok := StorageIDFrom(r.Context())
 	if !ok {
@@ -80,6 +123,10 @@ func (h *ProductHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	if since != nil {
 		h.listDelta(w, r, storageID, *since)
+		return
+	}
+	if r.URL.Query().Has("q") {
+		h.listSearch(w, r, storageID, r.URL.Query().Get("q"))
 		return
 	}
 
@@ -115,6 +162,191 @@ func (h *ProductHandler) listDelta(w http.ResponseWriter, r *http.Request, stora
 	writeJSON(w, http.StatusOK, deltaCollection[productResponse]{
 		Items: out, Deleted: delta.Deleted, SyncedAt: delta.SyncedAt,
 	})
+}
+
+// listSearch answers the ?q= form of List — products.html's list table
+// (docs/specs/16-product-maintenance.md). query is trimmed here so a
+// whitespace-only search behaves exactly like an absent one: "every
+// product", the same case an empty string already means to
+// store.SearchProducts.
+func (h *ProductHandler) listSearch(w http.ResponseWriter, r *http.Request, storageID uuid.UUID, query string) {
+	rows, err := h.store.SearchProducts(r.Context(), storageID, strings.TrimSpace(query))
+	if err != nil {
+		h.errors.WriteError(w, r, FromStoreError(err, "search products"))
+		return
+	}
+
+	out := make([]productSummaryResponse, 0, len(rows))
+	for _, p := range rows {
+		out = append(out, productSummaryResponse{
+			ID: p.ID, Name: p.Name, CategoryName: p.CategoryName,
+			ImageURL: p.ImageURL, IconName: p.IconName, CurrentStock: p.CurrentStock,
+		})
+	}
+	writeJSON(w, http.StatusOK, collection[productSummaryResponse]{Items: out})
+}
+
+// createProductRequest is the body of POST /api/storages/{storage_id}/products
+// — docs/specs/16-product-maintenance.md's "Creating a product". It mirrors
+// resolveNewProduct's manual fields (shoppinglists.go): the same set
+// shopping-list resolution's own manual-entry path already validates, since
+// this is the same underlying operation reached from a different door.
+type createProductRequest struct {
+	Name string `json:"name"`
+	// CategoryID is a string, parsed by hand below, so a malformed value is
+	// this field's own 422 rather than the whole body's "not valid JSON" —
+	// the same reason Update parses it out of a json.RawMessage.
+	CategoryID *string `json:"category_id"`
+	ItemType   string  `json:"item_type"`
+	MinStock   *int    `json:"min_stock"`
+	// Image is the hash of a picked image suggestion, promoted into permanent
+	// storage on success. Absent or null is no picture — a picture has never
+	// been required, at either the frontend or shoppinglists.go's own
+	// validation, and stays optional here for the same reason
+	// (docs/specs/07-shopping-list-reconciliation.md).
+	Image    *string `json:"image"`
+	IconName *string `json:"icon_name"`
+}
+
+// Create serves POST /api/storages/{storage_id}/products — the standalone
+// "+ Add product" entry point of docs/specs/16-product-maintenance.md's
+// "Creating a product", reachable without first typing a shopping-list line.
+//
+// Only name is required; blank or missing is 422, the same rule
+// internal/httpapi/shoppinglists.go's own manual-entry path already enforces.
+// Before inserting, the matching service's stage 1
+// (docs/specs/07-shopping-list-reconciliation.md) runs against name; a
+// confident local hit returns that existing product (200) instead of
+// creating a near-duplicate — the same "merge instead?" courtesy the rename
+// path on Update gives, applied at creation time instead of after the fact.
+// A genuinely new product is 201. No initial batch is created either way: a
+// product may exist with zero stock, and adding its first batch is the
+// ordinary stocktake or vision-ingestion path, not this endpoint's job.
+func (h *ProductHandler) Create(w http.ResponseWriter, r *http.Request) {
+	storageID, ok := StorageIDFrom(r.Context())
+	if !ok {
+		h.errors.WriteError(w, r, Internal(errNoStorageInContext))
+		return
+	}
+
+	var body createProductRequest
+	if failure := decodeJSON(w, r, &body); failure != nil {
+		h.errors.WriteError(w, r, failure)
+		return
+	}
+
+	fields := map[string][]string{}
+	name := strings.TrimSpace(body.Name)
+	switch {
+	case name == "":
+		fields["name"] = append(fields["name"], "Give the product a name.")
+	case utf8.RuneCountInString(name) > maxProductNameLength:
+		fields["name"] = append(fields["name"], "Keep the name under 255 characters.")
+	}
+
+	itemType := store.ItemType(body.ItemType)
+	switch itemType {
+	case "", store.ItemPerishable, store.ItemLongShelfLife, store.ItemNonPerishable:
+	default:
+		fields["item_type"] = append(fields["item_type"],
+			`Must be "perishable", "long_shelf_life" or "non_perishable".`)
+	}
+
+	minStock := 0
+	if body.MinStock != nil {
+		if *body.MinStock < 0 {
+			fields["min_stock"] = append(fields["min_stock"], "Cannot be negative.")
+		}
+		minStock = *body.MinStock
+	}
+
+	var categoryID *uuid.UUID
+	if body.CategoryID != nil {
+		parsed, err := uuid.Parse(*body.CategoryID)
+		if err != nil {
+			// 422, not 404: it says only that the input was malformed. A
+			// well-formed id belonging to another storage is the 404,
+			// decided by the store.
+			fields["category_id"] = append(fields["category_id"], "Must be a UUID.")
+		} else {
+			categoryID = &parsed
+		}
+	}
+
+	var iconName *string
+	if body.IconName != nil {
+		trimmed := strings.TrimSpace(*body.IconName)
+		switch {
+		case trimmed == "":
+			fields["icon_name"] = append(fields["icon_name"], "Send null, not an empty string, for no icon.")
+		case utf8.RuneCountInString(trimmed) > maxIconNameLength:
+			fields["icon_name"] = append(fields["icon_name"], "Keep the icon name under 100 characters.")
+		}
+		iconName = &trimmed
+	}
+
+	if len(fields) > 0 {
+		h.errors.WriteError(w, r, ValidationFailed(fields, nil))
+		return
+	}
+
+	// Stage 1 only, never the catalog: this storage's own products are what
+	// decide whether this is a duplicate, the same restraint
+	// docs/specs/09-consumption-logging.md's MatchLocalProduct documents.
+	if h.matcher != nil {
+		result, err := h.matcher.MatchLocalProduct(r.Context(), storageID, name)
+		if err != nil {
+			h.errors.WriteError(w, r, Internal(err))
+			return
+		}
+		if result.Status == matching.StatusExactMatch {
+			detail, failure := h.detail(r, storageID, result.Product.ProductID, productCounts{})
+			if failure != nil {
+				h.errors.WriteError(w, r, failure)
+				return
+			}
+			writeJSON(w, http.StatusOK, detail)
+			return
+		}
+	}
+
+	var picture string
+	var imageURL *string
+	if body.Image != nil {
+		pictureName, url, _, err := h.pictures.promoteSuggestion(r.Context(), storageID, *body.Image)
+		switch {
+		case errors.Is(err, errPictureUnavailable):
+			h.errors.WriteError(w, r, ValidationFailed(map[string][]string{
+				"image": {"That picture is no longer available. Pick another, or continue without one."},
+			}, err))
+			return
+		case err != nil:
+			h.errors.WriteError(w, r, Internal(err))
+			return
+		}
+		picture, imageURL = pictureName, &url
+	}
+
+	product, err := h.store.CreateProduct(r.Context(), storageID, store.NewProduct{
+		Name:       name,
+		CategoryID: categoryID,
+		ItemType:   itemType,
+		MinStock:   minStock,
+		ImageURL:   imageURL,
+		IconName:   iconName,
+	})
+	if err != nil {
+		h.pictures.remove(r.Context(), h.errors, picture)
+		h.errors.WriteError(w, r, FromStoreError(err, "category not found in storage"))
+		return
+	}
+
+	detail, failure := h.detail(r, storageID, product.ID, productCounts{})
+	if failure != nil {
+		h.errors.WriteError(w, r, failure)
+		return
+	}
+	writeJSON(w, http.StatusCreated, detail)
 }
 
 // Batches serves GET /api/storages/{storage_id}/products/{product_id}/batches
