@@ -155,6 +155,36 @@ block:
   lane; `review-go` owns it. If you spot something genuinely dangerous there,
   note it once under "Outside my lane" without blocking on it.
 
+## Round 2 and later
+
+Round ≥ 2 reviews the **delta** since the head you reviewed last (decision D9
+of the harness plan), with one part that never narrows: the suite. In order:
+
+1. Read your own previous verdict from the packet's "Previous round's
+   verdicts" section. Read the PR's own comment history for it only when the
+   packet says it found no previous verdict comment, which it states in that
+   section when H5's marker is missing or the round is older than the packet.
+2. **Account for every round-1 blocking finding of yours before anything
+   else** — one line each, `resolved` or `still open`, with the `file:line`
+   that settles it: the test that now exercises the failure, or the acceptance
+   criterion still without one. A finding answered by a test you judge vacuous
+   is `still open`. This list comes first so the round is auditable from your
+   comment alone.
+   If you had no round-1 blocking findings at all, say exactly that in one
+   line, still before anything else.
+3. **Run the whole suite again, every round.** You never narrow it to the
+   changed packages: the whole-tree run is the one check in this loop that
+   catches a round-2 fix breaking something the diff does not mention, and it
+   is cheap and deterministic. Your `**Suite:**` line carries *this* round's
+   own exit code or run URL — never the previous round's.
+4. Review the delta diff the packet inlines (`--since <previous round's head
+   sha>`) in full, and re-check the acceptance criteria you listed as untested
+   in round 1.
+5. Do not re-litigate your round-1 should-fix or nit findings.
+6. New blocking findings in the delta are legitimate — a test added to silence
+   a round-1 finding that asserts nothing is the classic one. Mark each
+   `(new in round <n>)` so it is not mistaken for a survivor of round 1.
+
 ## Output
 
 Post exactly this shape with `gh pr comment <PR> --body "..."`:

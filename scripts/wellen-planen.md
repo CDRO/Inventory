@@ -18,8 +18,11 @@ and reviewers" below.
 
 > **There is more than one plan file now.** `scripts/wellen.json` is the
 > Extended-core plan (#97, complete — kept as its record, not extended);
-> `scripts/wellen-followups.json` is the deferred-follow-ups plan (#176). A
-> finished plan's file stays where it is rather than being emptied, so **every
+> `scripts/wellen-followups.json` holds the deferred-follow-ups plan (#176,
+> complete as of its own 15 waves) plus, appended after it, standalone bonus
+> waves tracked by their own issue via the wave-level `planIssue` override
+> (see "Wave-file schema") rather than by reopening #176. A finished plan's
+> file stays where it is rather than being emptied, so **every
 > command that names a wave or a slug needs `-WaveFile` unless it means
 > `wellen.json`** — that default is silent, and a bare `-Wave 2` against the
 > wrong plan asks about a different wave entirely. Plans do not run
@@ -50,7 +53,13 @@ starts. The one other thing it does is that Docker cleanup, and that is
 deliberate: removing Docker resources is mechanical and must be exact, and a
 session that is told to tidy up Docker is a session that might run a prune.
 **Planning a new wave therefore means: extend the JSON file and set up the
-GitHub prerequisites. The script itself is never changed.**
+GitHub prerequisites. The script itself is never changed** to plan a wave
+that fits the existing schema. The rare exception is a wave that needs a
+schema field the script has no way to honor yet — the wave-level `planIssue`
+override below is the one example so far, added because nothing in the
+original schema let a bonus wave name a tracking issue other than the
+file-wide `plan.planIssue`. That is a schema change, reviewed like any other
+code change, not a planning-session shortcut.
 
 Docker isolation between parallel package worktrees (`COMPOSE_PROJECT_NAME`,
 `HTTP_PORT`, `TRAEFIK_PORT`) is automatic and needs no attention when
@@ -267,12 +276,21 @@ Before the orchestrator can work through a wave, these must exist:
     "advisor": true,                        // advisor on/off (default: on)
     "advisorModel": null,                   // optional; else same model as the session
     "roundLimitPackage": 2,                 // review rounds after which a session stops and reports
-    "roundLimitConsolidation": 4
+    "roundLimitConsolidation": 4,
+    "staleAfterMinutes": 45                 // optional; heartbeat threshold for every package (default: 45)
   },
   "waves": [
     {
       "number": 2,                          // unique and strictly ascending
       "waveIssue": 93,                      // wave issue; closed = wave done
+      "planIssue": null,                    // optional; overrides plan.planIssue for this wave's own
+                                             //   prompts (package and consolidation) - for a standalone
+                                             //   bonus wave tracked by its own issue rather than the
+                                             //   file-wide plan issue, e.g. one appended after that plan
+                                             //   issue already closed
+      "planName": null,                     // optional; overrides plan.name alongside planIssue - set
+                                             //   both together or neither, so "wave N of <name>" never
+                                             //   names a plan the wave was deliberately kept out of
       "integrationBranch": "integration/specs-13-20-welle-2",
       "sequential": false,                  // true: packages run one after another, not in parallel
       "dockerCleanup": true,                // true: after the consolidation, remove the Docker
@@ -290,7 +308,8 @@ Before the orchestrator can work through a wave, these must exist:
           "model": null,                    // optional: override per package
           "effort": null,                   // optional: override per package
           "advisor": true,                  // optional: turn the advisor off per package
-          "advisorModel": null              // optional: a stronger advisor for one package
+          "advisorModel": null,             // optional: a stronger advisor for one package
+          "staleAfterMinutes": null         // optional: override the heartbeat threshold for this package
         }
       ]
     }
@@ -401,11 +420,19 @@ Before assigning packages to a wave, check what each one touches:
    powershell -NoProfile -File scripts\wellen-orchestrator.ps1 -Validate
    powershell -NoProfile -File scripts\wellen-orchestrator.ps1 -DryRun
    ```
-   `-Validate` checks the schema, naming the path of every finding;
-   `-DryRun` additionally shows which sessions would start with which
-   model/effort/advisor — neither starts anything. Run `scripts/doctor` first,
-   too — it catches a broken Docker/gh/claude setup before the orchestrator
-   opens a single window.
+   `-Validate` checks the schema only, naming the path of every finding, and
+   exits before anything else runs — it never touches Docker/gh/claude.
+   `-DryRun` shows which sessions would start with which
+   model/effort/advisor/stale threshold; it does run the orchestrator's own
+   `scripts/doctor` pre-flight first (see "What the orchestrator watches"
+   below), the same as a real run, so a broken Docker/gh/claude setup is
+   caught there too, before anything else — including, now, whether
+   `HTTP_PORT`/`TRAEFIK_PORT` from the **main checkout's own** `.env` are
+   free, which a wave that used to `-DryRun` cleanly can fail on if the
+   operator's own dev stack happens to be up on those same ports; stop it
+   first, or the pre-flight will say so and refuse. `-Validate` never
+   reaches that check, so running `scripts/doctor` by hand during planning
+   is still worth doing on its own.
 6. Report to the user what was planned, and the command that starts it. Do
    **not** start the orchestrator yourself — that is the user's call.
 
@@ -467,3 +494,60 @@ of one of those loops, and never widening the deny list's own set of
 force-push, `reset --hard`, any `docker … prune`, `docker volume rm`, or
 reading `.env` — those stay denied regardless of what else the allowlist
 grows to cover.
+
+## What the orchestrator watches
+
+The orchestrator's own pre-flight, before it opens a single worktree or
+window, is `scripts/doctor` — it replaced the inline `docker compose
+version`/`docker info` pair this script used to run itself; a failure fails
+fast with `scripts/doctor`'s own output, remediation included.
+`scripts/doctor` already checks that `gh` and `claude` are present and
+authenticated, but `git`/`gh`/`claude` PATH presence is *also* checked
+separately in Main flow, just ahead of the doctor call, with an
+orchestrator-specific message for each — a small, deliberate overlap that
+fails on the exact right line rather than inside a ten-check report. The one
+thing `scripts/doctor` cannot cover at all is the `--remote-control` flag:
+proving `claude` is present and authenticated is not the same as proving
+*this installed version* understands that flag, so that check stays the
+orchestrator's own.
+
+One of `scripts/doctor`'s ten checks has a side effect worth knowing about
+here specifically because it changed what `-DryRun` does: it reads
+`HTTP_PORT`/`TRAEFIK_PORT` from the **main checkout's own** `.env` (never a
+package worktree's, which gets its own deterministic ports later) and binds
+each briefly with a throwaway `docker run -p` to prove they are free. If the
+operator's own dev stack is already up on those same ports when a wave
+starts, the pre-flight now refuses — something the old inline `docker info`
+check never looked at, and something `-DryRun` never did either, since it
+used to skip Docker I/O beyond `docker compose version`/`docker info`. Stop
+the local dev stack before starting a wave, or expect the pre-flight to say
+so and refuse.
+
+Once a package's session is running, the orchestrator has one more thing to
+notice: whether it is still moving. On every poll it computes each open
+package's most recent activity as the newest of three signals — the last
+commit date on the package's branch, its worktree's own
+`.claude/worklog.md` mtime, and the newest comment on its PR — and, if
+nothing has moved for `staleAfterMinutes` (default 45, per-plan via
+`standards.staleAfterMinutes` or per-package via `staleAfterMinutes`, both
+optional), logs a `WARN` and raises the same toast the `Notification`/`Stop`
+hooks use (`scripts/hooks/notify.ps1 stale "<window title>"`), at most once
+per hour per package so a session stuck for a whole afternoon does not flood
+the log. **This only alerts — it never kills, restarts, or otherwise acts on
+a session it thinks is stuck**; a false positive during a long test run
+costs one toast, not a lost session.
+
+When a package's issue closes, the orchestrator reads its PR's own H5
+verdict markers (`scripts/dev.d/gate`'s exact format,
+`<!-- verdict: APPROVE|BLOCK round=<n> sha=<head sha> reviewer=go|tests|docs -->`)
+and logs `package <slug>: PR #n, rounds=<n>, blocks=<n>` — the highest round
+number the PR reached and how many `BLOCK` verdicts it collected along the
+way. Once every package of a wave is done, the wave's totals (packages,
+summed rounds, summed blocks) are logged too. This is read-only bookkeeping
+for the same number the harness optimization plan tracks (reviewer runs per
+PR) — it does not feed into anything the orchestrator decides.
+
+**When a change to this takes effect.** Like the Docker cleanup rules above,
+the orchestrator reads its own script once, at start — a change to the
+pre-flight, the heartbeat, or the rounds bookkeeping only applies to a run
+started after the change has reached the checkout it is running from.
