@@ -20,6 +20,11 @@ const ZERO_LOCATIONS_JOB = "00000000-0000-7000-8000-000000000075";
 const ZERO_LOCATIONS_HOUSEHOLD = "00000000-0000-7000-8000-000000000012"; // "E2E Admin Household"
 const TOMATOES = "00000000-0000-7000-8000-000000000040";
 const PANTRY = "00000000-0000-7000-8000-000000000020";
+// "Fridge" and its child "Door Bin" (seeded for #174 item 2). The child is
+// what makes the rename/move banner test exercise nodeName's recursion rather
+// than just its first loop.
+const FRIDGE = "00000000-0000-7000-8000-000000000021";
+const DOOR_BIN = "00000000-0000-7000-8000-0000000000b6";
 const CANNED_GOODS = "00000000-0000-7000-8000-000000000030";
 
 // Stand-in photo bytes. The upload is refused on the model check, which runs
@@ -2104,12 +2109,17 @@ test("a failed rename and a failed move each name the node they were about", asy
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("Fridge");
 
-  // Expand Fridge to reach its child. Same pattern create-and-list.spec.js uses
-  // for a nested node.
-  const node = (name) =>
-    dialog.locator(".tree-node").filter({ has: dialog.locator(".tree-name", { hasText: new RegExp(`^${name}$`) }) });
-  await node("Fridge").locator(".tree-toggle").click();
-  await expect(node("Door Bin")).toHaveCount(1);
+  // Rows are addressed by the data-id tree.js puts on every .tree-node, not by
+  // their text: a .tree-node's textContent includes the toggle glyph and its
+  // three action-button labels, so an anchored name match never matches it and an
+  // unanchored one is a substring assertion pretending to be an identity.
+  const row = (id) => dialog.locator(`.tree-node[data-id="${id}"]`);
+
+  // Expand Fridge to reach its child.
+  await expect(row(FRIDGE)).toHaveCount(1);
+  await row(FRIDGE).locator(".tree-toggle").click();
+  await expect(row(DOOR_BIN)).toBeVisible();
+  await expect(row(DOOR_BIN).locator(".tree-name")).toHaveText("Door Bin");
 
   // Only PATCH fails; every GET, the post-mutation reloads included, goes through.
   await page.route(`**/api/storages/${HOUSEHOLD}/locations/**`, async (route) => {
@@ -2121,7 +2131,7 @@ test("a failed rename and a failed move each name the node they were about", asy
   });
 
   // The rename. tree.js's inline editor commits on blur, and Enter blurs it.
-  await node("Door Bin").getByRole("button", { name: "Rename" }).click();
+  await row(DOOR_BIN).getByRole("button", { name: "Rename" }).click();
   const renameInput = dialog.locator(".tree-rename-input");
   await expect(renameInput).toHaveValue("Door Bin");
   await renameInput.fill("Shelf Bin");
@@ -2134,12 +2144,12 @@ test("a failed rename and a failed move each name the node they were about", asy
   // The rename did not happen, so the tree still shows the old name — its reload
   // succeeded and redrew from the server, which is also what re-creates the row
   // the move below acts on.
-  await expect(node("Door Bin")).toHaveCount(1);
+  await expect(row(DOOR_BIN).locator(".tree-name")).toHaveText("Door Bin");
   await expect(dialog.locator(".tree")).not.toContainText("Shelf Bin");
 
   // The move, to the root, through the picker rather than drag-and-drop — the
   // keyboard-reachable path, and the one that hands onMove an id and nothing else.
-  await node("Door Bin").getByRole("button", { name: "Move to…" }).click();
+  await row(DOOR_BIN).getByRole("button", { name: "Move to…" }).click();
   const movePicker = page
     .locator("dialog")
     .filter({ has: page.getByRole("heading", { name: "Move to…" }) });
