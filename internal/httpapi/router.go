@@ -113,6 +113,7 @@ type APIStore interface {
 	InventoryStore
 	MembershipStore
 	IconStore
+	IconSuggestionStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -278,6 +279,7 @@ func NewRouter(d Deps) http.Handler {
 		batches := NewBatchHandler(d.Store, errs)
 		gamification := NewGamificationHandler(d.Store, errs)
 		icons := NewIconHandler(d.Store, errs)
+		iconSuggestions := NewIconSuggestionHandler(d.Store, errs)
 
 		// The session lifecycle (docs/specs/03-auth-and-multi-tenancy.md).
 		//
@@ -458,6 +460,12 @@ func NewRouter(d Deps) http.Handler {
 			// the caller belongs to some storage.
 			sr.Post("/icons", icons.Upload)
 			sr.Get("/icons/{id}/svg", icons.ServeSVG)
+
+			// The icon picker's local-alias search (docs/specs/40-icon-picker.md):
+			// no HTTP client anywhere in this handler, every result already
+			// lives in icon_aliases or icons above.
+			sr.Get("/icon-suggestions", iconSuggestions.Search)
+			sr.Post("/icon-suggestions/aliases", iconSuggestions.CreateAlias)
 
 			expiry := NewExpiryHandler(d.Store, errs)
 			sr.Patch("/inventory-batches/{id}/expiry", expiry.PatchBatchExpiry)

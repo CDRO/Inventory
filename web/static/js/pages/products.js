@@ -32,6 +32,7 @@ import { fetchLocations, appendLocationOptions, openLocationField } from "../loc
 import { clearChildren, el, text } from "../dom.js";
 import { openScanSheet } from "../barcode.js";
 import { renderImagePicker } from "../image-picker.js";
+import { renderIconPicker } from "../icon-picker.js";
 import { productCell } from "../product-table.js";
 
 // The list search is debounced by this many ms — "as-you-type" per
@@ -284,10 +285,12 @@ async function showDetail(productId) {
 function renderDetail(product) {
   clearChildren(detailContainer);
   const editForm = renderEditForm(product);
+  const iconField = renderIconField(product);
   detailContainer.append(
     el("div", { class: "card stack" }, [
       el("h3", {}, [text(product.name)]),
-      renderPicture(product, editForm.iconInput),
+      renderPicture(product, iconField.refresh),
+      iconField.node,
       editForm.form,
     ]),
     renderStockCard(product),
@@ -434,11 +437,18 @@ function renderBarcodeCard(product) {
 // deliberately built here rather than inside js/image-picker.js: the picker's
 // other caller is the shopping-list reconciliation screen, where the product
 // being given a picture does not exist yet and there is no id to post to.
-function renderPicture(product, iconInput) {
+// `onIconChanged` is called whenever a picture write clears icon_name — both
+// routes always clear it, a picture and a picked icon being alternatives —
+// so the icon field's own "current icon" line, a sibling built separately by
+// renderIconField, can resync. Without it, that line would go stale the same
+// way the old free-text input did before #251: setPicture/uploadPicture's
+// re-render is deliberately narrow (it must not discard unsaved edits) and
+// has no other handle onto the icon field's DOM.
+function renderPicture(product, onIconChanged) {
   const current = el("div", { "data-role": "product-picture" }, [currentPicture(product)]);
   const pickerBox = el("div", { "data-role": "picture-picker", class: "stack", hidden: true });
   const status = el("p", { class: "muted", "data-role": "picture-status", hidden: true });
-  const uploadBox = renderPictureUpload(product, current, status, iconInput);
+  const uploadBox = renderPictureUpload(product, current, status, onIconChanged);
 
   const change = el(
     "button",
@@ -462,7 +472,7 @@ function renderPicture(product, iconInput) {
           // only way to clear one would be a suggestion list that happened to
           // come back non-empty.
           clearable: true,
-          onPick: (hash) => setPicture(product, hash, current, status, iconInput),
+          onPick: (hash) => setPicture(product, hash, current, status, onIconChanged),
         });
       },
     },
@@ -479,7 +489,7 @@ function renderPicture(product, iconInput) {
 // module-level one would be shared by every product ever opened in this
 // session, so returning to a product while another one's upload was still in
 // flight would silently refuse it (the bug class of #249/#252 in the picker).
-function renderPictureUpload(product, current, status, iconInput) {
+function renderPictureUpload(product, current, status, onIconChanged) {
   let uploading = false;
 
   const input = el("input", {
@@ -502,7 +512,7 @@ function renderPictureUpload(product, current, status, iconInput) {
       uploading = true;
       input.disabled = true;
       try {
-        await uploadPicture(product, chosen, current, status, iconInput);
+        await uploadPicture(product, chosen, current, status, onIconChanged);
       } finally {
         uploading = false;
         input.disabled = false;
@@ -533,10 +543,12 @@ function currentPicture(product) {
 // setPicture writes the choice and re-renders only the picture itself. The
 // whole detail view is deliberately not re-rendered: the edit form beside it
 // may hold changes somebody has typed and not saved, and a picture change
-// must not discard them. Its `icon` field is a narrow exception — applyPicture
-// resyncs it directly, because it is the one field the picture change itself
-// can make stale (#251).
-async function setPicture(product, hash, current, status, iconInput) {
+// must not discard them. icon_name is always cleared alongside the picture
+// (the two are alternatives) — `onIconChanged` is how the icon field's own
+// "current icon" preview, a sibling built separately by renderIconField,
+// finds out (docs/specs/40-icon-picker.md; the same staleness #251 fixed for
+// the old free-text input, now on the field that replaced it).
+async function setPicture(product, hash, current, status, onIconChanged) {
   status.hidden = false;
   status.textContent = t("products.picture.saving");
   try {
@@ -544,7 +556,11 @@ async function setPicture(product, hash, current, status, iconInput) {
       image: hash,
       icon_name: null,
     });
-    applyPicture(product, updated, current, iconInput);
+    product.image_url = updated.image_url ?? null;
+    product.icon_name = updated.icon_name ?? null;
+    clearChildren(current);
+    current.append(currentPicture(product));
+    onIconChanged?.();
     status.textContent = hash ? t("products.picture.saved") : t("products.picture.cleared");
   } catch (err) {
     status.textContent = apiErrorMessage(err, t("products.error.network"));
@@ -565,14 +581,19 @@ async function setPicture(product, hash, current, status, iconInput) {
 // Unlike setPicture it does not rethrow. There is no selection state to roll
 // back — the file input was cleared the moment the file was read — and the
 // status line already carries the server's own words.
-async function uploadPicture(product, file, current, status, iconInput) {
+async function uploadPicture(product, file, current, status, onIconChanged) {
   status.hidden = false;
   status.textContent = t("products.picture.uploading");
 
   const body = new FormData();
   body.append("image", file);
   try {
-    applyPicture(product, await postForm(`${basePath()}/${product.id}/image`, body), current, iconInput);
+    const updated = await postForm(`${basePath()}/${product.id}/image`, body);
+    product.image_url = updated.image_url ?? null;
+    product.icon_name = updated.icon_name ?? null;
+    clearChildren(current);
+    current.append(currentPicture(product));
+    onIconChanged?.();
     status.textContent = t("products.picture.saved");
   } catch (err) {
     // Deliberately not rethrown, where setPicture just above does rethrow.
@@ -584,21 +605,79 @@ async function uploadPicture(product, file, current, status, iconInput) {
   }
 }
 
-// applyPicture writes what the route answered back onto the product and
-// re-renders the picture alone. Both change paths go through it, so the two
-// cannot disagree about which fields the response carries.
+// renderIconField replaces the free-text icon_name input
+// (docs/specs/40-icon-picker.md, "The picker UI") with a "Change icon"
+// trigger that opens js/icon-picker.js below it — the same open/toggle shape
+// renderPicture uses for the picture change paths above.
 //
-// It also resyncs the edit form's `icon` input to the new `icon_name` (#251).
-// Both routes always clear icon_name — a picture change and a picked icon are
-// alternatives — so the input is reset unconditionally rather than only when
-// the value actually moved; a stale DOM value would otherwise survive into
-// the next Save and reinstate an icon the user just cleared.
-function applyPicture(product, updated, current, iconInput) {
-  product.image_url = updated.image_url ?? null;
-  product.icon_name = updated.icon_name ?? null;
-  clearChildren(current);
-  current.append(currentPicture(product));
-  iconInput.value = product.icon_name ?? "";
+// A pick writes immediately, through the same PATCH the Save button uses
+// (`{"icon_name": "…"}` or `{"icon_name": null}` to clear), independently of
+// whatever the rest of the edit form currently holds — exactly like a picture
+// change already does, and for the same reason: the edit form beside it may
+// carry changes nobody has saved yet, and picking an icon must not discard
+// them.
+//
+// Returns `refresh`, alongside `node`, so renderPicture can resync this
+// field's "current icon" line when a picture write clears icon_name out from
+// under it — the two fields are siblings built independently, and neither
+// has any other handle onto the other's DOM.
+function renderIconField(product) {
+  const current = el("p", { class: "muted", "data-role": "current-icon" }, [text(currentIconLabel(product))]);
+  const status = el("p", { class: "muted", "data-role": "icon-status", hidden: true });
+  const pickerBox = el("div", { "data-role": "icon-picker", class: "stack", hidden: true });
+
+  const change = el(
+    "button",
+    {
+      type: "button",
+      class: "btn btn--ghost",
+      "data-role": "change-icon",
+      onclick: async () => {
+        pickerBox.hidden = false;
+        await renderIconPicker(pickerBox, {
+          storageId,
+          currentIconName: product.icon_name,
+          keyPrefix: "products.icons",
+          onPick: (iconName) => setIcon(product, iconName, current, status),
+        });
+      },
+    },
+    [text(t("products.icons.change"))],
+  );
+
+  const node = el("div", { class: "field" }, [
+    el("label", {}, [text(t("products.edit.icon"))]),
+    current,
+    change,
+    pickerBox,
+    status,
+  ]);
+
+  return { node, refresh: () => { current.textContent = currentIconLabel(product); } };
+}
+
+function currentIconLabel(product) {
+  return product.icon_name
+    ? t("products.icons.current", { icon: product.icon_name })
+    : t("products.icons.current.none");
+}
+
+// setIcon writes the picked icon_name and re-renders only the field's own
+// "current icon" line — the same narrow-update shape setPicture uses above,
+// for the same reason: a full reload() would discard unsaved edits sitting in
+// the rest of the form. Rethrows on failure so the picker rolls its selection
+// back, exactly like setPicture does.
+async function setIcon(product, iconName, current, status) {
+  status.hidden = true;
+  try {
+    const updated = await patch(`${basePath()}/${product.id}`, { icon_name: iconName });
+    product.icon_name = updated.icon_name ?? null;
+    current.textContent = currentIconLabel(product);
+  } catch (err) {
+    status.hidden = false;
+    status.textContent = apiErrorMessage(err, t("products.error.network"));
+    throw err;
+  }
 }
 
 function renderEditForm(product) {
@@ -631,18 +710,13 @@ function renderEditForm(product) {
     value: product.default_shelf_life_days == null ? "" : String(product.default_shelf_life_days),
   });
 
-  const icon = el("input", {
-    type: "text", id: "p-icon", maxlength: "100", placeholder: "noto:cheese-wedge",
-    value: product.icon_name ?? "",
-  });
-
   const form = el(
     "form",
     {
       class: "stack",
       onsubmit: (event) => {
         event.preventDefault();
-        save(product, { name, category, itemType, minStock, shelfLife, icon });
+        save(product, { name, category, itemType, minStock, shelfLife });
       },
     },
     [
@@ -651,13 +725,12 @@ function renderEditForm(product) {
       field(t("products.edit.itemTypeLabel"), itemType),
       field(t("products.edit.minStock"), minStock),
       field(t("products.edit.shelfLife"), shelfLife, t("products.edit.shelfLife.hint")),
-      field(t("products.edit.icon"), icon, t("products.edit.icon.hint")),
       el("div", { class: "row" }, [
         el("button", { type: "submit", class: "btn btn--primary" }, [text(t("common.save"))]),
       ]),
     ],
   );
-  return { form, iconInput: icon };
+  return { form };
 }
 
 function field(label, input, hint) {
@@ -817,10 +890,6 @@ async function save(product, inputs) {
   const shelfLifeRaw = inputs.shelfLife.value.trim();
   const shelfLife = shelfLifeRaw === "" ? null : Number.parseInt(shelfLifeRaw, 10);
   if (shelfLife !== (product.default_shelf_life_days ?? null)) body.default_shelf_life_days = shelfLife;
-
-  const iconRaw = inputs.icon.value.trim();
-  const icon = iconRaw === "" ? null : iconRaw;
-  if (icon !== (product.icon_name ?? null)) body.icon_name = icon;
 
   if (Object.keys(body).length === 0) {
     showStatus(t("products.save.nothingChanged"));
