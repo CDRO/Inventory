@@ -409,9 +409,13 @@ Before assigning packages to a wave, check what each one touches:
    model/effort/advisor/stale threshold; it does run the orchestrator's own
    `scripts/doctor` pre-flight first (see "What the orchestrator watches"
    below), the same as a real run, so a broken Docker/gh/claude setup is
-   caught there too, before anything else. `-Validate` never reaches that
-   check, so running `scripts/doctor` by hand during planning is still worth
-   doing on its own.
+   caught there too, before anything else — including, now, whether
+   `HTTP_PORT`/`TRAEFIK_PORT` from the **main checkout's own** `.env` are
+   free, which a wave that used to `-DryRun` cleanly can fail on if the
+   operator's own dev stack happens to be up on those same ports; stop it
+   first, or the pre-flight will say so and refuse. `-Validate` never
+   reaches that check, so running `scripts/doctor` by hand during planning
+   is still worth doing on its own.
 6. Report to the user what was planned, and the command that starts it. Do
    **not** start the orchestrator yourself — that is the user's call.
 
@@ -479,11 +483,28 @@ grows to cover.
 The orchestrator's own pre-flight, before it opens a single worktree or
 window, is `scripts/doctor` — it replaced the inline `docker compose
 version`/`docker info` pair this script used to run itself; a failure fails
-fast with `scripts/doctor`'s own output, remediation included. `git`, `gh`,
-and `claude` (including its `--remote-control` support) stay checked
-separately, since they are the orchestrator's own dependency, not something
-`scripts/doctor`'s checks (aimed at what a package session's ship loop
-needs) cover.
+fast with `scripts/doctor`'s own output, remediation included.
+`scripts/doctor` already checks that `gh` and `claude` are present and
+authenticated, but `git`/`gh`/`claude` PATH presence is *also* checked
+separately in Main flow, just ahead of the doctor call, with an
+orchestrator-specific message for each — a small, deliberate overlap that
+fails on the exact right line rather than inside a ten-check report. The one
+thing `scripts/doctor` cannot cover at all is the `--remote-control` flag:
+proving `claude` is present and authenticated is not the same as proving
+*this installed version* understands that flag, so that check stays the
+orchestrator's own.
+
+One of `scripts/doctor`'s ten checks has a side effect worth knowing about
+here specifically because it changed what `-DryRun` does: it reads
+`HTTP_PORT`/`TRAEFIK_PORT` from the **main checkout's own** `.env` (never a
+package worktree's, which gets its own deterministic ports later) and binds
+each briefly with a throwaway `docker run -p` to prove they are free. If the
+operator's own dev stack is already up on those same ports when a wave
+starts, the pre-flight now refuses — something the old inline `docker info`
+check never looked at, and something `-DryRun` never did either, since it
+used to skip Docker I/O beyond `docker compose version`/`docker info`. Stop
+the local dev stack before starting a wave, or expect the pre-flight to say
+so and refuse.
 
 Once a package's session is running, the orchestrator has one more thing to
 notice: whether it is still moving. On every poll it computes each open

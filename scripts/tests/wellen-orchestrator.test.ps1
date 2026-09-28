@@ -594,6 +594,72 @@ try { Invoke-Wave -Plan $null -Standards $null -Wave $wave -NextWave $null } cat
 Assert (-not $threw) "the polling loop terminates without a shadowed helper throwing ($err)"
 Assert (($stopOrder -join ',') -eq 'iw-b,iw-a') "teardown fires in ACTUAL close order (iw-b, listed second, closes first) - got '$($stopOrder -join ',')'"
 
+Write-Host "== Invoke-Wave (unsequential branch) wiring: Test-PackageHeartbeat is actually called for a still-open package (H11) =="
+
+# The #188 test above already drives this same polling loop, but never
+# shadows or asserts on Test-PackageHeartbeat - it proves the loop's
+# teardown ordering, nothing about the heartbeat call this PR adds to it.
+# Deleting that call (and the staleAfterMinutes resolution above it) from
+# Invoke-Wave leaves every existing assertion in this file green - this test
+# is what actually fails if that happens.
+$heartbeatCallsUnseq = [System.Collections.Generic.List[string]]::new()
+function Test-PackageHeartbeat {
+    param($Package, [string]$WorktreePath, [int]$StaleAfterMinutes, [string]$WindowTitle)
+    $heartbeatCallsUnseq.Add($Package.slug)
+}
+$closedUnseq = @{}
+$pkgHbU = [pscustomobject]@{ spec = 'HBU'; specIssue = 100; slug = 'hbu-pkg'; branch = 'hbu-branch' }
+$waveHbU = [pscustomobject]@{ number = 20; waveIssue = 101; integrationBranch = 'hbu'; packages = @($pkgHbU) }
+function Test-IssueClosed { param([int]$Number) return [bool]$closedUnseq[$Number] }
+function Invoke-Package { param($Plan, $Standards, $Wave, $Package) }
+function Invoke-Native { param([scriptblock]$Command) $script:NativeExit = 0; return '999' }
+function Stop-PackageStack { param([string]$WorktreePath, [string]$Slug) $closedUnseq[$waveHbU.waveIssue] = $true }
+$script:sleepsHbU = 0
+function Start-Sleep {
+    param($Seconds)
+    $script:sleepsHbU++
+    if ($script:sleepsHbU -gt 3) { throw 'watchdog: unsequential heartbeat wiring test did not terminate' }
+    $closedUnseq[$pkgHbU.specIssue] = $true
+}
+$standardsHbU = [pscustomobject]@{ staleAfterMinutes = 45 }
+$threwHbU = $false
+try { Invoke-Wave -Plan $null -Standards $standardsHbU -Wave $waveHbU -NextWave $null } catch { $threwHbU = $true }
+Assert (-not $threwHbU) 'the unsequential branch terminates without throwing'
+Assert ($heartbeatCallsUnseq.Count -ge 1) 'Test-PackageHeartbeat is actually invoked for the still-open package while polling'
+Assert ($heartbeatCallsUnseq -contains 'hbu-pkg') 'and it is invoked for the right package'
+
+Write-Host "== Invoke-Wave (sequential branch) wiring: Wait-ForPackageIssueClosed actually calls Test-PackageHeartbeat (H11) =="
+
+# The sequential branch has no equivalent to the #188/unsequential tests at
+# all before this PR - Wait-ForPackageIssueClosed's own heartbeat call had
+# zero coverage (confirmed by grep in review). Same shape as the test above,
+# against a "sequential": true wave instead.
+$heartbeatCallsSeq = [System.Collections.Generic.List[string]]::new()
+function Test-PackageHeartbeat {
+    param($Package, [string]$WorktreePath, [int]$StaleAfterMinutes, [string]$WindowTitle)
+    $heartbeatCallsSeq.Add($Package.slug)
+}
+$closedSeq = @{}
+$pkgHbS = [pscustomobject]@{ spec = 'HBS'; specIssue = 200; slug = 'hbs-pkg'; branch = 'hbs-branch' }
+$waveHbS = [pscustomobject]@{ number = 21; waveIssue = 201; integrationBranch = 'hbs'; sequential = $true; packages = @($pkgHbS) }
+function Test-IssueClosed { param([int]$Number) return [bool]$closedSeq[$Number] }
+function Invoke-Package { param($Plan, $Standards, $Wave, $Package) }
+function Invoke-Native { param([scriptblock]$Command) $script:NativeExit = 0; return '999' }
+function Stop-PackageStack { param([string]$WorktreePath, [string]$Slug) $closedSeq[$waveHbS.waveIssue] = $true }
+$script:sleepsHbS = 0
+function Start-Sleep {
+    param($Seconds)
+    $script:sleepsHbS++
+    if ($script:sleepsHbS -gt 3) { throw 'watchdog: sequential heartbeat wiring test did not terminate' }
+    $closedSeq[$pkgHbS.specIssue] = $true
+}
+$standardsHbS = [pscustomobject]@{ staleAfterMinutes = 45 }
+$threwHbS = $false
+try { Invoke-Wave -Plan $null -Standards $standardsHbS -Wave $waveHbS -NextWave $null } catch { $threwHbS = $true }
+Assert (-not $threwHbS) 'the sequential branch terminates without throwing'
+Assert ($heartbeatCallsSeq.Count -ge 1) 'Wait-ForPackageIssueClosed actually invokes Test-PackageHeartbeat while waiting'
+Assert ($heartbeatCallsSeq -contains 'hbs-pkg') 'and it is invoked for the right package'
+
 Write-Host "== Import-WavePlan: staleAfterMinutes validation (H11) =="
 
 # staleAfterMinutes is optional everywhere - Get-Field returns $null when it
@@ -694,6 +760,26 @@ $threw = $false; $result = $null
 try { $result = Get-NewestReviewerCommentDate -Branch 'some-branch' } catch { $threw = $true }
 Assert (-not $threw) 'Get-NewestReviewerCommentDate does not throw on unparseable gh output'
 Assert ($null -eq $result) 'and reports no signal'
+
+Write-Host "== Register-PackageStartIfUnknown: seeds a floor on restart, without clobbering one that already exists (H11) =="
+
+# Invoke-Package's restart-meets-existing-worktree path (.RESTART SAFETY)
+# calls this so a package with none of the three real heartbeat signals is
+# still eventually flagged stale after a restart, instead of never at all -
+# round-1 review's finding (review-go). Not overwriting an existing floor
+# matters too: a second restart, or this same process noticing the same
+# package again on a later poll, must not keep pushing "started" into the
+# future and resetting the clock.
+$script:PackageStartedAt = @{}
+Register-PackageStartIfUnknown -Slug 'restart-pkg'
+Assert ($script:PackageStartedAt.ContainsKey('restart-pkg')) 'seeds a floor for a package with none yet'
+$seededAt = $script:PackageStartedAt['restart-pkg']
+Assert (((Get-Date).ToUniversalTime() - $seededAt).TotalSeconds -lt 10) 'the seeded floor is "now" (UTC), not some arbitrary past or future time'
+
+$earlierFloor = (Get-Date).ToUniversalTime().AddMinutes(-45)
+$script:PackageStartedAt['restart-pkg'] = $earlierFloor
+Register-PackageStartIfUnknown -Slug 'restart-pkg'
+Assert ($script:PackageStartedAt['restart-pkg'] -eq $earlierFloor) 'a package that already has a floor keeps it - a later call never overwrites it'
 
 Write-Host "== Get-PackageLastActivity: actually wired to all three heartbeat sources (H11) =="
 

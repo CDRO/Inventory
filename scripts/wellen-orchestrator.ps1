@@ -423,11 +423,21 @@ function Invoke-Native {
 # tells the same story). Every check scripts/doctor makes - the docker daemon
 # and Compose version checks this script used to duplicate, plus gh auth, git
 # identity/line endings, claude auth, disk space, and the build-cache volume
-# - is read-only; a failure fails fast with the doctor's own output, which
-# already names the remediation. git/gh/claude PATH presence and the
-# --remote-control flag stay checked separately in Main flow: they are
-# orchestrator-specific (this script's own dependency, not something a
-# package session's ship loop needs), so scripts/doctor does not check them.
+# - never writes or mutates anything of this repo's or a package's; the one
+# check that is not purely passive (HTTP_PORT/TRAEFIK_PORT from the MAIN
+# checkout's .env, bound briefly via a throwaway `docker run -p` to prove
+# they are free - scripts/doctor itself, check 5) can now make a -DryRun that
+# used to be side-effect-free refuse to proceed if the operator's own dev
+# stack happens to be up on those ports (documented in "What the orchestrator
+# watches", scripts/wellen-planen.md). A failure fails fast with the doctor's
+# own output, which already names the remediation. git/gh/claude PATH presence is ALSO checked
+# separately in Main flow, ahead of this call, with an orchestrator-specific
+# message for each - a small overlap with scripts/doctor's own gh/claude
+# checks, kept because it fails on the exact right line rather than inside a
+# ten-check report. The one thing genuinely unique to the orchestrator that
+# scripts/doctor's checks do not cover at all is the --remote-control flag:
+# proving `claude` is present and authenticated (scripts/doctor) is not the
+# same as proving THIS installed version understands that flag.
 function Invoke-DoctorPreflight {
     if (-not (Get-Command sh -ErrorAction SilentlyContinue)) {
         throw "sh (Git Bash) not found on PATH - scripts/doctor needs it, and every package session's own ship loop already requires Git Bash on PATH for the same reason."
@@ -516,6 +526,21 @@ function Wait-ForRemoteBranch {
 # written a worklog, or received a PR comment in its first few minutes is new,
 # not stale.
 $script:PackageStartedAt = @{}
+
+# Seeds PackageStartedAt for a package THIS orchestrator process has not seen
+# start (a restart meeting an existing worktree, .RESTART SAFETY) - but only
+# if nothing already has a floor for it, so a second restart does not keep
+# pushing the floor forward and never seeds a package Invoke-Package already
+# started for real in THIS process's own lifetime. Without this, a package
+# with none of the three real signals (never committed, never wrote a
+# worklog, no PR yet) would never be flagged stale after a restart at all -
+# exactly the "crashed window" case the heartbeat's own header names.
+function Register-PackageStartIfUnknown {
+    param([string]$Slug)
+    if (-not $script:PackageStartedAt.ContainsKey($Slug)) {
+        $script:PackageStartedAt[$Slug] = (Get-Date).ToUniversalTime()
+    }
+}
 
 # Slug -> UTC time of the last WARN/toast for that package, so a session stuck
 # for hours gets one log line and one toast per hour, not one per poll.
@@ -1135,6 +1160,7 @@ function Invoke-Package {
     New-PackageWorktree -Slug $Package.slug -Branch $Package.branch -BaseBranch $Wave.integrationBranch | Out-Null
 
     if ($alreadyExists) {
+        Register-PackageStartIfUnknown -Slug $Package.slug
         Write-Log "Worktree for '$($Package.spec)' already existed - no new session started, only waiting for completion. If no session is running there anymore, please check by hand." 'WARN'
         return
     }
