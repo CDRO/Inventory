@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -12,22 +13,74 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The icon picker's search, pick and alias-recording flow, file by file.
+// iconFile is one source file in the picker's search, pick and
+// alias-recording flow.
 //
-// mayImportNetHTTP marks the two files that live in package httpapi, whose
-// handler signatures are necessarily http.ResponseWriter/*http.Request. The
-// import is unavoidable there, so those files are held to the narrower rule
-// below instead: they may name the package, but must not construct an
-// outbound request with it.
-var iconSearchFiles = []struct {
+// mayImportNetHTTP marks the files that live in package httpapi, whose handler
+// signatures are necessarily http.ResponseWriter/*http.Request. The import is
+// unavoidable there, so those files are held to the narrower rule instead:
+// they may name the package, but must not construct an outbound request with
+// it.
+type iconFile struct {
 	path             string
 	mayImportNetHTTP bool
-}{
-	{path: "iconlib.go"},
-	{path: "../store/icons.go"},
-	{path: "../store/icon_aliases.go"},
-	{path: "../httpapi/iconsuggestions.go", mayImportNetHTTP: true},
-	{path: "../httpapi/icons.go", mayImportNetHTTP: true},
+}
+
+// requiredIconFiles is the tripwire under the globs below: the files that
+// implement this flow today. A rename that moves one out of the "icon*"
+// convention would otherwise shrink the glob's result silently, leaving the
+// test green over a file it no longer looks at.
+var requiredIconFiles = []string{
+	"iconlib.go",
+	"../store/icons.go",
+	"../store/icon_aliases.go",
+	"../httpapi/icons.go",
+	"../httpapi/iconsuggestions.go",
+}
+
+// iconSearchFiles globs the icon path rather than listing it, so that a file
+// added to the flow later is covered the day it lands rather than the day
+// someone remembers this test exists. review-go raised the fixed list as a
+// silent-coverage-loss risk on PR #426 round 2: a rename is caught by
+// requiredIconFiles above, but an *addition* to a hardcoded list is not caught
+// by anything.
+func iconSearchFiles(t *testing.T) []iconFile {
+	t.Helper()
+
+	groups := []struct {
+		glob             string
+		mayImportNetHTTP bool
+	}{
+		{glob: "*.go"},              // this package: the vendored icon set itself
+		{glob: "../store/icon*.go"}, // icons.go, icon_aliases.go
+		{glob: "../httpapi/icon*.go", mayImportNetHTTP: true},
+	}
+
+	var files []iconFile
+	found := map[string]bool{}
+	for _, group := range groups {
+		matches, err := filepath.Glob(group.glob)
+		require.NoError(t, err)
+
+		for _, match := range matches {
+			match = filepath.ToSlash(match)
+			if strings.HasSuffix(match, "_test.go") {
+				continue
+			}
+			files = append(files, iconFile{path: match, mayImportNetHTTP: group.mayImportNetHTTP})
+			found[match] = true
+		}
+	}
+
+	for _, required := range requiredIconFiles {
+		require.Truef(t, found[required],
+			"%s implements the icon picker's search path but this test no longer "+
+				"sees it — if it was renamed, the \"icon*\" naming convention these "+
+				"globs rely on has been broken, and the guard has quietly stopped "+
+				"covering it. Rename it back or widen the globs; do not just update "+
+				"requiredIconFiles.", required)
+	}
+	return files
 }
 
 // Every net/http identifier that begins an outbound request. Naming them
@@ -54,6 +107,69 @@ var networkImports = map[string]bool{
 	"net/http/cgi": true,
 	"net/rpc":      true,
 	"net/smtp":     true,
+}
+
+const (
+	modulePrefix = "github.com/CDRO/Inventory/"
+	// The repository root, relative to this package's directory.
+	repoRoot = "../../"
+)
+
+// packageReachesNetwork returns the import chain by which pkg reaches a
+// network package, or nil if it cannot reach one. pkg is an import path inside
+// this module; imports outside it are not followed.
+//
+// This is what closes the gap a direct-call check leaves open. Banning
+// net/http in the icon path's own files says nothing about a call made one
+// level down — and this repository already contains the perfect vehicle for
+// exactly that: internal/imagesearch exposes Iconify.Candidates, a live search
+// against api.iconify.design, wired up and working for spec 07. A single line
+// in the icon handler,
+//
+//	imagesearch.NewIconify(nil).Candidates(r.Context(), query, limit)
+//
+// reintroduces the live icon search that spec 42 exists to remove, with no
+// net/http import and no URL literal anywhere in the icon path. That is also
+// the most *likely* shape for the regression, not a contrived one: a
+// "restore the old search as a fallback" patch would reach for the client that
+// is already there. It was found by review-tests probing this guard for
+// evasions on PR #426 round 2, and it defeated the guard's first version.
+func packageReachesNetwork(t *testing.T, pkg string, seen map[string]bool) []string {
+	t.Helper()
+
+	if seen[pkg] {
+		return nil
+	}
+	seen[pkg] = true
+
+	dir := filepath.Join(repoRoot, strings.TrimPrefix(pkg, modulePrefix))
+	entries, err := os.ReadDir(dir)
+	require.NoErrorf(t, err, "cannot read package %s at %s", pkg, dir)
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+
+		fset := token.NewFileSet()
+		parsed, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		require.NoError(t, err)
+
+		for _, imp := range parsed.Imports {
+			path := strings.Trim(imp.Path.Value, `"`)
+			if networkImports[path] {
+				return []string{pkg, path}
+			}
+			if !strings.HasPrefix(path, modulePrefix) {
+				continue
+			}
+			if chain := packageReachesNetwork(t, path, seen); chain != nil {
+				return append([]string{pkg}, chain...)
+			}
+		}
+	}
+	return nil
 }
 
 // urlPattern finds each absolute URL inside a string literal. Literals here
@@ -103,7 +219,7 @@ const xmlNamespacePrefix = "http://www.w3.org/"
 func TestIconSearchNeverLeavesTheDeployment(t *testing.T) {
 	t.Parallel()
 
-	for _, file := range iconSearchFiles {
+	for _, file := range iconSearchFiles(t) {
 		t.Run(file.path, func(t *testing.T) {
 			t.Parallel()
 
@@ -117,9 +233,19 @@ func TestIconSearchNeverLeavesTheDeployment(t *testing.T) {
 			parsed, err := parser.ParseFile(fset, file.path, src, 0)
 			require.NoError(t, err)
 
+			// The local name net/http is bound to in this file. An aliased
+			// import (`import nethttp "net/http"`) would otherwise walk past
+			// the outbound-call check below, which review-go raised on PR #426
+			// round 2 — the check compared against the literal "http".
+			httpName := ""
+
 			for _, imp := range parsed.Imports {
 				path := strings.Trim(imp.Path.Value, `"`)
 				if path == "net/http" && file.mayImportNetHTTP {
+					httpName = "http"
+					if imp.Name != nil {
+						httpName = imp.Name.Name
+					}
 					continue
 				}
 				require.Falsef(t, networkImports[path],
@@ -128,13 +254,25 @@ func TestIconSearchNeverLeavesTheDeployment(t *testing.T) {
 						"the vendored icon set (docs/specs/40-icon-picker.md, "+
 						"docs/specs/42-local-icon-library.md).",
 					file.path, path)
+
+				if !strings.HasPrefix(path, modulePrefix) {
+					continue
+				}
+				chain := packageReachesNetwork(t, path, map[string]bool{})
+				require.Nilf(t, chain,
+					"%s imports %q, which can reach the network: %s. The icon path may "+
+						"not call out even indirectly — internal/imagesearch's Iconify "+
+						"client is spec 07's image-suggestion path, and routing icon "+
+						"search back through it is exactly the regression "+
+						"docs/specs/42-local-icon-library.md exists to prevent.",
+					file.path, path, strings.Join(chain, " -> "))
 			}
 
 			ast.Inspect(parsed, func(n ast.Node) bool {
 				switch node := n.(type) {
 				case *ast.SelectorExpr:
 					pkg, ok := node.X.(*ast.Ident)
-					if !ok || pkg.Name != "http" {
+					if !ok || httpName == "" || pkg.Name != httpName {
 						return true
 					}
 					if name, banned := outboundHTTPIdents[node.Sel.Name]; banned {
@@ -198,24 +336,40 @@ func TestIconPickerFrontendCallsOnlyItsOwnAPI(t *testing.T) {
 	}
 }
 
-// stripLineComment drops a trailing // comment, leaving a URL's own "//"
-// alone.
+// stripLineComment drops a trailing // comment, leaving any "//" that is
+// inside a string literal alone.
 //
-// The naive strings.Cut(line, "//") is wrong here in a way that matters: it
-// cuts `const X = "https://api.iconify.design"` at the scheme's own slashes
-// and hands back `const X = "https:`, which contains neither "http://" nor
-// "https://". The first draft of this test did exactly that and passed
-// against a deliberately injected live call — a vacuous guard is worse than
-// none, because it reads as coverage.
+// Two different bugs have lived in this one function, both of which made a
+// check vacuous while it still read as coverage — which is worse than having
+// no check at all:
+//
+//   - strings.Cut(line, "//") cuts `const X = "https://api.iconify.design"`
+//     at the scheme's own slashes and returns `const X = "https:`, containing
+//     neither "http://" nor "https://". The first draft did this and passed
+//     against a deliberately injected live call.
+//   - Treating only a preceding ':' as "not a comment" fixes that case but
+//     leaves the protocol-relative one dead: `const CDN = "//cdn.example/x"`
+//     is still cut at the quote, so the `"//` check could never fire. Found
+//     by review-go on PR #426 round 2.
+//
+// Tracking string state is what actually covers both, and is why this is a
+// scanner rather than a search.
 func stripLineComment(line string) string {
-	for i := 0; i+1 < len(line); i++ {
-		if line[i] != '/' || line[i+1] != '/' {
-			continue
+	var quote byte
+	for i := 0; i < len(line); i++ {
+		char := line[i]
+		switch {
+		case quote != 0:
+			if char == '\\' {
+				i++ // skip whatever this escapes, including a quote
+			} else if char == quote {
+				quote = 0
+			}
+		case char == '"' || char == '\'' || char == '`':
+			quote = char
+		case char == '/' && i+1 < len(line) && line[i+1] == '/':
+			return line[:i]
 		}
-		if i > 0 && line[i-1] == ':' {
-			continue // part of a scheme, not the start of a comment
-		}
-		return line[:i]
 	}
 	return line
 }
