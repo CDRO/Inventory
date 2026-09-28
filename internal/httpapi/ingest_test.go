@@ -56,6 +56,20 @@ func (f *fakeIngester) Start(_ context.Context, u ingest.Upload) (*store.Job, er
 	return &store.Job{ID: uuid.New(), StorageID: u.StorageID, Kind: u.Kind, Status: store.JobPending}, nil
 }
 
+// StartShoppingList is the photographed-list upload of
+// docs/specs/07-shopping-list-reconciliation.md. It records into the same
+// `started` slice as Start, so a test can assert on the kind the handler
+// asked for rather than on which method it happened to call.
+func (f *fakeIngester) StartShoppingList(_ context.Context, u ingest.Upload) (*store.Job, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.started = append(f.started, u)
+	return &store.Job{ID: uuid.New(), StorageID: u.StorageID, Kind: u.Kind, Status: store.JobPending}, nil
+}
+
 type fakeIngestStore struct {
 	mu        sync.Mutex
 	decisions []store.IngestDecision

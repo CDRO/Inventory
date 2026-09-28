@@ -28,7 +28,7 @@ const maxLabelRunes = 255
 // kilobytes of JSON; this is room for a very full shelf, not for a runaway.
 const maxResponseBytes = 2 << 20
 
-// Mode is which of the two ingestion prompts to use
+// Mode is which prompt and reading of the reply to use
 // (docs/specs/06-vision-shelf-ingestion.md).
 type Mode string
 
@@ -44,6 +44,22 @@ const (
 	// crop; unlike ModeShelf it infers no location path, since consumption
 	// never places anything.
 	ModeConsumption Mode = "consumption"
+	// ModeShoppingList reads a photographed shopping list as a list from the
+	// start, rather than looking for shelved products first
+	// (docs/specs/07-shopping-list-reconciliation.md, "Ingestion"). It is the
+	// mode of a photo somebody uploaded *as* a list, where there is no
+	// ambiguity to resolve — the person chose that endpoint by choosing that
+	// mode (docs/specs/41-mixed-photo-classification.md, "No reverse check").
+	ModeShoppingList Mode = "shopping_list"
+)
+
+// Bounds on an extracted list. maxListLines is far above a household's
+// shopping and far below anything that would make matching every line an
+// expensive request; maxLineRunes matches shopping_list_items.raw_text, so a
+// line is always storable without a second truncation downstream.
+const (
+	maxListLines = 200
+	maxLineRunes = 255
 )
 
 var (
@@ -62,6 +78,19 @@ var (
 // Analysis is GeminiShelfAnalysis from the spec, validated.
 type Analysis struct {
 	Items []Item
+	// LooksLikeShoppingList is the model saying the photo is primarily a
+	// written list of items rather than the shelved or held products the
+	// mode asked about (docs/specs/41-mixed-photo-classification.md). It
+	// rides along on the one call every upload already makes, so an ordinary
+	// shelf photo — which simply gets false back — costs nothing extra.
+	//
+	// Always true for ModeShoppingList, where reading a list is the whole
+	// request rather than a mismatch to surface.
+	LooksLikeShoppingList bool
+	// ShoppingListLines is the line-by-line transcription behind that claim,
+	// in the photo's own order. Never nil, so a caller may range over it
+	// without checking.
+	ShoppingListLines []string
 }
 
 // Item is one detected product.
@@ -204,6 +233,16 @@ func (c *Client) generate(ctx context.Context, model string, body []byte) (strin
 	return text.String(), nil
 }
 
+// wireItem is one detected product exactly as the model sends it, before
+// ParseAnalysis decides what to repair and what to refuse.
+type wireItem struct {
+	Label                string   `json:"label"`
+	Confidence           *float64 `json:"confidence"`
+	Quantity             *int     `json:"quantity"`
+	BoundingBox          *Box     `json:"bounding_box"`
+	ProposedLocationPath []string `json:"proposed_location_path"`
+}
+
 // ParseAnalysis validates the model's JSON against the contract.
 //
 // What fails the whole analysis: text that is not JSON, a missing items array,
@@ -219,22 +258,37 @@ func (c *Client) generate(ctx context.Context, model string, body []byte) (strin
 // box or path, whatever the model sent.
 func ParseAnalysis(mode Mode, text []byte) (*Analysis, error) {
 	var wire struct {
-		Items *[]struct {
-			Label                string   `json:"label"`
-			Confidence           *float64 `json:"confidence"`
-			Quantity             *int     `json:"quantity"`
-			BoundingBox          *Box     `json:"bounding_box"`
-			ProposedLocationPath []string `json:"proposed_location_path"`
-		} `json:"items"`
+		Items                 *[]wireItem `json:"items"`
+		LooksLikeShoppingList bool        `json:"looks_like_shopping_list"`
+		ShoppingListLines     []string    `json:"shopping_list_lines"`
 	}
 	if err := json.Unmarshal(text, &wire); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrMalformedResponse, err)
 	}
-	if wire.Items == nil {
+	switch {
+	case wire.Items != nil:
+	case mode == ModeShoppingList:
+		// The one mode that never asked about items: a photographed list has
+		// none, so an omitted array here is the contract being met rather
+		// than a reply that could not be read.
+		wire.Items = &[]wireItem{}
+	default:
 		return nil, fmt.Errorf("%w: no items array", ErrMalformedResponse)
 	}
 
-	out := &Analysis{Items: make([]Item, 0, len(*wire.Items))}
+	out := &Analysis{
+		Items:                 make([]Item, 0, len(*wire.Items)),
+		LooksLikeShoppingList: wire.LooksLikeShoppingList || mode == ModeShoppingList,
+		ShoppingListLines:     cleanListLines(wire.ShoppingListLines),
+	}
+	// A claim with nothing behind it is not a classification anybody can act
+	// on — the review banner would offer a list of no lines, and
+	// from_job_id would have nothing to create. Treated as "not a list"
+	// rather than as a malformed reply: the items the mode actually asked
+	// for are still there and still reviewable.
+	if len(out.ShoppingListLines) == 0 && mode != ModeShoppingList {
+		out.LooksLikeShoppingList = false
+	}
 	for i, w := range *wire.Items {
 		label := strings.TrimSpace(w.Label)
 		if label == "" {
@@ -288,7 +342,42 @@ func validBox(b *Box) bool {
 	return b.Width > 0 && b.Height > 0 && b.X+b.Width <= 1+slack && b.Y+b.Height <= 1+slack
 }
 
-// prompts are the two instructions. They describe the task and nothing else:
+// cleanListLines trims the model's transcription into storable lines: blank
+// ones dropped, each one bounded by what shopping_list_items.raw_text holds,
+// and the whole list bounded by what one submission may carry. The order is
+// the photo's own, which is the order the person wrote their list in.
+func cleanListLines(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if utf8.RuneCountInString(line) > maxLineRunes {
+			line = string([]rune(line)[:maxLineRunes])
+		}
+		out = append(out, line)
+		if len(out) == maxListLines {
+			break
+		}
+	}
+	return out
+}
+
+// classifyInstruction is appended to every mode that photographs physical
+// things, so the one call each upload already makes can also say "this
+// doesn't look like what you told me"
+// (docs/specs/41-mixed-photo-classification.md). It never asks the model to
+// choose what happens next — only to report what it sees; the decision stays
+// with the person, on the review screen, and only when there is a real
+// mismatch to decide about.
+const classifyInstruction = ` If the image is primarily a handwritten or printed list of items — a ` +
+	`shopping list or a written note, rather than physical products on a shelf or in someone's hand — ` +
+	`set looks_like_shopping_list to true and put your best-effort line-by-line transcription in ` +
+	`shopping_list_lines, one entry per written line, in the order they are written. Otherwise set ` +
+	`looks_like_shopping_list to false and leave shopping_list_lines empty.`
+
+// prompts are the instructions. They describe the task and nothing else:
 // no catalog text, no product names from any storage, nothing a stranger wrote
 // is ever interpolated into them (docs/specs/02-data-model.md).
 var prompts = map[Mode]string{
@@ -299,19 +388,27 @@ var prompts = map[Mode]string{
 		`units, as fractions of the image width and height; and, if the photo lets you infer it, the ` +
 		`location path from the room down to this spot, for example ["Basement", "Right Shelf", "Layer 2"]. ` +
 		`Return a shorter path, or an empty one, rather than guessing. Do not list things that are not ` +
-		`products, such as the shelf itself.`,
+		`products, such as the shelf itself.` + classifyInstruction,
 	ModeProduct: `You are the vision system of a household inventory app. The photo shows one product ` +
 		`someone just bought. Identify it: a short label naming the product as printed on it (brand, ` +
 		`product, size if legible), quantity 1 unless several identical units are clearly shown, and ` +
 		`your confidence from 0 to 1. Return exactly one item. Do not return a bounding box or a ` +
-		`location path.`,
+		`location path.` + classifyInstruction,
 	ModeConsumption: `You are the vision system of a household inventory app. The photo shows one or more ` +
 		`items someone has just used up, consumed or is discarding — for example an empty carton, an ` +
 		`emptied jar, or packaging being thrown away. For each distinct product: a short label naming it ` +
 		`as printed on it (brand, product, size if legible); how many units are being used up or ` +
 		`discarded; your confidence from 0 to 1; and a bounding box around all units, as fractions of the ` +
 		`image width and height. Do not return a location path. Do not list things that are not products, ` +
-		`such as a bin or the shelf itself.`,
+		`such as a bin or the shelf itself.` + classifyInstruction,
+	// No classifyInstruction here, and no mismatch to report: this photo was
+	// uploaded as a list by somebody who chose that endpoint on purpose
+	// (docs/specs/41-mixed-photo-classification.md, "No reverse check").
+	ModeShoppingList: `You are the vision system of a household inventory app. The photo shows a ` +
+		`handwritten or printed shopping list. Transcribe it: put one entry per written line into ` +
+		`shopping_list_lines, in the order the lines are written, keeping any quantity the line states ` +
+		`("eggs x2", "2 milk"). Leave out headings, doodles and anything that is not an item to buy. ` +
+		`Return an empty items array — this photo shows no shelved products.`,
 }
 
 // analysisSchema is GeminiShelfAnalysis in Gemini's schema dialect.
@@ -343,6 +440,16 @@ var analysisSchema = map[string]any{
 				},
 				"required": []string{"label", "confidence", "quantity"},
 			},
+		},
+		// The classification fields of
+		// docs/specs/41-mixed-photo-classification.md. Deliberately not in
+		// "required": the overwhelming majority of replies describe an
+		// ordinary shelf photo, and a model that answers with items alone
+		// must stay a valid reply rather than become a failed job.
+		"looks_like_shopping_list": map[string]any{"type": "BOOLEAN"},
+		"shopping_list_lines": map[string]any{
+			"type":  "ARRAY",
+			"items": map[string]any{"type": "STRING"},
 		},
 	},
 	"required": []string{"items"},

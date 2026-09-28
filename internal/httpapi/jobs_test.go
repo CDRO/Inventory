@@ -57,6 +57,19 @@ func (f *fakeJobs) Job(_ context.Context, storageID, id uuid.UUID) (*store.Job, 
 	return &copied, nil
 }
 
+// take removes a job and returns it, the way a store method that discards a
+// row inside its own transaction does.
+func (f *fakeJobs) take(storageID, id uuid.UUID) (*store.Job, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	j, ok := f.jobs[id]
+	if !ok || j.StorageID != storageID {
+		return nil, false
+	}
+	delete(f.jobs, id)
+	return j, true
+}
+
 func (f *fakeJobs) ListJobs(_ context.Context, storageID uuid.UUID, statuses []store.JobStatus, after *uuid.UUID, limit int) ([]store.Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

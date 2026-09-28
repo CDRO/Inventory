@@ -31,6 +31,13 @@ const KIND_KEYS = {
   consumption_photo: "inbox.kind.consumption_photo",
 };
 
+// Where "Review" goes for a job of each kind. Absent means review.html, which
+// renders the shelf and product proposals.
+const REVIEW_PAGES = {
+  consumption_photo: "/consume-review.html",
+  shopping_list_photo: "/shopping-list.html",
+};
+
 const STATUS_KEYS = {
   pending: "inbox.status.pending",
   done: "inbox.status.done",
@@ -186,7 +193,14 @@ function renderJob(job) {
     // (docs/specs/09-consumption-logging.md): the row shape — batches to
     // decrement, not a location to place into — differs enough that they
     // need a different page while still sharing js/review.js underneath.
-    const page = job.kind === "consumption_photo" ? "/consume-review.html" : "/review.html";
+    //
+    // A photographed shopping list has no proposal to review at all: its job
+    // already became a real list, and the resolution screen is where its
+    // lines are decided (docs/specs/07-shopping-list-reconciliation.md). It
+    // is addressed by job rather than by list because the id of the list it
+    // became lives in the payload, which the inbox listing deliberately does
+    // not carry.
+    const page = REVIEW_PAGES[job.kind] ?? "/review.html";
     const href = new URL(withStorageParam(storageId, page), location.origin);
     href.searchParams.set("job", job.id);
     actions.append(el("a", { class: "btn btn--primary", href: href.pathname + href.search }, [text(t("inbox.review"))]));

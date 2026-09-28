@@ -566,7 +566,14 @@ func NewRouter(d Deps) http.Handler {
 			}
 
 			if d.Matcher != nil {
-				lists := NewShoppingListHandler(d.Store, d.Matcher, d.ImageCache, d.ProductImages, errs)
+				// d.Ingester is declared as Ingester (upload + reanalyse);
+				// starting a photographed shopping list is a narrower thing
+				// again, asserted at runtime the same way localMatcher above
+				// is. *ingest.Service always satisfies it, and an absent one
+				// means the upload volume was unusable — the photo branch of
+				// Create then answers as the server-side problem it is.
+				listIngester, _ := d.Ingester.(ListIngester)
+				lists := NewShoppingListHandler(d.Store, d.Matcher, listIngester, d.ImageCache, d.ProductImages, d.Photos, cutouts, errs)
 				sr.Post("/shopping-lists", lists.Create)
 				sr.Get("/shopping-lists/{id}", lists.Get)
 				sr.Post("/shopping-lists/{id}/items/{item_id}/rematch", lists.Rematch)

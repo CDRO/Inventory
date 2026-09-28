@@ -587,6 +587,40 @@ INSERT INTO jobs (id, storage_id, kind, status, payload, created_by) VALUES
    '00000000-0000-7000-8000-000000000003')
 ON CONFLICT (id) DO NOTHING;
 
+-- Two shelf-ingestion jobs in "E2E Household" (...010) whose analysis spotted
+-- a shopping list instead of a shelf, for
+-- e2e/specs/mixed-classification.spec.js
+-- (docs/specs/41-mixed-photo-classification.md). This is the shape the
+-- analysis writes when Gemini answers looks_like_shopping_list: true — the
+-- E2E stack's GEMINI_API_KEY is a placeholder, so no photo is ever really
+-- analysed here, exactly as the other seeded proposals above stand in for
+-- one.
+--
+-- Two jobs rather than one because the two banner actions differ in kind:
+-- "Keep as shelf photo" only dismisses, so ...076 can be revisited however
+-- many times the suite runs, while "Process as shopping list" DISCARDS its
+-- job outright, so ...077 is consumed by the one test that clicks it and
+-- must not be shared with anything else — the same reasoning the
+-- "Discard all" fixture below uses.
+--
+-- Both have an empty rows array, the common case for a genuine list misread
+-- as a shelf: it is also what proves "Keep as shelf photo" leaves the (empty)
+-- item review intact. The first line matches "Canned Tomatoes" (...040)
+-- exactly, so the list ...077 becomes is a real, resolvable one rather than
+-- three unmatched lines.
+INSERT INTO jobs (id, storage_id, kind, status, payload, created_by) VALUES
+  ('00000000-0000-7000-8000-000000000076', '00000000-0000-7000-8000-000000000010', 'shelf_ingestion', 'done',
+   '{"mode":"shelf","location_hint_id":null,"rows":[],
+     "looks_like_shopping_list":true,
+     "shopping_list_lines":["canned tomatoes","oat milk","sourdough bread"]}',
+   '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000077', '00000000-0000-7000-8000-000000000010', 'shelf_ingestion', 'done',
+   '{"mode":"shelf","location_hint_id":null,"rows":[],
+     "looks_like_shopping_list":true,
+     "shopping_list_lines":["canned tomatoes","oat milk","sourdough bread"]}',
+   '00000000-0000-7000-8000-000000000003')
+ON CONFLICT (id) DO NOTHING;
+
 -- One shelf-ingestion job in "E2E Admin Household" (...012), which —
 -- despite the name — also starts with zero locations, the same as "E2E
 -- Zero-Locations Household" (...013) does; dedicated to

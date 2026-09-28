@@ -300,10 +300,14 @@ type fakeAPI struct {
 // newFakeAPI builds the whole fake store around an auth fake, with every other
 // resource empty.
 func newFakeAPI(auth *fakeAuth) fakeAPI {
+	// The job rows are shared: the shopping-list fake discards one when a
+	// photo is reclassified (docs/specs/41-mixed-photo-classification.md),
+	// and the job routes must then see it gone.
+	jobs := newFakeJobs()
 	return fakeAPI{
 		fakeAuth: auth, fakeLocations: &fakeLocations{}, fakeCategories: &fakeCategories{}, fakeBatches: &fakeBatches{},
-		fakeShoppingLists: &fakeShoppingLists{}, fakeExpiry: &fakeExpiry{},
-		fakeJobs: newFakeJobs(), fakeIdempotency: newFakeIdempotency(), fakeIngestStore: &fakeIngestStore{},
+		fakeShoppingLists: &fakeShoppingLists{jobs: jobs}, fakeExpiry: &fakeExpiry{},
+		fakeJobs: jobs, fakeIdempotency: newFakeIdempotency(), fakeIngestStore: &fakeIngestStore{},
 		fakeConsumeStore: &fakeConsumeStore{}, fakeProductStore: &fakeProductStore{},
 		fakeReorderStore: &fakeReorderStore{}, fakeAnalyticsStore: &fakeAnalyticsStore{},
 		fakeGamification: newFakeGamification(), fakeStocktake: &fakeStocktake{},
@@ -408,6 +412,10 @@ func newAPIFixture(t *testing.T, opts ...func(*httpapi.Deps)) *apiFixture {
 	auth.addMember(storageID, user.ID)
 
 	jobs := newFakeJobs()
+	// One set of job rows for the whole fake API: reclassifying a photo as a
+	// shopping list discards its job (docs/specs/41-mixed-photo-classification.md),
+	// and the job routes have to see that happen.
+	lists.jobs = jobs
 	idem := newFakeIdempotency()
 	ingestStore := &fakeIngestStore{}
 	ingester := &fakeIngester{available: true}
