@@ -409,6 +409,25 @@ queries this table *before* calling any external API, and offers hits as
 new storage-local `products` row, resolving `category_path` to local
 `categories` rows, creating them if absent) or ignore.
 
+### `containers`
+
+What a batch is physically held in (a 24-pack box, a bag), independent of
+where it is. See [`39-batch-containers.md`](39-batch-containers.md) for
+why this is not folded into `locations`.
+
+```sql
+CREATE TABLE containers (
+    id             UUID PRIMARY KEY,
+    storage_id     UUID NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
+    label          VARCHAR(255) NOT NULL,
+    container_type TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    destroyed_at   TIMESTAMPTZ
+);
+
+CREATE INDEX idx_containers_storage_id ON containers(storage_id);
+```
+
 ### `inventory_batches`
 
 A concrete quantity of a product at a specific location, with its own
@@ -419,6 +438,7 @@ CREATE TABLE inventory_batches (
     id                UUID PRIMARY KEY,
     product_id        UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     location_id       UUID NOT NULL REFERENCES locations(id) ON DELETE RESTRICT,
+    container_id      UUID REFERENCES containers(id) ON DELETE SET NULL,
     quantity          INT NOT NULL DEFAULT 1 CHECK (quantity >= 0),
     expiration_date   DATE,
     expiration_source TEXT NOT NULL DEFAULT 'derived'
@@ -428,7 +448,14 @@ CREATE TABLE inventory_batches (
 
 CREATE INDEX idx_inventory_batches_product_id ON inventory_batches(product_id);
 CREATE INDEX idx_inventory_batches_location_id ON inventory_batches(location_id);
+CREATE INDEX idx_inventory_batches_container_id
+    ON inventory_batches(container_id) WHERE container_id IS NOT NULL;
 ```
+
+`container_id` is optional and orthogonal to `location_id` — a batch's
+container, if it has one, is what it sits *in*; its location is where
+that sitting happens. See `39-batch-containers.md` for the split/destroy
+semantics this column carries.
 
 A batch reaching `quantity = 0` is deleted in the same transaction that
 decremented it — see `09-consumption-logging.md`. Application code must
@@ -614,3 +641,12 @@ these five tables need — not `inventory_logs`, which is append-only, nor
 - Gamification tables (`user_progress`, `quests`, `achievements`): defined
   in `51-gamification-scoring.md`. They are additive and optional —
   nothing in specs `00`–`11` may depend on them.
+- `containers` and `inventory_batches.container_id`: split/destroy
+  semantics in `39-batch-containers.md`.
+- `icon_aliases` (global, insert-only, no `storage_id` — the same
+  deliberate exception `catalog_products` above already is): defined in
+  `40-icon-picker.md`.
+- The mixed-photo classification fields on a job's stored analysis
+  (`looks_like_shopping_list`, `shopping_list_lines`) live in `jobs.payload`
+  (already-flexible JSON, no new column) — see
+  `41-mixed-photo-classification.md`.

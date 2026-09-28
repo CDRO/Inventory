@@ -158,9 +158,8 @@ which is the rule `05` sets for every page.
 
 ### Width on large screens
 
-`.shell` is capped at `40rem` (`css/base.css`). That width suits forms and
-review rows and is too narrow for six columns. This spec adds one layout
-modifier to `base.css`:
+`.shell` is capped at `40rem` (`css/base.css`), too narrow for six
+columns. This spec adds one layout modifier to `base.css`:
 
 ```css
 .shell--wide { max-width: 80rem; }
@@ -169,7 +168,10 @@ modifier to `base.css`:
 `inventory.html` puts it on **both** its `<header>` and its `<main>`, so the
 header stays aligned with the table beneath it. On a wide screen the table
 is therefore up to 1280 px wide, well past the 800 px the page needs to be
-readable.
+readable. *(`.shell--wide` was this page's own one-off when this spec was
+written; [`05-frontend-pwa-foundations.md`](05-frontend-pwa-foundations.md)'s
+"Layout width" amendment later made it every page's default — nothing
+below changes as a result, since this page already used it.)*
 
 Below the existing `36rem` breakpoint (`components.css`) the table
 changes layout rather than scrolling sideways. Each row becomes a stacked
@@ -177,9 +179,6 @@ card: the product name as the heading, location and quantity on one line,
 and the expiry chip beneath. The column headers are visually hidden, and
 sorting moves into a `<select>`. This uses CSS only, with no second
 template.
-
-No other page is widened by this spec. Where a page would benefit from
-`.shell--wide`, that is a later change.
 
 ### Service worker
 

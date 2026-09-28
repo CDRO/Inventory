@@ -52,6 +52,7 @@ web/static/
 │   ├── jobs.js                # background-job polling helper
 │   ├── review.js              # shared proposal-review component
 │   ├── image-picker.js        # shared picture-suggestion picker (07, 16)
+│   ├── icon-picker.js         # shared searchable icon picker (40)
 │   ├── tree.js                # shared tree view (locations + categories)
 │   ├── dom.js                 # small helpers: el(), render templates, escape
 │   ├── i18n.js                # loads the active catalog, translates data-i18n (19)
@@ -198,10 +199,27 @@ reference tokens so urgency looks identical everywhere it appears. Layout
 uses CSS grid/flexbox; the app must be usable one-handed on a phone, since
 the primary flows start with a camera capture.
 
-Pages use `.shell` (a `40rem` column). A page whose content is a wide table
-may use the `.shell--wide` modifier (`80rem`) on both its header and its
-main element. The first such page is the inventory table,
-[`33-inventory-overview-table.md`](33-inventory-overview-table.md).
+## Layout width
+
+*(Amended — the wide layout is now every page's default; originally the
+`40rem` `.shell` was the default and `.shell--wide` was a one-page
+exception, [`33-inventory-overview-table.md`](33-inventory-overview-table.md).
+The narrow default made sense for a phone-first form or two; it stopped
+making sense once the product list, and everything shaped like it, needed
+the same room a table does — a stocktake on a laptop should not cost more
+scrolling than the data requires.)*
+
+Every page uses `.shell--wide` (`80rem`, `css/base.css`) on both its
+`<header>` and its `<main>` — `index.html`, `storages.html`,
+`locations.html`, `categories.html`, `products.html`, `ingest.html`,
+`shopping-list.html`, `review.html`, `consume-review.html`,
+`dashboard.html`, and `inventory.html` alike. `.shell` (`40rem`) still
+exists as a CSS class — a component that deliberately wants a narrow
+column *within* a wide page (a single form centered in otherwise empty
+space, say) may still reach for it locally — but no page's `<header>`/
+`<main>` uses it as their own class going forward. There is no exception
+list to maintain: a new page defaults to wide, full stop, the same way it
+already defaults to using `js/i18n.js` and `js/register-sw.js`.
 
 ## PWA
 

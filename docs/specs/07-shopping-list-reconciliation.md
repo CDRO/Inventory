@@ -49,6 +49,11 @@ CREATE TABLE shopping_list_items (
   service** (below), which assigns `status` and, for `exact_match`,
   `matched_product_id`.
 
+*(Extended by [`41-mixed-photo-classification.md`](41-mixed-photo-classification.md):
+this endpoint also accepts `from_job_id`, creating a list from a photo
+originally uploaded as a shelf/product/consumption photo that turned out
+to be a shopping list — no second upload, no second Gemini call.)*
+
 ## Matching service (shared)
 
 One backend package, `internal/matching`, exposing
