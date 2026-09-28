@@ -324,16 +324,30 @@ async function openViewfinder({ picker, modeLabel, openOsCamera }) {
         }
         if (photo) file = await normalise(photo);
       }
-      if (!file) {
+      if (!file && !closed) {
         // The canvas grab: the current frame at the video's intrinsic size.
         // Reached three ways — no ImageCapture at all, a takePhoto()
         // rejection, or a normalisation that produced nothing.
+        //
+        // Skipped once the dialog is gone: Done, Esc or a backdrop click can
+        // land while takePhoto() or the normalisation is still in flight, and
+        // release() has then stopped the track and cleared srcObject, so this
+        // would grab a 0x0 frame and produce nothing.
         file = await encode(video.videoWidth, video.videoHeight, (ctx) => ctx.drawImage(video, 0, 0));
       }
       if (!file) {
         // Both paths produced nothing. Saying so beats a Shutter that
-        // silently does nothing (#205 item 6).
-        picker.setStatus(t("camera.captureFailed"));
+        // silently does nothing (#205 item 6) — but not for a screen the
+        // person has already closed, where "that shot could not be saved" is
+        // a false alarm about a shot nobody is waiting for.
+        //
+        // flip() re-checks `closed` after its own await and returns outright;
+        // this one only suppresses the message. The asymmetry is deliberate:
+        // a stream is a resource that must not leak, so flip() drops it,
+        // while a photo that did finish encoding is the person's data and
+        // spec 37 requires every shot to survive an exit — so a completed
+        // file below is still added, closed or not.
+        if (!closed) picker.setStatus(t("camera.captureFailed"));
         return;
       }
       picker.add([file]);

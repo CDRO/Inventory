@@ -84,6 +84,15 @@ test("the two-control picker appends photos from both sources into one list, dra
   // criterion is about what a person can see, not just that the two named
   // ids exist; both real inputs carry the `hidden` attribute.
   await expect(page.locator('input[type="file"]:not([hidden])')).toHaveCount(0);
+  // Spec 36 also asks that ingest.html contain no file input *other* than the
+  // two the picker renders. "None visible" does not say that: a leftover
+  // hidden third input would satisfy the assertion above and still reach the
+  // server on submit. The exact count, plus the ids, is what closes it.
+  await expect(page.locator('input[type="file"]')).toHaveCount(2);
+  expect(await page.locator('input[type="file"]').evaluateAll((els) => els.map((el) => el.id))).toEqual([
+    "photos-library",
+    "photos-camera",
+  ]);
 
   await expect(uploadButton).toBeDisabled();
 
@@ -266,9 +275,16 @@ test("the barcode scan sheet's photograph control decodes through the same looku
 // Not verifiable in this stack, and left as #205 records them: sensor
 // resolution kept through normalisation (the fake device gives 640x480 on both
 // paths, so canvas-at-bitmap-size and canvas-at-preview-size are
-// indistinguishable), EXIF orientation via `imageOrientation: "from-image"`
-// (the fake PNG carries none), and the expired-activation branch of the
-// fallback (it cannot be driven without waiting out the activation window).
+// indistinguishable) and EXIF orientation via `imageOrientation: "from-image"`
+// (the fake PNG carries none).
+//
+// The expired-activation branch was on that list too, on the grounds that it
+// "cannot be driven without waiting out the activation window". That was
+// wrong, for exactly the reason the flip-button claim below was wrong:
+// activationIsAlive() reads `navigator.userActivation.isActive`, and
+// `userActivation` is a Navigator prototype accessor that an own property
+// shadows — the same technique the mediaDevices journey already uses. No wait
+// is needed and a journey drives it below.
 //
 // The flip button is NOT on that list, though #205 puts it there. The fake
 // device does report one videoinput, but `enumerateDevices()` is as
@@ -384,13 +400,22 @@ test("the viewfinder captures through takePhoto(), numbers its shots, keeps the 
   await shutter.click();
   await expect(rows).toHaveCount(2);
   await expect(dialog.locator('[data-role="shot-count"]')).toHaveText("2 photos taken");
+  // Three presses in ONE session, which is the criterion as spec 37 words it.
+  // The stream-released journey below reaches capture-3.jpg too, but across
+  // three separate dialogs — that proves the counter survives a session, not
+  // that one session handles three presses.
+  await shutter.click();
+  await expect(rows).toHaveCount(3);
+  await expect(dialog.locator('[data-role="shot-count"]')).toHaveText("3 photos taken");
+  await expect(dialog).toBeVisible();
 
   // Distinct names, in sequence, each row with a thumbnail and a Remove
   // button.
   await expect(rows.nth(0)).toContainText("capture-1.jpg");
   await expect(rows.nth(1)).toContainText("capture-2.jpg");
-  await expect(page.locator("#photo-list img[src^='blob:']")).toHaveCount(2);
-  await expect(rows.nth(0).getByRole("button", { name: "Remove photo 1 of 2, capture-1.jpg", exact: true })).toBeVisible();
+  await expect(rows.nth(2)).toContainText("capture-3.jpg");
+  await expect(page.locator("#photo-list img[src^='blob:']")).toHaveCount(3);
+  await expect(rows.nth(0).getByRole("button", { name: "Remove photo 1 of 3, capture-1.jpg", exact: true })).toBeVisible();
 
   // On the takePhoto() path the resolution hint is never shown: nothing was
   // downscaled to the preview size, so there is no trade-off to state.
@@ -398,7 +423,7 @@ test("the viewfinder captures through takePhoto(), numbers its shots, keeps the 
 
   await dialog.locator('[data-role="done"]').click();
   await expect(page.locator(VIEWFINDER)).toHaveCount(0);
-  await expect(rows).toHaveCount(2);
+  await expect(rows).toHaveCount(3);
 
   // The page itself survived: same document, same sticky mode, location field
   // still where it was.
@@ -416,12 +441,13 @@ test("the viewfinder captures through takePhoto(), numbers its shots, keeps the 
   });
 
   await page.getByRole("button", { name: "Upload" }).click();
-  await expect(page.locator("#uploads .card")).toHaveCount(2);
+  await expect(page.locator("#uploads .card")).toHaveCount(3);
   await expect(rows).toHaveCount(0);
 
-  expect(requests).toHaveLength(2);
+  expect(requests).toHaveLength(3);
   expectJpegUpload(requests[0], "first capture");
   expectJpegUpload(requests[1], "second capture");
+  expectJpegUpload(requests[2], "third capture");
 
   await page.unroute("**/ingest/shelf-photos");
 });
@@ -636,6 +662,92 @@ test("with getUserMedia rejecting, Camera reaches the OS input on the same tap a
   // "No error is shown for a denied permission" — the OS camera is the
   // answer, and it needs no browser permission.
   await expect(page.locator("#error")).toBeHidden();
+});
+
+// The other half of spec 37's fallback rule, and the one both the spec and the
+// comment at the top of this block used to call undrivable: the rejection
+// arrives when the tap's activation is already GONE. click() would then be a
+// silent no-op, so camera.js latches `cameraUnavailable`, shows the one status
+// line, and sends the NEXT tap straight to the OS input.
+//
+// Driven by shadowing `navigator.userActivation` — a Navigator prototype
+// accessor, so an own property on the instance wins, the same way this file
+// already replaces `navigator.mediaDevices` and `enumerateDevices()`. Note
+// what the stub does and does not change: it changes only what camera.js
+// *believes* about activation. Chromium's real activation state is untouched,
+// which is precisely why the second tap's chooser genuinely opens.
+test("with getUserMedia rejecting after activation expired, the tap says so and the NEXT tap opens the OS input", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    navigator.mediaDevices.getUserMedia = () =>
+      Promise.reject(new DOMException("Permission denied", "NotAllowedError"));
+    Object.defineProperty(navigator, "userActivation", {
+      value: { isActive: false, hasBeenActive: true },
+      configurable: true,
+    });
+  });
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  // First tap: this tap can no longer open a chooser, so the status line is
+  // the whole of what the person gets — without it the Camera button looks
+  // simply dead, which is the failure this branch exists to avoid.
+  await page.locator('[data-role="pick-camera"]').click();
+  await expect(page.locator(PICKER_STATUS)).toHaveText("Using your phone’s camera.");
+  await expect(page.locator(VIEWFINDER)).toHaveCount(0);
+  // Still a status and not an error: a denied permission is not a fault.
+  await expect(page.locator("#error")).toBeHidden();
+
+  // Second tap: `cameraUnavailable` is latched, so this goes straight to the
+  // OS input synchronously, without consulting getUserMedia again.
+  const [chooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    page.locator('[data-role="pick-camera"]').click(),
+  ]);
+  expect(await chooser.element().getAttribute("id")).toBe("photos-camera");
+});
+
+// Press Shutter, then close the dialog before the shot settles. review-go
+// round 1 on PR #360: capture() checked `closed` only on entry, so exit()
+// would stop the track and clear srcObject under an in-flight takePhoto(),
+// the canvas fallback would then grab a 0x0 frame, and "that shot could not
+// be saved" would appear on the ingest page for a screen the person had
+// deliberately closed — a failure message with no failure behind it.
+//
+// The ordering is enforced rather than timed: the stub parks its own reject
+// function on `window` and this test calls it only after Done has been
+// awaited. A stub that rejected on a timer would pass whenever the timer won
+// the race on a slow runner, and would stop testing anything at all.
+test("closing the viewfinder while a shot is still in flight reports no failure", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.ImageCapture.prototype.takePhoto = () =>
+      new Promise((_resolve, reject) => {
+        window.__rejectTakePhoto = () => reject(new DOMException("stopped", "InvalidStateError"));
+      });
+  });
+  await logInAsBob(page);
+  await page.goto(`/ingest.html?storage=${HOUSEHOLD}`);
+
+  const dialog = await openViewfinder(page);
+  const rows = page.locator("#photo-list li");
+
+  await dialog.locator('[data-role="shutter"]').click();
+  // The press is in flight and nothing has landed yet: takePhoto() is parked.
+  await expect(rows).toHaveCount(0);
+
+  await dialog.locator('[data-role="done"]').click();
+  await expect(page.locator(VIEWFINDER)).toHaveCount(0);
+
+  // Only now let the press fail, with the dialog already gone and the track
+  // already stopped — the exact interleaving the guard is about.
+  await page.evaluate(() => window.__rejectTakePhoto());
+
+  // The post-exit state: no row appeared, and above all no status line. The
+  // viewfinder assertion above plus this one is what makes the test about
+  // being closed, rather than merely about nothing having happened yet.
+  await expect(page.locator(PICKER_STATUS)).toBeHidden();
+  await expect(rows).toHaveCount(0);
 });
 
 // #205 item 4: the journeys above all wait for the Shutter to *become*
