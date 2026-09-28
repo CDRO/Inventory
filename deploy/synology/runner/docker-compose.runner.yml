@@ -1,0 +1,103 @@
+# The self-hosted GitHub Actions runner that deploys this project onto the NAS.
+# Contract: docs/specs/38-release-pipeline-and-nas-runner.md, "The runner: a
+# container on the NAS". Operator instructions: README.md, beside this file.
+#
+# Run it from THIS directory, and with no other -f:
+#
+#   cd /volume1/docker/inventory/deploy/synology/runner
+#   RUNNER_TOKEN=<one-hour token> docker-compose -f docker-compose.runner.yml up -d
+#
+# Deliberately NOT part of the app stack's file pair. It is its own Compose
+# project (see "name:" below), so "dc down" on the app stack never stops the
+# runner and recreating the runner never disturbs the app stack - which matters
+# because the runner is the thing that recreates the app stack. It also means
+# this file must never be merged with docker-compose.yml: it declares no app, no
+# db and no network, and a merge would only produce a broken hybrid.
+
+# The project name, in the file rather than in every command, so that a forgotten
+# -p cannot land the runner in the default project (named after this directory,
+# "runner") next to the app stack it is supposed to be independent of.
+name: inventory-runner
+
+services:
+  runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: inventory-runner:local
+
+    # A fixed name here, unlike the app service in docker-compose.nas.yml, which
+    # deliberately has none so that deploy/synology/update can run two app
+    # instances side by side. There is exactly one runner by design (one job at
+    # a time is the point), and a fixed name is what makes the removal procedure
+    # in README.md - "docker exec inventory-runner ./config.sh remove" - a
+    # command an operator can type rather than look up.
+    container_name: inventory-runner
+
+    restart: unless-stopped
+
+    # No "ports:" and no "networks:". Nothing ever connects TO the runner: it
+    # polls GitHub outbound over HTTPS and talks to the host's Docker daemon over
+    # the socket below. An exposed port would be a way in and buy nothing.
+
+    environment:
+      # The repository this runner belongs to. Its own registration credentials
+      # are scoped to it, so this is also the whole of the runner's reach.
+      RUNNER_URL: ${RUNNER_URL:-https://github.com/CDRO/Inventory}
+
+      # Stable on purpose. --replace replaces the registration OF THE SAME NAME,
+      # so a name that changed per container (the default, which is the
+      # container hostname) would register a new runner on every recreate and
+      # leave the old ones behind as offline duplicates.
+      RUNNER_NAME: ${RUNNER_NAME:-nas-inventory}
+
+      # Decision D4, quoted in spec 38: exactly these three.
+      RUNNER_LABELS: ${RUNNER_LABELS:-self-hosted,nas,synology}
+
+      # The clone, at the path it has on the host - the same value as both halves
+      # of the bind mount below. The entrypoint's smoke test refuses to start if
+      # this path is not a git checkout.
+      INVENTORY_CLONE: ${INVENTORY_CLONE:-/volume1/docker/inventory}
+
+      # First start only, exactly like TS_AUTHKEY in docker-compose.nas.yml, and
+      # kept out of .env for the same reason that file gives: .env is rewritten
+      # wholesale from .env.example by every "setup" run, so a one-off value
+      # placed there is either dropped silently or re-prompted forever. Pass it
+      # on the command line for the one start that registers:
+      #   RUNNER_TOKEN=ABC... docker-compose -f docker-compose.runner.yml up -d
+      # It expires in an hour and is single-use; the entrypoint unsets it before
+      # the listener (and therefore before any job) exists. Every later start
+      # reads the registration from ./runner_state instead. The default keeps
+      # "up" quiet once the runner is registered.
+      RUNNER_TOKEN: ${RUNNER_TOKEN:-}
+
+    volumes:
+      # 1. The host's Docker daemon. This is the whole point of the container
+      #    and, named plainly, the whole of its risk: a process that can talk to
+      #    this socket is root on the host. See README.md, "What this container
+      #    can do", and spec 38's "Security posture".
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      # 2. The clone, at THE IDENTICAL PATH inside and out. Not tidiness: the app
+      #    stack's bind mounts (./pgdata, ./uploads, ./imagecache, ./backups) are
+      #    relative to the clone, and a container this runner starts through the
+      #    socket above has those paths resolved by the HOST's daemon, not by
+      #    this container's filesystem. A clone mounted anywhere else would bind
+      #    the wrong host directories, successfully and silently. Both halves of
+      #    this line therefore interpolate the same variable - do not edit one
+      #    half.
+      - ${INVENTORY_CLONE:-/volume1/docker/inventory}:${INVENTORY_CLONE:-/volume1/docker/inventory}
+
+      # 3. The registration. .runner and .credentials live here so that a DSM
+      #    reboot, an "up --force-recreate" and a rebuilt image all come back as
+      #    the same registered runner with no token and no human (decision D4).
+      #    Relative to this file, so it lands in
+      #    deploy/synology/runner/runner_state inside the clone; it holds
+      #    credentials, and .gitignore and .dockerignore keep it out of the
+      #    repository and out of the app image's build context.
+      - ./runner_state:/runner/state
+
+      # Nothing else. Spec 38: "Mounts, and nothing else". Every extra mount is
+      # extra reach for a workflow that lands here, and after this repository
+      # goes private any workflow on any branch can name "runs-on: self-hosted"
+      # without a paid runner group to stop it.

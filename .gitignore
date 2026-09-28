@@ -46,3 +46,10 @@ e2e/playwright-report/
 # Wave orchestrator run artifacts (scripts/wellen-orchestrator.ps1)
 scripts/wellen-orchestrator.log
 scripts/konsol-welle-*.started
+
+# The self-hosted runner's registration (deploy/synology/runner/README.md). It
+# lives in a bind mount inside the clone for the same reason the NAS runtime data
+# above does, and it holds .credentials — the key this NAS authenticates to
+# GitHub Actions with. Never committed. `git clean -x` in the clone deletes it;
+# re-registering with a fresh one-hour token is the recovery.
+/deploy/synology/runner/runner_state/
