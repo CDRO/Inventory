@@ -93,7 +93,9 @@ badname="'$tag' is not a release tag name - it is vYYYY.MM.DD, or vYYYY.MM.DD.n 
 case "$tag" in
   v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]) ;;
   v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].*)
-    n=${tag##*.}
+    # What follows the date, whole - not `${tag##*.}`, which takes the LAST
+    # segment and so would accept v2026.09.30.1.2 by looking only at the `2`.
+    n=${tag#v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].}
     case "$n" in
       ''|*[!0-9]*) die "$badname" ;;
     esac ;;

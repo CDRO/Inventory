@@ -219,6 +219,7 @@ func TestReleaseRefusesANameThatIsNotAReleaseTag(t *testing.T) {
 		"v2026.9.30",      // month not zero-padded
 		"v2026.09.30.",    // trailing dot, no counter
 		"v2026.09.30.x",   // counter is not a number
+		"v2026.09.30.1.2", // one counter, not a fourth level
 		"v2026.09.30-rc1", // no pre-release suffixes
 		"vYYYY.MM.DD",
 	} {

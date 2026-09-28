@@ -150,6 +150,97 @@ func TestReleaseDeployJobKeepsItsGuards(t *testing.T) {
 	}
 }
 
+// The `if:` on `deploy` is the entire mechanism that makes
+// `needs: [gate, test, e2e]` stop a red run while still letting a SKIPPED
+// reusable call through. `!cancelled()` deliberately overrides GitHub's
+// default of skipping a job whose `needs` did not all succeed, which is what
+// makes the three `.result` clauses load-bearing rather than decorative:
+// delete them - a plausible tidy-up under the belief that `needs:` alone
+// enforces success - and a tag whose `test` job went red deploys to the NAS.
+// Nothing else in this repository would notice.
+func TestReleaseDeployRunsOnlyWhenTheGateAndBothCallsPassed(t *testing.T) {
+	body := workflowFiles(t)["release.yml"]
+	for _, want := range []struct {
+		text string
+		why  string
+	}{
+		{"needs: [gate, test, e2e]", "the deploy job waits for the gate AND for both reusable calls"},
+		{"!cancelled()", "a cancelled run must not fall through to the NAS"},
+		{"needs.gate.result == 'success'", "a failed gate stops the release"},
+		{"needs.test.result == 'success' || needs.test.result == 'skipped'", "a red `test` call stops the release; a skipped one does not"},
+		{"needs.e2e.result == 'success' || needs.e2e.result == 'skipped'", "a red `e2e` call stops the release; a skipped one does not"},
+		{"if: needs.gate.outputs.need_test == 'true'", "`test` runs exactly when the gate found no green run for the commit"},
+		{"if: needs.gate.outputs.need_e2e == 'true'", "`e2e` runs exactly when the gate found no green run for the commit"},
+	} {
+		if !strings.Contains(body, want.text) {
+			t.Errorf("release.yml no longer contains %q - %s", want.text, want.why)
+		}
+	}
+}
+
+// Decision D3, the consuming half. `scripts/dev_release_test.go` covers the
+// producing half - that `scripts/dev release --classic` writes the exact line
+// into the tag message - but the line only forces anything if the workflow
+// reads it the way the decision says, and both halves of that are a one-token
+// edit away from being silently wrong:
+//
+//   - the message must be read from the git DATABASE, because
+//     `actions/checkout` fetches annotated tags peeled and a checkout-based
+//     read would permanently and invisibly disable `--classic`;
+//   - the match must be `grep -qx` (whole line). Weakened to `grep -q`, the
+//     sentence "not deploy: classic yet" in a release note forces a stack
+//     restart - the exact failure the decision spells the rule out to avoid.
+func TestReleaseGateReadsTheTagMessageAsSpecifiedByD3(t *testing.T) {
+	body := workflowFiles(t)["release.yml"]
+	for _, want := range []struct {
+		text string
+		why  string
+	}{
+		{"git/ref/tags/$TAG", "the tag ref is resolved through the API, not from a checkout"},
+		{"git/tags/$obj", "the annotated tag OBJECT is read, which is where the message lives"},
+		{"grep -qx 'deploy: classic'", "the override is an exact LINE, never a substring"},
+		{"tr -d '\\r'", "a carriage return in the message does not hide the keyword"},
+	} {
+		if !strings.Contains(body, want.text) {
+			t.Errorf("release.yml no longer contains %q - %s", want.text, want.why)
+		}
+	}
+}
+
+// H17: "the job asserts that GET /healthz reports the tag as its version". A
+// deploy is not done because the script exited 0 - it is done when the NAS
+// serves the tag. Flip this comparison, or drop its `exit 1`, and a release
+// that left the previous version serving reports green.
+func TestReleaseAssertsHealthzReportsTheTag(t *testing.T) {
+	body := workflowFiles(t)["release.yml"]
+	for _, want := range []struct {
+		text string
+		why  string
+	}{
+		{`if [ "$version" != "$GITHUB_REF_NAME" ]; then`, "the version served is compared against the tag that triggered the run"},
+		{`"$version" != "$GITHUB_REF_NAME"`, "the comparison is inequality-then-fail, not equality-then-pass"},
+		{"/healthz", "the assertion probes the health endpoint"},
+	} {
+		if !strings.Contains(body, want.text) {
+			t.Errorf("release.yml no longer contains %q - %s", want.text, want.why)
+		}
+	}
+	// The `exit 1` has to be inside that branch: an assertion that reports the
+	// mismatch and exits 0 is not an assertion.
+	_, after, found := strings.Cut(body, `if [ "$version" != "$GITHUB_REF_NAME" ]; then`)
+	if !found {
+		return // already reported above
+	}
+	branch, _, closed := strings.Cut(after, "\n          fi")
+	if !closed {
+		t.Fatalf("release.yml's /healthz comparison has no closing `fi` at the expected indentation - "+
+			"this test can no longer tell what is inside the branch:\n%s", after)
+	}
+	if !strings.Contains(branch, "exit 1") {
+		t.Errorf("release.yml reports a /healthz version mismatch but does not fail the job:\n%s", branch)
+	}
+}
+
 // The gate's whole point is "for that exact SHA", never "the newest run on the
 // branch" - the trap test.yml's own header documents. `head_sha=` is the
 // query parameter that makes it exact.
