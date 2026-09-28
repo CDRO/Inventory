@@ -67,3 +67,8 @@ whenever you touch routing, handlers, uploads, or expiry:
   `inventory_logs` row.
 - EXIF stripped from every upload, with orientation applied to pixels **first**.
 - Expiry cascades touch `derived` dates only, never `user` ones.
+- `CACHE_VERSION` in `web/static/sw.js` bumped on **any** change to a
+  `SHELL_ASSETS` file's content, not just when one is added or renamed —
+  `sw.js` serves every cached path cache-first with no revalidation, so an
+  installed client keeps the old bytes until the version bumps. Enforced by
+  `web/shell_manifest_test.go` against `web/shell-manifest.json`.

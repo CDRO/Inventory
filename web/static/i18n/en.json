@@ -278,6 +278,11 @@
   "treeModal.categories.empty": "No categories yet. Add a top-level one below.",
   "treeModal.done": "Done",
   "treeModal.networkError": "Could not reach the server. Check your connection and try again.",
+  "treeModal.failed.add": "Could not add “{name}”.",
+  "treeModal.failed.rename": "Could not rename “{name}”.",
+  "treeModal.failed.move": "Could not move “{name}”.",
+  "treeModal.failed.change": "Could not save your change.",
+  "treeModal.failed.reload": "Could not refresh the list.",
 
   "locationOptions.createdButRefreshFailed": "A location was created, but the list could not be refreshed. Reload the page to see it.",
   "locationOptions.networkError": "Could not reach the server. Check your connection and try again.",
@@ -296,6 +301,7 @@
   "categoryShelfLife.savedNoChange": "Saved the shelf life for {name}. No existing expiry dates needed to change.",
   "categoryShelfLife.savedRecalculated.one": "Saved the shelf life for {name}. 1 existing expiry date was updated.",
   "categoryShelfLife.savedRecalculated.other": "Saved the shelf life for {name}. {count} existing expiry dates were updated.",
+  "categoryShelfLife.failed": "Could not save the shelf life for “{name}”.",
 
   "settings.pageTitle": "Settings · Inventory",
   "settings.title": "Settings",
