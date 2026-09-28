@@ -230,31 +230,41 @@ update: done mode=rolling ref=v1.4.0 version=v1.4.0 backup=inventory-backup-2026
 update: failed mode=rolling ref=v1.4.0 version=v1.4.0 backup=none phase=drain
 ```
 
-`mode` is `rolling`, `classic`, `first-start` or `nothing`. On success the word
-after `update:` is the phase reached (`done`); on failure `phase=` names the one
-it stopped in — the lookup key of the table below. It goes to stdout either way;
-the recovery messages keep going to stderr. The exit code is `0` on success
-**and** on nothing-to-do, `1` on every refusal and abort, and the signal exits
-(`130`, `143`, `129`) are unchanged.
+`mode` is `rolling`, `classic`, `first-start` or `nothing` once the run has
+chosen a path — and `unknown` until it has. Every failure in the `preflight`,
+`fetch`, `model`, `build` and `plan` phases prints `mode=unknown`, because at
+that point the path genuinely has not been decided: those five phases run
+before the first-start branch, the nothing-to-do check and the classic/rolling
+split. On success the word after `update:` is the phase reached (`done`); on
+failure `phase=` names the one it stopped in — the lookup key of the table
+below, read together with `mode=` for the two phases more than one path
+reaches. It goes to stdout either way; the recovery messages keep going to
+stderr. The exit code is `0` on success **and** on nothing-to-do, and non-zero
+otherwise: `1` from every refusal and abort this script makes itself, the
+signal exits (`130`, `143`, `129`) unchanged, and — for the one step that fails
+without going through the script — whatever `docker-compose build` itself
+returned. The deploy job reads zero versus non-zero, not the particular code.
 
 ### When a deploy fails
 
 A failed deploy is a **stop**, not a rollback: in most rows below the previous
 release is still serving, which is the point of the rolling design. Read
-`phase=` off the summary line and look it up:
+`phase=` off the summary line and look it up — and where a row names more than
+one mode, read `mode=` off the same line to pick the right half:
 
 | `phase=` | What is serving | What the database is | The way through |
 |---|---|---|---|
 | `preflight` | the old release, untouched | untouched | Fix what it named: Compose < 2.24, the lock, two app instances or a leftover stopped one, a dirty clone, a bad `BACKUP_KEEP`. |
-| `fetch` | the old release, untouched | untouched | The ref does not resolve, or `git fetch` failed. Nothing was built. |
+| `fetch` | the old release, untouched | untouched | The ref does not resolve, or `git fetch` or the checkout failed. Nothing was built. |
 | `model` | the old release, untouched | untouched — but the clone now stands at the new ref | The merged model is not the NAS one. The message names the commit the clone moved to. |
 | `build` | the old release, untouched | untouched | Fix the build. |
 | `plan` | the old release, untouched | untouched | `migrate plan` could not answer. Nothing was migrated. |
-| `backup` | the old release, untouched | untouched | The archive was not taken, so the run stopped before `migrate up`. |
-| `migrate` | the old release (rolling); stopped (classic) | possibly **partially** migrated: goose applies each migration in its own transaction and stops at the one that failed | Forward-only. Fix the migration and run again, or restore the archive. |
-| `drain` | the old release | migrated | Jobs would not drain, or the count could not be read. Re-tag with `deploy: classic`, or deploy by hand with `--classic`. |
-| `start` | the old release; the new instance is removed again | migrated | The new instance never became healthy. Its last 30 log lines are on stderr. |
-| `retire`, `sidecar` | the **new** release, but the tailnet URL is down until the sidecar is recreated | migrated | Run the `--force-recreate ts-inventory` command the exit trap printed. |
+| `backup` | the old release, untouched | untouched | The archive was not taken, so the run stopped before `migrate up` — and before the classic path stopped anything. |
+| `stop` (`classic`) | possibly still the old release: a `stop` that failed outright may have stopped nothing | untouched | The message deliberately does **not** claim a stopped stack here. Check with `dc ps`, then start what is down with `dc up -d`. |
+| `migrate` | `rolling`: the old release · `classic`: stopped · `first-start`: nothing yet | possibly **partially** migrated: goose applies each migration in its own transaction and stops at the one that failed | Forward-only. Fix the migration and run again, or restore the archive. |
+| `drain` (`rolling`) | the old release | migrated | Jobs would not drain, or the count could not be read. Re-tag with `deploy: classic`, or deploy by hand with `--classic`. |
+| `start` | `rolling`: the old release — the new instance never became healthy and was removed again, and its last 30 log lines are on stderr · `classic`: **stopped** — the migration succeeded but `up -d` did not · `first-start`: nothing yet | migrated | `rolling`: fix the release and run again; the old one is still serving. `classic`/`first-start`: nothing is up, so start the stack with the `up -d` the exit trap printed. |
+| `retire`, `sidecar` (`rolling`) | the **new** release, but the tailnet URL is down until the sidecar is recreated | migrated | Run the `--force-recreate ts-inventory` command the exit trap printed. |
 
 **Rollback is restoring the pre-upgrade archive** ("Going back" below;
 [`15-backup-restore-and-export.md`](../../docs/specs/15-backup-restore-and-export.md)

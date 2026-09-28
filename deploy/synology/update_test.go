@@ -78,6 +78,10 @@ case "$*" in
   *"--dry-run"*)
     [ -z "${STUB_PLAN:-}" ] || printf '%s\n' "$STUB_PLAN"
     exit ${STUB_PLAN_RC:-0} ;;
+  *" build")
+    # The build is the one step that fails without going through the script's
+    # own die(), so its phase is only reachable with an arm of its own.
+    exit ${STUB_BUILD_RC:-0} ;;
   *"run --rm -T backup"*)
     # A backup that is asked to write one writes it where the mount puts it:
     # $STUB_DIR is the throwaway clone's root, so $STUB_DIR/backups is the
@@ -911,6 +915,8 @@ func TestRefusesAComposeOlderThan224(t *testing.T) {
 //       TestRefStampsTheShortShaWhenTheRefIsNotATag
 //   --ref refuses a ref that does not resolve, before the build
 //       TestRefRefusesAnUnknownRefBeforeTheBuild
+//   --ref refuses when git cannot fetch or check out
+//       TestRefRefusesWhenGitCannotGetTheCode
 //   --ref keeps the dirty-clone refusal
 //       TestRefStillRefusesADirtyClone
 //   --ref and --no-pull are rejected together
@@ -931,7 +937,10 @@ func TestRefusesAComposeOlderThan224(t *testing.T) {
 //       TestBackupKeepIsCheckedBeforeTheBackupRuns
 //   the summary line, on success and on failure, naming the phase
 //       TestSummaryLineEndsEverySuccessfulRun
-//       TestSummaryLineNamesThePhaseAFailureStoppedIn
+//       TestSummaryLineNamesThePhaseAFailureStoppedIn — the whole line, not
+//       just the phase: mode= is what picks the right half of the two rows
+//       more than one path reaches, and mode=unknown is the documented value
+//       of every phase that runs before the path is chosen
 //   exit 0 on success and on nothing-to-do, 1 on every refusal
 //       covered by the exit assertions of all of the above
 // ---------------------------------------------------------------------------
@@ -1576,62 +1585,132 @@ func TestSummaryLineEndsEverySuccessfulRun(t *testing.T) {
 
 // Spec 38: "It is printed on failure too - a refusal says which phase it
 // stopped in, which is what makes the table under Failure and rollback a lookup
-// rather than a guess." Each case below is a row of that table.
+// rather than a guess." Each case below is a row of that table in
+// deploy/synology/README.md, "When a deploy fails", and the whole line is
+// asserted rather than its phase alone: an operator reads `mode=` off the same
+// line to pick the right half of the two rows more than one path reaches, so a
+// wrong `mode=` would send them to the wrong row.
+//
+// `mode=unknown` is the value of every phase that runs before the path is
+// chosen. It is a documented fifth value, not an accident: preflight, fetch,
+// model, build and plan all run before the first-start branch, the
+// nothing-to-do check and the classic/rolling split.
 func TestSummaryLineNamesThePhaseAFailureStoppedIn(t *testing.T) {
 	cases := map[string]struct {
-		env   map[string]string
-		args  []string
-		phase string
+		env  map[string]string
+		args []string
+		want string
 	}{
 		"Compose is too old": {
-			env:   map[string]string{"STUB_COMPOSE_VERSION": "2.20.1"},
-			args:  []string{"--no-pull"},
-			phase: "preflight",
+			env:  map[string]string{"STUB_COMPOSE_VERSION": "2.20.1"},
+			args: []string{"--no-pull"},
+			want: "update: failed mode=unknown ref=none version=dev backup=none phase=preflight",
+		},
+		"a contradictory command line": {
+			args: []string{"--no-pull", "--auto", "--classic"},
+			want: "update: failed mode=unknown ref=none version=dev backup=none phase=preflight",
 		},
 		"the clone is dirty": {
-			env:   map[string]string{"STUB_GIT_DIFF_RC": "1"},
-			args:  nil,
-			phase: "preflight",
+			env:  map[string]string{"STUB_GIT_DIFF_RC": "1"},
+			args: nil,
+			want: "update: failed mode=unknown ref=none version=dev backup=none phase=preflight",
 		},
 		"the ref does not resolve": {
-			env:   map[string]string{"STUB_GIT_REF_RC": "1"},
-			args:  []string{"--ref", "v9.9.9"},
-			phase: "fetch",
+			env:  map[string]string{"STUB_GIT_REF_RC": "1"},
+			args: []string{"--ref", "v9.9.9"},
+			want: "update: failed mode=unknown ref=v9.9.9 version=dev backup=none phase=fetch",
 		},
 		"the merged model lists traefik": {
-			env:   map[string]string{"STUB_SERVICES": "app db ts-inventory traefik"},
-			args:  []string{"--no-pull"},
-			phase: "model",
+			env:  map[string]string{"STUB_SERVICES": "app db ts-inventory traefik"},
+			args: []string{"--no-pull"},
+			want: "update: failed mode=unknown ref=none version=dev backup=none phase=model",
+		},
+		// The build is the one step that fails without going through `die`, so
+		// its phase would be unreachable without the stub's own build arm.
+		"the build fails": {
+			env:  map[string]string{"STUB_BUILD_RC": "1"},
+			args: []string{"--no-pull"},
+			want: "update: failed mode=unknown ref=none version=dev backup=none phase=build",
+		},
+		"the build fails under --ref": {
+			env: map[string]string{
+				"STUB_BUILD_RC": "1",
+				"STUB_HEAD_1":   "1111111000000000000000000000000000000000",
+				"STUB_HEAD_2":   "2222222000000000000000000000000000000000",
+			},
+			args: []string{"--ref", "v1.4.0"},
+			// The version is already stamped by the time the build runs, so the
+			// summary names the release that failed to build.
+			want: "update: failed mode=unknown ref=v1.4.0 version=v1.4.0 backup=none phase=build",
 		},
 		"the plan cannot be read": {
-			env:   map[string]string{"STUB_MIGRATE_PLAN_RC": "78"},
-			args:  []string{"--no-pull", "--auto"},
-			phase: "plan",
+			env:  map[string]string{"STUB_MIGRATE_PLAN_RC": "78"},
+			args: []string{"--no-pull", "--auto"},
+			want: "update: failed mode=unknown ref=none version=dev backup=none phase=plan",
 		},
 		"the backup fails": {
-			env:   map[string]string{"STUB_BACKUP_RC": "1", "STUB_BACKUP_ARCHIVE": ""},
-			args:  []string{"--no-pull", "--backup"},
-			phase: "backup",
+			env:  map[string]string{"STUB_BACKUP_RC": "1", "STUB_BACKUP_ARCHIVE": ""},
+			args: []string{"--no-pull", "--backup"},
+			want: "update: failed mode=rolling ref=none version=dev backup=none phase=backup",
+		},
+		// The classic path's own stop. Its recovery message deliberately does
+		// not claim a stopped stack, which is why the phase has a row of its own.
+		"the stop fails": {
+			env:  map[string]string{"STUB_STOP_RC": "1"},
+			args: []string{"--no-pull", "--classic"},
+			want: "update: failed mode=classic ref=none version=dev backup=none phase=stop",
 		},
 		"the migration fails": {
-			env:   map[string]string{"STUB_MIGRATE_RC": "1"},
-			args:  []string{"--no-pull", "--classic"},
-			phase: "migrate",
+			env:  map[string]string{"STUB_MIGRATE_RC": "1"},
+			args: []string{"--no-pull", "--classic"},
+			want: "update: failed mode=classic ref=none version=dev backup=none phase=migrate",
 		},
 		"the jobs will not drain": {
-			env:   map[string]string{"STUB_PENDING": "3", "DRAIN_TIMEOUT": "0"},
-			args:  []string{"--no-pull"},
-			phase: "drain",
+			env:  map[string]string{"STUB_PENDING": "3", "DRAIN_TIMEOUT": "0"},
+			args: []string{"--no-pull"},
+			want: "update: failed mode=rolling ref=none version=dev backup=none phase=drain",
 		},
 		"the new instance never becomes healthy": {
-			env:   map[string]string{"STUB_HEALTH_RC": "1", "HEALTH_TIMEOUT": "0"},
-			args:  []string{"--no-pull"},
-			phase: "start",
+			env:  map[string]string{"STUB_HEALTH_RC": "1", "HEALTH_TIMEOUT": "0"},
+			args: []string{"--no-pull"},
+			want: "update: failed mode=rolling ref=none version=dev backup=none phase=start",
+		},
+		// phase=start is reached by three paths, and what is serving afterwards
+		// differs for each - so `mode=` is what makes the table a lookup. These
+		// two are the halves the rolling case above does not cover.
+		"the classic path cannot start the stack again": {
+			env:  map[string]string{"STUB_UP_RC": "1"},
+			args: []string{"--no-pull", "--classic"},
+			want: "update: failed mode=classic ref=none version=dev backup=none phase=start",
+		},
+		"the first start cannot start the stack": {
+			env: map[string]string{
+				"STUB_UP_RC":           "1",
+				"STUB_PSQ_1":           "",
+				"STUB_PSQ":             "",
+				"STUB_APP_SERVICE_IDS": "",
+				"STUB_APP_ALL_IDS":     "",
+			},
+			args: []string{"--no-pull"},
+			want: "update: failed mode=first-start ref=none version=dev backup=none phase=start",
 		},
 		"the sidecar cannot be recreated": {
-			env:   map[string]string{"STUB_SIDECAR_RC": "1"},
-			args:  []string{"--no-pull"},
-			phase: "sidecar",
+			env:  map[string]string{"STUB_SIDECAR_RC": "1"},
+			args: []string{"--no-pull"},
+			want: "update: failed mode=rolling ref=none version=dev backup=none phase=sidecar",
+		},
+		// The pipeline's own invocation, failing late: the summary still names
+		// the release and the archive an operator would restore from.
+		"a --ref --auto --backup run that fails at the drain": {
+			env: map[string]string{
+				"STUB_HEAD_1":         "1111111000000000000000000000000000000000",
+				"STUB_HEAD_2":         "2222222000000000000000000000000000000000",
+				"STUB_BACKUP_ARCHIVE": archive,
+				"STUB_PENDING":        "2",
+				"DRAIN_TIMEOUT":       "0",
+			},
+			args: []string{"--ref", "v1.4.0", "--auto", "--backup"},
+			want: "update: failed mode=rolling ref=v1.4.0 version=v1.4.0 backup=" + archive + " phase=drain",
 		},
 	}
 	for name, c := range cases {
@@ -1646,12 +1725,8 @@ func TestSummaryLineNamesThePhaseAFailureStoppedIn(t *testing.T) {
 			if r.exit == 0 {
 				t.Fatal("expected a failure, got exit 0")
 			}
-			got := lastLine(r.stdout)
-			if !strings.HasPrefix(got, "update: failed ") {
-				t.Fatalf("the last line is not a failure summary: %q", got)
-			}
-			if !strings.HasSuffix(got, " phase="+c.phase) {
-				t.Errorf("the summary\n  got:  %q\n  want it to end in phase=%s", got, c.phase)
+			if got := lastLine(r.stdout); got != c.want {
+				t.Errorf("the failure summary\n  got:  %q\n  want: %q", got, c.want)
 			}
 		})
 	}
@@ -1676,5 +1751,50 @@ func TestHelpPrintsEveryOptionAndNoSummary(t *testing.T) {
 	// It talks to nothing.
 	if r.calls != "" {
 		t.Errorf("--help still called something:\n%s", r.calls)
+	}
+}
+
+// The two ways getting the code itself can fail. Both are refusals before the
+// build, and both leave the clone where it was: what is deployed has to be
+// what was fetched, so a fetch or a checkout that did not happen is not
+// something to carry on from.
+func TestRefRefusesWhenGitCannotGetTheCode(t *testing.T) {
+	cases := map[string]struct {
+		env    map[string]string
+		expect string
+		absent string
+	}{
+		"the fetch fails": {
+			env:    map[string]string{"STUB_GIT_FETCH_RC": "1"},
+			expect: "'git fetch origin --tags' failed",
+			// Nothing was verified or checked out on the way out.
+			absent: "git checkout",
+		},
+		"the checkout fails": {
+			env:    map[string]string{"STUB_GIT_CHECKOUT_RC": "1"},
+			expect: "could not check out 'v1.4.0'",
+		},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := refEnv()
+			for k, v := range c.env {
+				env[k] = v
+			}
+
+			r := run(t, env, "--ref", "v1.4.0")
+
+			if r.exit == 0 {
+				t.Fatal("expected a refusal, got exit 0")
+			}
+			mustContain(t, r.stderr, c.expect, "the refusal")
+			mustContain(t, r.stderr, "Nothing was built or migrated", "the refusal")
+			if c.absent != "" {
+				mustNotContain(t, r.calls, c.absent, "the calls")
+			}
+			mustNotContain(t, r.calls, "build", "the calls")
+			mustNotContain(t, r.calls, "migrate up", "the calls")
+			mustContain(t, lastLine(r.stdout), "phase=fetch", "the summary")
+		})
 	}
 }

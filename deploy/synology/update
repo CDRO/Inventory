@@ -79,6 +79,11 @@
 # docs/specs/38-release-pipeline-and-nas-runner.md, "Failure and rollback". It
 # goes to stdout in both cases; the recovery messages keep going to stderr.
 #
+# mode= is `unknown` until the run has chosen a path, so every failure in the
+# preflight, fetch, model, build and plan phases reports it: those five all run
+# before the first-start branch, the nothing-to-do check and the classic/rolling
+# split, and naming a path there would be a guess.
+#
 # Nothing to do: after the build, Compose is asked (up --dry-run) whether it would
 # recreate or start anything. If not, the script exits without touching anything.
 #
