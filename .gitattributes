@@ -63,3 +63,7 @@ scripts/agent_usage_test.go text eol=lf
 # continuations, which CRLF has broken in Docker builds before.
 deploy/synology/runner/entrypoint.sh text eol=lf
 deploy/synology/runner/Dockerfile text eol=lf
+
+# Same reason, same fix, for the agent runtime container (deploy/agent/, H18).
+deploy/agent/entrypoint.sh text eol=lf
+deploy/agent/Dockerfile text eol=lf
