@@ -123,6 +123,17 @@ brings the second app instance up beside the old one before it retires that one
 yours: the script takes no backup, and going back after a migration still means
 restoring it.
 
+Both halves of that change with the release pipeline of
+[`38-release-pipeline-and-nas-runner.md`](38-release-pipeline-and-nas-runner.md):
+steps 2 to 4 become a deploy job on a self-hosted runner on the NAS, triggered
+by an annotated `vYYYY.MM.DD` tag whose commit a gate job has proven green, and
+step 1 becomes `update --backup`, which takes the pre-upgrade archive before
+`migrate up` and aborts the upgrade when it cannot. Rollback itself does not
+change at all — it is still restoring that archive, because migrations stay
+forward-only — only who has to remember to take it. Spec 38 is the contract for
+that pipeline and names the packages that deliver it; until they land, all four
+steps above are yours, in this order.
+
 To make skipping step 3 loud instead of weird: **on startup, `serve`
 compares the database's goose version against the migrations the binary
 ships.** If migrations are pending, it exits fatally — same

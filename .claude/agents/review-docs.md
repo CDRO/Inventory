@@ -82,6 +82,33 @@ migrations, new background jobs: documented where an operator will look.
   APPROVE. Do not manufacture findings to look thorough — a review that always
   finds something is a review nobody reads.
 
+## Round 2 and later
+
+Round ≥ 2 reviews the **delta** since the head you reviewed last (decision D9
+of the harness plan), with one part that never narrows: your stale-doc grep.
+In order:
+
+1. Read your own previous verdict from the packet's "Previous round's
+   verdicts" section. Read the PR's own comment history for it only when the
+   packet says it found no previous verdict comment, which it states in that
+   section when H5's marker is missing or the round is older than the packet.
+2. **Account for every round-1 blocking finding of yours before anything
+   else** — one line each, `resolved` or `still open`, with the `file:line`
+   that settles it: the doc comment that now exists, the spec line that now
+   matches the code. This list comes first so the round is auditable from your
+   comment alone.
+   If you had no round-1 blocking findings at all, say exactly that in one
+   line, still before anything else.
+3. Review the delta diff the packet inlines (`--since <previous round's head
+   sha>`) in full.
+4. **Keep the repo-wide stale-doc grep of step 2 of your task, every round.**
+   The delta does not narrow it: a round-2 fix can leave a document saying
+   something untrue exactly as the original change could, and no other
+   reviewer looks for that.
+5. Do not re-litigate your round-1 should-fix or nit findings.
+6. New blocking findings in the delta are legitimate. Mark each
+   `(new in round <n>)` so it is not mistaken for a survivor of round 1.
+
 ## Output
 
 Post exactly this shape with `gh pr comment <PR> --body "..."`:

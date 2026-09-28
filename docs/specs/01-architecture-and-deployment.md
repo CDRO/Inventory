@@ -298,6 +298,20 @@ none — not mandated, and GitHub-hosted runners already put two concurrent
 round trips on separate ephemeral runners regardless. Both workflows have
 tighter `timeout-minutes` than before.
 
+A fourth workflow, `.github/workflows/release.yml`, is the only one that does
+not do its real work on a GitHub-hosted runner: on a `v*` tag push its `gate`
+job resolves the tag's commit and requires a green `test` and `e2e` run **for
+that SHA** (running them on the tag when there is none), and its `deploy` job
+then runs on a self-hosted runner in a container on the NAS, whose minutes
+GitHub does not bill at all — which is the point, with a 2 000-minute monthly
+cap on a private repository. Two consequences for the workflows above:
+`test.yml` and `e2e.yml` gain `on: workflow_call` so the gate can run them on a
+tag, keeping every trigger they already have, and `release.yml` stays the only
+workflow in this repository allowed to name that runner.
+[`38-release-pipeline-and-nas-runner.md`](38-release-pipeline-and-nas-runner.md)
+is the contract, including why that exclusivity is a security control rather
+than a convention.
+
 ## Running more than one instance of the stack locally
 
 Two ordinary situations need this: developing two branches side by side, and
@@ -623,6 +637,14 @@ GEMINI_IMAGE_MODEL=
 
 # --- Shopping-list image suggestions ---
 SERPAPI_API_KEY=
+
+# --- Deployment (read by deploy/synology/update, not by the binary) ---
+# How many pre-upgrade backup archives `deploy/synology/update --backup` keeps
+# (38-release-pipeline-and-nas-runner.md); 5 when unset. Commented out on
+# purpose: every uncommented key here is one the config loader reads
+# (TestEnvExampleParity, internal/config), and this one is read by the deploy
+# script instead. Uncomment it to change the retention.
+#BACKUP_KEEP=5
 ```
 
 There is no frontend API-URL variable: Traefik serves the UI and the API
@@ -861,6 +883,19 @@ workflow sets `COMPOSE_FILE` to include it.
   promoted to production. Unit tests already run inside the image build;
   E2E runs separately because it needs a live stack. A deployment that
   skips it is not a valid deployment.
+
+**A release is narrower than a deployment.** On the operator's NAS those
+commands are run by a self-hosted GitHub Actions runner rather than by a person:
+an annotated `vYYYY.MM.DD` tag is the release unit, a gate job proves that the
+tag's commit has a green `test` and a green `e2e` run before anything reaches the
+NAS — the deployment gate above, checked by SHA instead of remembered — and the
+runner then runs `deploy/synology/update` from the clone, which stamps `VERSION`
+from the tag and takes the pre-upgrade backup itself.
+[`38-release-pipeline-and-nas-runner.md`](38-release-pipeline-and-nas-runner.md)
+is the contract for that pipeline and names the packages that build it; until
+they land, deploying is the manual procedure described here and in
+[`18-operations-and-observability.md`](18-operations-and-observability.md),
+which stays the fallback for a NAS whose runner is down.
 
 ## Remote access (interchangeable by configuration)
 
@@ -1161,6 +1196,21 @@ change to the script are in
 the same update by hand is `git pull`, then `$DC pull ts-inventory`, `$DC build`,
 `$DC run --rm app migrate up`, `$DC up -d`, which stops the app before it starts
 the new one.
+
+**What [`38-release-pipeline-and-nas-runner.md`](38-release-pipeline-and-nas-runner.md)
+adds to this script** — and therefore what it changes about two statements above
+— is three flags and a caller. `--ref <tag>` deploys a named tag instead of
+whatever `git pull` brings; `--backup` takes the pre-upgrade backup that "back
+up first" asks for, so "the script takes no backup" stops being true once it
+lands; and `--auto` reads the pending migrations through `inventory migrate
+plan` and picks classic or rolling itself, so `--classic` stops being a
+judgement the operator makes per release (it becomes a marker line in the
+migration, decided in review). The caller is a self-hosted GitHub Actions
+runner in a container on this NAS, in its own Compose project
+(`inventory-runner`) so `dc down` on this stack never touches it, mounting
+nothing but the Docker socket and this clone. Spec 38 is the contract for all of
+it, including that socket's residual risk, and names the packages that build
+it; until they land, this section describes the script as it is.
 
 ## Health/readiness
 

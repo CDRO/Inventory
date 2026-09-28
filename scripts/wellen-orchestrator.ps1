@@ -19,10 +19,10 @@
 .DOCKER ISOLATION
     Every package session runs its own `docker compose` invocations
     (CLAUDE.md's ship loop) inside its own worktree. Before starting
-    anything, the script checks that docker compose actually has the rights
-    it needs (`docker info` must succeed for the current user) and fails
-    fast, with an actionable message, if it does not - a permission problem
-    found only after nine sessions are already running helps no one.
+    anything, the script runs `scripts/doctor` (H11) and fails fast, with the
+    doctor's own actionable message, if any check does not pass - a
+    permission problem found only after nine sessions are already running
+    helps no one.
     Once a worktree is created, its copied .env gets its own
     COMPOSE_PROJECT_NAME, HTTP_PORT, and TRAEFIK_PORT (deterministic per
     package, see Set-WorktreeEnvOverrides), so two worktrees running
@@ -196,6 +196,12 @@ $ParentDir  = Split-Path -Path $RepoRoot -Parent
 $LogFile    = Join-Path $PSScriptRoot 'wellen-orchestrator.log'
 $GhRepo     = $null   # derived from origin after validation
 
+# scripts/doctor (H11): the pre-flight, run once before any worktree or
+# session starts (see Invoke-DoctorPreflight below). A script-level variable,
+# not a literal Join-Path at the call site, purely so a test can point it at
+# a stub without touching the real scripts/doctor.
+$DoctorScript = Join-Path $PSScriptRoot 'doctor'
+
 # slug -> a stable, small, unique integer, assigned once the wave file is
 # loaded (every package's ordinal position across every wave, in file
 # order). Used only to derive a deterministic HTTP_PORT/TRAEFIK_PORT per
@@ -263,6 +269,18 @@ function Import-WavePlan {
         param([string]$Path, $Value)
         if ($Value -and $Value -like "*'*") { Add-ErrorMsg "${Path}: must not contain a single quote (passed single-quoted to claude)" }
     }
+    # staleAfterMinutes (standards and per-package, H11): the heartbeat's
+    # threshold. Get-Field already distinguishes "absent" ($null, no error -
+    # the field is optional) from "present" (any non-null value, including 0,
+    # is returned verbatim), so checking the Get-Field result is enough here -
+    # unlike dockerCleanup above, there is no boolean/empty-string ambiguity
+    # to work around with direct PSObject.Properties access.
+    function Test-StaleAfterMinutes {
+        param([string]$Path, $Value)
+        if ($null -eq $Value) { return }
+        if ($Value -isnot [int] -and $Value -isnot [long]) { Add-ErrorMsg "${Path}: must be a positive integer (minutes), not '$Value'"; return }
+        if ($Value -le 0) { Add-ErrorMsg "${Path}: must be a positive integer (minutes), not $Value" }
+    }
 
     $plan = Get-Field $data 'plan'
     if ($null -eq $plan) { Add-ErrorMsg "plan: missing" }
@@ -285,6 +303,7 @@ function Import-WavePlan {
             if (-not $value) { Add-ErrorMsg "standards.${field}: missing" }
             elseif ($ValidEfforts -notcontains $value) { Add-ErrorMsg "standards.${field}: '$value' is not a valid effort ($($ValidEfforts -join ', '))" }
         }
+        Test-StaleAfterMinutes 'standards.staleAfterMinutes' (Get-Field $standards 'staleAfterMinutes')
     }
 
     $waves = @(Get-Field $data 'waves' @())
@@ -362,6 +381,8 @@ function Import-WavePlan {
 
             $effort = Get-Field $package 'effort'
             if ($effort -and $ValidEfforts -notcontains $effort) { Add-ErrorMsg "${pPath}.effort: '$effort' is not a valid effort ($($ValidEfforts -join ', '))" }
+
+            Test-StaleAfterMinutes "${pPath}.staleAfterMinutes" (Get-Field $package 'staleAfterMinutes')
         }
     }
 
@@ -403,6 +424,42 @@ function Invoke-Native {
 }
 
 # ---------------------------------------------------------------------------
+# Pre-flight (H11): scripts/doctor, once, before any worktree or session.
+# ---------------------------------------------------------------------------
+
+# Replaces the inline `docker compose version` / `docker info` checks this
+# script used to run itself (a permission problem found only after nine
+# sessions are already running helps no one - scripts/doctor's own header
+# tells the same story). Every check scripts/doctor makes - the docker daemon
+# and Compose version checks this script used to duplicate, plus gh auth, git
+# identity/line endings, claude auth, disk space, and the build-cache volume
+# - never writes or mutates anything of this repo's or a package's; the one
+# check that is not purely passive (HTTP_PORT/TRAEFIK_PORT from the MAIN
+# checkout's .env, bound briefly via a throwaway `docker run -p` to prove
+# they are free - scripts/doctor itself, check 5) can now make a -DryRun that
+# used to be side-effect-free refuse to proceed if the operator's own dev
+# stack happens to be up on those ports (documented in "What the orchestrator
+# watches", scripts/wellen-planen.md). A failure fails fast with the doctor's
+# own output, which already names the remediation. git/gh/claude PATH presence is ALSO checked
+# separately in Main flow, ahead of this call, with an orchestrator-specific
+# message for each - a small overlap with scripts/doctor's own gh/claude
+# checks, kept because it fails on the exact right line rather than inside a
+# ten-check report. The one thing genuinely unique to the orchestrator that
+# scripts/doctor's checks do not cover at all is the --remote-control flag:
+# proving `claude` is present and authenticated (scripts/doctor) is not the
+# same as proving THIS installed version understands that flag.
+function Invoke-DoctorPreflight {
+    if (-not (Get-Command sh -ErrorAction SilentlyContinue)) {
+        throw "sh (Git Bash) not found on PATH - scripts/doctor needs it, and every package session's own ship loop already requires Git Bash on PATH for the same reason."
+    }
+    $output = Invoke-Native { sh $script:DoctorScript }
+    if ($script:NativeExit -ne 0) {
+        throw "scripts/doctor found a problem that must be fixed before starting anything:`n$($output -join "`n")"
+    }
+    Write-Log "scripts/doctor: all checks passed."
+}
+
+# ---------------------------------------------------------------------------
 # GitHub state (read-only)
 # ---------------------------------------------------------------------------
 
@@ -429,6 +486,21 @@ function Wait-ForIssueClosed {
     Write-Log "Issue #$Number ($Description) is closed."
 }
 
+# Same as Wait-ForIssueClosed, but for a single package in a sequential wave
+# (Invoke-Wave's own foreach, one package at a time) - checks its heartbeat on
+# every poll too. The unsequential wave's own polling loop below does the same
+# check inline, since several packages are pending there at once; this is the
+# sequential wave's equivalent for exactly one.
+function Wait-ForPackageIssueClosed {
+    param($Package, [string]$WorktreePath, [int]$StaleAfterMinutes, [string]$WindowTitle)
+    Write-Log "Waiting for issue #$($Package.specIssue) ($($Package.spec)) ..."
+    while (-not (Test-IssueClosed -Number $Package.specIssue)) {
+        Test-PackageHeartbeat -Package $Package -WorktreePath $WorktreePath -StaleAfterMinutes $StaleAfterMinutes -WindowTitle $WindowTitle
+        Start-Sleep -Seconds $PollSeconds
+    }
+    Write-Log "Issue #$($Package.specIssue) ($($Package.spec)) is closed."
+}
+
 function Test-RemoteBranchExists {
     param([string]$Branch)
     Invoke-Native { git -C $RepoRoot ls-remote --exit-code --heads origin $Branch } | Out-Null
@@ -449,6 +521,196 @@ function Wait-ForRemoteBranch {
     }
     Write-Log "Branch '$Branch' exists."
     return $true
+}
+
+# ---------------------------------------------------------------------------
+# Heartbeat (H11, decision D3 of the harness optimization plan): a package
+# session that is stuck (looping on a failing test, waiting on a prompt, a
+# crashed window) looks identical to one that is working, for hours - this
+# only notices and alerts; it never kills or restarts anything.
+# ---------------------------------------------------------------------------
+
+# Slug -> the UTC time a session was actually started for that package
+# (Invoke-Package), used as the "last activity" floor when none of the three
+# real signals below has anything yet - a session that has not committed,
+# written a worklog, or received a PR comment in its first few minutes is new,
+# not stale.
+$script:PackageStartedAt = @{}
+
+# Seeds PackageStartedAt for a package THIS orchestrator process has not seen
+# start (a restart meeting an existing worktree, .RESTART SAFETY) - but only
+# if nothing already has a floor for it, so a second restart does not keep
+# pushing the floor forward and never seeds a package Invoke-Package already
+# started for real in THIS process's own lifetime. Without this, a package
+# with none of the three real signals (never committed, never wrote a
+# worklog, no PR yet) would never be flagged stale after a restart at all -
+# exactly the "crashed window" case the heartbeat's own header names.
+function Register-PackageStartIfUnknown {
+    param([string]$Slug)
+    if (-not $script:PackageStartedAt.ContainsKey($Slug)) {
+        $script:PackageStartedAt[$Slug] = (Get-Date).ToUniversalTime()
+    }
+}
+
+# Slug -> UTC time of the last WARN/toast for that package, so a session stuck
+# for hours gets one log line and one toast per hour, not one per poll.
+$script:PackageLastWarnedAt = @{}
+
+# Signal 1/3: last commit date on the package branch. A PR's own `updatedAt`
+# already reflects its head commit in one call - cheaper than the two-call
+# form below, and covers most polls once a package has opened its PR. Only a
+# package with no PR yet falls through to `git ls-remote` (the branch's
+# current commit) + `gh api` (that commit's own date - ls-remote has none).
+function Get-BranchLastCommitDate {
+    param([string]$Branch)
+    $updatedAt = Invoke-Native { gh pr view $Branch --repo $GhRepo --json updatedAt -q '.updatedAt' }
+    if ($script:NativeExit -eq 0 -and -not [string]::IsNullOrWhiteSpace($updatedAt)) {
+        return (Get-ParsedDateOrNull -Text $updatedAt)
+    }
+    $refLine = Invoke-Native { git -C $RepoRoot ls-remote origin $Branch }
+    if ($script:NativeExit -ne 0 -or [string]::IsNullOrWhiteSpace($refLine)) { return $null }
+    $sha = (@($refLine) | Select-Object -First 1) -split '\s+' | Select-Object -First 1
+    $date = Invoke-Native { gh api "repos/$GhRepo/commits/$sha" -q '.commit.committer.date' }
+    if ($script:NativeExit -ne 0) { return $null }
+    return (Get-ParsedDateOrNull -Text $date)
+}
+
+# Signal 2/3: the package worktree's own .claude/worklog.md mtime - the ship
+# loop's local scratch file, rewritten at every phase boundary per the pickup
+# skill.
+function Get-WorklogLastWriteDate {
+    param([string]$WorktreePath)
+    $path = Join-Path $WorktreePath '.claude/worklog.md'
+    if (Test-Path -LiteralPath $path) { return (Get-Item -LiteralPath $path).LastWriteTimeUtc }
+    return $null
+}
+
+# Signal 3/3: the newest comment on the package's PR (a reviewer round, a
+# reply, anything) - $null when there is no PR yet or it has no comments.
+function Get-NewestReviewerCommentDate {
+    param([string]$Branch)
+    $prNumber = Invoke-Native { gh pr list --repo $GhRepo --head $Branch --state all --json number -q '.[0].number' }
+    if ($script:NativeExit -ne 0 -or [string]::IsNullOrWhiteSpace($prNumber)) { return $null }
+    $newest = Invoke-Native { gh pr view (($prNumber -split '\s+') | Select-Object -First 1) --repo $GhRepo --json comments -q '([.comments[].createdAt]) | if length == 0 then "" else max end' }
+    if ($script:NativeExit -ne 0 -or [string]::IsNullOrWhiteSpace($newest)) { return $null }
+    return (Get-ParsedDateOrNull -Text $newest)
+}
+
+# A native command's stdout is not a contract - a transient gh/git hiccup, a
+# jq null, or (in tests) a shadowed Invoke-Native returning a placeholder must
+# never throw out of a heartbeat check into a multi-day run; it is simply "no
+# signal from this source this time".
+function Get-ParsedDateOrNull {
+    param($Text)
+    try {
+        $line = (@($Text) | Select-Object -First 1)
+        return [DateTime]::Parse([string]$line, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+    } catch {
+        return $null
+    }
+}
+
+# The newest of an arbitrary set of (possibly $null) dates, or $null if none
+# of them has anything - kept separate from Get-PackageLastActivity below so
+# the "pick the newest" logic is testable with plain DateTime values, without
+# a live worktree or GitHub.
+function Get-LatestDate {
+    param([object[]]$Dates)
+    $valid = @($Dates | Where-Object { $null -ne $_ })
+    if ($valid.Count -eq 0) { return $null }
+    return ($valid | Sort-Object -Descending | Select-Object -First 1)
+}
+
+function Get-PackageLastActivity {
+    param($Package, [string]$WorktreePath)
+    return Get-LatestDate -Dates @(
+        (Get-BranchLastCommitDate -Branch $Package.branch),
+        (Get-WorklogLastWriteDate -WorktreePath $WorktreePath),
+        (Get-NewestReviewerCommentDate -Branch $Package.branch)
+    )
+}
+
+# The window title the orchestrator gave this package's session
+# (Start-ClaudeSession) - shared with the stale toast, which is how
+# scripts/hooks/notify.ps1 says WHICH of several open sessions it is about.
+function Get-PackageWindowTitle {
+    param($Wave, $Package)
+    return "Wave $($Wave.number) - $($Package.spec) (#$($Package.specIssue))"
+}
+
+# Decides whether to WARN+toast, given an already-computed last-activity time
+# (or $null). Kept separate from Test-PackageHeartbeat so the "once per hour,
+# never acts on it" decision is testable without a live worktree or GitHub.
+function Test-PackageStaleness {
+    param($Package, $LastActivity, [int]$StaleAfterMinutes, [string]$WindowTitle)
+    if ($null -eq $LastActivity) {
+        if (-not $script:PackageStartedAt.ContainsKey($Package.slug)) { return }
+        $LastActivity = $script:PackageStartedAt[$Package.slug]
+    }
+    $idleMinutes = ((Get-Date).ToUniversalTime() - $LastActivity).TotalMinutes
+    if ($idleMinutes -lt $StaleAfterMinutes) { return }
+    $lastWarned = $script:PackageLastWarnedAt[$Package.slug]
+    if ($null -ne $lastWarned -and ((Get-Date) - $lastWarned).TotalMinutes -lt 60) { return }
+    Write-Log "Package '$($Package.slug)' looks stale: nothing moved for $([int]$idleMinutes) min (threshold $StaleAfterMinutes min) - not acting on it, only alerting." 'WARN'
+    Invoke-Native { powershell -NoProfile -File (Join-Path $PSScriptRoot 'hooks\notify.ps1') 'stale' $WindowTitle } | Out-Null
+    $script:PackageLastWarnedAt[$Package.slug] = Get-Date
+}
+
+function Test-PackageHeartbeat {
+    param($Package, [string]$WorktreePath, [int]$StaleAfterMinutes, [string]$WindowTitle)
+    $lastActivity = Get-PackageLastActivity -Package $Package -WorktreePath $WorktreePath
+    Test-PackageStaleness -Package $Package -LastActivity $lastActivity -StaleAfterMinutes $StaleAfterMinutes -WindowTitle $WindowTitle
+}
+
+# ---------------------------------------------------------------------------
+# Rounds bookkeeping (H11, decision D3): how many review rounds a package's
+# PR actually used, read back from the H5 verdict markers
+# (scripts/dev.d/gate's own format:
+#   <!-- verdict: APPROVE|BLOCK round=<n> sha=<head sha reviewed> reviewer=go|tests|docs -->
+# ) once the package's issue closes.
+# ---------------------------------------------------------------------------
+
+# Pure: takes the PR's comment bodies as an array of lines (gh's own stdout
+# shape - a multi-line comment body prints as several physical lines, same
+# assumption scripts/dev.d/gate's awk makes) and returns the highest round
+# number seen and the total number of BLOCK markers across every round. Kept
+# separate from Invoke-PackageRoundsBookkeeping so it is testable against a
+# fixture without a live PR.
+function Get-RoundsFromComments {
+    param([object[]]$CommentLines, [string]$PrNumber)
+    $rounds = 0
+    $blocks = 0
+    foreach ($line in @($CommentLines)) {
+        if ($line -match '^<!-- verdict: (APPROVE|BLOCK) round=(\d+) sha=[0-9a-fA-F]+ reviewer=(go|tests|docs) -->') {
+            $round = [int]$Matches[2]
+            if ($round -gt $rounds) { $rounds = $round }
+            if ($Matches[1] -eq 'BLOCK') { $blocks++ }
+        }
+    }
+    return [pscustomobject]@{ PrNumber = $PrNumber; Rounds = $rounds; Blocks = $blocks }
+}
+
+# Reads the package's own PR (open or already merged/closed) and logs
+# `package <slug>: PR #n, rounds=<n>, blocks=<n>`. Returns $null (and only
+# warns, never throws) when there is no PR to read yet - the orchestrator's
+# own restart safety means a package can in principle have its issue closed
+# by something other than the usual ship loop.
+function Invoke-PackageRoundsBookkeeping {
+    param($Package)
+    $prNumber = Invoke-Native { gh pr list --repo $GhRepo --head $Package.branch --state all --json number -q '.[0].number' }
+    if ($script:NativeExit -ne 0 -or [string]::IsNullOrWhiteSpace($prNumber)) {
+        Write-Log "Rounds bookkeeping for '$($Package.slug)': no PR found for branch '$($Package.branch)' - skipping." 'WARN'
+        return $null
+    }
+    $prNumber = (@($prNumber) | Select-Object -First 1) -split '\s+' | Select-Object -First 1
+    $commentLines = Invoke-Native { gh pr view $prNumber --repo $GhRepo --json comments -q '.comments[].body' }
+    if ($script:NativeExit -ne 0) {
+        Write-Log "Rounds bookkeeping for '$($Package.slug)': could not read PR #$prNumber's comments - skipping." 'WARN'
+        return $null
+    }
+    $info = Get-RoundsFromComments -CommentLines $commentLines -PrNumber $prNumber
+    Write-Log "package $($Package.slug): PR #$($info.PrNumber), rounds=$($info.Rounds), blocks=$($info.Blocks)"
+    return $info
 }
 
 # ---------------------------------------------------------------------------
@@ -558,11 +820,13 @@ function Start-ClaudeSession {
         [string]$WindowTitle,
         [string]$Model,
         [string]$Effort,
-        [string]$AdvisorModel   # empty = no advisor
+        [string]$AdvisorModel,   # empty = no advisor
+        [Nullable[int]]$StaleAfterMinutes = $null  # H11: the package heartbeat's threshold - $null for consolidation, which the heartbeat does not cover
     )
+    $staleSuffix = if ($null -ne $StaleAfterMinutes) { " (stale threshold ${StaleAfterMinutes}min)" } else { '' }
     $advisorArg = if ($AdvisorModel) { "--advisor '$AdvisorModel' " } else { '' }
     if ($DryRun) {
-        Write-Log "[DryRun] would start Claude session in '$WorktreePath' titled '$WindowTitle': claude --model $Model --effort $Effort $($advisorArg)--remote-control '$WindowTitle' <prompt as argument>"
+        Write-Log "[DryRun] would start Claude session in '$WorktreePath' titled '$WindowTitle': claude --model $Model --effort $Effort $($advisorArg)--remote-control '$WindowTitle' <prompt as argument>$staleSuffix"
         return
     }
 
@@ -580,7 +844,7 @@ claude --model '$Model' --effort '$Effort' $advisorArg--remote-control '$WindowT
         -ArgumentList @('-NoExit', '-EncodedCommand', $encoded) `
         -WorkingDirectory $WorktreePath -PassThru
 
-    Write-Log "Claude session started: '$WindowTitle' in '$WorktreePath' (PID $($proc.Id)) - model $Model, effort $Effort$(if ($AdvisorModel) { ", advisor $AdvisorModel" }), Remote Control and prompt passed as CLI arguments."
+    Write-Log "Claude session started: '$WindowTitle' in '$WorktreePath' (PID $($proc.Id)) - model $Model, effort $Effort$(if ($AdvisorModel) { ", advisor $AdvisorModel" })$staleSuffix, Remote Control and prompt passed as CLI arguments."
 }
 
 # ---------------------------------------------------------------------------
@@ -738,18 +1002,32 @@ function Invoke-Wave {
         Wait-ForRemoteBranch -Branch $branch | Out-Null
     }
 
+    # Rounds bookkeeping (H11): one entry per package whose issue closed for
+    # real this run, filled in as each package finishes below and totalled
+    # once the wave is done. Never filled during -DryRun - there is no PR to
+    # read yet in that mode, and Stop-PackageStack's own -DryRun branch below
+    # already covers what -DryRun reports for a package.
+    $waveRoundsInfo = [System.Collections.Generic.List[object]]::new()
+
     $sequential = [bool](Get-Field $Wave 'sequential' $false)
     if ($sequential) {
         foreach ($package in $Wave.packages) {
             Invoke-Package -Plan $Plan -Standards $Standards -Wave $Wave -Package $package
+            $worktreePath = Join-Path $ParentDir "$RepoName-$($package.slug)"
             if (-not $DryRun) {
-                Wait-ForIssueClosed -Number $package.specIssue -Description $package.spec
+                $staleAfterMinutes = [int](Get-Field $package 'staleAfterMinutes' (Get-Field $Standards 'staleAfterMinutes' 45))
+                Wait-ForPackageIssueClosed -Package $package -WorktreePath $worktreePath `
+                    -StaleAfterMinutes $staleAfterMinutes -WindowTitle (Get-PackageWindowTitle -Wave $Wave -Package $package)
             }
             # Unconditional, not "if (-not $DryRun)": Stop-PackageStack checks
             # $DryRun itself (like every other action function here), which is
             # what makes a -DryRun run log that a teardown would happen here
             # too, instead of silently skipping it.
-            Stop-PackageStack -WorktreePath (Join-Path $ParentDir "$RepoName-$($package.slug)") -Slug $package.slug
+            Stop-PackageStack -WorktreePath $worktreePath -Slug $package.slug
+            if (-not $DryRun) {
+                $info = Invoke-PackageRoundsBookkeeping -Package $package
+                if ($null -ne $info) { $waveRoundsInfo.Add($info) }
+            }
         }
     } else {
         foreach ($package in $Wave.packages) {
@@ -778,7 +1056,12 @@ function Invoke-Wave {
                     if (Test-IssueClosed -Number $package.specIssue) {
                         Write-Log "Issue #$($package.specIssue) ($($package.spec)) is closed."
                         Stop-PackageStack -WorktreePath (Join-Path $ParentDir "$RepoName-$($package.slug)") -Slug $package.slug
+                        $info = Invoke-PackageRoundsBookkeeping -Package $package
+                        if ($null -ne $info) { $waveRoundsInfo.Add($info) }
                     } else {
+                        $staleAfterMinutes = [int](Get-Field $package 'staleAfterMinutes' (Get-Field $Standards 'staleAfterMinutes' 45))
+                        Test-PackageHeartbeat -Package $package -WorktreePath (Join-Path $ParentDir "$RepoName-$($package.slug)") `
+                            -StaleAfterMinutes $staleAfterMinutes -WindowTitle (Get-PackageWindowTitle -Wave $Wave -Package $package)
                         $stillPending.Add($package)
                     }
                 }
@@ -789,6 +1072,11 @@ function Invoke-Wave {
     }
 
     Write-Log "All packages of wave $n are done."
+    if ($waveRoundsInfo.Count -gt 0) {
+        $totalRounds = ($waveRoundsInfo | Measure-Object -Property Rounds -Sum).Sum
+        $totalBlocks = ($waveRoundsInfo | Measure-Object -Property Blocks -Sum).Sum
+        Write-Log "Wave $n rounds bookkeeping: $($waveRoundsInfo.Count) package(s), rounds=$totalRounds, blocks=$totalBlocks."
+    }
 
     # Double-start protection for consolidation: unlike packages, there is no
     # worktree whose existence would reveal a running session. Two signals
@@ -894,6 +1182,7 @@ function Invoke-Package {
     New-PackageWorktree -Slug $Package.slug -Branch $Package.branch -BaseBranch $Wave.integrationBranch | Out-Null
 
     if ($alreadyExists) {
+        Register-PackageStartIfUnknown -Slug $Package.slug
         Write-Log "Worktree for '$($Package.spec)' already existed - no new session started, only waiting for completion. If no session is running there anymore, please check by hand." 'WARN'
         return
     }
@@ -901,10 +1190,12 @@ function Invoke-Package {
     $model = Get-Field $Package 'model' (Get-Field $Standards 'model')
     $effort = Get-Field $Package 'effort' (Get-Field $Standards 'effort')
     $advisor = Get-AdvisorModel -Standards $Standards -Context $Package -SessionModel $model
+    $staleAfterMinutes = [int](Get-Field $Package 'staleAfterMinutes' (Get-Field $Standards 'staleAfterMinutes' 45))
     $prompt = Get-PackagePrompt -Plan $Plan -Standards $Standards -Wave $Wave -Package $Package
+    if (-not $DryRun) { $script:PackageStartedAt[$Package.slug] = (Get-Date).ToUniversalTime() }
     Start-ClaudeSession -WorktreePath $worktreePath -PromptText $prompt `
-        -WindowTitle "Wave $($Wave.number) - $($Package.spec) (#$($Package.specIssue))" `
-        -Model $model -Effort $effort -AdvisorModel $advisor
+        -WindowTitle (Get-PackageWindowTitle -Wave $Wave -Package $Package) `
+        -Model $model -Effort $effort -AdvisorModel $advisor -StaleAfterMinutes $staleAfterMinutes
 }
 
 # ---------------------------------------------------------------------------
@@ -947,19 +1238,12 @@ if (-not (Invoke-Native { claude --help } | Out-String).Contains('--remote-contr
 if (-not (Test-Path (Join-Path $RepoRoot '.env'))) { throw ".env is missing in the repo root - every worktree needs a copy of it." }
 
 # Every package session runs `docker compose run --rm app go test ./...`
-# (CLAUDE.md) as part of its own ship loop, in its own worktree, so this
-# has to work BEFORE any worktree/session is created - a permission problem
+# (CLAUDE.md) as part of its own ship loop, in its own worktree, so this has
+# to work BEFORE any worktree/session is created - a permission problem
 # discovered only after nine sessions are already running is nine sessions
-# stuck at the same point. `docker compose version` only proves the CLI and
-# plugin exist; `docker info` is what actually needs the daemon and
-# therefore actually proves the current user can reach it.
-if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw "docker not found on PATH." }
-Invoke-Native { docker compose version } | Out-Null
-if ($script:NativeExit -ne 0) { throw "docker compose (the CLI plugin) is not available - install/update Docker Desktop or the compose plugin." }
-Invoke-Native { docker info } | Out-Null
-if ($script:NativeExit -ne 0) {
-    throw "docker compose does not have the rights it needs: 'docker info' failed, which means the Docker daemon is either not running or not reachable by this user (on Windows/macOS: start Docker Desktop and wait until it reports running; on Linux: typically this user is not in the 'docker' group, or the socket needs sudo). Fix that first - every package session will otherwise fail its own ship loop at the same first 'docker compose run' in every worktree."
-}
+# stuck at the same point. H11: scripts/doctor is the pre-flight now, not an
+# inline `docker compose version`/`docker info` pair - see Invoke-DoctorPreflight.
+Invoke-DoctorPreflight
 
 $GhRepo = (Invoke-Native { gh repo view --json nameWithOwner -q '.nameWithOwner' })
 if ($script:NativeExit -ne 0 -or [string]::IsNullOrWhiteSpace($GhRepo)) {

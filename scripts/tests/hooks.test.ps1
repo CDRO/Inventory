@@ -72,6 +72,23 @@ try {
     $Host.UI.RawUI.WindowTitle = $previousTitle
 }
 
+Write-Host "== Get-ToastBodyForEvent (H11): a 'stale' toast names the STALE package, not this console =="
+
+# The orchestrator calls this from its OWN console about a DIFFERENT window
+# (the package session it suspects is stuck) - the live console title set
+# here stands in for "the orchestrator's own console title", which a naive
+# call to Get-ToastBody would report instead of the package's title.
+$previousTitle = $Host.UI.RawUI.WindowTitle
+try {
+    $Host.UI.RawUI.WindowTitle = 'Wave 3 - Orchestrator console (not the stale package)'
+    Assert ((Get-ToastBodyForEvent -EventName 'stale' -Fallback 'Wave 3 - H11 orchestrator attention (#310)') -ceq 'Wave 3 - H11 orchestrator attention (#310)') `
+        'a "stale" event uses the passed title, never the current (orchestrator) console title'
+    Assert ((Get-ToastBodyForEvent -EventName 'Notification' -Fallback 'fallback') -ceq 'Wave 3 - Orchestrator console (not the stale package)') `
+        'every other event still prefers the live console title, unchanged from before H11'
+} finally {
+    $Host.UI.RawUI.WindowTitle = $previousTitle
+}
+
 Write-Host "== Send-Toast (stubbed backend) =="
 $env:CLAUDE_NOTIFY_TEST_BACKEND = 'ok'
 try {
@@ -106,11 +123,11 @@ try {
 # functions above.
 
 function Invoke-Hook {
-    param([string]$Backend, [string]$StdinJson = '{}')
+    param([string]$Backend, [string]$StdinJson = '{}', [string]$EventName = 'Notification')
     $env:CLAUDE_NOTIFY_TEST_BACKEND = $Backend
     try {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $StdinJson | & powershell -NoProfile -File $hookScript 'Notification' 'test title' | Out-Null
+        $StdinJson | & powershell -NoProfile -File $hookScript $EventName 'test title' | Out-Null
         $exitCode = $LASTEXITCODE
         $sw.Stop()
         return @{ ExitCode = $exitCode; Seconds = $sw.Elapsed.TotalSeconds }
@@ -135,6 +152,12 @@ Assert ($thrown.Seconds -lt 2.0) "runs in under 2 seconds when the backend throw
 $hung = Invoke-Hook -Backend 'hang'
 Assert ($hung.ExitCode -eq 0) "exit 0 when the toast backend hangs for 30s (got $($hung.ExitCode))"
 Assert ($hung.Seconds -lt 2.0) "runs in under 2 seconds even when the backend hangs for 30s (took $([math]::Round($hung.Seconds, 2))s) - proves Wait-Job -Timeout actually bounds it"
+
+# H11's new "stale" event flows through the exact same entrypoint - proves it
+# is not a special case that skips the exit-0/timeout guarantees above.
+$stale = Invoke-Hook -Backend 'ok' -EventName 'stale'
+Assert ($stale.ExitCode -eq 0) "exit 0 for the 'stale' event too (got $($stale.ExitCode))"
+Assert ($stale.Seconds -lt 2.0) "runs in under 2 seconds for the 'stale' event too (took $([math]::Round($stale.Seconds, 2))s)"
 
 if ($script:failures -gt 0) {
     Write-Host "$($script:failures) assertion(s) FAILED" -ForegroundColor Red
