@@ -25,6 +25,16 @@ import (
 // the review screen.
 type Proposal struct {
 	Rows []Row `json:"rows"`
+	// LooksLikeShoppingList and ShoppingListLines are the classification that
+	// rode along on this photo's one analysis call
+	// (docs/specs/41-mixed-photo-classification.md). The job keeps its own
+	// kind and its own review screen either way — these only let that screen
+	// offer to reprocess the photo as a shopping list, and let
+	// POST .../shopping-lists?from_job_id do it without a second Gemini call.
+	LooksLikeShoppingList bool `json:"looks_like_shopping_list"`
+	// ShoppingListLines is never null, so a client may read its length
+	// without a nil check.
+	ShoppingListLines []string `json:"shopping_list_lines"`
 }
 
 // Row is one detected item to be used up.
@@ -67,7 +77,11 @@ type Matcher interface {
 
 // buildProposal assembles the payload from an analysis.
 func buildProposal(ctx context.Context, matcher Matcher, storageID uuid.UUID, analysis *vision.Analysis) (*Proposal, error) {
-	out := &Proposal{Rows: make([]Row, 0, len(analysis.Items))}
+	out := &Proposal{
+		Rows:                  make([]Row, 0, len(analysis.Items)),
+		LooksLikeShoppingList: analysis.LooksLikeShoppingList,
+		ShoppingListLines:     analysis.ShoppingListLines,
+	}
 	for i, item := range analysis.Items {
 		result, err := matcher.MatchLocalProduct(ctx, storageID, item.Label)
 		if err != nil {

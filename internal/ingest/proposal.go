@@ -32,6 +32,16 @@ type Proposal struct {
 	LocationHintID *uuid.UUID `json:"location_hint_id"`
 	// Rows are the detections, each with the row_id a confirm must decide.
 	Rows []Row `json:"rows"`
+	// LooksLikeShoppingList and ShoppingListLines are the classification that
+	// rode along on this photo's one analysis call
+	// (docs/specs/41-mixed-photo-classification.md). The job keeps its own
+	// kind and its own review screen either way — these only let that screen
+	// offer to reprocess the photo as a shopping list, and let
+	// POST .../shopping-lists?from_job_id do it without a second Gemini call.
+	LooksLikeShoppingList bool `json:"looks_like_shopping_list"`
+	// ShoppingListLines is never null, so a client may read its length
+	// without a nil check.
+	ShoppingListLines []string `json:"shopping_list_lines"`
 }
 
 // Row is one detected product.
@@ -108,7 +118,13 @@ type Matcher interface {
 func buildProposal(ctx context.Context, matcher Matcher, storageID uuid.UUID, mode vision.Mode, hint *uuid.UUID, tree []store.Location, analysis *vision.Analysis) (*Proposal, error) {
 	index := newTreeIndex(tree)
 
-	out := &Proposal{Mode: mode, LocationHintID: hint, Rows: make([]Row, 0, len(analysis.Items))}
+	out := &Proposal{
+		Mode:                  mode,
+		LocationHintID:        hint,
+		Rows:                  make([]Row, 0, len(analysis.Items)),
+		LooksLikeShoppingList: analysis.LooksLikeShoppingList,
+		ShoppingListLines:     analysis.ShoppingListLines,
+	}
 	for i, item := range analysis.Items {
 		result, err := matcher.MatchProductCandidates(ctx, storageID, item.Label)
 		if err != nil {

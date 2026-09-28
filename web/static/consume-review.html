@@ -37,6 +37,11 @@
         anything that is not really there; correct anything the photo got
         wrong to an existing product — consumption never creates a new one.
       </p>
+      <!-- The mixed-photo classification offer
+           (docs/specs/41-mixed-photo-classification.md). Ahead of the rows,
+           empty and hidden until an analysis says this photo looks like a
+           shopping list; the review below it is never blocked by it. -->
+      <div id="shopping-list-banner" hidden></div>
       <div id="rows" class="review-list"></div>
       <div class="row">
         <button id="confirm" type="button" class="btn btn--primary" data-i18n="consumeReview.confirm">Confirm</button>

@@ -54,11 +54,15 @@ type Photos interface {
 	Remove(name string) error
 }
 
-// Store is what the service reads and sweeps.
+// Store is what the service reads and sweeps, plus the one thing it writes:
+// a photographed shopping list becomes a real list inside its own job, because
+// docs/specs/07-shopping-list-reconciliation.md has its processing "continue
+// identically to the text path", which writes one outright.
 type Store interface {
 	LocationTree(ctx context.Context, storageID uuid.UUID) ([]store.Location, error)
 	ExpiredJobImages(ctx context.Context, cutoff time.Time, limit int) (map[uuid.UUID]string, error)
 	ClearJobImage(ctx context.Context, id uuid.UUID) error
+	CreateShoppingList(ctx context.Context, storageID uuid.UUID, source store.ShoppingListSource, createdBy *uuid.UUID, items []store.NewShoppingListItem) (*store.ShoppingList, []store.ShoppingListItem, error)
 }
 
 // Service starts ingestion jobs and does their work.
