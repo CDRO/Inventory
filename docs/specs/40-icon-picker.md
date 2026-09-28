@@ -88,7 +88,12 @@ already is.
 ## Recording a new alias
 
 `POST /api/storages/{storage_id}/icon-suggestions/aliases` — body
-`{icon_name, alias}`. Inserts with `ON CONFLICT (icon_name, alias) DO
+`{icon_name, alias}`. Both fields are required, non-empty, and capped at
+100 characters (`VARCHAR(100)`, matching the schema above) — `422` on a
+missing/empty field or on either exceeding the limit, the same shape
+every other length-bounded field in this system already rejects
+(`16-product-maintenance.md`'s `icon_name` cap is the closest precedent).
+On a valid body, inserts with `ON CONFLICT (icon_name, alias) DO
 NOTHING`, the same insert-and-ignore shape `catalog_products` already
 uses. Any authenticated storage member may call this — it is additive,
 low-risk shared data, not an admin action (`03-auth-and-multi-tenancy.md`'s
@@ -136,6 +141,10 @@ form (`16-product-maintenance.md`, "The product edit surface"):
   term again and confirming the icon now appears as a local hit.
 - Iconify being unreachable degrades to local-alias-only results, never a
   failed picker.
+- `POST .../icon-suggestions/aliases` is `422` on a missing/empty
+  `icon_name` or `alias`, and `422` on either exceeding 100 characters —
+  never a silent truncation or a database-level error surfacing to the
+  client.
 - `icon_aliases` is global: an alias recorded from one storage's picker
   session is immediately findable from a different storage's picker — the
   same non-enumeration rules that protect storage data

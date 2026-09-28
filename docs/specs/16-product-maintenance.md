@@ -66,6 +66,11 @@ or together:
 Unknown fields are `422`, not ignored. Every write bumps `updated_at`
 (`02-data-model.md`).
 
+*(Extended by [`39-batch-containers.md`](39-batch-containers.md): the
+batch list above gains a container field per batch, with its own
+rename/clear/destroy affordances — nothing above changes, `39` only adds
+to what a batch row shows.)*
+
 ## The product list
 
 `products.html`'s list defaults to **filter-only**: a search box, a "+
@@ -221,7 +226,10 @@ the source's is discarded with it.
   and leaves `catalog_products` untouched.
 - Unknown fields in `PATCH` are rejected with `422`.
 - `POST /api/storages/{storage_id}/products` requires only `name`;
-  omitting `image` and `icon_name` succeeds and creates no batch.
+  omitting `image` and `icon_name` succeeds and creates no batch. Omitting
+  or blanking `name` itself is `422`, the same rule
+  `internal/httpapi/shoppinglists.go`'s manual-entry path already
+  enforces.
 - Creating a product whose `name` closely matches an existing one
   (matching service stage 1) returns the existing product rather than a
   duplicate.

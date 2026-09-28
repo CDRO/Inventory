@@ -62,12 +62,14 @@ CREATE INDEX idx_inventory_batches_container_id
   separate count on `containers` — that would be a second number that can
   drift from the truth. A container with no batch referencing it anymore
   (the batch hit `quantity = 0` and was deleted, per `02-data-model.md`'s
-  existing rule) simply has no current count; its row is left in place
-  (`destroyed_at` still `NULL`) as a harmless orphan, not auto-destroyed —
-  emptying a container by consuming everything in it is not the same
-  statement as "I threw the box away," and the distinction matters for
-  anyone later asking "what happened to this container" via
-  `inventory_logs`/its own audit trail below.
+  existing rule) simply has no current count; its row is **deliberately
+  left in place** (`destroyed_at` still `NULL`) as a harmless orphan, not
+  auto-destroyed — emptying a container by consuming everything in it is
+  not the same statement as "I threw the box away," and the distinction
+  matters for anyone later asking "what happened to this container" via
+  `inventory_logs`/its own audit trail below. Nothing in this spec sweeps
+  or garbage-collects an orphaned container row; it stays queryable and
+  `destroyed_at IS NULL` forever unless someone explicitly destroys it.
 - `ON DELETE SET NULL` on `inventory_batches.container_id`: a container is
   never a required field, and nothing about deleting one (there is no
   delete endpoint, only destroy — below) should be able to fail or cascade
@@ -104,12 +106,17 @@ on whichever endpoint creates the batch.
 ## Destroying a container
 
 `POST /api/storages/{storage_id}/containers/{id}/destroy` — no body.
+Unlike `container_label`'s rename path (which never takes a container id
+directly — see "Acceptance criteria"), this endpoint's `{id}` *is* a
+container id straight from the URL, so it is the one place in this spec
+that needs a real runtime same-storage check, not a structural one.
 
-1. `404` if the container does not belong to this storage or is already
-   destroyed (destroying is not idempotent — a second call on an
-   already-destroyed container is a `404`, the same "already gone" answer
-   an unknown id gets, per the project's 404-not-403 discipline applied to
-   "does this still exist").
+1. `404` if the container does not belong to this storage (an id from a
+   different storage gets the identical `404` an unknown id gets — no
+   `403`, per the project's non-enumeration rule) or is already destroyed
+   (destroying is not idempotent — a second call on an already-destroyed
+   container is a `404`, the same "already gone" answer an unknown id
+   gets).
 2. In one transaction: set `destroyed_at = now()`, and clear
    `container_id` to `NULL` on every batch currently referencing it.
 3. No `inventory_logs` row — nothing about quantity changed, only which
@@ -126,7 +133,9 @@ surfacing it, but nothing should make it impossible either.
 `POST /api/storages/{storage_id}/inventory-batches/{id}/split` (`06`)
 gains one more optional field: `container_disposition`, one of
 `"source"` (default), `"target"`, `"both"`, `"neither"`, or
-`"destroy"`.
+`"destroy"`. A value outside this set is `422`, the same treatment every
+other invalid-field-value case in this system already gets — this
+endpoint does not introduce a new error shape.
 
 - The source batch (what stays behind after the split) and the new target
   batch (what the split creates) each either keep the source's
@@ -194,9 +203,15 @@ five and the person is mid-task.
   second one.
 - `container_label: null` detaches without destroying; the container row
   survives, referenced by nothing.
+- Sending `container_type` with no `container_label` and no existing
+  container already on the batch is `422` — there is nothing to attach
+  the type to.
 - `POST .../containers/{id}/destroy` sets `destroyed_at`, clears
   `container_id` on every batch that referenced it, in one transaction,
-  and is `404` on an unknown or already-destroyed container.
+  is `404` on a container from a **different storage** (identical to the
+  `404` an unknown id gets — never `403`), and is `404` on a
+  **same-storage but already-destroyed** container too.
+- A `container_disposition` value outside the five listed is `422`.
 - Splitting a batch that has a container respects `container_disposition`
   exactly per the table above, defaulting to `source` when the field is
   omitted, and is a no-op on container fields when the source batch has
@@ -204,11 +219,20 @@ five and the person is mid-task.
 - `container_disposition: "destroy"` on a split destroys the container in
   the same transaction as the split — no window where the split has
   happened but the container has not yet been destroyed, or vice versa.
-- Same-storage validation: a container id referenced by
-  `container_label`'s rename path never crosses storages (there is no way
-  to pass a container id directly — only a label to upsert against the
-  batch's *own* container — so this is enforced structurally, not by a
-  runtime check).
+- A batch's container becomes orphaned (referenced by nothing) when its
+  last batch is consumed to `quantity = 0` and deleted — the container
+  row is not destroyed or removed by that, and stays queryable exactly as
+  before.
+- Same-storage validation: `container_label`'s rename path never crosses
+  storages structurally — there is no way to pass a container id
+  directly through it, only a label to upsert against the batch's *own*
+  container, and the batch itself is already storage-scoped by its own
+  id in the URL. The **destroy** endpoint is different: its `{id}` *is* a
+  container id taken directly from the URL, so it is checked against the
+  URL's `storage_id` at runtime like any other directly-addressed
+  resource — this is the one container operation that needs, and has, a
+  real runtime check rather than relying on the structural argument
+  above.
 - E2E: `e2e/specs/products.spec.js` (or a new file) covers labeling a
   batch as a container, renaming it, splitting it with each
   `container_disposition` value, and destroying it — including the
