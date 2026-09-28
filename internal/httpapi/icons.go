@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
 	"errors"
@@ -74,7 +75,11 @@ func (h *IconHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxIconSVGBytes)
-	if err := r.ParseMultipartForm(maxIconSVGBytes); err != nil {
+	// maxMultipartMemory (upload.go), not maxIconSVGBytes, bounds how much of
+	// the parsed form is held in RAM before spilling to disk — the two
+	// constants answer different questions and maxIconSVGBytes is already
+	// well under it, so reusing upload.go's is the one to name here.
+	if err := r.ParseMultipartForm(maxMultipartMemory); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			h.errors.WriteError(w, r, PayloadTooLarge())
@@ -151,22 +156,57 @@ func readIconSVG(r *http.Request) (string, *Failure) {
 	return string(raw), nil
 }
 
-// svgRoot matches any well-formed XML document whose root element's local
-// name is "svg", regardless of namespace prefix — deliberately not a
-// full SVG schema validation, per readIconSVG's own comment on what this
-// check is and is not for.
-type svgRoot struct {
-	XMLName xml.Name `xml:"svg"`
-}
-
-// isWellFormedSVG reports whether raw parses as well-formed XML rooted at an
-// <svg> element. xml.Unmarshal walks the whole document to find and skip
-// every element even when nothing addresses their content, so this rejects
-// unbalanced tags and invalid syntax anywhere in the body, not just in the
-// root tag.
+// isWellFormedSVG reports whether raw is a well-formed XML document with
+// exactly one top-level element, whose local name is "svg" (regardless of
+// namespace prefix) — deliberately not a full SVG schema validation, per
+// readIconSVG's own comment on what this check is and is not for.
+//
+// **Not `xml.Unmarshal` into a struct carrying only XMLName.** That decodes
+// only as far as it takes to fill the root element and silently ignores
+// everything after — `<svg>...</svg><script>alert(1)</script>` unmarshals
+// without error, because nothing ever asks the decoder to look past `</svg>`.
+// This walks every token to the end of the input instead, so content outside
+// the single root element — a second top-level element, or any non-
+// whitespace text before or after it — fails the check instead of being
+// stored verbatim.
 func isWellFormedSVG(raw []byte) bool {
-	var root svgRoot
-	return xml.Unmarshal(raw, &root) == nil
+	decoder := xml.NewDecoder(bytes.NewReader(raw))
+	depth := 0
+	rootSeen := false
+	rootClosed := false
+
+	for {
+		tok, err := decoder.Token()
+		if err != nil {
+			return err == io.EOF && rootSeen && rootClosed
+		}
+
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if depth == 0 {
+				if rootSeen {
+					return false // a second top-level element
+				}
+				if t.Name.Local != "svg" {
+					return false
+				}
+				rootSeen = true
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+			if depth == 0 {
+				rootClosed = true
+			}
+		case xml.CharData:
+			// depth == 0 here means this text sits outside every element —
+			// before the root or after it closed — where only whitespace is
+			// well-formed XML.
+			if depth == 0 && len(bytes.TrimSpace(t)) > 0 {
+				return false
+			}
+		}
+	}
 }
 
 // ServeSVG serves GET /api/storages/{storage_id}/icons/{id}/svg.
@@ -207,9 +247,12 @@ func (h *IconHandler) ServeSVG(w http.ResponseWriter, r *http.Request) {
 	// (docs/specs/07-shopping-list-reconciliation.md uses the same header
 	// for the same reason on product pictures).
 	header.Set("Content-Security-Policy", "default-src 'none'")
-	// An icon's body never changes once stored — there is no update path,
-	// only create — so a day in the browser's own cache is safe.
-	header.Set("Cache-Control", "private, max-age=86400")
+	// public, unlike a product picture's "private": an icon is global,
+	// shared, non-sensitive data (docs/specs/42-local-icon-library.md), so
+	// nothing is disclosed by a shared cache holding a copy. An icon's body
+	// never changes once stored — there is no update path, only create — so
+	// a day in cache, browser or shared, is safe.
+	header.Set("Cache-Control", "public, max-age=86400")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(body))
 }

@@ -33,7 +33,7 @@ const (
 	IconSourceUploaded = "uploaded"
 )
 
-// ImportIcons inserts one icons row per iclonlib.Icon, `ON CONFLICT (name) DO
+// ImportIcons inserts one icons row per iconlib.Icon, `ON CONFLICT (name) DO
 // NOTHING`, and returns how many rows were actually new.
 //
 // Safe to call more than once — the acceptance criterion `inventory icons

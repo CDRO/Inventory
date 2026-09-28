@@ -354,8 +354,10 @@ func TestRecoverFatalReraisesOtherPanics(t *testing.T) {
 // adds, whose acceptance criterion in docs/specs/34-navigation-and-start-page.md
 // is "its down migration drops the column"; jobs.lease_owner is
 // migrations/00014_job_lease.sql's; and inventory_batches.container_id plus
-// containers.label are migrations/00015_batch_containers.sql's, the newest, so
-// they are the block a walk that stopped one step short would silently skip.
+// containers.label are migrations/00015_batch_containers.sql's — not
+// necessarily the newest migration shipped, but old enough relative to
+// startPageVersion that a walk stopping one step short of the real newest
+// would still silently skip them.
 // (containers.label standing in for the table: information_schema lists no
 // columns for a table that is gone.) `migrate up` afterwards must put all of
 // them back: a rollback that cannot be undone is not a rollback.

@@ -105,6 +105,23 @@ func TestUploadIconRejectsMalformedSVG(t *testing.T) {
 	assert.Contains(t, errorFields(t, rec), "svg")
 }
 
+// TestUploadIconRejectsContentAfterTheRootElement is the regression for a
+// round-1 go review finding: xml.Unmarshal into a struct that only names
+// XMLName stops as soon as the root element is filled and never notices
+// anything after it, so a payload smuggling a second top-level element past
+// a well-formed <svg>...</svg> used to pass isWellFormedSVG and be stored
+// verbatim.
+func TestUploadIconRejectsContentAfterTheRootElement(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	rec := doMultipart(t, f, f.base()+"/icons",
+		map[string]string{"name": "custom:smuggled", "svg": validSVG + "<script>alert(1)</script>"}, "", "", nil)
+
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+	assert.Contains(t, errorFields(t, rec), "svg")
+}
+
 func TestUploadIconRejectsNonSVGXML(t *testing.T) {
 	t.Parallel()
 
