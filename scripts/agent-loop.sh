@@ -368,7 +368,11 @@ ensure_worktree() {
     # means a retry actually retries, rather than requiring a manual
     # `git branch -D` before every single attempt.
     warn "branch '$branch' already exists with no worktree - reusing it (a previous attempt's leftover, or a resume)"
-    add_err=$(git -C "$root" worktree add --no-track "$wt" "$branch" 2>&1) || die "git worktree add failed for '$slug' (reusing existing branch $branch): $add_err"
+    # No --no-track here: that flag only means anything when -b/-B creates a
+    # NEW branch (git rejects it otherwise - "can only be used if a new
+    # branch is created", exit 128) - review-go, PR #488 round 1, verified
+    # empirically. Reusing an existing branch has no tracking to configure.
+    add_err=$(git -C "$root" worktree add "$wt" "$branch" 2>&1) || die "git worktree add failed for '$slug' (reusing existing branch $branch): $add_err"
   else
     add_err=$(git -C "$root" worktree add --no-track -b "$branch" "$wt" "origin/$base" 2>&1) || die "git worktree add failed for '$slug' (branch $branch from origin/$base): $add_err"
   fi

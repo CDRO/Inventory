@@ -264,7 +264,13 @@ case "$*" in
     exit 1 ;;
 esac
 is_worktree_add=0
-for a in "$@"; do [ "$a" = "worktree" ] && is_worktree_add=1; done
+has_no_track=0
+has_new_branch=0
+for a in "$@"; do
+  [ "$a" = "worktree" ] && is_worktree_add=1
+  [ "$a" = "--no-track" ] && has_no_track=1
+  { [ "$a" = "-b" ] || [ "$a" = "-B" ] || [ "$a" = "--detach" ]; } && has_new_branch=1
+done
 if [ "$is_worktree_add" -eq 1 ]; then
   # GIT_STUB_WORKTREE_FAIL simulates the real "git worktree add" failure #465
   # was found through (dubious-ownership, a full disk, anything) - exits
@@ -272,6 +278,15 @@ if [ "$is_worktree_add" -eq 1 ]; then
   if [ -n "${GIT_STUB_WORKTREE_FAIL:-}" ]; then
     echo "fatal: stub-simulated worktree add failure" >&2
     exit 1
+  fi
+  # Real git rejects --no-track unless -b/-B/--detach is also creating a new
+  # branch (exit 128, "can only be used if a new branch is created") -
+  # review-go, PR #488 round 1: the stub used to accept any flag combination,
+  # so the branch-reuse scenario passed even though the real command it was
+  # meant to model would have failed outright.
+  if [ "$has_no_track" -eq 1 ] && [ "$has_new_branch" -eq 0 ]; then
+    echo "fatal: --[no-]track can only be used if a new branch is created" >&2
+    exit 128
   fi
   last=""; secondlast=""
   for a in "$@"; do secondlast=$last; last=$a; done
