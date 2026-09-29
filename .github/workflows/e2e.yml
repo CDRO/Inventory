@@ -198,14 +198,24 @@ jobs:
       # did. Checking for `inventory-e2e-app:latest` by that same literal
       # string would be a tautology (both jobs write the identical hardcoded
       # tag by hand, so a typo in one would just as easily be repeated in the
-      # other) — this asks Compose itself what tag it will use for `app`, the
-      # same resolution `run`/`up` below actually perform.
+      # other) — this asks Compose itself what image it will use for `app`,
+      # the same resolution `run`/`up` below actually perform. `config
+      # --images` prints the image name with no explicit tag; matching it to
+      # the `:latest` tag loaded above relies on Docker's own implicit-tag
+      # normalization in `docker image inspect`, the same normalization
+      # `run`/`up` rely on — correct in effect, just not a tag-for-tag
+      # comparison.
       #
       # `config --images app` alone isn't enough: Compose always resolves a
       # named service's full dependency subgraph, so it prints `db`'s image
       # (`postgres:16-alpine`) too, since `app` has `depends_on: db` —
       # verified locally, not assumed. Subtracting `db`'s own (dependency-
-      # free) image list leaves exactly `app`'s.
+      # free) image list leaves exactly `app`'s — as long as `app` has only
+      # that one dependency. If `app` ever gains a second dependency beyond
+      # `db`, the subtraction leaves more than one line, and `docker image
+      # inspect` on a multi-line argument fails with a raw, unhelpful Docker
+      # error rather than a message pointing at what changed — so check the
+      # line count explicitly instead of just non-empty (#343).
       - name: Verify the image Compose will actually use is the one just loaded
         run: |
           app_and_deps="$(docker compose -f docker-compose.e2e.yml config --images app | sort -u)"
@@ -213,6 +223,13 @@ jobs:
           expected="$(comm -23 <(echo "$app_and_deps") <(echo "$db_only"))"
           if [ -z "$expected" ]; then
             echo "could not isolate app's own image from its dependency subgraph" >&2
+            exit 1
+          fi
+          expected_count="$(printf '%s\n' "$expected" | grep -c .)"
+          if [ "$expected_count" -ne 1 ]; then
+            echo "expected exactly one image for app after subtracting db's dependency subgraph, got $expected_count:" >&2
+            printf '%s\n' "$expected" >&2
+            echo "app likely gained a new dependency beyond db - update this step to subtract its image too" >&2
             exit 1
           fi
           docker image inspect "$expected" >/dev/null
@@ -274,12 +291,19 @@ jobs:
       # not `npm ci`, stays the `e2e` service's own entrypoint
       # (docker-compose.e2e.yml) — `npm ci` deletes node_modules before
       # installing, which would throw this cache away on every single run
-      # instead of reusing it.
+      # instead of reusing it. `restore-keys` falls back to the most recent
+      # cache under the prefix when `package.json` has changed but the exact
+      # hash no longer matches, so a change to it (a real dependency bump, or
+      # something unrelated added to the file) restores the nearest previous
+      # node_modules and lets `npm install` reconcile it, instead of missing
+      # the cache entirely and reinstalling from scratch (#359).
       - name: Restore e2e/node_modules
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: e2e/node_modules
           key: e2e-node-modules-${{ hashFiles('e2e/package.json') }}
+          restore-keys: |
+            e2e-node-modules-
 
       - name: Run the E2E suite
         run: docker compose -f docker-compose.e2e.yml run --rm e2e
