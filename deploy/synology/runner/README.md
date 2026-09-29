@@ -216,6 +216,41 @@ behind is what produces the confusing case — a container that starts, finds a
 registration GitHub no longer knows, and fails to connect. Delete the directory
 and register again with a fresh token.
 
+## The git transport
+
+The container shares the clone's `.git` with the NAS — the same bind mount that
+puts the clone at its identical path — and therefore shares its **remote URL**.
+What it does *not* share is `$HOME`, which is where `known_hosts` and SSH keys
+live. So an SSH remote that the NAS itself fetches from without complaint fails
+in here with `Host key verification failed`, and every release deploy refuses at
+`phase=fetch`.
+
+That cost one real release to diagnose (#409), because the obvious test —
+`git fetch` typed on the NAS — passes and proves nothing. **Test it the way the
+deploy will do it:**
+
+```sh
+docker exec inventory-runner git -C /volume1/docker/inventory fetch origin --tags
+```
+
+The entrypoint therefore rewrites SSH GitHub URLs to HTTPS in the **container's
+own** global git config, which changes nothing the host shares — the NAS keeps
+using SSH for its own `git pull` — and survives a re-clone, which a
+`git remote set-url` on the clone does not.
+
+The rewrite is **conditional, and the condition is the point**: an anonymous
+HTTPS fetch only works while this repository is **public**. It is applied only
+when no SSH private key is present at `$HOME/.ssh/id_*` in the container. When
+the repository goes private and the read-only deploy key is mounted there, the
+rewrite disables itself and SSH becomes the transport again — which is what you
+want, because anonymous HTTPS would by then fail to authenticate.
+
+Mounting that key is the going-private step; it also needs GitHub's host key in
+the container, either baked into the image with `ssh-keyscan` or mounted
+alongside. The start-up smoke test's `git ls-remote` check covers both cases:
+whatever the transport is, it fails the container at start-up rather than at the
+first release.
+
 ## When something is wrong
 
 | The log says | What it means |

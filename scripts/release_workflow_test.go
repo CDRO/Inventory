@@ -173,9 +173,15 @@ func TestReleaseDeployJobKeepsItsGuards(t *testing.T) {
 	deploy := jobBlock(t, body, "deploy")
 
 	// The trigger is the workflow's, not the deploy job's.
-	if !strings.Contains(body, `tags: ["v*"]`) {
-		t.Error(`release.yml no longer contains tags: ["v*"] - the trigger is a tag push only, ` +
-			"which is what stops a fork from starting a release on this repository")
+	//
+	// `v[0-9]*` rather than `v*`, and the difference is load-bearing now that
+	// the runner can actually fetch: a tag matching this filter deploys to the
+	// NAS for real, so `v-test` or `vendor-pin` must not match. Widening it
+	// back would not fail anything else in this repository.
+	if !strings.Contains(body, `tags: ["v[0-9]*"]`) {
+		t.Error(`release.yml's tag filter is no longer tags: ["v[0-9]*"] - a tag push is the only ` +
+			"trigger, and narrowing it to names starting with a digit is what stops a stray " +
+			"tag like v-test from deploying to the NAS")
 	}
 
 	for _, want := range []struct {
@@ -300,6 +306,41 @@ func TestReleaseGateLooksRunsUpByTheTagsCommit(t *testing.T) {
 	if !strings.Contains(body, "actions: read") {
 		t.Error("release.yml no longer requests `actions: read` - the gate's run lookup would 403 " +
 			"on a repository whose default workflow permission is read-only contents")
+	}
+}
+
+// The `tags:` glob cannot express the release shape — GitHub's filter patterns
+// are not regular expressions — so `v2` and `v1.4.0` still reach the gate. The
+// gate rejecting them is the second half of that guard, and it has to happen
+// before anything is resolved or looked up: once the deploy job starts, the NAS
+// has already been touched. Deleting this case statement would leave a workflow
+// that still looks correct and deploys `v2`.
+func TestReleaseGateRefusesATagThatIsNotAReleaseTag(t *testing.T) {
+	gate := jobBlock(t, workflowFiles(t)["release.yml"], "gate")
+	for _, want := range []struct {
+		text string
+		why  string
+	}{
+		{"v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9])", "the plain vYYYY.MM.DD shape is accepted"},
+		{"v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].*)", "the same-day counter vYYYY.MM.DD.n is accepted"},
+		{"''|*[!0-9]*) ok=0", "and only when that counter is all digits - the check that keeps this " +
+			"gate from being looser than scripts/dev.d/release, which would let the tool cut a tag " +
+			"its own pipeline then refuses"},
+		{"is not a release tag", "anything else is refused with a message naming what to do about it"},
+	} {
+		if !strings.Contains(gate, want.text) {
+			t.Errorf("release.yml's `gate` job no longer contains %q - %s. Without it a tag like "+
+				"v2 or v-test reaches the deploy job and is released to the NAS.", want.text, want.why)
+		}
+	}
+	// The refusal has to precede the lookups, or it refuses a tag the job has
+	// already acted on.
+	refusal := strings.Index(gate, "is not a release tag")
+	lookup := strings.Index(gate, "git/ref/tags/")
+	if refusal < 0 || lookup < 0 || refusal > lookup {
+		t.Errorf("release.yml's gate resolves the tag before checking its shape "+
+			"(refusal at %d, lookup at %d) - the check must come first, so that a bad tag "+
+			"costs a failed gate rather than a deploy", refusal, lookup)
 	}
 }
 

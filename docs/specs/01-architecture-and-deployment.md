@@ -901,10 +901,14 @@ NAS — the deployment gate above, checked by SHA instead of remembered — and 
 runner then runs `deploy/synology/update` from the clone, which stamps `VERSION`
 from the tag and takes the pre-upgrade backup itself.
 [`38-release-pipeline-and-nas-runner.md`](38-release-pipeline-and-nas-runner.md)
-is the contract for that pipeline and names the packages that build it; until
-they land, deploying is the manual procedure described here and in
-[`18-operations-and-observability.md`](18-operations-and-observability.md),
-which stays the fallback for a NAS whose runner is down.
+is the contract for that pipeline and names the packages that build it, and they
+have landed: on that NAS an ordinary release is now `scripts/dev release <tag>`
+typed on the operator's machine
+([`deploy/synology/README.md`](../../deploy/synology/README.md), "A release,
+start to finish"). The manual procedure described here and in
+[`18-operations-and-observability.md`](18-operations-and-observability.md) stays
+the fallback for a NAS whose runner is down, and the procedure for any
+deployment that is not that NAS.
 
 ## Remote access (interchangeable by configuration)
 
@@ -1207,19 +1211,21 @@ the same update by hand is `git pull`, then `$DC pull ts-inventory`, `$DC build`
 the new one.
 
 **What [`38-release-pipeline-and-nas-runner.md`](38-release-pipeline-and-nas-runner.md)
-adds to this script** — and therefore what it changes about two statements above
-— is three flags and a caller. `--ref <tag>` deploys a named tag instead of
+added to this script** — and therefore what it changed about two statements
+above — is three flags and a caller. `--ref <tag>` deploys a named tag instead of
 whatever `git pull` brings; `--backup` takes the pre-upgrade backup that "back
-up first" asks for, so "the script takes no backup" stops being true once it
-lands; and `--auto` reads the pending migrations through `inventory migrate
+up first" asks for, so "the script takes no backup" is no longer
+true; and `--auto` reads the pending migrations through `inventory migrate
 plan` and picks classic or rolling itself, so `--classic` stops being a
 judgement the operator makes per release (it becomes a marker line in the
 migration, decided in review). The caller is a self-hosted GitHub Actions
 runner in a container on this NAS, in its own Compose project
 (`inventory-runner`) so `dc down` on this stack never touches it, mounting
 nothing but the Docker socket and this clone. Spec 38 is the contract for all of
-it, including that socket's residual risk, and names the packages that build
-it; until they land, this section describes the script as it is.
+it, including that socket's residual risk, and names the packages that built
+it; they have all landed, so the flags and the caller above exist today — this
+section describes the script's own mechanics, which the pipeline calls rather
+than replaces.
 
 ## Health/readiness
 
