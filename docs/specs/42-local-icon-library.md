@@ -188,9 +188,15 @@ nothing close enough.
   frontend — grep the icon-rendering code path for confirmation as part
   of this package's own review, not just at picker-UI review time.
 - Neither this spec's icon-import path nor `40`'s search/picker endpoints
-  ever reach `api.iconify.design` or any other icon-serving host — the
-  E2E network-blocked check `40` already specifies is the regression
-  guard. **This does not extend to `07-shopping-list-reconciliation.md`'s
+  ever reach `api.iconify.design` or any other icon-serving host —
+  enforced as a regression guard by `internal/iconlib/egress_test.go`,
+  which fails if any file in the icon path imports a network package,
+  constructs an outbound `net/http` request (alias-aware), names an
+  external URL, or imports a package that transitively reaches
+  `net/http`, and if `web/static/js/icon-picker.js` contains an absolute
+  URL. `40`'s egress-blocked run remains valid as a stronger manual
+  check, but it is not what enforces this continuously. **This does not
+  extend to `07-shopping-list-reconciliation.md`'s
   picture-suggestion flow**, which keeps its own, different, already-
   shipped call to the same host (see `07`'s own flagged note) — a
   system-wide "never calls Iconify" claim would be false and is not what

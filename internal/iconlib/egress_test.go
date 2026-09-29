@@ -320,56 +320,104 @@ func TestIconPickerFrontendCallsOnlyItsOwnAPI(t *testing.T) {
 	src, err := os.ReadFile(pickerPath)
 	require.NoErrorf(t, err, "%s is listed in this test but missing — if it moved, move the entry too rather than dropping it", pickerPath)
 
-	for i, line := range strings.Split(string(src), "\n") {
-		code := stripLineComment(line)
-		// "//" on its own covers a protocol-relative URL (//cdn.example/x),
-		// which is how a CDN reference is most often written; requiring the
-		// opening quote keeps it from matching an ordinary comment.
-		for _, forbidden := range []string{"http://", "https://", `"//`, "'//"} {
-			require.NotContainsf(t, code, forbidden,
-				"%s:%d reaches an absolute URL. The icon picker is served by, and "+
-					"talks only to, this deployment (docs/specs/40-icon-picker.md's "+
-					"network-egress criterion); libraries are vendored as single "+
-					"files, never loaded from a CDN (CLAUDE.md).",
-				pickerPath, i+1)
-		}
-	}
+	line, forbidden := scanFrontendForAbsoluteURLs(string(src))
+	require.Zerof(t, line,
+		"%s:%d reaches an absolute URL via %q. The icon picker is served by, "+
+			"and talks only to, this deployment (docs/specs/40-icon-picker.md's "+
+			"network-egress criterion); libraries are vendored as single files, "+
+			"never loaded from a CDN (CLAUDE.md).",
+		pickerPath, line, forbidden)
 }
 
-// stripLineComment drops a trailing // comment, leaving any "//" that is
-// inside a string literal alone.
+// forbiddenURLPatterns are the substrings that mark an absolute URL: the two
+// schemes this project would ever name, plus a quoted protocol-relative
+// reference ("//cdn.example/x" — the usual shape of a CDN pull). A bare "//"
+// is not included, because that also matches an ordinary line comment.
+var forbiddenURLPatterns = []string{"http://", "https://", `"//`, "'//"}
+
+// scanFrontendForAbsoluteURLs reports the first line (1-indexed) and pattern
+// in src that reaches an absolute URL, or (0, "") if none does.
 //
-// Two different bugs have lived in this one function, both of which made a
-// check vacuous while it still read as coverage — which is worse than having
-// no check at all:
+// This intentionally does not try to skip comments. An earlier version
+// stripped a trailing "// ..." comment before checking each line, on the
+// theory that only executable code needing to be checked. That function,
+// stripLineComment, went through three rounds of vacuous-check bugs before
+// being deleted, all with the same shape — it read as a defense in depth
+// but instead ate whatever it was supposed to be catching:
 //
-//   - strings.Cut(line, "//") cuts `const X = "https://api.iconify.design"`
-//     at the scheme's own slashes and returns `const X = "https:`, containing
-//     neither "http://" nor "https://". The first draft did this and passed
-//     against a deliberately injected live call.
-//   - Treating only a preceding ':' as "not a comment" fixes that case but
-//     leaves the protocol-relative one dead: `const CDN = "//cdn.example/x"`
-//     is still cut at the quote, so the `"//` check could never fire. Found
-//     by review-go on PR #426 round 2.
+//   - strings.Cut(line, "//") cut a URL at its own scheme slashes
+//     (`"https://api...` became `"https:`), so the check never fired.
+//   - Treating only a preceding ':' as "not a comment" fixed that but left
+//     the protocol-relative form ("//cdn.example/x") dead, since it too was
+//     cut at the opening quote before the "//" check ever ran.
+//   - Tracking quote state made both of those pass, but it did so per line:
+//     a template literal opened with a backtick on one line and continued
+//     on the next started the next call with no memory of being inside a
+//     string, so a URL on its own continuation line — with no backtick, no
+//     quote, nothing but the URL itself — read as the start of a "//"
+//     comment and was truncated away. Found on PR #426 round 2 (#428).
 //
-// Tracking string state is what actually covers both, and is why this is a
-// scanner rather than a search.
-func stripLineComment(line string) string {
-	var quote byte
-	for i := 0; i < len(line); i++ {
-		char := line[i]
-		switch {
-		case quote != 0:
-			if char == '\\' {
-				i++ // skip whatever this escapes, including a quote
-			} else if char == quote {
-				quote = 0
+// icon-picker.js has no legitimate reason to name an external host anywhere
+// in it, comments included, so the fix that actually closes the class of bug
+// is to stop parsing comments at all: check the raw line. A check with no
+// parsing has no parsing bug.
+func scanFrontendForAbsoluteURLs(src string) (line int, forbidden string) {
+	for i, l := range strings.Split(src, "\n") {
+		for _, pattern := range forbiddenURLPatterns {
+			if strings.Contains(l, pattern) {
+				return i + 1, pattern
 			}
-		case char == '"' || char == '\'' || char == '`':
-			quote = char
-		case char == '/' && i+1 < len(line) && line[i+1] == '/':
-			return line[:i]
 		}
 	}
-	return line
+	return 0, ""
+}
+
+// TestScanFrontendForAbsoluteURLsCatchesMultiLineTemplateLiterals proves the
+// #428 evasion is closed: a URL that appears on its own line inside a
+// multi-line template literal, with no quote character anywhere near it, is
+// still caught. The old stripLineComment-based scanner missed exactly this
+// shape because its quote-tracking reset at every newline.
+func TestScanFrontendForAbsoluteURLsCatchesMultiLineTemplateLiterals(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		src           string
+		wantLine      int
+		wantForbidden string
+	}{
+		{
+			name: "clean file finds nothing",
+			src: "const el = document.createElement('div');\n" +
+				"// no URLs here, https-shaped or otherwise\n",
+			wantLine: 0,
+		},
+		{
+			name:     "single-line quoted URL is caught",
+			src:      `const TPL = ` + "`" + `<a href="https://api.iconify.design/search">x</a>` + "`" + `;`,
+			wantLine: 1, wantForbidden: "https://",
+		},
+		{
+			name: "URL split onto its own line inside a template literal (#428 repro)",
+			src: "const ENDPOINT = `\n" +
+				"https://api.iconify.design/search\n" +
+				"`.trim();\n",
+			wantLine: 2, wantForbidden: "https://",
+		},
+		{
+			name:     "protocol-relative reference inside a quote",
+			src:      `const CDN = "//cdn.example/x";`,
+			wantLine: 1, wantForbidden: `"//`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotLine, gotForbidden := scanFrontendForAbsoluteURLs(tt.src)
+			require.Equal(t, tt.wantLine, gotLine)
+			require.Equal(t, tt.wantForbidden, gotForbidden)
+		})
+	}
 }
