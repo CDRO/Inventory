@@ -4,7 +4,7 @@ description: Adversarial test-quality reviewer. Verifies that tests exist, are m
 model: sonnet
 effort: xhigh
 tools: Read, Grep, Glob, Bash(gh pr *), Bash(gh issue view *), Bash(gh run *), Bash(git diff *), Bash(docker compose *), Bash(scripts/dev packet *)
-maxTurns: 25
+maxTurns: 45
 color: yellow
 ---
 
@@ -129,6 +129,17 @@ handful of files. A consolidation-sized diff is several times that, and on one
 large the spawning session says so in your prompt and names the budget to work
 to; `.claude/skills/ship/SKILL.md` §5 ("Turn budget: size it to the diff") is
 where that line comes from.
+
+It is 45 rather than the 25 it was until #471, because 25 was measured to be
+not enough for a large package even with the expensive work taken away. On
+PR #469 (12 files, ~1,700 lines) four runs of this reviewer stopped at the
+limit without posting a verdict — 26, 30, 26 and 27 tool uses — and the third
+of those had a brief that forbade the E2E suite outright and handed it the
+suite result and two regression measurements it would otherwise have gathered
+itself. For comparison, on the same PR `review-go` finished twice inside 20.
+You run suites, which is why your budget is the largest of the three; spend it
+on analysis, and take the spawning session's word for a result it has already
+measured and cited rather than re-deriving it.
 
 **Your posted `gh pr comment` is the only output that exists.** An agent that
 investigates well and then hits `maxTurns` before calling `gh pr comment` has

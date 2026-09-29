@@ -169,8 +169,9 @@ missing or stale. Each posts its own PR comment and returns a short summary.
 ### Turn budget: size it to the diff
 
 Each reviewer's `maxTurns` is fixed in its frontmatter — `review-go` 20,
-`review-docs` 15, `review-tests` 25 — and sized for a package PR of a handful
-of files. A consolidation diff is several times that, and the budget does not
+`review-docs` 15, `review-tests` 45 (raised from 25 by #471, after four runs on
+one package PR stopped at the limit without posting a verdict) — and sized for a
+package PR of a handful of files. A consolidation diff is several times that, and the budget does not
 stretch: on PR #360 (14 files, ~1,820 lines) all three lanes overran, and four
 of the six lane-runs stopped **before posting a verdict** (#364).
 
