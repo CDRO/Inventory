@@ -1044,12 +1044,130 @@ function Invoke-WaveDockerCleanup {
 }
 
 # ---------------------------------------------------------------------------
+# Automatic release tagging. Only the plan's LAST wave's consolidation ever
+# reaches this (Invoke-Wave's own call site gates on $NextWave being $null),
+# and only once main actually carries that consolidation's merge. A plan
+# whose cumulative diff never leaves the prefixes below is harness/tooling or
+# documentation work - neither changes what runs on the NAS - so it gets no
+# tag. Anything else is product code, and gets tagged the moment it lands,
+# which is enough on its own to trigger the release pipeline
+# (.github/workflows/release.yml, docs/specs/38-release-pipeline-and-nas-runner.md
+# - it watches for any v[0-9]* push, nothing here calls it directly).
+#
+# No human step in between: Tizian's explicit choice, asked and confirmed
+# 2026-09-29, trading the release checkpoint every prior deploy has had for
+# not needing one per plan. The tag carries no "deploy: classic" line, so
+# the pipeline's own --auto logic still decides rolling vs classic from the
+# real migration - this only decides WHETHER to release, never HOW.
+#
+# Known gap, not solved here: $PlanStartSha is this orchestrator PROCESS's
+# own start time, not the plan's. A `-StartWave` resume (a fresh process
+# beginning mid-plan) only sees the diff from its own start onward, missing
+# any product-code changes from waves that merged in an earlier process
+# invocation. Invoke-AutoReleaseTagIfNeeded logs a WARN and skips tagging
+# rather than guessing when it has no start sha to compare against; a
+# `-StartWave` resume of a plan with earlier product-affecting waves needs a
+# tag cut by hand.
+# ---------------------------------------------------------------------------
+
+$script:ReleaseInfraPrefixes = @('scripts/', 'deploy/', '.github/', '.claude/', 'docs/')
+
+function Test-ChangedFilesAffectProduct {
+    param([string[]]$Files)
+    foreach ($f in $Files) {
+        if ([string]::IsNullOrWhiteSpace($f)) { continue }
+        $isInfra = $false
+        foreach ($prefix in $script:ReleaseInfraPrefixes) {
+            if ($f.StartsWith($prefix)) { $isInfra = $true; break }
+        }
+        if (-not $isInfra) { return $true }
+    }
+    return $false
+}
+
+# $ExistingTags: tag names already on the remote (no 'refs/tags/' prefix, no
+# '^{}' peel suffix). $Today: 'yyyy.MM.dd', passed in rather than read from
+# Get-Date here so this stays a pure function a test can call with a fixed
+# date instead of racing the real clock across midnight.
+function Get-NextReleaseTagName {
+    param([string[]]$ExistingTags, [string]$Today)
+    $base = "v$Today"
+    if ($ExistingTags -notcontains $base) { return $base }
+    $suffix = 1
+    while ($ExistingTags -contains "$base.$suffix") { $suffix++ }
+    return "$base.$suffix"
+}
+
+function Invoke-AutoReleaseTagIfNeeded {
+    param([string]$PlanStartSha, [string]$PlanName)
+    if ($DryRun) {
+        Write-Log "[DryRun] would check whether '$PlanName' needs an automatic release tag."
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($PlanStartSha)) {
+        Write-Log "Auto-release: no plan-start commit recorded (likely a -StartWave resume) - skipping the product-code check, no tag. Cut one by hand if this plan touched product code." 'WARN'
+        return
+    }
+    # This fetch is the only place in the whole script that ever advances the
+    # local origin/main tracking ref - everywhere else watches for a merge
+    # through the gh API, never local git state. A silent failure here would
+    # leave the diff below comparing against a STALE origin/main: either a
+    # false "touched only infra/docs" verdict for a plan that plainly shipped
+    # product code (no tag, no warning, run reports success), or a tag cut on
+    # a commit missing the just-landed work, sent through the real release
+    # pipeline incomplete. Checked explicitly for exactly that reason - the
+    # round-1 review of this PR found it unchecked.
+    Invoke-Native { git fetch origin main --tags } | Out-Null
+    if ($script:NativeExit -ne 0) {
+        Write-Log "Auto-release: 'git fetch origin main --tags' failed - origin/main may be stale, refusing to diff against it. No tag. Check by hand." 'WARN'
+        return
+    }
+    $changedRaw = Invoke-Native { git diff --name-only "$PlanStartSha" origin/main }
+    if ($script:NativeExit -ne 0) {
+        Write-Log "Auto-release: could not diff $PlanStartSha..origin/main - skipping, no tag. Check by hand." 'WARN'
+        return
+    }
+    $changed = @($changedRaw -split "`n" | Where-Object { $_ })
+    if (-not (Test-ChangedFilesAffectProduct -Files $changed)) {
+        Write-Log "Auto-release: '$PlanName' touched only infra/docs paths - no tag."
+        return
+    }
+    # A failed ls-remote must not fall through to Get-NextReleaseTagName with
+    # an empty $existingTags: it would confidently name the bare vYYYY.MM.DD
+    # even when that name is already taken, and only discover the collision
+    # at the push step below with a "check by hand" message that names the
+    # wrong cause.
+    $tagsRaw = Invoke-Native { git ls-remote --tags origin }
+    if ($script:NativeExit -ne 0) {
+        Write-Log "Auto-release: 'git ls-remote --tags origin' failed - cannot safely pick a tag name. No tag. Check by hand." 'WARN'
+        return
+    }
+    $existingTags = @($tagsRaw -split "`n" |
+        ForEach-Object { ($_ -split "`t")[1] } |
+        Where-Object { $_ -and $_ -notlike '*^{}' } |
+        ForEach-Object { $_ -replace '^refs/tags/', '' })
+    $today = Get-Date -Format 'yyyy.MM.dd'
+    $tagName = Get-NextReleaseTagName -ExistingTags $existingTags -Today $today
+    Invoke-Native { git tag -a $tagName -m "Automatic release: $PlanName" origin/main } | Out-Null
+    if ($script:NativeExit -ne 0) {
+        Write-Log "Auto-release: failed to create tag $tagName - not pushed. Check by hand." 'WARN'
+        return
+    }
+    Invoke-Native { git push origin $tagName } | Out-Null
+    if ($script:NativeExit -ne 0) {
+        Write-Log "Auto-release: failed to push tag $tagName - not released. Check by hand." 'WARN'
+        return
+    }
+    Write-Log "Auto-release: pushed $tagName - release pipeline triggered for '$PlanName'."
+}
+
+# ---------------------------------------------------------------------------
 # Orchestrate one wave: wait for its branch, start/wait for packages, start
 # consolidation, wait for the wave issue.
 # ---------------------------------------------------------------------------
 
 function Invoke-Wave {
-    param($Plan, $Standards, $Wave, $NextWave)
+    param($Plan, $Standards, $Wave, $NextWave, $PlanStartSha)
 
     $n = $Wave.number
     $branch = $Wave.integrationBranch
@@ -1184,6 +1302,9 @@ function Invoke-Wave {
     if (-not $DryRun) {
         Wait-ForIssueClosed -Number $Wave.waveIssue -Description "consolidation wave $n"
         Remove-Item -Path $marker -ErrorAction SilentlyContinue
+    }
+    if ($null -eq $NextWave) {
+        Invoke-AutoReleaseTagIfNeeded -PlanStartSha $PlanStartSha -PlanName $Plan.name
     }
     Invoke-WaveDockerCleanup -Wave $Wave
     Write-Log "=== Wave ${n}: done ==="
@@ -1325,6 +1446,15 @@ if ($script:NativeExit -ne 0 -or [string]::IsNullOrWhiteSpace($GhRepo)) {
 $GhRepo = $GhRepo.Trim()
 Write-Log "GitHub repository: $GhRepo"
 
+# The baseline Invoke-AutoReleaseTagIfNeeded diffs against once the plan's
+# last wave consolidates. Only meaningful for a plan started fresh at wave 1
+# in THIS process - see that function's own comment for the -StartWave gap.
+$planStartSha = $null
+if (-not $DryRun -and ($StartWave -eq 0 -or $StartWave -eq 1)) {
+    $planStartSha = Invoke-Native { git rev-parse origin/main }
+    if ($script:NativeExit -ne 0) { $planStartSha = $null }
+}
+
 for ($i = 0; $i -lt $waves.Count; $i++) {
     $wave = $waves[$i]
     if ($StartWave -gt 0 -and $wave.number -lt $StartWave) {
@@ -1332,7 +1462,7 @@ for ($i = 0; $i -lt $waves.Count; $i++) {
         continue
     }
     $next = if ($i + 1 -lt $waves.Count) { $waves[$i + 1] } else { $null }
-    Invoke-Wave -Plan $plan -Standards $standards -Wave $wave -NextWave $next
+    Invoke-Wave -Plan $plan -Standards $standards -Wave $wave -NextWave $next -PlanStartSha $planStartSha
 }
 
 Write-Log "All waves in the file are done. '$($plan.name)' complete."
