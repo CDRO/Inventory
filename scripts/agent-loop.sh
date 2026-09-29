@@ -301,20 +301,28 @@ apply_worktree_env_overrides() {
 }
 
 # --- Worktree lifecycle -------------------------------------------------------
+# Sets $ensured_worktree on success - deliberately NOT "prints the path on
+# stdout" for the caller to capture via $(...): a command substitution runs
+# in a subshell, and die()'s `exit 1` inside one only kills that subshell,
+# leaving the caller to silently continue with an empty result instead of
+# actually stopping (#465 - observed live: a worktree-add failure fell
+# through to running a real session directly against the primary checkout).
+# Calling this directly, with no subshell around it, means die() here exits
+# the real process.
 ensure_worktree() {
-  # $1 slug, $2 branch, $3 base branch; prints the worktree path on stdout
+  # $1 slug, $2 branch, $3 base branch
   slug=$1; branch=$2; base=$3
   wt="$parent_dir/$repo_name-$slug"
   if [ -d "$wt" ]; then
     warn "worktree '$wt' already exists - not created again"
-    printf '%s' "$wt"
+    ensured_worktree="$wt"
     return 0
   fi
   git -C "$root" fetch origin >/dev/null 2>&1
   if ! git -C "$root" worktree add --no-track -b "$branch" "$wt" "origin/$base" >/dev/null 2>&1; then
     die "git worktree add failed for '$slug' (branch $branch from origin/$base)"
   fi
-  printf '%s' "$wt"
+  ensured_worktree="$wt"
 }
 
 # --- One claude session -------------------------------------------------------
@@ -475,7 +483,8 @@ process_issue() {
     return 0
   fi
 
-  wt=$(ensure_worktree "$slug" "$branch" "$base")
+  ensure_worktree "$slug" "$branch" "$base"
+  wt="$ensured_worktree"
   write_worktree_env "$wt"
   apply_worktree_env_overrides "$wt" "$slug" "$port_index"
 

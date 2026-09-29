@@ -244,6 +244,13 @@ printf '%s\n' "$*" >> "$GIT_STUB_CALLS"
 is_worktree_add=0
 for a in "$@"; do [ "$a" = "worktree" ] && is_worktree_add=1; done
 if [ "$is_worktree_add" -eq 1 ]; then
+  # GIT_STUB_WORKTREE_FAIL simulates the real "git worktree add" failure #465
+  # was found through (dubious-ownership, a full disk, anything) - exits
+  # nonzero with nothing created, same as the real command would.
+  if [ -n "${GIT_STUB_WORKTREE_FAIL:-}" ]; then
+    echo "fatal: stub-simulated worktree add failure" >&2
+    exit 1
+  fi
   last=""; secondlast=""
   for a in "$@"; do secondlast=$last; last=$a; done
   mkdir -p "$secondlast"
@@ -454,6 +461,25 @@ assert_contains "$calls" "issue #703" "the rendered prompt names issue #703"
 ghcalls=$(cat "$SCPATH/state/gh-calls.log")
 assert_not_contains "$ghcalls" "issue list" "no queue routing call is made in --issue mode"
 assert_not_contains "$ghcalls" "--json body" "no blocked-by body scan is made in --issue mode"
+
+echo "== scenario: a failed worktree add stops the loop, not just the failing subshell (#465) =="
+setup_scenario worktreefail
+# No gh-open-issues / gh-issue-bodies fixtures needed: the loop must never
+# reach a session at all. GIT_STUB_WORKTREE_FAIL makes the stubbed
+# `git worktree add` fail exactly like the real one does under #465's
+# dubious-ownership condition - ensure_worktree's own die() must actually
+# stop process_issue, not just the command-substitution subshell it used to
+# run inside (which silently continued with an empty worktree path and let a
+# real session start directly against the primary checkout).
+export GIT_STUB_WORKTREE_FAIL=1
+rc=$(run_loop --issue 704)
+unset GIT_STUB_WORKTREE_FAIL
+out=$(cat "$SCPATH/state/output.log")
+assert "$([ "$rc" -ne 0 ] && echo 0 || echo 1)" "a worktree-add failure stops the loop with a nonzero exit"
+assert_contains "$out" "FATAL" "the failure is reported as fatal"
+assert_contains "$out" "git worktree add failed" "the failure names what actually failed"
+callcount=$(claude_call_count)
+assert "$([ "$callcount" = "0" ] && echo 0 || echo 1)" "no session starts once the worktree could not be created"
 
 echo
 echo "== summary: $passes passed, $failures failed =="
