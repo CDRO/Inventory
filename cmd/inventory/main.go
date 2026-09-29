@@ -30,6 +30,7 @@ import (
 	"github.com/CDRO/Inventory/internal/config"
 	"github.com/CDRO/Inventory/internal/consume"
 	"github.com/CDRO/Inventory/internal/httpapi"
+	"github.com/CDRO/Inventory/internal/iconlib"
 	"github.com/CDRO/Inventory/internal/imagesearch"
 	"github.com/CDRO/Inventory/internal/ingest"
 	"github.com/CDRO/Inventory/internal/jobs"
@@ -172,6 +173,10 @@ func run(args []string) error {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return runMigrate(ctx, args[1:])
+	case "icons":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return runIcons(ctx, args[1:])
 	case "recompute-progress":
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -194,6 +199,7 @@ Commands:
   migrate up           Apply pending database migrations
   migrate status       Show migration state
   migrate plan         List pending migrations and the deploy mode they need
+  icons import         Import the vendored icon library (also run by migrate up)
   recompute-progress   Rebuild gamification XP/level/streak from scratch
 `)
 }
@@ -259,7 +265,59 @@ func runMigrate(ctx context.Context, args []string) error {
 		return err
 	}
 	defer db.Close()
-	return bootstrapAdmin(ctx, db, cfg)
+	if err := bootstrapAdmin(ctx, db, cfg); err != nil {
+		return err
+	}
+
+	// The vendored icon library's second side effect of `migrate up`
+	// (docs/specs/42-local-icon-library.md): run here, after the schema
+	// migration above has applied the `icons` table, so a fresh install ends
+	// with a populated, searchable library after the same command it already
+	// had to run — no separate manual step, the same shape as the initial
+	// admin above.
+	return importIcons(ctx, db)
+}
+
+// runIcons handles the `icons` subcommand — today just `icons import`, kept
+// separate from `migrate up`'s own call to importIcons so an operator can
+// re-run the import on its own (docs/specs/42-local-icon-library.md's
+// "safe to run more than once").
+func runIcons(ctx context.Context, args []string) error {
+	action := ""
+	if len(args) > 0 {
+		action = args[0]
+	}
+	if action != "import" {
+		return fmt.Errorf("unknown icons action %q (want: import)", action)
+	}
+
+	cfg, err := config.Load(os.Getenv)
+	if err != nil {
+		return err
+	}
+	db, err := store.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return importIcons(ctx, db)
+}
+
+// importIcons parses the vendored Noto collection and inserts one `icons`
+// row per icon, `ON CONFLICT (name) DO NOTHING`
+// (docs/specs/42-local-icon-library.md). Nothing here makes a network call —
+// the whole set is already embedded in this binary (internal/iconlib).
+func importIcons(ctx context.Context, db *store.Store) error {
+	icons, err := iconlib.Noto()
+	if err != nil {
+		return fmt.Errorf("load vendored icons: %w", err)
+	}
+	inserted, err := db.ImportIcons(ctx, icons)
+	if err != nil {
+		return fmt.Errorf("import icons: %w", err)
+	}
+	fmt.Printf("inventory: imported %d new icon(s) (%d already present)\n", inserted, len(icons)-inserted)
+	return nil
 }
 
 // bootstrapAdmin creates the first admin on an install with no users at all

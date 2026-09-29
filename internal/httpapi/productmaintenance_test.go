@@ -3,6 +3,7 @@ package httpapi_test
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/CDRO/Inventory/internal/httpapi"
+	"github.com/CDRO/Inventory/internal/matching"
 	"github.com/CDRO/Inventory/internal/store"
 )
 
@@ -415,4 +418,253 @@ func TestProductMaintenanceRoutesRefuseANonMember(t *testing.T) {
 	assert.Zero(t, f.products.updateCalls)
 	assert.Zero(t, f.products.mergeCalls)
 	assert.Zero(t, f.products.deleteCalls)
+}
+
+// "Creating a product" (docs/specs/16-product-maintenance.md): the standalone
+// POST /api/storages/{storage_id}/products, the "+ Add product" entry point
+// that does not require first typing a shopping-list line.
+
+// TestCreateProductRequiresName mirrors the 422 rule
+// internal/httpapi/shoppinglists.go's own manual-entry path already enforces:
+// a blank or missing name never reaches the store.
+func TestCreateProductRequiresName(t *testing.T) {
+	t.Parallel()
+
+	for _, body := range []string{`{}`, `{"name":""}`, `{"name":"   "}`} {
+		f := newAPIFixture(t)
+
+		rec := f.do(http.MethodPost, f.base()+"/products", body)
+		require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+		assert.Contains(t, errorFields(t, rec), "name")
+		assert.Zero(t, f.reorder.createCalls, "a refused body must not reach the store")
+	}
+}
+
+// TestCreateProductOnlyNameSucceeds: every other field is optional, and no
+// batch is created — a product may exist with zero stock, per the spec.
+func TestCreateProductOnlyNameSucceeds(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+
+	rec := f.do(http.MethodPost, f.base()+"/products", `{"name":"Oat Milk"}`)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	body := decodeDetail(t, rec.Body.Bytes())
+	assert.Equal(t, "Oat Milk", body["name"])
+	assert.EqualValues(t, 0, body["current_stock"], "no initial batch is created")
+	assert.Equal(t, 1, f.reorder.createCalls)
+	assert.Equal(t, "Oat Milk", f.reorder.lastNew.Name)
+}
+
+// TestCreateProductValidatesEveryField: the same fields Update validates,
+// checked here so a value the model would refuse is a 422 rather than a 500
+// from a database CHECK.
+func TestCreateProductValidatesEveryField(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		body  string
+		field string
+	}{
+		{"unknown item type", `{"name":"Milk","item_type":"frozen"}`, "item_type"},
+		{"negative min stock", `{"name":"Milk","min_stock":-1}`, "min_stock"},
+		{"malformed category id", `{"name":"Milk","category_id":"not-a-uuid"}`, "category_id"},
+		{"empty icon name", `{"name":"Milk","icon_name":"  "}`, "icon_name"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newAPIFixture(t)
+
+			rec := f.do(http.MethodPost, f.base()+"/products", tc.body)
+			require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+			assert.Contains(t, errorFields(t, rec), tc.field)
+			assert.Zero(t, f.reorder.createCalls, "nothing invalid reaches the store")
+		})
+	}
+}
+
+// TestCreateProductNameLengthIsCountedInRunes mirrors
+// TestPatchProductNameLengthIsCountedInRunes: VARCHAR(255) counts characters,
+// not bytes.
+func TestCreateProductNameLengthIsCountedInRunes(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	rec := f.do(http.MethodPost, f.base()+"/products", `{"name":"`+strings.Repeat("ж", 256)+`"}`)
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+	assert.Contains(t, errorFields(t, rec), "name")
+	assert.Zero(t, f.reorder.createCalls)
+}
+
+// TestCreateProductRunsStage1AndReturnsExistingOnCloseHit is the
+// "merge instead?" courtesy applied at creation time: a name that stage 1
+// resolves to a confident local match returns that existing product (200)
+// instead of inserting a near-duplicate.
+func TestCreateProductRunsStage1AndReturnsExistingOnCloseHit(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	existing := seedProduct(f, "Barilla Penne")
+	f.matcher.result = matching.Result{
+		Status:  matching.StatusExactMatch,
+		Product: &matching.LocalCandidate{ProductID: existing.ID, Name: existing.Name, Similarity: 0.9},
+	}
+
+	rec := f.do(http.MethodPost, f.base()+"/products", `{"name":"Penne Barilla 500g"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	body := decodeDetail(t, rec.Body.Bytes())
+	assert.Equal(t, existing.ID.String(), body["id"])
+	assert.Equal(t, "Barilla Penne", body["name"], "the existing product's own fields, unchanged")
+	assert.Zero(t, f.reorder.createCalls, "a close hit must not insert a duplicate")
+	assert.Equal(t, []string{"Penne Barilla 500g"}, f.matcher.texts, "stage 1 ran against the new name")
+}
+
+// TestCreateProductAmbiguousOrNewItemStillCreates: only a confident single
+// local match (StatusExactMatch) short-circuits creation. An ambiguous match
+// is a question for a person, which this endpoint has no way to ask, so it
+// creates rather than silently guessing.
+func TestCreateProductAmbiguousOrNewItemStillCreates(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []matching.Status{matching.StatusAmbiguous, matching.StatusNewItem} {
+		f := newAPIFixture(t)
+		f.matcher.result = matching.Result{Status: status}
+
+		rec := f.do(http.MethodPost, f.base()+"/products", `{"name":"Tomatoes"}`)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		assert.Equal(t, 1, f.reorder.createCalls, "status %s", status)
+	}
+}
+
+// TestCreateProductWithUnknownCategoryIs404 — same-storage validation on
+// category_id, like every other id in this system.
+func TestCreateProductWithUnknownCategoryIs404(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	f.reorder.createErr = store.ErrNotFound
+
+	rec := f.do(http.MethodPost, f.base()+"/products",
+		`{"name":"Milk","category_id":"`+uuid.NewString()+`"}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, "not_found", errorCode(t, rec))
+}
+
+// TestCreateProductRefusesANonMember mirrors
+// TestProductMaintenanceRoutesRefuseANonMember for the one product route that
+// test cannot reach: Create has no {product_id} in its path, so it needs its
+// own check that the whole maintenance surface's gate — the same 404 a
+// nonexistent storage gets — still covers it (docs/specs/03-auth-and-multi-tenancy.md).
+func TestCreateProductRefusesANonMember(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	other := uuid.New() // a storage this session is not a member of
+
+	rec := f.do(http.MethodPost, "/api/storages/"+other.String()+"/products", `{"name":"Milk"}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, "not_found", errorCode(t, rec))
+	assert.Zero(t, f.reorder.createCalls, "a refused request must not reach the store")
+}
+
+// TestCreateProductPromotesImageSuggestion: the picture, when given, is
+// promoted into permanent storage, never recorded by its suggestion-cache
+// address — the same rule SetImage enforces.
+func TestCreateProductPromotesImageSuggestion(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	hash := strings.Repeat("b", 64)
+	f.imageData.sources = map[string]string{hash: "https://provider.test/soup.png"}
+	f.imageData.data, f.imageData.contentType = []byte("\x89PNGsoup"), "image/png"
+
+	rec := f.do(http.MethodPost, f.base()+"/products", `{"name":"Soup","image":"`+hash+`"}`)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	require.NotNil(t, f.reorder.lastNew.ImageURL)
+	prefix := f.base() + "/product-images/"
+	require.True(t, strings.HasPrefix(*f.reorder.lastNew.ImageURL, prefix), *f.reorder.lastNew.ImageURL)
+	assert.Equal(t, []byte("\x89PNGsoup"), f.pictures.files[strings.TrimPrefix(*f.reorder.lastNew.ImageURL, prefix)])
+}
+
+// TestCreateProductWithImageLeavesNoOrphanedFileWhenTheStoreRefuses mirrors
+// TestUploadImageReportsNotFoundFromTheStoreAndKeepsNoFile: the picture is
+// promoted before the insert (so it can be attached to it), and this is the
+// half of that ordering the happy-path test above cannot reach — the file
+// written before the row must not survive the row being refused.
+func TestCreateProductWithImageLeavesNoOrphanedFileWhenTheStoreRefuses(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	f.reorder.createErr = store.ErrNotFound
+	hash := strings.Repeat("b", 64)
+	f.imageData.sources = map[string]string{hash: "https://provider.test/soup.png"}
+	f.imageData.data, f.imageData.contentType = []byte("\x89PNGsoup"), "image/png"
+
+	rec := f.do(http.MethodPost, f.base()+"/products",
+		`{"name":"Soup","category_id":"`+uuid.NewString()+`","image":"`+hash+`"}`)
+
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Empty(t, f.pictures.files, "a refused write must leave no orphaned photo behind")
+}
+
+// TestCreateProductRefusesASuggestionNoLongerCached — the person picked a
+// picture that was evicted since, and is asked to pick again rather than
+// getting a product with a broken picture; nothing is inserted either way.
+func TestCreateProductRefusesASuggestionNoLongerCached(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+
+	rec := f.do(http.MethodPost, f.base()+"/products",
+		`{"name":"Soup","image":"`+strings.Repeat("c", 64)+`"}`)
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+	assert.NotEmpty(t, errorFields(t, rec)["image"])
+	assert.Zero(t, f.reorder.createCalls)
+	assert.Empty(t, f.pictures.files)
+}
+
+// TestCreateProductRouteAbsentWithoutMatcher documents the same "absent
+// collaborator, absent route" rule the shopping-list and reorder groups
+// already follow: Create needs the matcher's stage 1 to dedup against. The
+// path itself still exists (GET /products stays up), so an absent POST
+// answers 405, not 404 — chi's ordinary "method not allowed on a known path".
+func TestCreateProductRouteAbsentWithoutMatcher(t *testing.T) {
+	t.Parallel()
+
+	auth := newFakeAuth()
+	user, session := auth.addUser(t, false)
+	storageID := uuid.New()
+	auth.addMember(storageID, user.ID)
+
+	router := httpapi.NewRouter(httpapi.Deps{
+		Errors: httpapi.NewErrorWriter(false, discardLogger()),
+		Store: fakeAPI{
+			fakeAuth: auth, fakeLocations: &fakeLocations{}, fakeBatches: &fakeBatches{},
+			fakeShoppingLists: &fakeShoppingLists{}, fakeExpiry: &fakeExpiry{},
+			fakeJobs: newFakeJobs(), fakeIdempotency: newFakeIdempotency(), fakeIngestStore: &fakeIngestStore{},
+			fakeConsumeStore: &fakeConsumeStore{}, fakeProductStore: &fakeProductStore{},
+			fakeReorderStore: &fakeReorderStore{},
+		},
+		// Matcher deliberately omitted (nil).
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/storages/"+storageID.String()+"/products", strings.NewReader(`{"name":"x"}`))
+	req.AddCookie(&http.Cookie{Name: httpapi.SessionCookie, Value: session.ID})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+
+	// The list route has no such dependency and must still work.
+	getReq := httptest.NewRequest(http.MethodGet, "/api/storages/"+storageID.String()+"/products", nil)
+	getReq.AddCookie(&http.Cookie{Name: httpapi.SessionCookie, Value: session.ID})
+	getRec := httptest.NewRecorder()
+	router.ServeHTTP(getRec, getReq)
+	assert.Equal(t, http.StatusOK, getRec.Code)
 }

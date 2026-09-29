@@ -18,7 +18,8 @@ internal/
 ├── admin/                # server-rendered admin handlers (html/template)
 ├── store/                # pgx queries, one file per table group
 ├── vision/               # Gemini client, prompts, parsing, model resilience
-├── imagesearch/          # SerpAPI + Iconify clients
+├── imagesearch/          # SerpAPI + Iconify clients (07 image suggestions only — NOT the icon picker)
+├── iconlib/              # vendored offline icon set, embedded; no network at all (42)
 ├── matching/             # shared product matching (catalog-first, then trigram)
 ├── expiry/               # shelf-life resolution chain (08-expiration-and-classification.md)
 ├── jobs/                 # background job runner + job store
@@ -143,9 +144,15 @@ One shape for every error, produced by **exactly one serializer** in
 `501` is deliberately distinct from `404`: the route exists and the spec
 describes it, but the machinery behind it is not built. Answering `404`
 would tell a client the endpoint is wrong, which is the one thing it is
-not — the first use is the photo-sourced shopping list in
+not.
+
+Its first use was the photo-sourced shopping list of
 [`07-shopping-list-reconciliation.md`](07-shopping-list-reconciliation.md),
-which waits on the background job runner.
+which waited on the background job runner.
+*Amended by [`41-mixed-photo-classification.md`](41-mixed-photo-classification.md):*
+that path is built, so **no route answers `501` today**. The row above is
+the convention for the next documented-but-unbuilt route, not a description
+of anything currently shipping.
 
 `403` is deliberately unused for storage and admin scoping — see the
 non-enumeration rules in `03-auth-and-multi-tenancy.md`.

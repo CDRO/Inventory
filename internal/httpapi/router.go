@@ -112,6 +112,8 @@ type APIStore interface {
 	BarcodePromptStore
 	InventoryStore
 	MembershipStore
+	IconStore
+	IconSuggestionStore
 }
 
 // Deps are the collaborators the router needs. StaticFS may be nil, in which
@@ -276,6 +278,8 @@ func NewRouter(d Deps) http.Handler {
 		locations := NewLocationHandler(d.Store, errs)
 		batches := NewBatchHandler(d.Store, errs)
 		gamification := NewGamificationHandler(d.Store, errs)
+		icons := NewIconHandler(d.Store, errs)
+		iconSuggestions := NewIconSuggestionHandler(d.Store, errs)
 
 		// The session lifecycle (docs/specs/03-auth-and-multi-tenancy.md).
 		//
@@ -442,6 +446,27 @@ func NewRouter(d Deps) http.Handler {
 			sr.Patch("/inventory-batches/{id}", batches.Update)
 			sr.Post("/inventory-batches/{id}/split", batches.Split)
 
+			// The only container route (docs/specs/39-batch-containers.md).
+			// Setting, renaming and clearing a container all happen through the
+			// batch PATCH above, and a split disposes of one; destroying is the
+			// single operation that addresses a container by its own id.
+			sr.Post("/containers/{id}/destroy", batches.DestroyContainer)
+
+			// The local icon library (docs/specs/42-local-icon-library.md):
+			// uploading an icon the vendored set has nothing close enough
+			// for, and serving one uploaded icon's SVG body. Storage-scoped
+			// like the alias endpoint 40 adds beside this, even though the
+			// icons table itself is global — the route only needs to prove
+			// the caller belongs to some storage.
+			sr.Post("/icons", icons.Upload)
+			sr.Get("/icons/{id}/svg", icons.ServeSVG)
+
+			// The icon picker's local-alias search (docs/specs/40-icon-picker.md):
+			// no HTTP client anywhere in this handler, every result already
+			// lives in icon_aliases or icons above.
+			sr.Get("/icon-suggestions", iconSuggestions.Search)
+			sr.Post("/icon-suggestions/aliases", iconSuggestions.CreateAlias)
+
 			expiry := NewExpiryHandler(d.Store, errs)
 			sr.Patch("/inventory-batches/{id}/expiry", expiry.PatchBatchExpiry)
 			sr.Patch("/categories/{id}/shelf-life", expiry.PatchCategoryShelfLife)
@@ -502,7 +527,14 @@ func NewRouter(d Deps) http.Handler {
 			// and batch-picker need (docs/specs/09-consumption-logging.md), plus
 			// the two narrow product-editing writes spec 52's "uncategorized"
 			// and "imageless" quests need to be closeable at all.
-			products := NewProductHandler(d.Store, d.ImageCache, d.ProductImages, errs)
+			// d.Matcher is declared only as Matcher (MatchProductCandidates) —
+			// the stage-1-only narrowing Create needs is a runtime assertion,
+			// the same pattern internal/consume/proposal.go's own dependency
+			// narrowing uses. Its concrete type (*matching.Service) always
+			// satisfies it; a fake that does not is the "absent collaborator,
+			// absent route" case below, same as everywhere else in this file.
+			localMatcher, _ := d.Matcher.(LocalMatcher)
+			products := NewProductHandler(d.Store, localMatcher, d.ImageCache, d.ProductImages, errs)
 			sr.Get("/products", products.List)
 			sr.Get("/products/{product_id}/batches", products.Batches)
 			sr.Patch("/products/{product_id}/category", products.SetCategory)
@@ -524,9 +556,24 @@ func NewRouter(d Deps) http.Handler {
 			sr.Patch("/products/{product_id}", products.Update)
 			sr.Post("/products/{product_id}/merge", products.Merge)
 			sr.Delete("/products/{product_id}", products.Delete)
+			// The standalone "+ Add product" entry point ("Creating a
+			// product", docs/specs/16-product-maintenance.md) needs the
+			// matcher's stage 1 to dedup against, so it follows the same
+			// "absent collaborator, absent route" rule as the shopping-list
+			// group below.
+			if localMatcher != nil {
+				sr.Post("/products", products.Create)
+			}
 
 			if d.Matcher != nil {
-				lists := NewShoppingListHandler(d.Store, d.Matcher, d.ImageCache, d.ProductImages, errs)
+				// d.Ingester is declared as Ingester (upload + reanalyse);
+				// starting a photographed shopping list is a narrower thing
+				// again, asserted at runtime the same way localMatcher above
+				// is. *ingest.Service always satisfies it, and an absent one
+				// means the upload volume was unusable — the photo branch of
+				// Create then answers as the server-side problem it is.
+				listIngester, _ := d.Ingester.(ListIngester)
+				lists := NewShoppingListHandler(d.Store, d.Matcher, listIngester, d.ImageCache, d.ProductImages, d.Photos, cutouts, errs)
 				sr.Post("/shopping-lists", lists.Create)
 				sr.Get("/shopping-lists/{id}", lists.Get)
 				sr.Post("/shopping-lists/{id}/items/{item_id}/rematch", lists.Rematch)

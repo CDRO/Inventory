@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="/css/gamification.css">
 </head>
 <body>
-  <header class="shell row row--between">
+  <header class="shell shell--wide row row--between">
     <a id="wordmark" class="wordmark" href="/storages.html" data-i18n="common.appName">Inventory</a>
     <div class="row">
       <div id="storage-switcher" hidden></div>
@@ -22,20 +22,29 @@
     </div>
   </header>
 
-  <nav id="nav" class="shell nav" aria-label="Main" data-i18n-aria-label="nav.label" hidden></nav>
+  <nav id="nav" class="shell shell--wide nav" aria-label="Main" data-i18n-aria-label="nav.label" hidden></nav>
 
-  <main id="main" class="shell" aria-live="polite">
+  <main id="main" class="shell shell--wide" aria-live="polite">
     <h2 data-i18n="shoppingList.title">Shopping list</h2>
 
     <div id="error" class="alert" role="alert" hidden></div>
+    <p id="status" class="empty-state" role="status" hidden></p>
 
     <section id="compose" class="card stack">
       <label for="raw-text" data-i18n="shoppingList.compose.label">One item per line</label>
       <textarea id="raw-text" rows="8" placeholder="milk&#10;eggs x2&#10;cherry tomatoes" data-i18n-placeholder="shoppingList.compose.placeholder"></textarea>
-      <p class="empty-state" data-i18n="shoppingList.compose.note">
-        A photographed list is not available yet. Typing or pasting works today.
-      </p>
       <button id="submit" type="button" class="btn" data-i18n="shoppingList.compose.submit">Match this list</button>
+
+      <!-- The photo variant of docs/specs/07-shopping-list-reconciliation.md's
+           ingestion: the same endpoint, a multipart upload instead of text.
+           The model reads the lines in the background and the resolution
+           below is reached exactly as it is for a typed list. -->
+      <hr>
+      <p class="muted" data-i18n="shoppingList.compose.photoNote">
+        Or photograph a written list. Each line is read out and matched the same way.
+      </p>
+      <div id="photo-picker"></div>
+      <button id="submit-photo" type="button" class="btn" data-i18n="shoppingList.compose.submitPhoto">Read this photo</button>
     </section>
 
     <section id="results" class="stack" hidden>

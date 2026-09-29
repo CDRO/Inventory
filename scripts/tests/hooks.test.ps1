@@ -9,12 +9,12 @@
     top-to-bottom script into "functions" and "main": Get-StdinMessage and
     Get-ToastBody are dot-sourced from the portion of notify.ps1 above its
     "# Main" marker and called directly, against a stubbed toast backend -
-    no real Windows toast subsystem is needed. The main tail (job dispatch,
-    the try/catch, `exit 0`) is then exercised end to end as a real
+    no real Windows toast subsystem is needed. The main tail (runspace
+    dispatch, the try/catch, `exit 0`) is then exercised end to end as a real
     subprocess, with $env:CLAUDE_NOTIFY_TEST_BACKEND selecting Send-Toast's
     fake backend, to prove the acceptance criteria in #303: exit 0 and total
     runtime under 2 seconds whether the backend succeeds, throws, or - the
-    case that actually exercises Wait-Job's timeout rather than a backend
+    case that actually exercises the WaitOne timeout rather than a backend
     that just happens to be fast - hangs for 30 seconds.
 
     Run:  powershell -NoProfile -File scripts\tests\hooks.test.ps1
@@ -112,14 +112,14 @@ try {
 
 # The "hang" backend sleeps 30s - if Send-Toast is called directly (as
 # above) this call would genuinely block for 30s, so it is only exercised
-# through the real script end-to-end below, where Wait-Job -Timeout must cut
-# it off. This directly guards against the timeout being deleted or
+# through the real script end-to-end below, where the WaitOne timeout must
+# cut it off. This directly guards against the timeout being deleted or
 # bypassed: without it, the "hang" case in the section below would time out
 # this whole test file instead of completing in under 2 seconds.
 
 # --- Run the real script end to end, as a subprocess -----------------------
 # This is what actually proves the acceptance criteria: the *whole* hook -
-# stdin read, job dispatch, Wait-Job timeout, exit 0 - not just the
+# stdin read, runspace dispatch, WaitOne timeout, exit 0 - not just the
 # functions above.
 
 function Invoke-Hook {
@@ -145,13 +145,14 @@ $thrown = Invoke-Hook -Backend 'throw'
 Assert ($thrown.ExitCode -eq 0) "exit 0 when the toast backend throws (got $($thrown.ExitCode))"
 Assert ($thrown.Seconds -lt 2.0) "runs in under 2 seconds when the backend throws (took $([math]::Round($thrown.Seconds, 2))s)"
 
-# This is the one that actually proves Wait-Job -Timeout does something: the
-# "hang" backend sleeps 30s, so a script that waited on it unconditionally,
-# or whose timeout had been deleted or widened, would blow well past 2
-# seconds here - this is not a fast backend happening to finish quickly.
+# This is the one that actually proves the WaitOne timeout does something:
+# the "hang" backend sleeps 30s, so a script that waited on it
+# unconditionally, or whose timeout had been deleted or widened, would blow
+# well past 2 seconds here - this is not a fast backend happening to finish
+# quickly.
 $hung = Invoke-Hook -Backend 'hang'
 Assert ($hung.ExitCode -eq 0) "exit 0 when the toast backend hangs for 30s (got $($hung.ExitCode))"
-Assert ($hung.Seconds -lt 2.0) "runs in under 2 seconds even when the backend hangs for 30s (took $([math]::Round($hung.Seconds, 2))s) - proves Wait-Job -Timeout actually bounds it"
+Assert ($hung.Seconds -lt 2.0) "runs in under 2 seconds even when the backend hangs for 30s (took $([math]::Round($hung.Seconds, 2))s) - proves the WaitOne timeout actually bounds it"
 
 # H11's new "stale" event flows through the exact same entrypoint - proves it
 # is not a special case that skips the exit-0/timeout guarantees above.

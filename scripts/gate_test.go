@@ -159,7 +159,7 @@ func marker(verdict string, round int, sha, reviewer string) string {
 
 const (
 	headSHA = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
-	oldSHA  = "0000000000000000000000000000000000dead"
+	oldSHA  = "000000000000000000000000000000000000dead"
 )
 
 func TestGateThreeApprovesAtHeadMerge(t *testing.T) {
@@ -321,6 +321,42 @@ func TestGateIgnoresCommentsWithoutAMarker(t *testing.T) {
 		t.Fatalf("expected exit 0, got %d\n%s", r.exit, r.stdout)
 	}
 	mustContain(t, r.stdout, "MERGE", "stdout")
+}
+
+// A marker whose sha= is not exactly 40 lowercase hex characters - truncated,
+// as a regressed reviewer prompt might emit - must abort loudly (exit 2)
+// rather than be silently dropped and leave the reviewer looking stale
+// forever (#359).
+func TestGateMalformedMarkerShaAborts(t *testing.T) {
+	env := mergeEnv(map[string]string{"STUB_HEAD_SHA": headSHA}, commentEnv(
+		"<!-- verdict: APPROVE round=1 sha=a1b2c3d reviewer=go -->", // truncated sha
+		marker("APPROVE", 1, headSHA, "tests"),
+		marker("APPROVE", 1, headSHA, "docs"),
+	))
+	r := runGate(t, env, "gate", "42")
+	if r.exit != 2 {
+		t.Fatalf("expected exit 2, got %d\nstdout:\n%s\nstderr:\n%s", r.exit, r.stdout, r.stderr)
+	}
+	mustContain(t, r.stderr, "malformed verdict marker", "stderr")
+	if r.stdout != "" {
+		t.Errorf("must not print a verdict summary on a malformed marker, got:\n%s", r.stdout)
+	}
+}
+
+// Uppercase hex is not a valid marker sha either - git and `gh` both always
+// emit lowercase, so anything else is itself evidence of a malformed marker.
+func TestGateUppercaseMarkerShaAborts(t *testing.T) {
+	upper := strings.ToUpper(headSHA)
+	env := mergeEnv(map[string]string{"STUB_HEAD_SHA": headSHA}, commentEnv(
+		marker("APPROVE", 1, upper, "go"),
+		marker("APPROVE", 1, headSHA, "tests"),
+		marker("APPROVE", 1, headSHA, "docs"),
+	))
+	r := runGate(t, env, "gate", "42")
+	if r.exit != 2 {
+		t.Fatalf("expected exit 2, got %d\nstdout:\n%s\nstderr:\n%s", r.exit, r.stdout, r.stderr)
+	}
+	mustContain(t, r.stderr, "malformed verdict marker", "stderr")
 }
 
 func TestGateUsageRequiresANumericPR(t *testing.T) {

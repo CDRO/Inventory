@@ -21,8 +21,15 @@ type Reanalyzer interface {
 
 // reanalyzers maps each kind of job to the service that analyses its photo.
 // A kind whose service is not wired — the upload volume was unusable — is
-// absent, and such a job cannot be analysed again. Shopping-list photos have no
-// analysis to repeat yet (docs/specs/07-shopping-list-reconciliation.md).
+// absent, and such a job cannot be analysed again.
+//
+// Shopping-list photos stay absent now that they are analysed
+// (docs/specs/07-shopping-list-reconciliation.md), and deliberately so: that
+// job's analysis does not end in a proposal waiting for review, it ends in a
+// real shopping list. Repeating it would write a second list next to the first
+// rather than replacing anything, which is not what "Analyze again" means
+// anywhere else (docs/specs/09-consumption-logging.md). A misread list is
+// re-photographed instead.
 func reanalyzers(d Deps) map[store.JobKind]Reanalyzer {
 	out := map[store.JobKind]Reanalyzer{}
 	if d.Ingester != nil {

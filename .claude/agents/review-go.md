@@ -20,16 +20,29 @@ this in order:
 
 1. Run `scripts/dev packet <PR>` (add `--since <previous-round-head-sha>` on
    round ≥ 2) if `.claude/review-packet.md` is missing or its `Head SHA:`
-   line differs from the PR's current head, then read it. It carries the PR
-   title/body, the issue body, the spec sections the issue or PR names, the
-   diff, the exported-identifier table, the test files changed, CI status,
-   and — on round ≥ 2 — your own previous verdict comment. Its `Head SHA:`
-   line is the `headRefOid` your Output marker below needs.
+   line differs from the PR's current head, then read it. It carries, in this
+   order: the PR title, its base and head branches and its `Head SHA:`; the
+   PR body; the body of every issue the PR references; the spec sections the
+   issue or PR names; `git diff --stat` for the whole PR; the diff itself (on
+   round ≥ 2, only the delta since `--since`); the table of exported Go
+   identifiers the diff adds or changes and whether each carries a doc
+   comment; the test files changed; the PR's CI checks; and — on round ≥ 2 —
+   the previous round's verdict comments. The **Exported identifiers
+   changed** table is where a newly exported symbol, or one whose signature
+   moved, shows up first. Its `Head SHA:` line is the `headRefOid` your
+   Output marker below needs.
 2. **The spec is the contract.** Never review against your own idea of what
    the code should be; review against what the spec says.
 3. Read the surrounding files for any hunk you cannot judge in isolation. A
    diff read without its context produces confident, wrong findings.
 4. Post your review (format below) with `gh pr comment`.
+
+Your `maxTurns` budget in the frontmatter above is sized for a package PR — a
+handful of files. A consolidation-sized diff is several times that, and on one
+(PR #360, 14 files and ~1,820 lines) every lane overran (#364). On a diff that
+large the spawning session says so in your prompt and names the budget to work
+to; `.claude/skills/ship/SKILL.md` §5 ("Turn budget: size it to the diff") is
+where that line comes from.
 
 ## What you are looking for
 

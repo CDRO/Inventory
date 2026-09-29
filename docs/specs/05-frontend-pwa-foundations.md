@@ -40,6 +40,9 @@ web/static/
 ├── consume-review.html        # consumption proposal review/confirm (09)
 ├── dashboard.html             # reorder + analytics (10, 11)
 ├── inventory.html             # every batch, sortable table (33)
+├── inbox.html                 # ingestion job inbox, discard-all (06, 32)
+├── settings.html              # account self-service, start page (14, 34)
+├── stocktake.html             # manual inventory correction entry points (13, 35)
 ├── css/
 │   ├── tokens.css             # design tokens as CSS custom properties
 │   ├── base.css               # reset, typography, layout primitives
@@ -209,17 +212,20 @@ making sense once the product list, and everything shaped like it, needed
 the same room a table does — a stocktake on a laptop should not cost more
 scrolling than the data requires.)*
 
-Every page uses `.shell--wide` (`80rem`, `css/base.css`) on both its
-`<header>` and its `<main>` — `index.html`, `storages.html`,
+Every page uses `.shell--wide` (`80rem`, `css/base.css`) alongside `.shell`
+on its `<header>`, `<nav>`, and `<main>` — `index.html`, `storages.html`,
 `locations.html`, `categories.html`, `products.html`, `ingest.html`,
 `shopping-list.html`, `review.html`, `consume-review.html`,
-`dashboard.html`, and `inventory.html` alike. `.shell` (`40rem`) still
-exists as a CSS class — a component that deliberately wants a narrow
+`dashboard.html`, `inbox.html`, `settings.html`, `stocktake.html`, and
+`inventory.html` alike. `.shell--wide` only overrides `max-width`; `.shell`
+still supplies the margin and padding, which is why the two classes appear
+together rather than one replacing the other. `.shell` (`40rem`) also
+remains available on its own — a component that deliberately wants a narrow
 column *within* a wide page (a single form centered in otherwise empty
 space, say) may still reach for it locally — but no page's `<header>`/
-`<main>` uses it as their own class going forward. There is no exception
-list to maintain: a new page defaults to wide, full stop, the same way it
-already defaults to using `js/i18n.js` and `js/register-sw.js`.
+`<nav>`/`<main>` uses it alone as their own class going forward. There is no
+exception list to maintain: a new page defaults to wide, full stop, the same
+way it already defaults to using `js/i18n.js` and `js/register-sw.js`.
 
 ## PWA
 

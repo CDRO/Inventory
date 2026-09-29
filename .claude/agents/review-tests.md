@@ -21,13 +21,17 @@ this in order:
 
 1. Run `scripts/dev packet <PR>` (add `--since <previous-round-head-sha>` on
    round ≥ 2) if `.claude/review-packet.md` is missing or its `Head SHA:`
-   line differs from the PR's current head, then read it. It carries the PR
-   title/body, the issue body, the spec sections the issue or PR names — its
-   **Acceptance criteria** section is your checklist, every criterion needs a
-   test that would catch its violation or it is a finding — the diff, the
-   test files changed, CI status, and — on round ≥ 2 — your own previous
-   verdict comment. Its `Head SHA:` line is the `headRefOid` your Output
-   marker below needs.
+   line differs from the PR's current head, then read it. It carries, in this
+   order: the PR title, its base and head branches and its `Head SHA:`; the
+   PR body; the body of every issue the PR references; the spec sections the
+   issue or PR names; `git diff --stat` for the whole PR; the diff itself (on
+   round ≥ 2, only the delta since `--since`); the table of exported Go
+   identifiers the diff adds or changes and whether each carries a doc
+   comment; the test files changed; the PR's CI checks; and — on round ≥ 2 —
+   the previous round's verdict comments. The spec sections' **Acceptance
+   criteria** are your checklist: every criterion needs a test that would
+   catch its violation, or it is a finding. Its `Head SHA:` line is the
+   `headRefOid` your Output marker below needs.
 2. **Run the suite yourself**, keeping the full log on disk and only the signal
    in context:
 
@@ -52,9 +56,24 @@ this in order:
    suite actually running and failing, that is an environment limitation, not
    evidence about the code. Do not pattern-match on one exact error string;
    the underlying cause varies by sandbox. Fall back to the `test` GitHub
-   Actions workflow (`.github/workflows/test.yml`), which runs the identical
-   `docker compose run --rm app go test ./...` command on a runner that has a
-   working daemon.
+   Actions workflow (`.github/workflows/test.yml`), which runs the same suite
+   from the same image on a runner that has a working daemon — but not the
+   identical command, and the difference changes what a red run means:
+
+   - The suite step is `docker compose run --rm app sh -c 'go vet ./... &&
+     go test ./...'` (#301: one container invocation instead of two, so the
+     wait on `db`'s healthcheck is paid once). `go vet` runs **first and
+     gates it**: if vet fails, `go test` never executes and the job is red
+     with no test result at all.
+   - A separate, earlier step runs `sh scripts/dev check` — gofmt, `go vet`,
+     staticcheck, revive and the `.env.example` parity test — and a failure
+     there fails the job before the suite step is reached.
+
+   So a red run is not by itself evidence of a failing suite. Read
+   `gh run view "$RUN_ID" --log-failed`, say which step failed, and report it
+   as that kind of failure: a lint or vet failure is a finding, and it is
+   also a reason you have **no** suite result — say so on your `**Suite:**`
+   line rather than calling the suite red.
 
    `test.yml` triggers automatically on a PR only when its **base** is
    `main` (a wave consolidation PR, or any other PR merging straight to
@@ -91,7 +110,8 @@ this in order:
    one command, with the same exit code.)
 
    If the run failed, `gh run view "$RUN_ID" --log-failed` to see why, and
-   report that as you would a local failure. A **passing** dispatched run is
+   report it as you would a local failure of whichever step failed — naming
+   the step, per the three the job runs, above. A **passing** dispatched run is
    equivalent evidence to a local green run; cite the run URL in your
    `**Suite:**` line instead of an exit code. A **local suite that ran and
    failed** is always a blocking finding regardless of what CI shows — local
@@ -102,6 +122,13 @@ this in order:
    (workflow file missing, `gh workflow run` itself fails), that is a
    blocking finding and you say why.
 3. Post your review with `gh pr comment`.
+
+Your `maxTurns` budget in the frontmatter above is sized for a package PR — a
+handful of files. A consolidation-sized diff is several times that, and on one
+(PR #360, 14 files and ~1,820 lines) every lane overran (#364). On a diff that
+large the spawning session says so in your prompt and names the budget to work
+to; `.claude/skills/ship/SKILL.md` §5 ("Turn budget: size it to the diff") is
+where that line comes from.
 
 ## What makes a test meaningless
 

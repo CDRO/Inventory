@@ -30,10 +30,12 @@ body {
   padding: 2rem 1rem;
 }
 
-/* A wide layout modifier for the one page that needs more than 40rem to be
-   readable: a six-column table (docs/specs/33-inventory-overview-table.md).
-   Applied to both a page's <header> and its <main> so the header stays
-   aligned with the content beneath it. No other page uses this. */
+/* Every page's own width (docs/specs/05-frontend-pwa-foundations.md, "Layout
+   width"): applied alongside .shell, not instead of it, on a page's <header>,
+   <nav>, and <main> — .shell--wide only overrides max-width and still relies
+   on .shell for margin/padding. .shell itself remains available for a
+   component that wants a narrower column locally within an otherwise-wide
+   page. */
 .shell--wide {
   max-width: 80rem;
 }

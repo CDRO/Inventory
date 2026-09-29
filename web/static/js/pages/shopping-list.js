@@ -29,7 +29,9 @@ import { renderNav, startPageFor } from "../nav.js";
 import { initGamification } from "../gamification.js";
 import { fetchLocations, appendLocationOptions, openLocationField } from "../location-options.js";
 import { fetchCategories, appendCategoryOptions, openCategoryField } from "../category-options.js";
-import { post, ApiError } from "../api.js";
+import { get, post, postForm, ApiError } from "../api.js";
+import { mountPhotoPicker } from "../photo-picker.js";
+import { pollJob, JobFailedError } from "../jobs.js";
 import { el, text, clearChildren, qs } from "../dom.js";
 import { offerBarcodeCapture } from "../barcode-offer.js";
 import { renderImagePicker, markChosen } from "../image-picker.js";
@@ -37,15 +39,19 @@ import { t, apiErrorMessage, applyI18n } from "../i18n.js";
 
 const switcherContainer = qs("#storage-switcher");
 const errorBox = qs("#error");
+const statusLine = qs("#status");
 const composeSection = qs("#compose");
 const rawTextInput = qs("#raw-text");
 const submitButton = qs("#submit");
+const submitPhotoButton = qs("#submit-photo");
 const resultsSection = qs("#results");
 const itemsContainer = qs("#items");
 const itemTemplate = qs("#item-template");
 
 let storageId = null;
 let listId = null;
+/** @type {{files: () => File[], clear: () => void}|null} */
+let photos = null;
 let locations = [];
 let categories = [];
 
@@ -87,6 +93,8 @@ async function init() {
   });
   initGamification(storageId);
   submitButton.addEventListener("click", submitList);
+  photos = mountPhotoPicker(qs("#photo-picker"), { multiple: false });
+  submitPhotoButton.addEventListener("click", submitPhoto);
 
   // Where things go, and how a new product is filed. Loaded once: a line is
   // resolved against the storage as it was when the list was opened. If that
@@ -99,6 +107,70 @@ async function init() {
     return;
   }
   submitButton.disabled = false;
+
+  // Two ways in besides typing: a list somebody already has (the banner of
+  // docs/specs/41-mixed-photo-classification.md lands here after reclassifying
+  // a photo, and the address is shareable and re-openable), and a photographed
+  // list still being read.
+  const params = new URLSearchParams(location.search);
+  const openList = params.get("list");
+  const openJob = params.get("job");
+  if (openList) {
+    await openExistingList(openList);
+  } else if (openJob) {
+    await openPhotoJob(openJob);
+  }
+}
+
+// openExistingList renders a list that already exists, matched exactly as it
+// was at ingestion — the statuses come from the server and are never
+// re-derived here (docs/specs/07-shopping-list-reconciliation.md).
+async function openExistingList(id) {
+  setStatus(t("shoppingList.status.loading"));
+  try {
+    const list = await get(`${basePath()}/${id}`);
+    listId = list.id;
+    renderList(list);
+    hideStatus();
+  } catch (err) {
+    hideStatus();
+    if (err instanceof ApiError && err.status === 404) {
+      showError(new Error(t("shoppingList.errors.listGone")));
+      return;
+    }
+    showError(err);
+  }
+}
+
+// openPhotoJob waits for a photographed list to be read, then opens the list
+// it became. The job holds no proposal to review — its payload names the list,
+// because processing "continues identically to the text path"
+// (docs/specs/07-shopping-list-reconciliation.md, "Ingestion").
+async function openPhotoJob(jobId) {
+  composeSection.hidden = true;
+  setStatus(t("shoppingList.status.reading"));
+  let payload;
+  try {
+    payload = await pollJob(storageId, jobId);
+  } catch (err) {
+    hideStatus();
+    composeSection.hidden = false;
+    if (err instanceof JobFailedError) {
+      // job.error is server-authored text (docs/specs/19-localization.md:
+      // the API stays English) — only the fallback default is translated.
+      showError(new Error(err.message || t("shoppingList.errors.photoFailed")));
+      return;
+    }
+    showError(err);
+    return;
+  }
+  if (!payload?.shopping_list_id) {
+    hideStatus();
+    composeSection.hidden = false;
+    showError(new Error(t("shoppingList.errors.photoFailed")));
+    return;
+  }
+  await openExistingList(payload.shopping_list_id);
 }
 
 function basePath() {
@@ -122,6 +194,34 @@ async function submitList() {
     showError(err);
   } finally {
     submitButton.disabled = false;
+  }
+}
+
+// submitPhoto uploads a photographed list and follows its job. The address
+// gains ?job= so the wait survives a reload, exactly as a review screen's
+// does.
+async function submitPhoto() {
+  const [file] = photos?.files() ?? [];
+  if (!file) {
+    showError(new Error(t("shoppingList.errors.noPhoto")));
+    return;
+  }
+
+  submitPhotoButton.disabled = true;
+  clearError();
+  const body = new FormData();
+  body.append("image", file);
+  try {
+    const { job_id: jobId } = await postForm(basePath(), body);
+    photos.clear();
+    const url = new URL(withStorageParam(storageId, "/shopping-list.html"), location.origin);
+    url.searchParams.set("job", jobId);
+    history.replaceState(null, "", url.pathname + url.search);
+    await openPhotoJob(jobId);
+  } catch (err) {
+    showError(err);
+  } finally {
+    submitPhotoButton.disabled = false;
   }
 }
 
@@ -484,4 +584,13 @@ function showError(err) {
 function clearError() {
   errorBox.textContent = "";
   errorBox.hidden = true;
+}
+
+function setStatus(message) {
+  statusLine.textContent = message;
+  statusLine.hidden = false;
+}
+
+function hideStatus() {
+  statusLine.hidden = true;
 }

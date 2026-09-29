@@ -22,7 +22,7 @@ import { fetchMe, resolveStorage, rememberStorageId, withStorageParam } from "..
 import { renderStorageSwitcher } from "../storage-switcher.js";
 import { renderNav, startPageFor } from "../nav.js";
 import { initGamification } from "../gamification.js";
-import { ReviewList } from "../review.js";
+import { ReviewList, mountShoppingListBanner } from "../review.js";
 import { fetchLocations, appendLocationOptions, openLocationField } from "../location-options.js";
 import { fetchCategories, appendCategoryOptions, openCategoryField } from "../category-options.js";
 import { fetchProducts } from "../product-options.js";
@@ -173,7 +173,44 @@ async function render(job) {
   } else {
     statusLine.hidden = true;
   }
+  offerShoppingList(job);
   proposalSection.hidden = false;
+}
+
+// offerShoppingList shows the mixed-photo classification banner when this
+// photo's analysis flagged it as a shopping list
+// (docs/specs/41-mixed-photo-classification.md).
+//
+// "Process as shopping list" posts the job id to spec 07's ingestion endpoint,
+// which creates the list from the lines this analysis already extracted — no
+// second upload, no second Gemini call — and discards this job. On success the
+// browser goes to the new list's resolution screen, the same place every other
+// list ingestion lands. "Keep as …" is handled inside the banner itself: it
+// just dismisses, leaving this review exactly as it was.
+function offerShoppingList(job) {
+  mountShoppingListBanner(qs("#shopping-list-banner"), {
+    payload: job.payload,
+    kind: job.kind,
+    onProcess: () => processAsShoppingList(),
+  });
+}
+
+async function processAsShoppingList() {
+  const banner = qs("#shopping-list-banner");
+  for (const button of banner.querySelectorAll("button")) button.disabled = true;
+  clearError();
+  try {
+    const list = await post(`/api/storages/${storageId}/shopping-lists`, { from_job_id: jobId });
+    const url = new URL(withStorageParam(storageId, "/shopping-list.html"), location.origin);
+    url.searchParams.set("list", list.id);
+    location.assign(url.pathname + url.search);
+  } catch (err) {
+    // The proposal on screen is untouched by a refusal — the job is only
+    // discarded by a reclassification that succeeded — so the banner comes
+    // back rather than the screen losing its offer.
+    for (const button of banner.querySelectorAll("button")) button.disabled = false;
+    showError(err);
+  }
 }
 
 function setupRow(el, row, proposal, locations, categories, products, hasImage) {

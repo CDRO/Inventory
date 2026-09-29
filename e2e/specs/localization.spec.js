@@ -215,7 +215,17 @@ test.describe("a batch expiry date under a non-UTC browser timezone", () => {
     expect(login.status()).toBe(200);
 
     await page.goto(`/products.html?storage=${HOUSEHOLD_STORAGE}`);
-    await page.getByRole("button", { name: "Greek Yogurt", exact: true }).click();
+    // The list defaults to filter-only (docs/specs/16-product-maintenance.md):
+    // a search finds the row, which is a link now, not a button. `#nav`
+    // becoming visible is products.js's own "init() is done, the #filter
+    // listener is attached" signal — waiting for it here, and for exactly
+    // one matching link before the click, avoids the parallel-load race #423
+    // describes (see products.spec.js's openProduct for the full account).
+    await expect(page.locator("#nav")).toBeVisible();
+    await page.locator("#filter").fill("Greek Yogurt");
+    const yogurtLink = page.getByRole("link", { name: "Greek Yogurt", exact: true });
+    await expect(yogurtLink).toHaveCount(1);
+    await yogurtLink.click();
 
     const row = page.locator('[data-role="batch-row"][data-batch-id="' + YOGURT_FRIDGE_BATCH + '"]');
     await expect(row).toContainText("Jan 1, 2030");
@@ -236,7 +246,15 @@ test.describe("a batch expiry date under a non-UTC browser timezone", () => {
 
     await page.goto(`/products.html?storage=${HOUSEHOLD_STORAGE}`);
     await expect(page.locator("html")).toHaveAttribute("lang", "de");
-    await page.getByRole("button", { name: "Greek Yogurt", exact: true }).click();
+    // `#nav` becoming visible is products.js's own "init() is done, the
+    // #filter listener is attached" signal — the `lang` attribute above sets
+    // too early to prove that on its own. See products.spec.js's openProduct
+    // for the full account of the race this avoids (#423).
+    await expect(page.locator("#nav")).toBeVisible();
+    await page.locator("#filter").fill("Greek Yogurt");
+    const yogurtLinkDE = page.getByRole("link", { name: "Greek Yogurt", exact: true });
+    await expect(yogurtLinkDE).toHaveCount(1);
+    await yogurtLinkDE.click();
 
     const row = page.locator('[data-role="batch-row"][data-batch-id="' + YOGURT_FRIDGE_BATCH + '"]');
     await expect(row).toContainText("01.01.2030"); // Intl.DateTimeFormat("de", {dateStyle:"medium"})

@@ -136,7 +136,7 @@ func TestPatchBatchRequiresALocationID(t *testing.T) {
 	rec := f.do(http.MethodPatch, f.base()+"/inventory-batches/"+uuid.New().String(), `{}`)
 
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
-	assert.NotEmpty(t, errorFields(t, rec)["location_id"],
+	assert.NotEmpty(t, errorFields(t, rec)["body"],
 		"a PATCH that changed nothing must not answer 200 as though it had")
 }
 

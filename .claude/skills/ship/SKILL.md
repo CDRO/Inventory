@@ -125,6 +125,38 @@ missing or stale. Each posts its own PR comment and returns a short summary.
 `model` parameter overrides frontmatter, which would silently undo the pinned
 `sonnet`/`xhigh` in their definitions.
 
+### Turn budget: size it to the diff
+
+Each reviewer's `maxTurns` is fixed in its frontmatter — `review-go` 20,
+`review-docs` 15, `review-tests` 25 — and sized for a package PR of a handful
+of files. A consolidation diff is several times that, and the budget does not
+stretch: on PR #360 (14 files, ~1,820 lines) all three lanes overran, and four
+of the six lane-runs stopped **before posting a verdict** (#364).
+
+That failure is invisible, which is what makes it worth spending a line on.
+`scripts/dev gate` reads only the posted marker, so a reviewer that did the
+entire review and ran out one step before `gh pr comment` counts as `missing`
+— indistinguishable from one that never ran — and the PR sits at `WAIT` with
+nothing saying why.
+
+The Agent tool has no per-spawn `maxTurns` override, so the budget travels in
+the spawn prompt, next to the round number. Read the size off the packet's own
+`## Diff --stat` section before spawning (or `git diff --stat <base>...<head>
+| tail -1`), and when the diff is **over 10 files or 800 changed lines** —
+every consolidation PR, and the occasional large package — add one line to
+each of the three spawn prompts:
+
+> This diff is <F> files / <L> changed lines, several times the size your
+> frontmatter turn budget assumes. Reach a defensible position and post your
+> verdict comment before you run out of turns; an unposted verdict reads as
+> `missing` to `scripts/dev gate` and stalls the PR at `WAIT` with no signal
+> that anything went wrong.
+
+Same precedent as the round cap, which a consolidation already raises from 2
+to 4 (`roundLimitPackage` / `roundLimitConsolidation` in the wave plan's JSON,
+read at `scripts/wellen-orchestrator.ps1:873` and `:893`): the loop's limits
+are sized for a package PR, and a PR several times that size states its own.
+
 ## 6. The gate — read verdicts back from GitHub
 
 ```bash

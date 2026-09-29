@@ -35,6 +35,17 @@ type fakeShoppingLists struct {
 	// catalog holds the rows FindCatalogProduct can return, by name.
 	catalog     map[string]*store.CatalogProduct
 	lastStorage uuid.UUID
+
+	// The reclassification path of spec 41. The job rows live in the shared
+	// *fakeJobs rather than here, because the real store.Store reads them
+	// through the one Job method every other job route uses; duplicating them
+	// would let a test set up a job the rest of the API cannot see.
+	jobs         *fakeJobs
+	fromJobErr   error
+	fromJobID    uuid.UUID
+	fromJobLines []store.NewShoppingListItem
+	fromJobImage *string
+	fromJobCalls int
 }
 
 func (f *fakeShoppingLists) CreateShoppingList(_ context.Context, storageID uuid.UUID, source store.ShoppingListSource, createdBy *uuid.UUID, items []store.NewShoppingListItem) (*store.ShoppingList, []store.ShoppingListItem, error) {
@@ -55,6 +66,25 @@ func (f *fakeShoppingLists) CreateShoppingList(_ context.Context, storageID uuid
 	}
 	f.list, f.items = list, out
 	return list, out, nil
+}
+
+func (f *fakeShoppingLists) CreateShoppingListFromJob(ctx context.Context, storageID, jobID uuid.UUID, createdBy *uuid.UUID, items []store.NewShoppingListItem) (*store.ShoppingList, []store.ShoppingListItem, *string, error) {
+	f.fromJobCalls++
+	f.fromJobID, f.fromJobLines = jobID, items
+	if f.fromJobErr != nil {
+		return nil, nil, nil, f.fromJobErr
+	}
+	// Discarding the job is what makes reclassifying non-idempotent: the row
+	// is gone, so a second attempt finds nothing — exactly what the real
+	// store does inside the same transaction.
+	job, ok := f.jobs.take(storageID, jobID)
+	if !ok {
+		return nil, nil, nil, store.ErrNotFound
+	}
+	f.fromJobImage = job.ImageFilename
+
+	list, created, err := f.CreateShoppingList(ctx, storageID, store.SourcePhoto, createdBy, items)
+	return list, created, job.ImageFilename, err
 }
 
 func (f *fakeShoppingLists) ShoppingListWithItems(_ context.Context, storageID, _ uuid.UUID) (*store.ShoppingList, []store.ShoppingListItem, error) {
@@ -131,6 +161,22 @@ type fakeMatcher struct {
 }
 
 func (f *fakeMatcher) MatchProductCandidates(_ context.Context, _ uuid.UUID, text string) (matching.Result, error) {
+	f.calls++
+	f.texts = append(f.texts, text)
+	if f.err != nil {
+		return matching.Result{}, f.err
+	}
+	result := f.result
+	result.Query = text
+	return result, nil
+}
+
+// MatchLocalProduct makes fakeMatcher also satisfy httpapi.LocalMatcher — the
+// stage-1-only slice products.go's Create needs
+// (docs/specs/16-product-maintenance.md). It answers from the same canned
+// f.result a test already sets for MatchProductCandidates: nothing here reads
+// the catalog, so the two stages sharing one fixture field costs nothing.
+func (f *fakeMatcher) MatchLocalProduct(_ context.Context, _ uuid.UUID, text string) (matching.Result, error) {
 	f.calls++
 	f.texts = append(f.texts, text)
 	if f.err != nil {
@@ -350,17 +396,20 @@ func TestMatchingSeesTheLineWithoutItsMultiplier(t *testing.T) {
 	require.Equal(t, []string{"eggs"}, f.matcher.texts)
 }
 
-// TestPhotoListsAreRefusedExplicitly — treating an image as text would file its
-// bytes as somebody's shopping.
-func TestPhotoListsAreRefusedExplicitly(t *testing.T) {
+// TestPhotoSourceWithoutAPhotoIsRefused — a JSON body claiming source "photo"
+// carries no photo and names no job, so there is nothing to read. Treating it
+// as text would file an empty list under somebody's shopping; it used to be
+// 501 because the whole path was unbuilt (docs/specs/41-mixed-photo-classification.md
+// is what built it).
+func TestPhotoSourceWithoutAPhotoIsRefused(t *testing.T) {
 	t.Parallel()
 
 	f := newAPIFixture(t)
 	rec := f.do(http.MethodPost, f.base()+"/shopping-lists", `{"source":"photo"}`)
 
-	require.Equal(t, http.StatusNotImplemented, rec.Code)
-	assert.Equal(t, "not_implemented", errorCode(t, rec))
-	assert.Zero(t, f.lists.lastCreated, "nothing may be written for a source we cannot process")
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	assert.Equal(t, "validation_failed", errorCode(t, rec))
+	assert.Zero(t, f.lists.lastCreated, "nothing may be written for a body with no lines in it")
 }
 
 func TestShoppingListValidatesItsInput(t *testing.T) {

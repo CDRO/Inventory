@@ -185,10 +185,7 @@ func parseShellAssets(t *testing.T, source string) []string {
 
 	var cleaned []string
 	for _, line := range strings.Split(block[1], "\n") {
-		if i := strings.Index(line, "//"); i != -1 {
-			line = line[:i]
-		}
-		cleaned = append(cleaned, line)
+		cleaned = append(cleaned, stripLineComment(line))
 	}
 
 	var paths []string
@@ -196,4 +193,40 @@ func parseShellAssets(t *testing.T, source string) []string {
 		paths = append(paths, match[1])
 	}
 	return paths
+}
+
+// stripLineComment cuts a line off at the first "//" that appears outside a
+// quoted string, so an entry whose path itself contains "//" — a
+// protocol-relative URL, say — is not silently truncated mid-path the way a
+// bare strings.Index(line, "//") would truncate it.
+func stripLineComment(line string) string {
+	inString := false
+	for i := 0; i < len(line); i++ {
+		switch {
+		case line[i] == '"':
+			inString = !inString
+		case !inString && line[i] == '/' && i+1 < len(line) && line[i+1] == '/':
+			return line[:i]
+		}
+	}
+	return line
+}
+
+// TestParseShellAssetsKeepsProtocolRelativeURLIntact is the regression guard
+// for #394 item 1: a bare strings.Index(line, "//") used to cut a line off at
+// the first "//" found anywhere in it, including inside a quoted path, so a
+// protocol-relative URL entry ("//cdn.example.com/lib.js") would have been
+// silently truncated to an empty string rather than parsed intact. No current
+// SHELL_ASSETS entry contains "//", so this exercises the parser directly
+// with a fabricated block rather than waiting for a real one to trip it.
+func TestParseShellAssetsKeepsProtocolRelativeURLIntact(t *testing.T) {
+	t.Parallel()
+
+	source := "const SHELL_ASSETS = [\n" +
+		"  // a leading explanatory comment, like sw.js's own\n" +
+		"  \"/index.html\", // a trailing comment on a normal entry\n" +
+		"  \"//cdn.example.com/lib.js\",\n" +
+		"];\n"
+
+	require.Equal(t, []string{"/index.html", "//cdn.example.com/lib.js"}, parseShellAssets(t, source))
 }

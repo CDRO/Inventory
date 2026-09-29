@@ -60,7 +60,7 @@ CREATE INDEX idx_icons_name_trgm ON icons USING gin (name gin_trgm_ops);
   search, which treats both identically.
 - **Licensing is recorded once, here, not per row.** The base vendored
   set (below) is a single collection under a single license; repeating
-  that license string on 3,145 rows would be noise, not a safeguard. An
+  that license string on 3,819 rows would be noise, not a safeguard. An
   **uploaded** icon carries no license claim at all — see "Uploading a
   custom icon."
 
@@ -103,7 +103,7 @@ for.
   side-effects beyond pure schema migration, and this is a second one —
   so a fresh install has a searchable library after the same command a
   fresh install already had to run, with no separate manual step and no
-  change to the documented command sequence. All 3,145 icons import —
+  change to the documented command sequence. All 3,819 icons import —
   this spec does not hand-curate a
   subset; a smaller, hand-picked set is real editorial work with no
   clear stopping point, while "import everything, let search and the
@@ -122,7 +122,7 @@ Two paths, both offline, neither turning into a running dependency:
   own prefix. This spec does not commit to a second collection now —
   Noto's breadth is the reason it was chosen first — but the mechanism
   does not need to change to add one.
-- **Upload a custom icon**, below, for the individual "nothing in 3,145
+- **Upload a custom icon**, below, for the individual "nothing in 3,819
   emoji fits this specific product" case, which does not need a whole
   new collection to solve.
 
@@ -188,9 +188,15 @@ nothing close enough.
   frontend — grep the icon-rendering code path for confirmation as part
   of this package's own review, not just at picker-UI review time.
 - Neither this spec's icon-import path nor `40`'s search/picker endpoints
-  ever reach `api.iconify.design` or any other icon-serving host — the
-  E2E network-blocked check `40` already specifies is the regression
-  guard. **This does not extend to `07-shopping-list-reconciliation.md`'s
+  ever reach `api.iconify.design` or any other icon-serving host —
+  enforced as a regression guard by `internal/iconlib/egress_test.go`,
+  which fails if any file in the icon path imports a network package,
+  constructs an outbound `net/http` request (alias-aware), names an
+  external URL, or imports a package that transitively reaches
+  `net/http`, and if `web/static/js/icon-picker.js` contains an absolute
+  URL. `40`'s egress-blocked run remains valid as a stronger manual
+  check, but it is not what enforces this continuously. **This does not
+  extend to `07-shopping-list-reconciliation.md`'s
   picture-suggestion flow**, which keeps its own, different, already-
   shipped call to the same host (see `07`'s own flagged note) — a
   system-wide "never calls Iconify" claim would be false and is not what

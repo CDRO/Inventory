@@ -112,9 +112,11 @@ Three things the sequence alone doesn't make obvious:
   trustworthy. A red result against a stack that has already run the suite
   once is not evidence of a bug — reset (`down -v`, then the full sequence
   again) and re-run before trusting it. A reused stack has a quieter failure
-  mode too: `e2e/specs/barcode-recall.spec.js` runs under
-  `test.describe.configure({ mode: "serial" })`, so when its first test fails
-  against a used stack, the rest of that file is *skipped*, not failed. A
+  mode too: any spec file running under
+  `test.describe.configure({ mode: "serial" })` — currently
+  `e2e/specs/barcode-recall.spec.js`, `e2e/specs/gamification.spec.js` and
+  `e2e/specs/stocktake.spec.js` — skips the rest of its tests, rather than
+  failing them, once its first test fails against a used stack. A
   "did not run" count is as much a reset signal as a failure count is — a
   reviewer who reads only pass/fail can conclude the suite merely flaked when
   part of it never executed at all.
@@ -130,12 +132,18 @@ Three things the sequence alone doesn't make obvious:
   `pgdata` volume carried onto it, so `psql -U e2e` answers `role "e2e" does
   not exist`. The flag is not about per-worktree isolation; it deliberately
   makes the name identical everywhere, which is why **two checkouts may never
-  run the suite at the same time.** Traefik publishes host 8443 with no
-  variable, so a second stack under a different name is refused the port, but
-  a second one under this same name is not refused anything: it recreates the
-  first's containers and takes the run over silently. Inside a sequential wave
-  that cannot happen; with `"sequential": false` the pre-flight `docker ps`
-  at the top of the compose header is the only guard.
+  run the suite at the same time.** Nothing Docker does enforces that on its
+  own: a second `up` under the same shared project name is not refused
+  anything, it recreates the first's containers and takes the run over
+  silently. Inside a sequential wave that cannot happen; with
+  `"sequential": false` the pre-flight `docker ps -a` at the top of the
+  compose header is the only guard. (Traefik used to publish a fixed host
+  port here, which incidentally refused a *second* project name the same
+  port — but it also let an ordinary dev stack in the very worktree running
+  the gate silently starve its own E2E run of that port, with no clear
+  failure message; #358 removed the `ports:` block entirely rather than try
+  to fix both at once, since the port was never load-bearing for the
+  same-name collision this rule actually cares about.)
 - **The `db` service also runs with `fsync=off`, `synchronous_commit=off` and
   `full_page_writes=off`** (docs/plans/2026-09-harness-optimization.md,
   decision D5 — that document is on branch `harness/optimization-plan`, PR
@@ -288,7 +296,11 @@ and pins both its dependencies to the exact Playwright version
 to keeping in lockstep with the pulled image tag, so a real version bump
 changes the file and invalidates the cache — which is what the lockfile
 would have keyed on if one existed here. The `e2e` service's `npm install`
-is then a no-op on a cache hit. The backup/restore round trip (issue #133)
+is then a no-op on a cache hit. A `restore-keys:` fallback on the same
+prefix means a `package.json` change that does not hit the exact key still
+restores the nearest previous cache instead of missing it entirely, so
+`npm install` only has to reconcile the difference rather than reinstall
+from scratch. The backup/restore round trip (issue #133)
 used to be a second job in `e2e.yml`, running on every push to `main`
 alongside the suite; H8 moved it into its own workflow,
 `.github/workflows/restore.yml`, triggered on a push to `main` that touches
@@ -455,7 +467,8 @@ with it.
 │   ├── admin/                  # server-rendered admin UI handlers (html/template)
 │   ├── store/                  # pgx queries, one file per table group
 │   ├── vision/                 # Gemini client, prompts, response parsing, model resilience
-│   ├── imagesearch/            # SerpAPI + Iconify clients
+│   ├── imagesearch/            # SerpAPI + Iconify clients (07 image suggestions only — NOT the icon picker)
+│   ├── iconlib/                # vendored offline icon set, embedded; no network at all (42)
 │   ├── matching/               # shared product matching (catalog-first, then trigram)
 │   ├── expiry/                 # shelf-life resolution chain (08-expiration-and-classification.md)
 │   ├── jobs/                   # background job runner + job store
@@ -826,6 +839,8 @@ services:
       - ./docker-compose.yml:/src/docker-compose.yml
       - ./docker-compose.nas.yml:/src/docker-compose.nas.yml
       - ./docker-compose.e2e.yml:/src/docker-compose.e2e.yml
+      - ./docker-compose.override.yml:/src/docker-compose.override.yml
+      - ./docker-compose.ci.yml:/src/docker-compose.ci.yml
       - ./.gitignore:/src/.gitignore
       - ./.dockerignore:/src/.dockerignore
       - ./.gitattributes:/src/.gitattributes
@@ -855,7 +870,10 @@ production runs Postgres on its defaults. A third file, `docker-compose.ci.yml`
 (override-style, `db` service only), adds a `tmpfs` data directory for the
 same flags on a GitHub-hosted runner, whose whole VM is destroyed at the end
 of the job anyway; it is not auto-loaded and is picked up only where a
-workflow sets `COMPOSE_FILE` to include it.
+workflow sets `COMPOSE_FILE` to include it — `.github/workflows/test.yml`
+does this (H8), so CI's `go test ./...` runs against the tmpfs data
+directory, not the override's persistent one; `.github/workflows/e2e.yml`
+does not set it and is unaffected.
 
 ## Deployment model
 
@@ -898,10 +916,14 @@ NAS — the deployment gate above, checked by SHA instead of remembered — and 
 runner then runs `deploy/synology/update` from the clone, which stamps `VERSION`
 from the tag and takes the pre-upgrade backup itself.
 [`38-release-pipeline-and-nas-runner.md`](38-release-pipeline-and-nas-runner.md)
-is the contract for that pipeline and names the packages that build it; until
-they land, deploying is the manual procedure described here and in
-[`18-operations-and-observability.md`](18-operations-and-observability.md),
-which stays the fallback for a NAS whose runner is down.
+is the contract for that pipeline and names the packages that built it, and they
+have all landed: on that NAS an ordinary release is now `scripts/dev release <tag>`
+typed on the operator's machine
+([`deploy/synology/README.md`](../../deploy/synology/README.md), "A release,
+start to finish"). The manual procedure described here and in
+[`18-operations-and-observability.md`](18-operations-and-observability.md) stays
+the fallback for a NAS whose runner is down, and the procedure for any
+deployment that is not that NAS.
 
 ## Remote access (interchangeable by configuration)
 
@@ -1104,7 +1126,7 @@ $ cd /volume1/docker/inventory        # the clone; adjust the path
 $ DC="docker-compose -p inventory -f docker-compose.yml -f docker-compose.nas.yml"
 $ $DC run --rm setup           # writes .env
 $ $DC build
-$ $DC run --rm app migrate up  # also creates the initial admin
+$ $DC run --rm app migrate up  # also creates the initial admin and imports the icon library
 $ TS_AUTHKEY=tskey-auth-… $DC up -d
 ```
 
@@ -1204,19 +1226,21 @@ the same update by hand is `git pull`, then `$DC pull ts-inventory`, `$DC build`
 the new one.
 
 **What [`38-release-pipeline-and-nas-runner.md`](38-release-pipeline-and-nas-runner.md)
-adds to this script** — and therefore what it changes about two statements above
-— is three flags and a caller. `--ref <tag>` deploys a named tag instead of
+added to this script** — and therefore what it changed about two statements
+above — is three flags and a caller. `--ref <tag>` deploys a named tag instead of
 whatever `git pull` brings; `--backup` takes the pre-upgrade backup that "back
-up first" asks for, so "the script takes no backup" stops being true once it
-lands; and `--auto` reads the pending migrations through `inventory migrate
+up first" asks for, so "the script takes no backup" is no longer
+true; and `--auto` reads the pending migrations through `inventory migrate
 plan` and picks classic or rolling itself, so `--classic` stops being a
 judgement the operator makes per release (it becomes a marker line in the
 migration, decided in review). The caller is a self-hosted GitHub Actions
 runner in a container on this NAS, in its own Compose project
 (`inventory-runner`) so `dc down` on this stack never touches it, mounting
 nothing but the Docker socket and this clone. Spec 38 is the contract for all of
-it, including that socket's residual risk, and names the packages that build
-it; until they land, this section describes the script as it is.
+it, including that socket's residual risk, and names the packages that built
+it; they have all landed, so the flags and the caller above exist today — this
+section describes the script's own mechanics, which the pipeline calls rather
+than replaces.
 
 ## Health/readiness
 

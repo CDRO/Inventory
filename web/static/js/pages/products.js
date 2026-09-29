@@ -32,6 +32,12 @@ import { fetchLocations, appendLocationOptions, openLocationField } from "../loc
 import { clearChildren, el, text } from "../dom.js";
 import { openScanSheet } from "../barcode.js";
 import { renderImagePicker } from "../image-picker.js";
+import { renderIconPicker } from "../icon-picker.js";
+import { productCell } from "../product-table.js";
+
+// The list search is debounced by this many ms — "as-you-type" per
+// docs/specs/16-product-maintenance.md, without a request per keystroke.
+const SEARCH_DEBOUNCE_MS = 250;
 
 // The server's bound (maxShelfLifeDays in internal/httpapi/expiry.go). The
 // input carries it so a browser flags an out-of-range number before a round
@@ -51,6 +57,8 @@ const detailContainer = document.querySelector("#detail");
 const errorBox = document.querySelector("#error");
 const statusLine = document.querySelector("#status");
 const filterInput = document.querySelector("#filter");
+const showAllButton = document.querySelector("#show-all");
+const addProductButton = document.querySelector("#add-product");
 const switcherContainer = document.querySelector("#storage-switcher");
 
 let storageId = null;
@@ -61,6 +69,15 @@ let categories = [];
 /** @type {{id: string, name: string, depth: number, path: string[]}[]} */
 let locations = [];
 let selectedId = null;
+
+// The list panel's search state. null means the filter-only default — no
+// products rendered (docs/specs/16-product-maintenance.md) — and a string is
+// the last query a request was actually made for, "" meaning "Show all
+// products". Kept so a save, a delete or a create elsewhere on the page can
+// refresh whatever is currently shown without guessing what that was.
+let currentListQuery = null;
+let searchGeneration = 0;
+let searchDebounceTimer = null;
 
 init();
 
@@ -96,7 +113,12 @@ async function init() {
   });
   initGamification(storageId);
 
-  filterInput.addEventListener("input", renderList);
+  filterInput.addEventListener("input", onFilterInput);
+  showAllButton.addEventListener("click", onShowAllClick);
+  addProductButton.addEventListener("click", () => {
+    selectedId = null;
+    showCreateForm();
+  });
 
   // A deep link from inventory.html's "Product" column
   // (docs/specs/33-inventory-overview-table.md) names the product to open
@@ -128,7 +150,12 @@ async function reload() {
     return;
   }
   clearError();
-  renderList();
+
+  // Whatever the list panel was showing (a search, "show all", or nothing)
+  // stays showing, refreshed — a save, a merge or a create elsewhere on the
+  // page must not silently revert it to the filter-only default.
+  if (currentListQuery === null) renderListDefault();
+  else await runSearch(currentListQuery);
 
   if (selectedId && !products.some((p) => p.id === selectedId)) {
     // The selected product is gone — merged away or deleted.
@@ -138,44 +165,107 @@ async function reload() {
   if (selectedId) await showDetail(selectedId);
 }
 
-function renderList() {
-  const needle = normalize(filterInput.value);
-  const shown = needle ? products.filter((p) => normalize(p.name).includes(needle)) : products;
-
-  clearChildren(listContainer);
-  if (products.length === 0) {
-    listContainer.append(
-      el("p", { class: "empty-state" }, [
-        text(t("products.list.empty")),
-      ]),
-    );
+// onFilterInput debounces the as-you-type search
+// (docs/specs/16-product-maintenance.md). Clearing the box returns to the
+// filter-only empty state immediately — never back to "show all", which is a
+// person's explicit choice each time, not a state the page remembers.
+function onFilterInput() {
+  clearTimeout(searchDebounceTimer);
+  const query = filterInput.value.trim();
+  if (query === "") {
+    renderListDefault();
     return;
   }
-  if (shown.length === 0) {
+  searchDebounceTimer = setTimeout(() => runSearch(query), SEARCH_DEBOUNCE_MS);
+}
+
+// onShowAllClick loads and renders every product in the storage — the same
+// request the old default page load made, now reached by an explicit click
+// rather than happening on its own.
+function onShowAllClick() {
+  clearTimeout(searchDebounceTimer);
+  filterInput.value = "";
+  runSearch("");
+}
+
+// renderListDefault is the filter-only default: no products rendered until a
+// search or "Show all products" (docs/specs/16-product-maintenance.md).
+// `searchGeneration` is bumped so a search already in flight cannot land
+// after the box was cleared and overwrite this state with stale rows.
+function renderListDefault() {
+  currentListQuery = null;
+  searchGeneration++;
+  clearChildren(listContainer);
+  const key = products.length === 0 ? "products.list.empty" : "products.list.prompt";
+  listContainer.append(el("p", { class: "empty-state" }, [text(t(key))]));
+}
+
+// runSearch is the one path to the list table, for both a typed search and
+// "Show all products" (query === ""): a filtered GET request built the same
+// way every other filtered-and-reloaded listing on this system already is
+// (docs/specs/33-inventory-overview-table.md's pattern), replacing the empty
+// state with matching rows.
+async function runSearch(query) {
+  currentListQuery = query;
+  const generation = ++searchGeneration;
+
+  let rows;
+  try {
+    rows = (await get(`${basePath()}?q=${encodeURIComponent(query)}`)).items;
+  } catch (err) {
+    if (generation !== searchGeneration) return; // superseded by a newer search
+    showError(err);
+    return;
+  }
+  if (generation !== searchGeneration) return; // superseded by a newer search
+  clearError();
+
+  clearChildren(listContainer);
+  if (rows.length === 0) {
     listContainer.append(el("p", { class: "empty-state" }, [text(t("products.list.noMatch"))]));
     return;
   }
+  listContainer.append(renderProductListTable(rows));
+}
 
-  for (const product of shown) {
-    listContainer.append(
-      el(
-        "button",
-        {
-          type: "button",
-          class: product.id === selectedId ? "btn btn--block btn--primary" : "btn btn--block btn--ghost",
-          onclick: () => showDetail(product.id),
+// renderProductListTable is products.html's list table
+// (docs/specs/16-product-maintenance.md): the same row shape and CSS classes
+// as inventory.html's own table (docs/specs/33-inventory-overview-table.md),
+// not a second table implementation — js/product-table.js's productCell is
+// the piece the two pages actually share.
+function renderProductListTable(rows) {
+  return el("table", { class: "inventory-table" }, [
+    el("thead", {}, [
+      el("tr", {}, [
+        el("th", { scope: "col" }, [text(t("products.list.columns.product"))]),
+        el("th", { scope: "col" }, [text(t("products.list.columns.category"))]),
+        el("th", { scope: "col", class: "inventory-table__qty" }, [text(t("products.list.columns.stock"))]),
+      ]),
+    ]),
+    el("tbody", {}, rows.map(renderProductListRow)),
+  ]);
+}
+
+function renderProductListRow(row) {
+  return el("tr", { "data-product-id": row.id }, [
+    el("td", { "data-label": "" }, [
+      productCell(row.image_url, row.name, {
+        href: `${location.pathname}?storage=${encodeURIComponent(storageId)}&product=${encodeURIComponent(row.id)}`,
+        onclick: (event) => {
+          event.preventDefault();
+          showDetail(row.id);
         },
-        // Names go in through text(), never innerHTML: a product name is user
-        // text and may contain anything.
-        [text(product.name)],
-      ),
-    );
-  }
+      }),
+    ]),
+    el("td", { "data-label": t("products.list.columns.category") }, [text(row.category_name || "—")]),
+    el("td", { "data-label": t("products.list.columns.stock"), class: "inventory-table__qty" }, [
+      text(String(row.current_stock)),
+    ]),
+  ]);
 }
 
 async function showDetail(productId) {
   selectedId = productId;
-  renderList();
   clearStatus();
 
   let product;
@@ -195,10 +285,12 @@ async function showDetail(productId) {
 function renderDetail(product) {
   clearChildren(detailContainer);
   const editForm = renderEditForm(product);
+  const iconField = renderIconField(product);
   detailContainer.append(
     el("div", { class: "card stack" }, [
       el("h3", {}, [text(product.name)]),
-      renderPicture(product, editForm.iconInput),
+      renderPicture(product, iconField.refresh),
+      iconField.node,
       editForm.form,
     ]),
     renderStockCard(product),
@@ -345,11 +437,18 @@ function renderBarcodeCard(product) {
 // deliberately built here rather than inside js/image-picker.js: the picker's
 // other caller is the shopping-list reconciliation screen, where the product
 // being given a picture does not exist yet and there is no id to post to.
-function renderPicture(product, iconInput) {
+// `onIconChanged` is called whenever a picture write clears icon_name — both
+// routes always clear it, a picture and a picked icon being alternatives —
+// so the icon field's own "current icon" line, a sibling built separately by
+// renderIconField, can resync. Without it, that line would go stale the same
+// way the old free-text input did before #251: setPicture/uploadPicture's
+// re-render is deliberately narrow (it must not discard unsaved edits) and
+// has no other handle onto the icon field's DOM.
+function renderPicture(product, onIconChanged) {
   const current = el("div", { "data-role": "product-picture" }, [currentPicture(product)]);
   const pickerBox = el("div", { "data-role": "picture-picker", class: "stack", hidden: true });
   const status = el("p", { class: "muted", "data-role": "picture-status", hidden: true });
-  const uploadBox = renderPictureUpload(product, current, status, iconInput);
+  const uploadBox = renderPictureUpload(product, current, status, onIconChanged);
 
   const change = el(
     "button",
@@ -373,7 +472,7 @@ function renderPicture(product, iconInput) {
           // only way to clear one would be a suggestion list that happened to
           // come back non-empty.
           clearable: true,
-          onPick: (hash) => setPicture(product, hash, current, status, iconInput),
+          onPick: (hash) => setPicture(product, hash, current, status, onIconChanged),
         });
       },
     },
@@ -390,7 +489,7 @@ function renderPicture(product, iconInput) {
 // module-level one would be shared by every product ever opened in this
 // session, so returning to a product while another one's upload was still in
 // flight would silently refuse it (the bug class of #249/#252 in the picker).
-function renderPictureUpload(product, current, status, iconInput) {
+function renderPictureUpload(product, current, status, onIconChanged) {
   let uploading = false;
 
   const input = el("input", {
@@ -413,7 +512,7 @@ function renderPictureUpload(product, current, status, iconInput) {
       uploading = true;
       input.disabled = true;
       try {
-        await uploadPicture(product, chosen, current, status, iconInput);
+        await uploadPicture(product, chosen, current, status, onIconChanged);
       } finally {
         uploading = false;
         input.disabled = false;
@@ -444,10 +543,12 @@ function currentPicture(product) {
 // setPicture writes the choice and re-renders only the picture itself. The
 // whole detail view is deliberately not re-rendered: the edit form beside it
 // may hold changes somebody has typed and not saved, and a picture change
-// must not discard them. Its `icon` field is a narrow exception — applyPicture
-// resyncs it directly, because it is the one field the picture change itself
-// can make stale (#251).
-async function setPicture(product, hash, current, status, iconInput) {
+// must not discard them. icon_name is always cleared alongside the picture
+// (the two are alternatives) — `onIconChanged` is how the icon field's own
+// "current icon" preview, a sibling built separately by renderIconField,
+// finds out (docs/specs/40-icon-picker.md; the same staleness #251 fixed for
+// the old free-text input, now on the field that replaced it).
+async function setPicture(product, hash, current, status, onIconChanged) {
   status.hidden = false;
   status.textContent = t("products.picture.saving");
   try {
@@ -455,7 +556,11 @@ async function setPicture(product, hash, current, status, iconInput) {
       image: hash,
       icon_name: null,
     });
-    applyPicture(product, updated, current, iconInput);
+    product.image_url = updated.image_url ?? null;
+    product.icon_name = updated.icon_name ?? null;
+    clearChildren(current);
+    current.append(currentPicture(product));
+    onIconChanged?.();
     status.textContent = hash ? t("products.picture.saved") : t("products.picture.cleared");
   } catch (err) {
     status.textContent = apiErrorMessage(err, t("products.error.network"));
@@ -476,14 +581,19 @@ async function setPicture(product, hash, current, status, iconInput) {
 // Unlike setPicture it does not rethrow. There is no selection state to roll
 // back — the file input was cleared the moment the file was read — and the
 // status line already carries the server's own words.
-async function uploadPicture(product, file, current, status, iconInput) {
+async function uploadPicture(product, file, current, status, onIconChanged) {
   status.hidden = false;
   status.textContent = t("products.picture.uploading");
 
   const body = new FormData();
   body.append("image", file);
   try {
-    applyPicture(product, await postForm(`${basePath()}/${product.id}/image`, body), current, iconInput);
+    const updated = await postForm(`${basePath()}/${product.id}/image`, body);
+    product.image_url = updated.image_url ?? null;
+    product.icon_name = updated.icon_name ?? null;
+    clearChildren(current);
+    current.append(currentPicture(product));
+    onIconChanged?.();
     status.textContent = t("products.picture.saved");
   } catch (err) {
     // Deliberately not rethrown, where setPicture just above does rethrow.
@@ -495,21 +605,79 @@ async function uploadPicture(product, file, current, status, iconInput) {
   }
 }
 
-// applyPicture writes what the route answered back onto the product and
-// re-renders the picture alone. Both change paths go through it, so the two
-// cannot disagree about which fields the response carries.
+// renderIconField replaces the free-text icon_name input
+// (docs/specs/40-icon-picker.md, "The picker UI") with a "Change icon"
+// trigger that opens js/icon-picker.js below it — the same open/toggle shape
+// renderPicture uses for the picture change paths above.
 //
-// It also resyncs the edit form's `icon` input to the new `icon_name` (#251).
-// Both routes always clear icon_name — a picture change and a picked icon are
-// alternatives — so the input is reset unconditionally rather than only when
-// the value actually moved; a stale DOM value would otherwise survive into
-// the next Save and reinstate an icon the user just cleared.
-function applyPicture(product, updated, current, iconInput) {
-  product.image_url = updated.image_url ?? null;
-  product.icon_name = updated.icon_name ?? null;
-  clearChildren(current);
-  current.append(currentPicture(product));
-  iconInput.value = product.icon_name ?? "";
+// A pick writes immediately, through the same PATCH the Save button uses
+// (`{"icon_name": "…"}` or `{"icon_name": null}` to clear), independently of
+// whatever the rest of the edit form currently holds — exactly like a picture
+// change already does, and for the same reason: the edit form beside it may
+// carry changes nobody has saved yet, and picking an icon must not discard
+// them.
+//
+// Returns `refresh`, alongside `node`, so renderPicture can resync this
+// field's "current icon" line when a picture write clears icon_name out from
+// under it — the two fields are siblings built independently, and neither
+// has any other handle onto the other's DOM.
+function renderIconField(product) {
+  const current = el("p", { class: "muted", "data-role": "current-icon" }, [text(currentIconLabel(product))]);
+  const status = el("p", { class: "muted", "data-role": "icon-status", hidden: true });
+  const pickerBox = el("div", { "data-role": "icon-picker", class: "stack", hidden: true });
+
+  const change = el(
+    "button",
+    {
+      type: "button",
+      class: "btn btn--ghost",
+      "data-role": "change-icon",
+      onclick: async () => {
+        pickerBox.hidden = false;
+        await renderIconPicker(pickerBox, {
+          storageId,
+          currentIconName: product.icon_name,
+          keyPrefix: "products.icons",
+          onPick: (iconName) => setIcon(product, iconName, current, status),
+        });
+      },
+    },
+    [text(t("products.icons.change"))],
+  );
+
+  const node = el("div", { class: "field" }, [
+    el("label", {}, [text(t("products.edit.icon"))]),
+    current,
+    change,
+    pickerBox,
+    status,
+  ]);
+
+  return { node, refresh: () => { current.textContent = currentIconLabel(product); } };
+}
+
+function currentIconLabel(product) {
+  return product.icon_name
+    ? t("products.icons.current", { icon: product.icon_name })
+    : t("products.icons.current.none");
+}
+
+// setIcon writes the picked icon_name and re-renders only the field's own
+// "current icon" line — the same narrow-update shape setPicture uses above,
+// for the same reason: a full reload() would discard unsaved edits sitting in
+// the rest of the form. Rethrows on failure so the picker rolls its selection
+// back, exactly like setPicture does.
+async function setIcon(product, iconName, current, status) {
+  status.hidden = true;
+  try {
+    const updated = await patch(`${basePath()}/${product.id}`, { icon_name: iconName });
+    product.icon_name = updated.icon_name ?? null;
+    current.textContent = currentIconLabel(product);
+  } catch (err) {
+    status.hidden = false;
+    status.textContent = apiErrorMessage(err, t("products.error.network"));
+    throw err;
+  }
 }
 
 function renderEditForm(product) {
@@ -542,18 +710,13 @@ function renderEditForm(product) {
     value: product.default_shelf_life_days == null ? "" : String(product.default_shelf_life_days),
   });
 
-  const icon = el("input", {
-    type: "text", id: "p-icon", maxlength: "100", placeholder: "noto:cheese-wedge",
-    value: product.icon_name ?? "",
-  });
-
   const form = el(
     "form",
     {
       class: "stack",
       onsubmit: (event) => {
         event.preventDefault();
-        save(product, { name, category, itemType, minStock, shelfLife, icon });
+        save(product, { name, category, itemType, minStock, shelfLife });
       },
     },
     [
@@ -562,19 +725,151 @@ function renderEditForm(product) {
       field(t("products.edit.itemTypeLabel"), itemType),
       field(t("products.edit.minStock"), minStock),
       field(t("products.edit.shelfLife"), shelfLife, t("products.edit.shelfLife.hint")),
-      field(t("products.edit.icon"), icon, t("products.edit.icon.hint")),
       el("div", { class: "row" }, [
         el("button", { type: "submit", class: "btn btn--primary" }, [text(t("common.save"))]),
       ]),
     ],
   );
-  return { form, iconInput: icon };
+  return { form };
 }
 
 function field(label, input, hint) {
   const children = [el("label", { for: input.id }, [text(label)]), input];
   if (hint) children.push(el("small", { class: "muted" }, [text(hint)]));
   return el("div", { class: "field" }, children);
+}
+
+// showCreateForm opens the standalone "+ Add product" entry point
+// (docs/specs/16-product-maintenance.md, "Creating a product") in the detail
+// panel — reachable without first typing a shopping-list line. It reuses the
+// same field set and image-picker call shopping-list.js's describeManually()
+// already uses (name, category, item type, min_stock, an optional picture)
+// rather than building a second form from scratch.
+function showCreateForm() {
+  clearStatus();
+  clearChildren(detailContainer);
+  detailContainer.append(renderCreateForm());
+}
+
+function renderCreateForm() {
+  const name = el("input", { type: "text", id: "np-name", required: true, maxlength: "255" });
+
+  const category = el("select", { id: "np-category" });
+  appendCategoryOptions(category, categories);
+
+  const itemType = el("select", { id: "np-item-type" });
+  for (const [value, labelKey] of ITEM_TYPES) {
+    itemType.append(el("option", { value }, [text(t(labelKey))]));
+  }
+  // The server's own default when item_type is omitted (internal/store/products.go).
+  itemType.value = "long_shelf_life";
+
+  const minStock = el("input", { type: "number", id: "np-min-stock", min: "0", step: "1", value: "0" });
+
+  // The picker needs something to search for, which a blank "+ Add product"
+  // form does not have yet — unlike describeManually(), which always opens
+  // with a line's own text already in the name field. Rather than firing it
+  // automatically off a blur (which would race the very click that leaves the
+  // name field to reach Save), it opens the same way the edit form's own
+  // picture change does: an explicit button, using whatever name has been
+  // typed by the time it is clicked.
+  const pictureBox = el("div", { class: "stack", hidden: true });
+  let pickedImage = null;
+  const addPictureButton = el(
+    "button",
+    {
+      type: "button",
+      class: "btn btn--ghost",
+      onclick: () => {
+        pictureBox.hidden = false;
+        renderImagePicker(pictureBox, {
+          storageId,
+          query: name.value.trim(),
+          keyPrefix: "products.pictures",
+          onPick: (hash) => {
+            pickedImage = hash;
+          },
+        });
+      },
+    },
+    [text(t("products.create.addPicture"))],
+  );
+
+  const errorLine = el("div", { class: "alert", role: "alert", hidden: true });
+
+  const form = el(
+    "form",
+    {
+      class: "stack",
+      onsubmit: (event) => {
+        event.preventDefault();
+        submitCreate({ name, category, itemType, minStock }, () => pickedImage, errorLine);
+      },
+    },
+    [
+      field(t("products.edit.name"), name),
+      field(t("products.edit.category"), category),
+      field(t("products.edit.itemTypeLabel"), itemType),
+      field(t("products.edit.minStock"), minStock),
+      el("div", { class: "field" }, [
+        el("label", {}, [text(t("products.create.picture"))]),
+        addPictureButton,
+        pictureBox,
+      ]),
+      errorLine,
+      el("div", { class: "row" }, [
+        el("button", { type: "submit", class: "btn btn--primary" }, [text(t("common.save"))]),
+        el(
+          "button",
+          { type: "button", class: "btn btn--ghost", onclick: () => clearChildren(detailContainer) },
+          [text(t("common.cancel"))],
+        ),
+      ]),
+    ],
+  );
+
+  return el("div", { class: "card stack" }, [
+    el("h3", {}, [text(t("products.create.title"))]),
+    form,
+  ]);
+}
+
+// submitCreate posts the new product. name is the only field the server
+// requires (docs/specs/16-product-maintenance.md); a close match to an
+// existing product's name comes back as that existing product instead of a
+// new one, which is shown exactly like a freshly created product would be —
+// the same "merge instead?" courtesy the rename path gives, applied here by
+// the server rather than the frontend.
+async function submitCreate(inputs, pickedImage, errorLine) {
+  const name = inputs.name.value.trim();
+  if (!name) {
+    errorLine.textContent = t("products.create.nameRequired");
+    errorLine.hidden = false;
+    return;
+  }
+
+  const body = { name, item_type: inputs.itemType.value };
+  if (inputs.category.value) body.category_id = inputs.category.value;
+  const minStock = Number.parseInt(inputs.minStock.value, 10);
+  body.min_stock = Number.isFinite(minStock) ? minStock : 0;
+  const hash = pickedImage();
+  if (hash) body.image = hash;
+
+  errorLine.hidden = true;
+  try {
+    const created = await post(basePath(), body);
+    clearError();
+    selectedId = created.id;
+    // After reload(), not before: reload() opens the new product's own detail
+    // view, and showDetail() clears the status line at its own start (#395)
+    // — set after it runs, so the confirmation is not wiped before anyone
+    // sees it.
+    await reload();
+    showStatus(t("products.create.saved", { name: created.name }));
+  } catch (err) {
+    errorLine.textContent = err instanceof ApiError ? apiErrorMessage(err) : t("products.error.network");
+    errorLine.hidden = false;
+  }
 }
 
 async function save(product, inputs) {
@@ -596,10 +891,6 @@ async function save(product, inputs) {
   const shelfLife = shelfLifeRaw === "" ? null : Number.parseInt(shelfLifeRaw, 10);
   if (shelfLife !== (product.default_shelf_life_days ?? null)) body.default_shelf_life_days = shelfLife;
 
-  const iconRaw = inputs.icon.value.trim();
-  const icon = iconRaw === "" ? null : iconRaw;
-  if (icon !== (product.icon_name ?? null)) body.icon_name = icon;
-
   if (Object.keys(body).length === 0) {
     showStatus(t("products.save.nothingChanged"));
     return;
@@ -619,12 +910,16 @@ async function save(product, inputs) {
   try {
     const updated = await patch(`${basePath()}/${product.id}`, body);
     clearError();
+    // After reload(), not before: reload() re-runs showDetail() on the
+    // product just saved, and showDetail() clears the status line at its own
+    // start (#395) — set after it runs, so the confirmation is not wiped
+    // before anyone sees it.
+    await reload();
     if (typeof updated.recomputed_batches === "number") {
       showStatus(tCount("products.save.shelfLifeRecalculated", updated.recomputed_batches));
     } else {
       showStatus(t("products.save.saved"));
     }
-    await reload();
   } catch (err) {
     showError(err);
   }
@@ -661,14 +956,15 @@ async function offerMerge(survivor, source) {
   try {
     const result = await post(`${basePath()}/${survivor.id}/merge`, { source_product_id: source.id });
     clearError();
+    selectedId = survivor.id;
+    // After reload(), not before — same reason as save()'s reordering (#395).
+    await reload();
     showStatus(
       t("products.merge.result", {
         batches: tCount("products.merge.movedBatches", result.moved_batches),
         dates: tCount("products.merge.recomputedDates", result.recomputed_batches),
       }),
     );
-    selectedId = survivor.id;
-    await reload();
   } catch (err) {
     showError(err);
   }
@@ -680,7 +976,20 @@ function renderStockCard(product) {
   // (docs/specs/28-batch-move-quick-create.md, matching 26's refresh
   // contract) rather than one request per open field.
   const locationSelects = [];
-  const rows = product.batches.map((batch) => renderBatchRow(batch, locationSelects));
+  // Destroying a container clears it off every batch that referenced it, not
+  // just the one in view (docs/specs/39-batch-containers.md), so the
+  // confirmation has to be able to say how many. Counted over this product's
+  // own batches, which is where a shared container can come from at all — a
+  // split with container_disposition "both".
+  const containerUsage = new Map();
+  for (const batch of product.batches) {
+    if (batch.container_id) {
+      containerUsage.set(batch.container_id, (containerUsage.get(batch.container_id) ?? 0) + 1);
+    }
+  }
+  const rows = product.batches.map((batch) =>
+    renderBatchRow(batch, locationSelects, containerUsage.get(batch.container_id) ?? 0),
+  );
 
   const [hintBefore, hintAfter] = t("products.stock.hint").split("{link}");
   return el("div", { class: "card stack" }, [
@@ -714,13 +1023,23 @@ function renderStockCard(product) {
  * guard in js/location-options.js) — a defense against a duplicate
  * *request*, not a validity check the server already owns.
  *
+ * It also carries the batch's container (docs/specs/39-batch-containers.md):
+ * what the stock is physically held in, orthogonal to where it sits. The
+ * container form upserts through the same PATCH the move uses — one label
+ * creates a container, a second renames that same row, null takes the batch out
+ * of it without destroying it — and "destroy" is the one separate endpoint,
+ * behind a confirmation because it clears the container off every batch that
+ * referenced it and cannot be undone by sending the label again.
+ *
  * @param {Object} batch
  * @param {HTMLSelectElement[]} locationSelects - every batch row's target-
  *   location field on the currently rendered product, shared so the "+ New
  *   location" trigger can refresh all of them from one GET
  *   (docs/specs/28-batch-move-quick-create.md).
+ * @param {number} containerBatchCount - how many of this product's batches
+ *   share this batch's container, so the destroy confirmation can say so.
  */
-function renderBatchRow(batch, locationSelects) {
+function renderBatchRow(batch, locationSelects, containerBatchCount) {
   const locationPath = locationPathFor(batch.location_id);
   const errorLine = el("div", { class: "alert", role: "alert", hidden: true });
 
@@ -747,6 +1066,7 @@ function renderBatchRow(batch, locationSelects) {
     min: "1",
     step: "1",
     required: true,
+    "data-field": "quantity",
     "aria-label": t("products.batch.splitQuantityAriaLabel"),
     placeholder: t("products.batch.quantityPlaceholder"),
   });
@@ -772,19 +1092,50 @@ function renderBatchRow(batch, locationSelects) {
     }),
   );
   const splitSubmit = el("button", { type: "submit", class: "btn btn--primary" }, [text(t("products.batch.split"))]);
+
+  // Shown only when the source batch has a container: with nothing to dispose
+  // of, five radio buttons are five questions about nothing
+  // (docs/specs/39-batch-containers.md, "Product detail UI"). "source" is
+  // pre-selected because it is the server's default and the common case — the
+  // 24-pack that now holds 22 is still the 24-pack.
+  const dispositionRadios = [];
+  const splitDisposition = batch.container_id
+    ? el("fieldset", { class: "stack", "data-role": "container-disposition" }, [
+        el("legend", {}, [text(t("products.batch.disposition.legend"))]),
+        ...["source", "target", "both", "neither", "destroy"].map((value) => {
+          const radio = el("input", {
+            type: "radio",
+            name: `disposition-${batch.id}`,
+            value,
+            checked: value === "source",
+          });
+          dispositionRadios.push(radio);
+          return el("label", { class: "row" }, [radio, text(t(`products.batch.disposition.${value}`))]);
+        }),
+      ])
+    : null;
+
+  function chosenDisposition() {
+    const picked = dispositionRadios.find((radio) => radio.checked);
+    return picked ? picked.value : null;
+  }
+
   const splitForm = el(
     "form",
-    { class: "row", hidden: true, "data-role": "split-form" },
+    { class: "stack", hidden: true, "data-role": "split-form" },
     [
-      splitQuantity,
-      splitTarget,
-      splitLocationAdd,
-      splitSubmit,
-      el(
-        "button",
-        { type: "button", class: "btn btn--ghost", onclick: () => closeForms() },
-        [text(t("common.cancel"))],
-      ),
+      el("div", { class: "row" }, [
+        splitQuantity,
+        splitTarget,
+        splitLocationAdd,
+        splitSubmit,
+        el(
+          "button",
+          { type: "button", class: "btn btn--ghost", onclick: () => closeForms() },
+          [text(t("common.cancel"))],
+        ),
+      ]),
+      ...(splitDisposition ? [splitDisposition] : []),
     ],
   );
   splitForm.addEventListener("submit", async (event) => {
@@ -796,11 +1147,14 @@ function renderBatchRow(batch, locationSelects) {
     if (!Number.isFinite(quantity) || !splitTarget.value) return;
     errorLine.hidden = true;
     splitSubmit.disabled = true;
+    const body = { quantity, target_location_id: splitTarget.value };
+    // Sent only when there was a container to decide about. The server treats
+    // the field as a no-op on a container-less batch either way, so this is
+    // about not claiming a decision nobody made.
+    const disposition = chosenDisposition();
+    if (disposition) body.container_disposition = disposition;
     try {
-      await post(`${batchesBasePath()}/${batch.id}/split`, {
-        quantity,
-        target_location_id: splitTarget.value,
-      });
+      await post(`${batchesBasePath()}/${batch.id}/split`, body);
       await reload();
     } catch (err) {
       fail(err);
@@ -865,9 +1219,110 @@ function renderBatchRow(batch, locationSelects) {
     }
   });
 
+  // Container: label and type upsert through the batch PATCH
+  // (docs/specs/39-batch-containers.md). One label creates a container, a second
+  // renames that same row, and null takes the batch out of it without
+  // destroying it — three behaviours of one field, so one form drives all three.
+  const containerLabel = el("input", {
+    type: "text",
+    required: true,
+    maxlength: "255",
+    "data-field": "container-label",
+    "aria-label": t("products.batch.containerLabelAriaLabel"),
+    placeholder: t("products.batch.containerLabelPlaceholder"),
+    value: batch.container_label ?? "",
+  });
+  const containerType = el("input", {
+    type: "text",
+    "data-field": "container-type",
+    "aria-label": t("products.batch.containerTypeAriaLabel"),
+    placeholder: t("products.batch.containerTypePlaceholder"),
+    value: batch.container_type ?? "",
+  });
+  const containerSubmit = el("button", { type: "submit", class: "btn btn--primary" }, [
+    text(batch.container_id ? t("products.batch.containerRename") : t("products.batch.containerSave")),
+  ]);
+
+  // container_type is only ever sent alongside a label or on a batch that
+  // already has a container: the server answers 422 for a type with nothing to
+  // attach it to, and this form always has the label beside it, so that refusal
+  // is never reached from here by design rather than by a client-side check.
+  async function patchContainer(body, trigger) {
+    if (trigger.disabled) return;
+    errorLine.hidden = true;
+    trigger.disabled = true;
+    try {
+      await patch(`${batchesBasePath()}/${batch.id}`, body);
+      await reload();
+    } catch (err) {
+      fail(err);
+    } finally {
+      trigger.disabled = false;
+    }
+  }
+
+  const containerActions = [containerSubmit];
+  if (batch.container_id) {
+    const clearButton = el("button", { type: "button", class: "btn btn--ghost", "data-role": "container-clear" }, [
+      text(t("products.batch.containerClear")),
+    ]);
+    clearButton.addEventListener("click", () => patchContainer({ container_label: null }, clearButton));
+
+    const destroyButton = el("button", { type: "button", class: "btn btn--danger", "data-role": "container-destroy" }, [
+      text(t("products.batch.containerDestroy")),
+    ]);
+    destroyButton.addEventListener("click", async () => {
+      if (destroyButton.disabled) return;
+      // Confirmed because it is not undoable by sending the label again, and
+      // because it clears the container off every batch that referenced it —
+      // which the count names, since a batch list is exactly the surface where
+      // more than the row in view can be affected.
+      const warning = t("products.batch.containerDestroyConfirm", {
+        label: batch.container_label ?? "",
+        batches: tCount("products.batch.containerDestroyBatches", Math.max(containerBatchCount, 1)),
+      });
+      if (!confirm(warning)) return;
+      errorLine.hidden = true;
+      destroyButton.disabled = true;
+      try {
+        await post(`/api/storages/${storageId}/containers/${batch.container_id}/destroy`, {});
+        await reload();
+      } catch (err) {
+        fail(err);
+      } finally {
+        destroyButton.disabled = false;
+      }
+    });
+
+    containerActions.push(clearButton, destroyButton);
+  }
+
+  const containerForm = el(
+    "form",
+    { class: "row", hidden: true, "data-role": "container-form" },
+    [
+      containerLabel,
+      containerType,
+      ...containerActions,
+      el(
+        "button",
+        { type: "button", class: "btn btn--ghost", onclick: () => closeForms() },
+        [text(t("common.cancel"))],
+      ),
+    ],
+  );
+  containerForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const label = containerLabel.value.trim();
+    if (!label) return;
+    const kind = containerType.value.trim();
+    patchContainer({ container_label: label, container_type: kind === "" ? null : kind }, containerSubmit);
+  });
+
   function closeForms() {
     splitForm.hidden = true;
     moveForm.hidden = true;
+    containerForm.hidden = true;
     errorLine.hidden = true;
   }
 
@@ -885,6 +1340,14 @@ function renderBatchRow(batch, locationSelects) {
           : t("products.batch.noExpiry"),
       ),
       text(batch.expiration_source === "user" ? t("products.batch.userSet") : ""),
+      // The container's label, or nothing at all when the batch is in nothing —
+      // docs/specs/39-batch-containers.md asks for exactly that, not an
+      // "in no container" line on every row of every product.
+      batch.container_label
+        ? el("span", { "data-role": "container-label" }, [
+            text(t("products.batch.inContainer", { label: batch.container_label })),
+          ])
+        : text(""),
     ]),
     el("div", { class: "row" }, [
       el("a", { class: "btn btn--ghost", href: stocktakeHref(batch.location_id) }, [
@@ -918,6 +1381,20 @@ function renderBatchRow(batch, locationSelects) {
         },
         [text(t("products.batch.move"))],
       ),
+      el(
+        "button",
+        {
+          type: "button",
+          class: "btn btn--ghost",
+          "data-role": "container-toggle",
+          onclick: () => {
+            const opening = containerForm.hidden;
+            closeForms();
+            containerForm.hidden = !opening;
+          },
+        },
+        [text(batch.container_id ? t("products.batch.containerEdit") : t("products.batch.containerAdd"))],
+      ),
     ]),
   ]);
 
@@ -926,6 +1403,7 @@ function renderBatchRow(batch, locationSelects) {
     errorLine,
     splitForm,
     moveForm,
+    containerForm,
   ]);
 }
 

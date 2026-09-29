@@ -587,6 +587,67 @@ INSERT INTO jobs (id, storage_id, kind, status, payload, created_by) VALUES
    '00000000-0000-7000-8000-000000000003')
 ON CONFLICT (id) DO NOTHING;
 
+-- Two shelf-ingestion jobs in "E2E Household" (...010) whose analysis spotted
+-- a shopping list instead of a shelf, for
+-- e2e/specs/mixed-classification.spec.js
+-- (docs/specs/41-mixed-photo-classification.md). This is the shape the
+-- analysis writes when Gemini answers looks_like_shopping_list: true — the
+-- E2E stack's GEMINI_API_KEY is a placeholder, so no photo is ever really
+-- analysed here, exactly as the other seeded proposals above stand in for
+-- one.
+--
+-- Two jobs rather than one because the two banner actions differ in kind:
+-- "Keep as shelf photo" only dismisses, so ...076 can be revisited however
+-- many times the suite runs, while "Process as shopping list" DISCARDS its
+-- job outright, so ...077 is consumed by the one test that clicks it and
+-- must not be shared with anything else — the same reasoning the
+-- "Discard all" fixture below uses.
+--
+-- Both have an empty rows array, the common case for a genuine list misread
+-- as a shelf: it is also what proves "Keep as shelf photo" leaves the (empty)
+-- item review intact. The first line matches "Canned Tomatoes" (...040)
+-- exactly, so the list ...077 becomes is a real, resolvable one rather than
+-- three unmatched lines.
+INSERT INTO jobs (id, storage_id, kind, status, payload, created_by) VALUES
+  ('00000000-0000-7000-8000-000000000076', '00000000-0000-7000-8000-000000000010', 'shelf_ingestion', 'done',
+   '{"mode":"shelf","location_hint_id":null,"rows":[],
+     "looks_like_shopping_list":true,
+     "shopping_list_lines":["canned tomatoes","oat milk","sourdough bread"]}',
+   '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000077', '00000000-0000-7000-8000-000000000010', 'shelf_ingestion', 'done',
+   '{"mode":"shelf","location_hint_id":null,"rows":[],
+     "looks_like_shopping_list":true,
+     "shopping_list_lines":["canned tomatoes","oat milk","sourdough bread"]}',
+   '00000000-0000-7000-8000-000000000003')
+ON CONFLICT (id) DO NOTHING;
+
+-- The same classification on a consumption photo (...078), in the shape
+-- internal/consume writes — no mode field and no location placement, which is
+-- exactly why it is worth its own fixture: the banner on
+-- consume-review.html reads the job's *kind* rather than the payload's mode,
+-- and that wiring is a different file (web/static/js/pages/consume-review.js)
+-- from review.html's. Only ever dismissed, never processed, so it survives
+-- every run.
+--
+-- ...079 is the same fixture again, for the "Process as shopping list" click
+-- on that same page (#425): consume-review.js wires that action separately
+-- from review.html's own copy (its own POST to .../shopping-lists with
+-- {from_job_id}, its own redirect to the new list), so it needs a job of its
+-- own to discard — sharing ...078 would make that test collide with the
+-- "keep" one above on every parallel run.
+INSERT INTO jobs (id, storage_id, kind, status, payload, created_by) VALUES
+  ('00000000-0000-7000-8000-000000000078', '00000000-0000-7000-8000-000000000010', 'consumption_photo', 'done',
+   '{"rows":[],
+     "looks_like_shopping_list":true,
+     "shopping_list_lines":["canned tomatoes","oat milk","sourdough bread"]}',
+   '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000079', '00000000-0000-7000-8000-000000000010', 'consumption_photo', 'done',
+   '{"rows":[],
+     "looks_like_shopping_list":true,
+     "shopping_list_lines":["canned tomatoes","oat milk","sourdough bread"]}',
+   '00000000-0000-7000-8000-000000000003')
+ON CONFLICT (id) DO NOTHING;
+
 -- One shelf-ingestion job in "E2E Admin Household" (...012), which —
 -- despite the name — also starts with zero locations, the same as "E2E
 -- Zero-Locations Household" (...013) does; dedicated to
@@ -925,4 +986,141 @@ ON CONFLICT (id) DO NOTHING;
 INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock, icon_name) VALUES
   ('00000000-0000-7000-8000-000000000101', '00000000-0000-7000-8000-000000000010', 'E2E Picture Edit Form Sync Source', NULL, 'non_perishable', 0, 'noto:cheese-wedge')
 ON CONFLICT (id) DO NOTHING;
+-- Ten products in "E2E Household" plus one container in the *other*
+-- household, dedicated to #400: batch containers
+-- (docs/specs/39-batch-containers.md). ...102 onwards are the next free ids
+-- after ...101, the picture-edit-form fixture immediately above.
+--
+-- One product per scenario, the same reasoning every block above gives: this
+-- suite runs fullyParallel and every one of these scenarios writes to its
+-- batch's container, so sharing a row would let the order they run in decide
+-- the outcome. The five split scenarios in particular each consume their
+-- source's container in a different way, which is the whole point of the
+-- table they cover.
+--
+-- ...102 and ...10b start with no container: the first asserts one arriving,
+-- the second asserts that the split form asks nothing about a container when
+-- there is none. Every other product here starts with one, because what they
+-- assert is a rename, a detach, a destroy or a disposition, none of which is
+-- observable on a batch that was in nothing to begin with.
+--
+-- ...12c belongs to "E2E Other Household" (...011), Alice's and not Bob's. It
+-- exists only to be addressed as a container id from a storage the caller is
+-- not a member of, proving the deployed stack answers that with the identical
+-- 404 an unknown id gets. It is deliberately attached to nothing: the refusal
+-- happens on the container's own storage_id, before any batch is looked at.
+INSERT INTO containers (id, storage_id, label, container_type) VALUES
+  ('00000000-0000-7000-8000-000000000120', '00000000-0000-7000-8000-000000000010', 'E2E Old Bag',           NULL),
+  ('00000000-0000-7000-8000-000000000121', '00000000-0000-7000-8000-000000000010', 'E2E Clip-top Box',      'box'),
+  ('00000000-0000-7000-8000-000000000122', '00000000-0000-7000-8000-000000000010', 'E2E Crate To Bin',      NULL),
+  ('00000000-0000-7000-8000-000000000123', '00000000-0000-7000-8000-000000000010', 'E2E 24-pack Box',       'box'),
+  ('00000000-0000-7000-8000-000000000124', '00000000-0000-7000-8000-000000000010', 'E2E Cooler Bag',        'bag'),
+  ('00000000-0000-7000-8000-000000000125', '00000000-0000-7000-8000-000000000010', 'E2E Shared Crate',      NULL),
+  ('00000000-0000-7000-8000-000000000126', '00000000-0000-7000-8000-000000000010', 'E2E Loose Bag',         NULL),
+  ('00000000-0000-7000-8000-000000000127', '00000000-0000-7000-8000-000000000010', 'E2E Split-destroy Box', NULL),
+  ('00000000-0000-7000-8000-00000000012c', '00000000-0000-7000-8000-000000000011', 'E2E Foreign Container', NULL)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock) VALUES
+  ('00000000-0000-7000-8000-000000000102', '00000000-0000-7000-8000-000000000010', 'E2E Container Label Source',         NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000103', '00000000-0000-7000-8000-000000000010', 'E2E Container Rename Source',        NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000104', '00000000-0000-7000-8000-000000000010', 'E2E Container Clear Source',         NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000105', '00000000-0000-7000-8000-000000000010', 'E2E Container Destroy Source',       NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000106', '00000000-0000-7000-8000-000000000010', 'E2E Container Pack Source',          NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000107', '00000000-0000-7000-8000-000000000010', 'E2E Container Target Source',        NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000108', '00000000-0000-7000-8000-000000000010', 'E2E Container Both Source',          NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-000000000109', '00000000-0000-7000-8000-000000000010', 'E2E Container Neither Source',       NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-00000000010a', '00000000-0000-7000-8000-000000000010', 'E2E Container Destroy Split Source', NULL, 'non_perishable', 0),
+  ('00000000-0000-7000-8000-00000000010b', '00000000-0000-7000-8000-000000000010', 'E2E Container Free Split Source',     NULL, 'non_perishable', 0)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_batches (id, product_id, location_id, quantity, expiration_date, expiration_source, container_id) VALUES
+  ('00000000-0000-7000-8000-000000000110', '00000000-0000-7000-8000-000000000102', '00000000-0000-7000-8000-000000000020',  6, NULL, 'derived', NULL),
+  ('00000000-0000-7000-8000-000000000111', '00000000-0000-7000-8000-000000000103', '00000000-0000-7000-8000-000000000020',  6, NULL, 'derived', '00000000-0000-7000-8000-000000000120'),
+  ('00000000-0000-7000-8000-000000000112', '00000000-0000-7000-8000-000000000104', '00000000-0000-7000-8000-000000000020',  6, NULL, 'derived', '00000000-0000-7000-8000-000000000121'),
+  ('00000000-0000-7000-8000-000000000113', '00000000-0000-7000-8000-000000000105', '00000000-0000-7000-8000-000000000020',  6, NULL, 'derived', '00000000-0000-7000-8000-000000000122'),
+  ('00000000-0000-7000-8000-000000000114', '00000000-0000-7000-8000-000000000106', '00000000-0000-7000-8000-000000000020', 24, NULL, 'derived', '00000000-0000-7000-8000-000000000123'),
+  ('00000000-0000-7000-8000-000000000115', '00000000-0000-7000-8000-000000000107', '00000000-0000-7000-8000-000000000020', 10, NULL, 'derived', '00000000-0000-7000-8000-000000000124'),
+  ('00000000-0000-7000-8000-000000000116', '00000000-0000-7000-8000-000000000108', '00000000-0000-7000-8000-000000000020', 10, NULL, 'derived', '00000000-0000-7000-8000-000000000125'),
+  ('00000000-0000-7000-8000-000000000117', '00000000-0000-7000-8000-000000000109', '00000000-0000-7000-8000-000000000020', 10, NULL, 'derived', '00000000-0000-7000-8000-000000000126'),
+  ('00000000-0000-7000-8000-000000000118', '00000000-0000-7000-8000-00000000010a', '00000000-0000-7000-8000-000000000020', 10, NULL, 'derived', '00000000-0000-7000-8000-000000000127'),
+  ('00000000-0000-7000-8000-000000000119', '00000000-0000-7000-8000-00000000010b', '00000000-0000-7000-8000-000000000020',  6, NULL, 'derived', NULL)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO inventory_logs (id, product_id, batch_id, change_qty, reason, created_by) VALUES
+  ('00000000-0000-7000-8000-000000000130', '00000000-0000-7000-8000-000000000102', '00000000-0000-7000-8000-000000000110',  6, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000131', '00000000-0000-7000-8000-000000000103', '00000000-0000-7000-8000-000000000111',  6, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000132', '00000000-0000-7000-8000-000000000104', '00000000-0000-7000-8000-000000000112',  6, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000133', '00000000-0000-7000-8000-000000000105', '00000000-0000-7000-8000-000000000113',  6, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000134', '00000000-0000-7000-8000-000000000106', '00000000-0000-7000-8000-000000000114', 24, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000135', '00000000-0000-7000-8000-000000000107', '00000000-0000-7000-8000-000000000115', 10, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000136', '00000000-0000-7000-8000-000000000108', '00000000-0000-7000-8000-000000000116', 10, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000137', '00000000-0000-7000-8000-000000000109', '00000000-0000-7000-8000-000000000117', 10, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000138', '00000000-0000-7000-8000-00000000010a', '00000000-0000-7000-8000-000000000118', 10, 'purchase', '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000139', '00000000-0000-7000-8000-00000000010b', '00000000-0000-7000-8000-000000000119',  6, 'purchase', '00000000-0000-7000-8000-000000000003')
+ON CONFLICT (id) DO NOTHING;
+
+-- Two products dedicated to the icon picker (docs/specs/40-icon-picker.md).
+-- ...0150 and ...0151 are the next free ids after ...0139, the container
+-- batches block above.
+--
+-- Their own rows rather than reusing an existing one, same reasoning as
+-- every block above: the suite runs fullyParallel, and one scenario searches
+-- and picks (a global icon_aliases write, since icon_aliases and icons are
+-- both global tables — docs/specs/02-data-model.md's catalog_products
+-- exception) while the other clears, so sharing a product would let the
+-- order they run in decide the outcome.
+--
+-- ...0150 starts with no icon: the scenario asserts one arriving from a
+-- direct-name search hit. ...0151 starts with 'noto:cheese-wedge', the same
+-- vendored identifier every other icon fixture in this file already uses, so
+-- clearing it — and observing it stay cleared — is observable.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock, icon_name) VALUES
+  ('00000000-0000-7000-8000-000000000150', '00000000-0000-7000-8000-000000000010', 'E2E Icon Picker Search Source', NULL, 'non_perishable', 0, NULL),
+  ('00000000-0000-7000-8000-000000000151', '00000000-0000-7000-8000-000000000010', 'E2E Icon Picker Clear Source',  NULL, 'non_perishable', 0, 'noto:cheese-wedge')
+ON CONFLICT (id) DO NOTHING;
+
+-- One product dedicated to #395: the "Saved." confirmation must survive
+-- save()'s own reload rather than being wiped by it. ...0152 is the next free
+-- id after ...0151, the icon-picker block above.
+--
+-- Its own row rather than reusing an existing one: this scenario holds the
+-- reload's GET open with page.route to observe the status line's state while
+-- the reload is still in flight, and the suite runs fullyParallel, so a
+-- shared product's reload could be held open by two scenarios at once.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock, icon_name) VALUES
+  ('00000000-0000-7000-8000-000000000152', '00000000-0000-7000-8000-000000000010', 'E2E Save Status Survives Reload Source', NULL, 'non_perishable', 0, NULL)
+ON CONFLICT (id) DO NOTHING;
+
+-- Two products dedicated to #395's other reload/status-clearing path:
+-- offerMerge(), reached by declining the rename-over-merge confirm. ...0153
+-- and ...0154 are the next free ids after ...0152 above.
+--
+-- ...0153 is the pre-existing "twin" the rename is made to match, and the one
+-- the merge absorbs and removes. ...0154 is the one the scenario opens and
+-- renames; renaming it to ...0153's own name is what makes
+-- closestOtherProduct() find ...0153 as the twin. Own rows rather than
+-- reusing existing ones: nothing else in this file drives a merge through
+-- the UI, and this scenario's merge is destructive to whichever product it
+-- absorbs, so sharing either row with another scenario would let the two
+-- decide each other's outcome.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock, icon_name) VALUES
+  ('00000000-0000-7000-8000-000000000153', '00000000-0000-7000-8000-000000000010', 'E2E Merge Status Twin', NULL, 'non_perishable', 0, NULL),
+  ('00000000-0000-7000-8000-000000000154', '00000000-0000-7000-8000-000000000010', 'E2E Merge Status Editable Source', NULL, 'non_perishable', 0, NULL)
+ON CONFLICT (id) DO NOTHING;
+
+-- Two products dedicated to #395's acceptance criterion that opening a
+-- *different* product still clears a stale status line. ...0155 and ...0156
+-- are the next free ids after ...0154 above.
+--
+-- ...0155 is saved first, to put a confirmation on screen; ...0156 is then
+-- opened, and the scenario asserts ...0155's confirmation did not follow it
+-- over. Own rows rather than reusing ...0152 above: that product is also
+-- edited by the reload-pinning scenario, and sharing it here would make the
+-- two scenarios' status-line assertions race each other's writes.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock, icon_name) VALUES
+  ('00000000-0000-7000-8000-000000000155', '00000000-0000-7000-8000-000000000010', 'E2E Stale Status Edited Source', NULL, 'non_perishable', 0, NULL),
+  ('00000000-0000-7000-8000-000000000156', '00000000-0000-7000-8000-000000000010', 'E2E Stale Status Switch Target', NULL, 'non_perishable', 0, NULL)
+ON CONFLICT (id) DO NOTHING;
+
 COMMIT;
