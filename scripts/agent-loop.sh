@@ -215,19 +215,36 @@ render_package_prompt() {
   # args, in order: spec spec_issue wave_number plan_name integration_branch
   #                 plan_issue focus conventions wave_issue round_limit
   tmpl="$root/scripts/package-prompt.template"
-  content=$(cat "$tmpl")
-  content=$(printf '%s\n' "$content" | sed "s|{{SPEC}}|$(sed_escape "$1")|g")
-  content=$(printf '%s\n' "$content" | sed "s|{{SPEC_ISSUE}}|$(sed_escape "$2")|g")
-  content=$(printf '%s\n' "$content" | sed "s|{{WAVE_NUMBER}}|$(sed_escape "$3")|g")
-  content=$(printf '%s\n' "$content" | sed "s|{{PLAN_NAME}}|$(sed_escape "$4")|g")
-  content=$(printf '%s\n' "$content" | sed "s|{{INTEGRATION_BRANCH}}|$(sed_escape "$5")|g")
-  content=$(printf '%s\n' "$content" | sed "s|{{PLAN_ISSUE}}|$(sed_escape "$6")|g")
-  content=$(printf '%s\n' "$content" | sed "s|{{FOCUS}}|$(sed_escape "$7")|g")
-  content=$(printf '%s\n' "$content" | sed "s|{{CONVENTIONS}}|$(sed_escape "$8")|g")
-  content=$(printf '%s\n' "$content" | sed "s|{{WAVE_ISSUE}}|$(sed_escape "$9")|g")
+  spec=$(sed_escape "$1"); spec_issue=$(sed_escape "$2"); wave_number=$(sed_escape "$3")
+  plan_name=$(sed_escape "$4"); integration_branch=$(sed_escape "$5"); plan_issue=$(sed_escape "$6")
+  focus=$(sed_escape "$7"); conventions=$(sed_escape "$8"); wave_issue=$(sed_escape "$9")
   shift 9
-  content=$(printf '%s\n' "$content" | sed "s|{{ROUND_LIMIT}}|$(sed_escape "$1")|g")
-  printf '%s' "$content"
+  round_limit=$(sed_escape "$1")
+  # One sed invocation, one command substitution - not the ten of each this
+  # used to chain, reassigning $content through a fresh $(...) every step.
+  # $(...) unconditionally strips ALL trailing newlines, so doing that ten
+  # times in a row silently dropped the template's own real trailing newline
+  # (scripts/package-prompt.template ends in one), making this renderer's
+  # output diverge byte-for-byte from wellen-orchestrator.ps1's
+  # Get-PackagePrompt (Get-Content -Raw, which keeps it) - #462, found by the
+  # PR's own round-2 review after the acceptance criterion "both entry points
+  # render the identical prompt" turned out false. The `printf 'x'`/`${%x}`
+  # pair is the standard way to carry a trailing newline through a command
+  # substitution: $(...) strips the sentinel itself, not the newline(s)
+  # before it, since the sentinel isn't a newline.
+  content=$(sed \
+    -e "s|{{SPEC}}|$spec|g" \
+    -e "s|{{SPEC_ISSUE}}|$spec_issue|g" \
+    -e "s|{{WAVE_NUMBER}}|$wave_number|g" \
+    -e "s|{{PLAN_NAME}}|$plan_name|g" \
+    -e "s|{{INTEGRATION_BRANCH}}|$integration_branch|g" \
+    -e "s|{{PLAN_ISSUE}}|$plan_issue|g" \
+    -e "s|{{FOCUS}}|$focus|g" \
+    -e "s|{{CONVENTIONS}}|$conventions|g" \
+    -e "s|{{WAVE_ISSUE}}|$wave_issue|g" \
+    -e "s|{{ROUND_LIMIT}}|$round_limit|g" \
+    "$tmpl"; printf 'x')
+  printf '%s' "${content%x}"
 }
 
 # --- .env for a package worktree --------------------------------------------
@@ -447,6 +464,19 @@ backoff_and_wait() {
       sleep "$wait_seconds"
       return
     fi
+    # A reset time WAS found in the text but could not be turned into a
+    # future epoch - either this host's `date -d` can't parse ISO-8601 at
+    # all (true of BusyBox date; the sanctioned deploy/agent image is
+    # debian:bookworm-slim, where GNU date can, so this is a real gap only
+    # for an operator running the script directly on a non-GNU-date host)
+    # or the parsed time is already in the past. #462: the message below
+    # used to fire for this case too, worded as if the text had named
+    # nothing at all - which sends whoever is debugging a stuck loop
+    # looking at the wrong half of the problem.
+    wait_seconds=$((limit_backoff_minutes * 60))
+    log "usage-limit: found reset time $reset_iso in the result text but could not use it (unparseable on this host, or already past) - backing off ${limit_backoff_minutes}m instead"
+    sleep "$wait_seconds"
+    return
   fi
   wait_seconds=$((limit_backoff_minutes * 60))
   log "usage-limit: no reset time found in the result text, backing off ${limit_backoff_minutes}m"

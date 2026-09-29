@@ -481,6 +481,37 @@ assert_contains "$out" "git worktree add failed" "the failure names what actuall
 callcount=$(claude_call_count)
 assert "$([ "$callcount" = "0" ] && echo 0 || echo 1)" "no session starts once the worktree could not be created"
 
+echo "== unit: render_package_prompt preserves the template's trailing newline byte-for-byte (#462) =="
+# Isolated from the rest of the script on purpose: render_package_prompt and
+# its sed_escape helper are pure functions of $root and their arguments, and
+# sourcing scripts/agent-loop.sh whole would run its own argument parsing and
+# entry-point dispatch (it has no "if sourced, skip main" guard) against
+# whatever $@ this test script happens to have. Extracting just the two
+# function bodies keeps this a real unit test without needing one.
+UNITDIR=$(mktemp -d)
+mkdir -p "$UNITDIR/scripts"
+awk '/^sed_escape\(\)/,/^}/' "$REPO_ROOT/scripts/agent-loop.sh" > "$UNITDIR/scripts/functions.sh"
+awk '/^render_package_prompt\(\)/,/^}/' "$REPO_ROOT/scripts/agent-loop.sh" >> "$UNITDIR/scripts/functions.sh"
+cp "$REPO_ROOT/scripts/package-prompt.template" "$UNITDIR/scripts/package-prompt.template"
+(
+  root="$UNITDIR"
+  . "$UNITDIR/scripts/functions.sh"
+  render_package_prompt "Test spec" "1" "7" "Test Plan" "integration/x" "999" "Do the thing." "" "231" "2"
+) > "$UNITDIR/rendered.txt"
+# scripts/package-prompt.template itself ends in a real trailing newline
+# (confirmed: `tail -c 1 scripts/package-prompt.template | od -An -tx1` is
+# `0a`) - wellen-orchestrator.ps1's Get-PackagePrompt keeps it (Get-Content
+# -Raw does not trim), so the shell renderer must too for the two entry
+# points to actually render the identical prompt, per this PR's own
+# acceptance criterion. Read the last byte via od, not `$(tail -c 1 ...)`,
+# because capturing through a second command substitution would strip the
+# very newline being checked for.
+last_byte=$(tail -c 1 "$UNITDIR/rendered.txt" | od -An -tx1 | tr -d ' \n')
+assert "$([ "$last_byte" = "0a" ] && echo 0 || echo 1)" "the rendered prompt ends in a real trailing newline, matching Get-Content -Raw"
+rendered=$(cat "$UNITDIR/rendered.txt")
+assert_contains "$rendered" "Work Test spec (issue #1, wave 7 of Test Plan)" "placeholders are substituted correctly"
+rm -rf "$UNITDIR"
+
 echo
 echo "== summary: $passes passed, $failures failed =="
 [ "$failures" -eq 0 ]
