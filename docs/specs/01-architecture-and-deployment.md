@@ -290,7 +290,11 @@ and pins both its dependencies to the exact Playwright version
 to keeping in lockstep with the pulled image tag, so a real version bump
 changes the file and invalidates the cache — which is what the lockfile
 would have keyed on if one existed here. The `e2e` service's `npm install`
-is then a no-op on a cache hit. The backup/restore round trip (issue #133)
+is then a no-op on a cache hit. A `restore-keys:` fallback on the same
+prefix means a `package.json` change that does not hit the exact key still
+restores the nearest previous cache instead of missing it entirely, so
+`npm install` only has to reconcile the difference rather than reinstall
+from scratch. The backup/restore round trip (issue #133)
 used to be a second job in `e2e.yml`, running on every push to `main`
 alongside the suite; H8 moved it into its own workflow,
 `.github/workflows/restore.yml`, triggered on a push to `main` that touches
