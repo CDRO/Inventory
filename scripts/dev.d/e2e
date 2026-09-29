@@ -54,8 +54,16 @@
 # scripts/wellen-docker-cleanup.ps1 selects on that label, so the lock is
 # never swept out from under a live run by a wave's own cleanup.
 #
-# A lock whose holder is this same checkout is reclaimed rather than refused -
-# that is this checkout's own abandoned run, not somebody else's.
+# A lock whose holder is this same checkout is reclaimed only when the evidence
+# below says nothing is running behind it. A matching working_dir is NOT on its
+# own proof that the earlier hold is over: two terminals in one checkout write
+# the identical label, so reclaiming on the name alone let the second one
+# `down -v` the first one's live suite - the very failure this lock exists to
+# prevent, readmitted through the one branch that skipped the check (found by
+# review-go on PR #469). So our own lock gets the same discriminators as anybody
+# else's, and only the wording of the refusal differs. What is left for
+# reclaiming is the case it exists for: a hard-killed run, since an ordinary
+# interrupt releases the lock from the trap.
 #
 # ## Why a refusal says which kind of refusal it is
 #
@@ -117,12 +125,15 @@
 # runner, no other compose project and no `.env`, so every problem above is
 # already absent there and a lock would be pure overhead.
 #
-# Exit codes: 2 usage; 3 the gate is held by ANOTHER checkout's live run (wait
-# for it); 4 the gate is held by a lock with nothing running behind it (break
-# it); 1 the daemon refused the claim for a reason that is not a held lock;
-# otherwise the failing step's own exit code, or the suite's. A gate held by
-# THIS checkout is not a refusal - `status` exits 0 on it and a run reclaims
-# it - so 3 and 4 always mean somebody else.
+# Exit codes: 2 usage; 3 the gate is held by a live run - another checkout's, or
+# another terminal's in this one (wait for it either way); 4 the gate is held by
+# a lock with nothing running behind it and the lock is not ours to reclaim
+# (break it); 1 the daemon refused the claim for a reason that is not a held
+# lock; 130/143 interrupted by SIGINT/SIGTERM, after tearing down and releasing;
+# otherwise the failing step's own exit code, or the suite's. `status` exits 0
+# on a gate this checkout holds, since that is information rather than a
+# refusal; a RUN against the same gate still exits 3 if something is live
+# behind it.
 set -u
 
 help() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
