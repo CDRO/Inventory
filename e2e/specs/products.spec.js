@@ -631,6 +631,13 @@ test("the list renders nothing until a search or Show all products, and clearing
 }) => {
   await logIn(page);
   await page.goto(`/products.html?storage=${STORAGE_ID}`);
+  // #nav becoming visible is products.js's own "init() is done, the #filter
+  // listener is attached" signal — waiting for it here avoids the same
+  // parallel-load race openProduct above guards against (#423): without it,
+  // fill() below can fire before the listener exists and the search that
+  // would populate #list never starts, so the toBeVisible() checks below
+  // stall on their own auto-wait instead of the assertion ever settling.
+  await expect(page.locator("#nav")).toBeVisible();
 
   const list = page.locator("#list");
   await expect(list).toContainText("Type to search");
@@ -663,6 +670,8 @@ test("the list renders nothing until a search or Show all products, and clearing
 test("the list table shows category and current total stock, not just a name", async ({ page }) => {
   await logIn(page);
   await page.goto(`/products.html?storage=${STORAGE_ID}`);
+  // Same "init() is done" wait the test above and openProduct use (#423).
+  await expect(page.locator("#nav")).toBeVisible();
 
   await page.locator("#filter").fill("E2E Move Source");
   const row = page.locator("tr", { has: page.getByRole("link", { name: "E2E Move Source", exact: true }) });
