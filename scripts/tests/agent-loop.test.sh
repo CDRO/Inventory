@@ -92,11 +92,15 @@ EOF
 # D10 could not verify the exact usage-limit subtype or wording - this
 # fixture encodes BOTH candidate signals the issue names: a mid-stream
 # system/api_retry event with error "rate_limit", and result text that reads
-# like a usage-limit message, with a reset time about a day out (agent-loop
-# treats "today" as 2026-09-28 when this fixture was written).
-cat > "$FIXDIR/rate_limit.jsonl" <<'EOF'
+# like a usage-limit message. The reset time is computed a day out from
+# whenever the suite actually runs (never a hardcoded date) - agent-loop.sh's
+# own backoff_and_wait only trusts a reset time that is still in the future
+# (scripts/agent-loop.sh:436), so a fixed past-tense date goes stale and
+# silently falls through to the default backoff instead of failing loudly.
+RATE_LIMIT_RESET_ISO=$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ)
+cat > "$FIXDIR/rate_limit.jsonl" <<EOF
 {"type":"system","subtype":"api_retry","attempt":1,"max_retries":3,"retry_delay_ms":2000,"error_status":429,"error":"rate_limit","uuid":"u1","session_id":"sess-ratelimit-1"}
-{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":50,"session_id":"sess-ratelimit-1","result":"Stopped: usage limit reached, resets at 2026-09-29T00:00:00Z"}
+{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":50,"session_id":"sess-ratelimit-1","result":"Stopped: usage limit reached, resets at $RATE_LIMIT_RESET_ISO"}
 EOF
 
 cat > "$FIXDIR/after_resume_success.jsonl" <<'EOF'
@@ -319,7 +323,7 @@ rc=$(run_loop --wave-file "$SCPATH/wave.json" --wave 6)
 out=$(cat "$SCPATH/state/output.log")
 assert "$rc" "loop exits 0 once the resumed session succeeds"
 assert_contains "$out" "usage-limit" "log names the usage-limit condition"
-assert_contains "$out" "2026-09-29T00:00:00Z" "log names the reset time found in the result text"
+assert_contains "$out" "$RATE_LIMIT_RESET_ISO" "log names the reset time found in the result text"
 slept=$(cat "$SCPATH/state/sleep-calls.log")
 assert_contains "$slept" "slept" "the loop actually waited (via the sleep stub) before resuming"
 calls=$(cat "$SCPATH/state/claude-calls.log")
