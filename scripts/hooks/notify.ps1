@@ -27,16 +27,28 @@
     used as the toast body directly instead.
 
     Must NEVER block or fail the session, and must return within about 2
-    seconds even if the toast backend hangs: the actual toast call runs as a
-    background job bounded by Wait-Job -Timeout, and every path - missing
-    BurntToast, a thrown exception, a job that never completes - falls
-    through to `exit 0`. A missed toast is not a failed session.
+    seconds even if the toast backend hangs: the actual toast call runs on a
+    runspace (a background thread in this same process, via
+    [PowerShell]::Create()/BeginInvoke) bounded by an AsyncWaitHandle.WaitOne
+    timeout, and every path - missing BurntToast, a thrown exception, a call
+    that never completes - falls through to `exit 0`. A missed toast is not a
+    failed session.
+
+    #330 measured an earlier Start-Job-based version of this hook as having
+    only ~0.5 s of margin against that 2 s budget: Start-Job spawns a whole
+    PowerShell child process, which cost most of a ~1.5 s quiet run, and
+    under host load the hang case measured 2.31 s - over budget, so a busy
+    machine could kill this script before the toast fires, which is the very
+    moment a waiting session most needs it. Running the toast call on a
+    runspace instead removes that process-spawn cost (no new OS process, just
+    a thread in this one), which is why the wait below can keep the same
+    0.8 s budget #326 chose and still land around 1.1 s total, not 1.5-2.3 s.
 
     Testable without a real Windows toast backend: scripts/tests/hooks.test.ps1
     dot-sources everything above this script's entry-point marker to call
     the functions directly, and separately runs this script end-to-end with
     $env:CLAUDE_NOTIFY_TEST_BACKEND set to "ok", "throw", or "hang" (a 30s
-    sleep, proving the Wait-Job -Timeout below actually bounds it), which
+    sleep, proving the WaitOne timeout below actually bounds it), which
     makes Send-Toast substitute a fake backend instead of BurntToast/NotifyIcon.
 #>
 [CmdletBinding()]
@@ -95,7 +107,7 @@ function Send-Toast {
     # Windows toast subsystem (CI, a locked-down account, no BurntToast
     # installed). "ok" simulates success; "throw" simulates a backend that
     # fails; "hang" simulates one that never returns - all three must still
-    # let the caller (the Wait-Job -Timeout below) reach exit 0 on schedule.
+    # let the caller (the WaitOne timeout below) reach exit 0 on schedule.
     param([string]$Title, [string]$Body)
     switch ($env:CLAUDE_NOTIFY_TEST_BACKEND) {
         'ok' { return }
@@ -136,16 +148,27 @@ $toastTitle = "Claude Code - $EventName"
 $toastBody = Get-ToastBodyForEvent -EventName $EventName -Fallback (Get-StdinMessage -Raw $stdinRaw -Fallback $FallbackTitle)
 
 try {
-    $job = Start-Job -ScriptBlock ${function:Send-Toast} -ArgumentList $toastTitle, $toastBody
-    # 0.8s, not the full ~2s budget: Start-Job itself already costs time (a
-    # new background PowerShell process), so the wait has to leave headroom
-    # for that overhead plus Remove-Job and PowerShell's own startup - a
-    # hanging backend (scripts/tests/hooks.test.ps1's "hang" case) must not
-    # push the total past Claude Code's ~2s hook timeout.
-    Wait-Job -Job $job -Timeout 0.8 | Out-Null
-    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    # [PowerShell]::Create() + BeginInvoke runs Send-Toast on a new thread in
+    # THIS process (a runspace), not Start-Job's new child powershell.exe -
+    # that process spawn was measured (#330) to cost ~1.5s of a ~1.5-2.3s
+    # total run, leaving as little as ~0.5s of margin against the 2s hook
+    # timeout .claude/settings.json sets. A runspace pays none of that
+    # process-startup cost, so keeping the same 0.8s wait budget #326 already
+    # validated now leaves comfortable margin instead of a thin one.
+    $ps = [PowerShell]::Create()
+    [void]$ps.AddScript(${function:Send-Toast}.ToString()).AddArgument($toastTitle).AddArgument($toastBody)
+    $asyncResult = $ps.BeginInvoke()
+    if ($asyncResult.AsyncWaitHandle.WaitOne(800)) {
+        # Completed within budget - EndInvoke is the documented other half of
+        # BeginInvoke; it also rethrows whatever Send-Toast threw (the "throw"
+        # backend), which the outer catch below still swallows into exit 0.
+        $ps.EndInvoke($asyncResult) | Out-Null
+    } else {
+        $ps.Stop()
+    }
+    $ps.Dispose()
 } catch {
-    # A backend failure, a job that never starts, anything at all - the hook
-    # still succeeds.
+    # A backend failure, a runspace that never starts, anything at all - the
+    # hook still succeeds.
 }
 exit 0
