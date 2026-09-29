@@ -21,8 +21,12 @@ and reviewers" below.
 > `scripts/wellen-followups.json` holds the deferred-follow-ups plan (#176,
 > complete as of its own 15 waves) plus, appended after it, standalone bonus
 > waves tracked by their own issue via the wave-level `planIssue` override
-> (see "Wave-file schema") rather than by reopening #176. A finished plan's
-> file stays where it is rather than being emptied, so **every
+> (see "Wave-file schema") rather than by reopening #176;
+> `scripts/wellen-harness.json` is the harness optimization plan (#293,
+> `docs/plans/2026-09-harness-optimization.md`), which starts only after
+> #176's last wave has closed and gets its own file rather than more bonus
+> waves appended to `wellen-followups.json`. A
+> finished plan's file stays where it is rather than being emptied, so **every
 > command that names a wave or a slug needs `-WaveFile` unless it means
 > `wellen.json`** — that default is silent, and a bare `-Wave 2` against the
 > wrong plan asks about a different wave entirely. Plans do not run
