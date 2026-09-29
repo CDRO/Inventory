@@ -587,6 +587,15 @@ $ docker compose -f deploy/agent/docker-compose.agent.yml run --rm agent \
     sh scripts/agent-loop.sh --queue
 ```
 
+or against exactly one named issue, bypassing both the wave file and the
+queue's own routing — for an operator who already knows which issue to
+work, and for a one-off verification run:
+
+```console
+$ docker compose -f deploy/agent/docker-compose.agent.yml run --rm agent \
+    sh scripts/agent-loop.sh --issue 435
+```
+
 `--dry-run` prints the session(s) it would start — model, effort, advisor
 and the deterministic `HTTP_PORT`/`TRAEFIK_PORT` pair each wave-mode package
 gets (see "Avoiding collisions between parallel packages" above; the same
@@ -605,19 +614,19 @@ closing on GitHub, the same signal the orchestrator polls for above — never
 the `claude` process's own exit code, which a round-limit report or a
 mid-turn resume leaves non-terminal in perfectly ordinary operation.
 
-Safety, refused in order before a single worktree or session is created:
-never root; never `--dangerously-skip-permissions` (the non-root user plus
-this same `permissions.allow` list, see "Attention" above, is what an
-unattended session runs under instead); `scripts/doctor` must pass; the
-`CLAUDE_CODE_OAUTH_TOKEN` used to authenticate must be set (from `claude
-setup-token`, run once on a trusted machine — never baked into an image,
-see `deploy/agent/README.md`); and one loop per repository, held with an
-exclusive lock directory. `scripts/tests/agent-loop.test.sh` drives every
-one of these, plus every stop condition below, against a fully faked
-`claude`/`gh`/`git` — see that file's own header for how to run it (it
-needs `jq`, which is why it is not part of `docker compose run --rm app go
-test ./...`; `scripts/agent_loop_test.go` is the thin slice of this that
-*is*, covering argument parsing only).
+Safety, refused in this order before a single worktree or session is
+created: never root (never `--dangerously-skip-permissions` either — the
+non-root user plus this same `permissions.allow` list, see "Attention"
+above, is what an unattended session runs under instead); one loop per
+repository, held with an exclusive lock directory; `scripts/doctor` must
+pass; and the `CLAUDE_CODE_OAUTH_TOKEN` used to authenticate must be set
+(from `claude setup-token`, run once on a trusted machine — never baked
+into an image, see `deploy/agent/README.md`). `scripts/tests/agent-loop.test.sh`
+drives every one of these, plus every stop condition below, against a fully
+faked `claude`/`gh`/`git` — see that file's own header for how to run it (it
+needs `jq` and GNU coreutils' `date`, which is why it is not part of
+`docker compose run --rm app go test ./...`; `scripts/agent_loop_test.go` is
+the thin slice of this that *is*, covering argument parsing only).
 
 A session's stream is watched for four outcomes, checked in this order
 once it ends:

@@ -7,15 +7,24 @@
 # the thin smoke test that IS part of that suite, covering --help/--dry-run
 # wiring without needing jq at all).
 #
-# Needs: jq, gh, git, sh on PATH (real binaries; every call THEY make is
-# faked below, so nothing here reaches a real repository or a real GitHub).
-# Run inside deploy/agent's container, where all of these already are:
+# Needs: jq, gh, git, sh, and GNU coreutils' date (real binaries; every call
+# claude/gh/git/sleep make is faked below, so nothing here reaches a real
+# repository or a real GitHub - date is the one real binary agent-loop.sh's
+# own backoff_and_wait actually calls, to parse an ISO-8601 reset time out of
+# a fixture's result text; BusyBox date (plain `alpine`, most embedded
+# Linux) cannot parse `-d '<ISO-8601 string>'` at all and fails every
+# usage-limit assertion that depends on it - this is a real gap the suite
+# will now report honestly (round 1 of this PR made it report falsely
+# instead: an unset variable made the assertion's needle empty, which always
+# "matches"). Run inside deploy/agent's container, where GNU date already is
+# (its image is debian:bookworm-slim):
 #
 #   export REPO_PATH=$(pwd)
 #   docker compose -f deploy/agent/docker-compose.agent.yml run --rm agent \
 #     sh scripts/tests/agent-loop.test.sh
 #
-# or on any Linux host with jq installed:
+# or on any Linux host with jq and GNU coreutils installed (i.e. not a
+# BusyBox/musl minimal image):
 #
 #   sh scripts/tests/agent-loop.test.sh
 #
@@ -97,7 +106,18 @@ EOF
 # own backoff_and_wait only trusts a reset time that is still in the future
 # (scripts/agent-loop.sh:436), so a fixed past-tense date goes stale and
 # silently falls through to the default backoff instead of failing loudly.
-RATE_LIMIT_RESET_ISO=$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ)
+#
+# `date -d '+1 day'` is a GNU-only relative-date extension: on BusyBox date
+# (e.g. plain `alpine`, which the header above says is a valid place to run
+# this) it fails silently, leaving this variable empty - and assert_contains
+# with an empty needle always matches (see its `case "$1" in *"$2"*)`  above),
+# so the round-1 fix for this same fixture's staleness regressed into an
+# assertion that could never fail while looking like it still tested
+# anything. `-d @<epoch>` is POSIX-portable across both date flavors, so the
+# offset is computed as arithmetic on `date +%s` instead of parsed as text.
+now_epoch=$(date -u +%s) || { echo "FATAL: date +%s failed" >&2; exit 1; }
+RATE_LIMIT_RESET_ISO=$(date -u -d "@$((now_epoch + 86400))" +%Y-%m-%dT%H:%M:%SZ)
+[ -n "$RATE_LIMIT_RESET_ISO" ] || { echo "FATAL: could not compute RATE_LIMIT_RESET_ISO - date(1) does not support -d @<epoch> here" >&2; exit 1; }
 cat > "$FIXDIR/rate_limit.jsonl" <<EOF
 {"type":"system","subtype":"api_retry","attempt":1,"max_retries":3,"retry_delay_ms":2000,"error_status":429,"error":"rate_limit","uuid":"u1","session_id":"sess-ratelimit-1"}
 {"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":50,"session_id":"sess-ratelimit-1","result":"Stopped: usage limit reached, resets at $RATE_LIMIT_RESET_ISO"}
