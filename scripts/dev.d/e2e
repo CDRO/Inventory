@@ -1,0 +1,512 @@
+#!/bin/sh
+# Run the E2E deployment gate under a machine-wide lock; full log in .claude/last-e2e.log.
+#
+#   scripts/dev e2e [--workers N]   claim the gate and run the whole sequence
+#   scripts/dev e2e status          who holds the gate, and whether a suite is really running
+#   scripts/dev e2e break-lock      release a lock whose holder is gone, and clear its stack
+#   scripts/dev e2e down            tear down this checkout's own stack and release the lock
+#
+# This is the local E2E gate as one command, replacing the seven compose lines
+# docker-compose.e2e.yml's header used to ask a session to paste by hand. It
+# exists because those seven lines could not be run safely (#389), could not be
+# told apart from a leftover stack (#377), could not tell whose image they were
+# serving (#391), and inherited CI's worker count on a machine running five
+# other compose projects (#382).
+#
+#   1. claim the gate lock          5. seed the fixtures
+#   2. down -v (clean slate)        6. wait for /healthz through Traefik
+#   3. build this checkout's image  7. check the served frontend is ours
+#   4. migrate up                   8. run the suite
+#                                   9. down -v and release the lock - ALWAYS
+#
+# Step 9 runs from a trap on EXIT, INT and TERM, which is most of the reason
+# this command exists. The teardown used to be the last line of a documented
+# sequence, so a session that stopped early - finished its work, was
+# interrupted, crashed - simply never reached it, and its stack stayed `Up`
+# and `healthy` indefinitely while the next checkout waited for a run that had
+# ended half an hour earlier (#377).
+#
+# ## The lock
+#
+# A machine has exactly ONE E2E project, `inventory-e2e`, shared by every
+# checkout on it (docker-compose.e2e.yml's `name:` comment, #190), so two
+# checkouts may never run the suite at once. What enforced that before was a
+# `docker ps` pre-flight in that file's header: read the container list, and
+# if nothing foreign appears, proceed. That is a check-then-act race whose
+# window is minutes wide, because the next documented command is `down -v` and
+# a build, a `git` sequence or a Go suite run happens in between - anything
+# that starts in that window is invisible to a check that already passed.
+# Measured (#389): two checkouts both passed the pre-flight, and the single
+# project ended up holding containers from two working directories at once, at
+# which point neither session could safely operate it.
+#
+# The lock is a Docker network named `inventory-e2e-gate-lock`, claimed with
+# `docker network create`. The daemon refuses a duplicate name - measured on
+# Docker 27.4.0: the second create exits 1 with "network with name ... already
+# exists" - so the claim is atomic across processes and across checkouts,
+# which is exactly what the pre-flight was not. A network rather than a
+# container because it needs no image to exist first (`status` has to work on
+# a machine that has pulled nothing yet) and costs no runtime resources.
+# Labels carry the holder's working directory and claim time, so a refusal can
+# name who holds it.
+#
+# It deliberately carries no `com.docker.compose.project` label:
+# scripts/wellen-docker-cleanup.ps1 selects on that label, so the lock is
+# never swept out from under a live run by a wave's own cleanup.
+#
+# A lock whose holder is this same checkout is reclaimed rather than refused -
+# that is this checkout's own abandoned run, not somebody else's.
+#
+# ## Why a refusal says which kind of refusal it is
+#
+# The old pre-flight reported existence, so "three containers, Up, healthy,
+# belonging to someone else" was all a session could see - and that looks
+# identical whether a suite is mid-run (waiting is right, tearing down
+# destroys a real run) or a finished session left its stack behind (waiting
+# never terminates). Three discriminators settle it, and `status` reports all
+# three (#377):
+#
+#   * Is there a suite container at all? The suite runs as `run --rm e2e`, so
+#     a run in progress has a container for the `e2e` service. None means
+#     nothing is executing.
+#   * Has the app logged anything recently? A suite mid-run hits it
+#     constantly. `docker logs --since` answers that without any date
+#     arithmetic in POSIX sh, which busybox and Git Bash would not agree on.
+#   * What does the holder's own `.claude/worklog.md` say? Reported verbatim,
+#     never acted on - it is a hint written by another session, not a fact
+#     about the daemon.
+#
+# ACTIVE is any of: a container for the `e2e` service exists, the app logged
+# something inside the idle window, or the lock is younger than the stale
+# threshold. STALE is a held lock with none of those. Breaking a lock stays a
+# deliberate act - `break-lock`, refused on an ACTIVE gate unless --force -
+# because the one thing worse than waiting for a finished session is tearing
+# down a live run on a heuristic.
+#
+# ## Per-checkout image, and the check that the served bytes are ours
+#
+# E2E_APP_IMAGE is exported with a tag derived from this checkout's path, so
+# `app` is built and run under a tag no other checkout shares (#391). Before
+# the suite runs, the served `/js/*` is fetched through Traefik and hashed
+# against web/shell-manifest.json's digests (#349), because the failure this
+# guards against is silent: containers can be entirely yours, healthy,
+# correctly labelled with your own working_dir, and still serve another
+# checkout's frontend, producing failures that look exactly like a real
+# regression in the diff under review.
+#
+# ## Workers and retries
+#
+# The suite inherits Playwright's own default worker count, which is derived
+# from the machine's CPUs and on a developer machine comes out CI-shaped - 12
+# workers on a box also running five other compose projects. Measured (#382):
+# 28 failed and 5 did not run, on an unmodified commit, on a fresh stack,
+# while CI passed the same commit 191/191 twice. So this command sets
+# E2E_WORKERS (default 4, override with --workers or the environment) and
+# E2E_RETRIES (default 1). e2e/playwright.config.js reads both and falls back
+# to today's behaviour when neither is set, which is how CI keeps 0 retries
+# and its own worker count without knowing this command exists.
+#
+# A local retry makes a contention flake report as `flaky` rather than
+# `failed`, which is more information than a red suite, not less. A test that
+# is actually broken still fails both attempts.
+#
+# ## Not for CI
+#
+# .github/workflows/e2e.yml and restore.yml run the compose commands
+# themselves and must keep doing so: a runner has one checkout, one job per
+# runner, no other compose project and no `.env`, so every problem above is
+# already absent there and a lock would be pure overhead.
+#
+# Exit codes: 2 usage; 3 the gate is held by a live run (wait for it); 4 the
+# gate is held by a lock with nothing running behind it (break it); otherwise
+# the failing step's own exit code, or the suite's.
+set -u
+
+help() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
+
+PROJECT=inventory-e2e
+LOCK=inventory-e2e-gate-lock
+LABEL=inventory.e2e.lock
+# A suite hits the app several times a second, so five minutes of silence is
+# not a run in progress. Fifteen minutes is longer than any single step of the
+# sequence below, so a lock younger than that is never called stale even when
+# the stack is momentarily quiet - between `up -d` and the suite's first
+# request, `npm install` can be silent for a minute or more.
+IDLE_WINDOW=5m
+STALE_AFTER=900
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root" || exit 1
+
+case "${1:-}" in
+  -h|--help|help) help; exit 0 ;;
+esac
+
+# --- the compose stack -----------------------------------------------------
+
+# The image tag this checkout builds under: legible first (the directory name)
+# and unique second (a checksum of the absolute path, because two worktrees can
+# share a basename). Lowercased and stripped of everything Docker does not
+# allow in a tag, and cut well under the 128-character limit.
+slug=$(basename "$root" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]/-/g' | cut -c1-80)
+sum=$(printf '%s' "$root" | cksum | awk '{print $1}')
+E2E_APP_IMAGE="inventory-e2e-app:${slug}-${sum}"
+export E2E_APP_IMAGE
+
+compose() { docker compose -p "$PROJECT" -f docker-compose.e2e.yml "$@"; }
+
+# --- the lock and its discriminators ---------------------------------------
+
+lock_label() { docker network inspect "$LOCK" --format "{{index .Labels \"$LABEL.$1\"}}" 2>/dev/null; }
+lock_held() { docker network inspect "$LOCK" >/dev/null 2>&1; }
+
+# Containers of one compose service, by label. `docker ps --filter name=` is a
+# substring match and would also answer for the project's own
+# `inventory-e2e_default` network and for any container whose name merely
+# contains the service name, so the service label is what is matched here.
+service_containers() {
+  docker ps -a --filter "label=com.docker.compose.project=$PROJECT" \
+    --filter "label=com.docker.compose.service=$1" --format "$2" 2>/dev/null
+}
+
+stack_rows() {
+  docker ps -a --filter "label=com.docker.compose.project=$PROJECT" \
+    --format '{{.Names}}  {{.Status}}  {{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null
+}
+
+# Anything logged inside IDLE_WINDOW, as the daemon computes it.
+app_is_talking() {
+  c=$(service_containers app '{{.Names}}' | head -1)
+  [ -n "$c" ] || return 1
+  [ -n "$(docker logs --since "$IDLE_WINDOW" --timestamps "$c" 2>&1 | head -1)" ]
+}
+
+app_last_log() {
+  c=$(service_containers app '{{.Names}}' | head -1)
+  if [ -z "$c" ]; then echo "no app container"; return; fi
+  line=$(docker logs --timestamps --tail 1 "$c" 2>&1 | head -1 | cut -d' ' -f1)
+  if [ -n "$line" ]; then echo "$line"; else echo "nothing logged"; fi
+}
+
+lock_age() {
+  since=$(lock_label claimed_epoch)
+  case "$since" in
+    '' | *[!0-9]*) echo 0; return ;;
+  esac
+  echo $(($(date -u +%s) - since))
+}
+
+# The evidence, then one `verdict:` line - FREE, ACTIVE or STALE.
+report_gate() {
+  if ! lock_held; then
+    echo "gate:     FREE - no lock network $LOCK"
+    stack=$(stack_rows)
+    if [ -n "$stack" ]; then
+      echo "stack:    containers with no lock behind them (a pre-lock run, or a broken lock):"
+      printf '%s\n' "$stack" | sed 's/^/          /'
+      echo "          scripts/dev e2e clears them with its own opening down -v."
+    fi
+    echo "verdict:  FREE"
+    return
+  fi
+
+  holder=$(lock_label working_dir)
+  age=$(lock_age)
+  echo "gate:     HELD by ${holder:-<unlabelled>}"
+  echo "          claimed $(lock_label claimed_iso) (${age}s ago)"
+  echo "this:     $root"
+
+  stack=$(stack_rows)
+  if [ -n "$stack" ]; then
+    printf '%s\n' "$stack" | sed 's/^/stack:    /'
+  else
+    echo "stack:    no containers in project $PROJECT"
+  fi
+
+  runner=$(service_containers e2e '{{.Names}} ({{.Status}})')
+  if [ -n "$runner" ]; then
+    echo "runner:   $runner - the suite runs as run --rm e2e, so this is a live run"
+  else
+    echo "runner:   none - no container for the e2e service, so no suite is executing"
+  fi
+
+  if app_is_talking; then
+    echo "app:      logged something within $IDLE_WINDOW (last $(app_last_log))"
+  else
+    echo "app:      silent for over $IDLE_WINDOW (last $(app_last_log))"
+  fi
+
+  # A hint written by another session: reported verbatim, never acted on.
+  if [ -n "${holder:-}" ] && [ -f "$holder/.claude/worklog.md" ]; then
+    grep -E '^(Updated|Phase|Issue|PR):' "$holder/.claude/worklog.md" 2>/dev/null |
+      sed 's/^/holder:   /'
+  else
+    echo "holder:   no readable .claude/worklog.md at that path"
+  fi
+
+  if [ -n "$runner" ] || app_is_talking || [ "$age" -lt "$STALE_AFTER" ]; then
+    echo "verdict:  ACTIVE"
+  else
+    echo "verdict:  STALE"
+  fi
+}
+
+verdict_of() { printf '%s\n' "$1" | sed -n 's/^verdict:  //p'; }
+
+release_lock() {
+  if [ "$(lock_label working_dir)" = "$root" ]; then
+    docker network rm "$LOCK" >/dev/null 2>&1
+  fi
+}
+
+# --- subcommands -----------------------------------------------------------
+
+cmd_status() {
+  report=$(report_gate)
+  printf '%s\n' "$report"
+  case "$(verdict_of "$report")" in
+    FREE) return 0 ;;
+    ACTIVE)
+      if [ "$(lock_label working_dir)" = "$root" ]; then return 0; fi
+      echo
+      echo "Another checkout is running the gate. Wait for it."
+      return 3 ;;
+    *)
+      echo
+      echo "Nothing is running behind this lock. Break it deliberately:"
+      echo "  scripts/dev e2e break-lock"
+      return 4 ;;
+  esac
+}
+
+cmd_break_lock() {
+  force=${1:-}
+  if ! lock_held; then
+    echo "e2e: no lock to break." >&2
+    stack=$(stack_rows)
+    if [ -n "$stack" ]; then
+      echo "e2e: these containers are still around, though:" >&2
+      printf '%s\n' "$stack" >&2
+      echo "e2e: scripts/dev e2e down clears them." >&2
+    fi
+    return 0
+  fi
+  report=$(report_gate)
+  printf '%s\n' "$report"
+  if [ "$(verdict_of "$report")" = "ACTIVE" ] && [ "$force" != "--force" ]; then
+    echo >&2
+    echo "e2e: refusing to break an ACTIVE gate - that destroys a run in progress." >&2
+    echo "e2e: wait for it, or pass --force if the evidence above is wrong." >&2
+    return 3
+  fi
+  echo
+  echo "breaking the lock and clearing the project"
+  compose down -v --remove-orphans
+  docker network rm "$LOCK" >/dev/null 2>&1
+  echo "e2e: gate released."
+}
+
+cmd_down() {
+  holder=$(lock_label working_dir)
+  if lock_held && [ "$holder" != "$root" ]; then
+    echo "e2e: the gate is held by $holder, not this checkout." >&2
+    echo "e2e: read scripts/dev e2e status first; break-lock is how a stale hold is cleared." >&2
+    return 3
+  fi
+  compose down -v --remove-orphans
+  docker network rm "$LOCK" >/dev/null 2>&1
+  echo "e2e: stack down, gate released."
+}
+
+# --- the run ---------------------------------------------------------------
+
+log=.claude/last-e2e.log
+
+step() {
+  what=$1
+  shift
+  printf '\n== %s\n' "$what" >> "$log"
+  "$@" >> "$log" 2>&1
+  code=$?
+  if [ "$code" -ne 0 ]; then
+    printf 'e2e: %s failed (exit %s)\n' "$what" "$code" >&2
+    tail -15 "$log" >&2
+    printf 'e2e: full log in %s\n' "$log" >&2
+    exit "$code"
+  fi
+  printf '%s: ok\n' "$what"
+}
+
+# Fetches every /js/* path in web/shell-manifest.json through Traefik, from a
+# throwaway container on the project's own network (traefik publishes no host
+# port, #358), and compares the digests with the manifest's. A text asset is
+# hashed with CRLF normalised to LF, exactly as web/shell_manifest_test.go
+# generates them, so a Windows checkout and a Linux one produce the same
+# digest for the same content.
+check_served_assets() {
+  expected=$(sed -n 's/.*"\(\/js\/[^"]*\)": "\([0-9a-f]\{64\}\)".*/\1 \2/p' web/shell-manifest.json)
+  if [ -z "$expected" ]; then
+    echo "e2e: no /js/ digests parsed out of web/shell-manifest.json" >&2
+    return 1
+  fi
+  paths=$(printf '%s\n' "$expected" | awk '{print $1}')
+
+  served=$(compose run --rm -T --no-deps --entrypoint sh e2e -c '
+    for p in "$@"; do
+      if curl -fsk -o /tmp/served "$BASE_URL$p"; then
+        printf "%s %s\n" "$p" "$(sed "s/\r\$//" /tmp/served | sha256sum | cut -d" " -f1)"
+      else
+        printf "%s unreachable\n" "$p"
+      fi
+    done
+  ' sh $paths 2>>"$log")
+
+  bad=$(printf '%s\n' "$expected" | while read -r p want; do
+    got=$(printf '%s\n' "$served" | awk -v p="$p" '$1 == p { print $2; exit }')
+    if [ "$got" != "$want" ]; then
+      printf '  %s\n    served   %s\n    expected %s\n' "$p" "${got:-no answer}" "$want"
+    fi
+  done)
+
+  if [ -z "$bad" ]; then return 0; fi
+
+  {
+    echo "e2e: the frontend this stack serves is not this checkout's."
+    echo
+    printf '%s\n' "$bad"
+    echo
+    echo "Either the app image was built by another checkout (#391 - this command"
+    echo "tags it per checkout, so that needs a build run outside scripts/dev e2e),"
+    echo "or web/shell-manifest.json is out of date in this working tree. To tell"
+    echo "them apart:"
+    echo
+    echo "  scripts/dev test ./web/"
+    echo
+    echo "If TestShellAssetsMatchManifest fails, the manifest is stale and this is"
+    echo "a false alarm - regenerate it from that test's own output. If it passes,"
+    echo "the served image is foreign; rebuild through scripts/dev e2e."
+    echo
+    echo "The image this checkout expects: $E2E_APP_IMAGE"
+  } >&2
+  return 1
+}
+
+torn_down=
+teardown() {
+  code=$?
+  trap - EXIT INT TERM
+  if [ -n "$torn_down" ]; then exit "$code"; fi
+  torn_down=yes
+  echo
+  echo "tearing down and releasing the gate"
+  compose down -v --remove-orphans >> "$log" 2>&1
+  release_lock
+  exit "$code"
+}
+
+cmd_run() {
+  workers=${E2E_WORKERS:-4}
+  retries=${E2E_RETRIES:-1}
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --workers)
+        shift
+        workers=${1:-}
+        if [ -z "$workers" ]; then echo "e2e: --workers needs a number" >&2; return 2; fi ;;
+      *)
+        echo "e2e: unknown option '$1'" >&2
+        help >&2
+        return 2 ;;
+    esac
+    shift
+  done
+  case "$workers" in
+    '' | *[!0-9]*) echo "e2e: --workers must be a number, got '$workers'" >&2; return 2 ;;
+  esac
+
+  # The claim, and the one place this command may not be interrupted: the trap
+  # goes up on the next statement, so a lock outlives its holder only if the
+  # process dies between the two. `break-lock` is the answer to that, and
+  # `status` is what names it.
+  if docker network create "$LOCK" \
+      --label "$LABEL.working_dir=$root" \
+      --label "$LABEL.claimed_epoch=$(date -u +%s)" \
+      --label "$LABEL.claimed_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1; then
+    echo "gate:     claimed by this checkout"
+  elif [ "$(lock_label working_dir)" = "$root" ]; then
+    echo "gate:     reclaiming this checkout's own lock from an earlier run"
+  else
+    report=$(report_gate)
+    printf '%s\n' "$report" >&2
+    case "$(verdict_of "$report")" in
+      ACTIVE)
+        echo >&2
+        echo "e2e: another checkout is running the gate - wait for it." >&2
+        return 3 ;;
+      *)
+        echo >&2
+        echo "e2e: the gate is locked with nothing running behind it." >&2
+        echo "e2e: break it deliberately:  scripts/dev e2e break-lock" >&2
+        return 4 ;;
+    esac
+  fi
+  trap teardown EXIT INT TERM
+
+  mkdir -p .claude
+  : > "$log"
+  echo "image:    $E2E_APP_IMAGE"
+  echo "workers:  $workers, retries: $retries"
+
+  step "reset the stack" compose down -v --remove-orphans
+  step "build the image" compose build
+  step "migrate up" compose run --rm app migrate up
+  step "start the stack" compose up -d
+  # MSYS_NO_PATHCONV, or Git Bash rewrites the container path /fixtures/seed.sql
+  # into a host path and psql answers "No such file or directory".
+  step "seed the fixtures" env MSYS_NO_PATHCONV=1 docker compose -p "$PROJECT" \
+    -f docker-compose.e2e.yml exec -T db psql -U e2e -d e2e -f /fixtures/seed.sql
+  # `up -d` returns when the containers have started, not when the app answers
+  # a request. /healthz only answers 200 once the app's own database connection
+  # succeeds, unlike a static asset, which is served without touching Postgres
+  # at all - a 200 there would prove nothing.
+  step "wait for /healthz" compose run --rm -T --no-deps --entrypoint sh e2e -c '
+    for i in $(seq 1 30); do
+      code=$(curl -sk -o /dev/null -w "%{http_code}" "$BASE_URL/healthz" || true)
+      if [ "$code" = "200" ]; then exit 0; fi
+      sleep 2
+    done
+    exit 1'
+  # Deliberately not wrapped in `step`: that redirects a step's output into the
+  # log and then shows `tail -15` of it, which would cut the front off this
+  # one's message - and the front is where it says what went wrong. The whole
+  # value of this check is that it is legible at the moment it fires.
+  if check_served_assets; then
+    echo "check served assets: ok"
+  else
+    exit 1
+  fi
+
+  echo
+  echo "running the suite"
+  compose run --rm -T -e "E2E_WORKERS=$workers" -e "E2E_RETRIES=$retries" e2e >> "$log" 2>&1
+  code=$?
+  # The shape scripts/dev.d/test established: the whole log on disk, only the
+  # signal in a reviewer's context - Playwright's own opening line (which
+  # states the worker count this run actually used), its failure headers, and
+  # its final counts, which are what a verdict gets written from. A `flaky`
+  # count is local-only and means the test passed on its retry; a `did not run`
+  # count is a reset signal, not a pass (docs/specs/01-architecture-and-
+  # deployment.md, "Running the E2E suite").
+  grep -E '^Running [0-9]+ test|^[[:space:]]*[0-9]+\) |^[[:space:]]*[0-9]+ (passed|failed|flaky|skipped|interrupted|did not run)' "$log" | head -40
+  echo "exit=$code"
+  echo "full log: $log"
+  return "$code"
+}
+
+case "${1:-}" in
+  status) shift; cmd_status "$@" ;;
+  break-lock) shift; cmd_break_lock "$@" ;;
+  down) shift; cmd_down "$@" ;;
+  run) shift; cmd_run "$@" ;;
+  *) cmd_run "$@" ;;
+esac

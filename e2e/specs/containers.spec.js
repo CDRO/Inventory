@@ -15,6 +15,8 @@
 
 import { test, expect } from "@playwright/test";
 
+import { fixtureLogin } from "../support/fixture-login.js";
+
 const STORAGE_ID = "00000000-0000-7000-8000-000000000010";
 const BASE = `/api/storages/${STORAGE_ID}`;
 
@@ -58,10 +60,7 @@ const FREE_SPLIT_BATCH = "00000000-0000-7000-8000-000000000119";
 const FOREIGN_CONTAINER = "00000000-0000-7000-8000-00000000012c";
 
 async function logIn(page) {
-  const res = await page.request.post("/api/auth/login", {
-    data: { username: "e2e-bob", password: "e2e-fixture-password" },
-  });
-  expect(res.status(), "fixture login").toBe(200);
+  await fixtureLogin(page, "e2e-bob");
 }
 
 // The list defaults to filter-only (docs/specs/16-product-maintenance.md).
@@ -262,10 +261,7 @@ test("a container from another storage is the same 404 an unknown id gets", asyn
 
   // And the refusal is a refusal: the other household's container is still
   // there to be destroyed by somebody who may.
-  const asAlice = await page.request.post("/api/auth/login", {
-    data: { username: "e2e-alice", password: "e2e-fixture-password" },
-  });
-  expect(asAlice.status()).toBe(200);
+  await fixtureLogin(page, "e2e-alice");
   const allowed = await page.request.post(
     `/api/storages/00000000-0000-7000-8000-000000000011/containers/${FOREIGN_CONTAINER}/destroy`,
   );

@@ -52,7 +52,7 @@ Every command is therefore a Docker invocation:
 | Run the stack (dev) | `docker compose up -d` |
 | Run the stack (production) | `docker compose -f docker-compose.yml up -d` |
 | Run unit tests | `docker compose run --rm app go test ./...` |
-| Run E2E tests (deployment gate) | Six-step sequence, not a single command — see "Running the E2E suite" below |
+| Run E2E tests (deployment gate) | `scripts/dev e2e` — a locked wrapper around a six-step sequence; see "Running the E2E suite" below |
 | Run migrations | `docker compose -f docker-compose.yml run --rm app migrate up` |
 | Lint / vet | `docker compose run --rm app go vet ./...` |
 | Rebuild gamification progress from scratch | `docker compose -f docker-compose.yml run --rm app recompute-progress` |
@@ -102,7 +102,19 @@ documented once, in `docker-compose.e2e.yml`'s own header comment; run it
 from there rather than copying the commands here, so there is exactly one
 place they can go stale.
 
-Three things the sequence alone doesn't make obvious:
+**Locally, run it as `scripts/dev e2e`** (`scripts/dev.d/e2e`), not by pasting
+those commands. The sequence it performs is the documented one; what it adds is
+everything the pasted version could not do — a real lock instead of a
+check-then-act pre-flight, a teardown that runs even when the session stops
+early, an image tag that is this checkout's alone, a check that the frontend
+being served is the one in this working tree, and a worker count sized for a
+developer machine rather than a CI runner (#377, #382, #389, #391). Its own
+header carries the measurements for each. `scripts/dev e2e status` is what to
+read when the gate is busy, and `scripts/dev e2e break-lock` is how a hold
+whose owner is gone is cleared. CI keeps running the raw commands, for the
+reason that file's header gives.
+
+Four things the sequence alone doesn't make obvious:
 
 - **The suite is not idempotent.** Nothing resets state between runs.
   Re-running `run --rm e2e` against a stack that already ran once fails
@@ -136,14 +148,31 @@ Three things the sequence alone doesn't make obvious:
   own: a second `up` under the same shared project name is not refused
   anything, it recreates the first's containers and takes the run over
   silently. Inside a sequential wave that cannot happen; with
-  `"sequential": false` the pre-flight `docker ps -a` at the top of the
-  compose header is the only guard. (Traefik used to publish a fixed host
+  `"sequential": false` what stands between two checkouts is `scripts/dev
+  e2e`'s lock — a Docker network the daemon refuses to create twice, so the
+  claim is atomic. The `docker ps -a` pre-flight that header used to prescribe
+  instead is **not** a guard and is no longer presented as one: it reports
+  existence after the fact and cannot see a run that begins ten seconds later,
+  which is how two checkouts once both passed it and left the single project
+  holding containers from two working directories at once (#389). (Traefik used to publish a fixed host
   port here, which incidentally refused a *second* project name the same
   port — but it also let an ordinary dev stack in the very worktree running
   the gate silently starve its own E2E run of that port, with no clear
   failure message; #358 removed the `ports:` block entirely rather than try
   to fix both at once, since the port was never load-bearing for the
   same-name collision this rule actually cares about.)
+- **Bringing the stack up obliges you to tear it down.** The gate is not free
+  again until `down -v` has run, and that is not tidiness: the next checkout
+  reads a leftover stack as an active run and waits for it. Measured (#377): a
+  session that had finished its work, merged its PR and commented on its wave
+  issue never reached the sequence's closing `down -v`, and its containers
+  stayed `Up` and `healthy` for over half an hour while a consolidation waited.
+  `scripts/dev e2e` discharges this from a trap, so it runs even when the
+  session is interrupted or stops early; a hand-run sequence leaves it to you.
+  The orchestrator's own Docker cleanup does not cover it either —
+  `scripts/wellen-docker-cleanup.ps1` deliberately refuses to sweep a project
+  with a container outside the wave's worktrees, and the shared `inventory-e2e`
+  project always has one.
 - **The `db` service also runs with `fsync=off`, `synchronous_commit=off` and
   `full_page_writes=off`** (docs/plans/2026-09-harness-optimization.md,
   decision D5 — that document is on branch `harness/optimization-plan`, PR
