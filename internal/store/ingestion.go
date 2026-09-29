@@ -36,6 +36,13 @@ type IngestDecision struct {
 	// (docs/specs/08-expiration-and-classification.md).
 	ExpirationEdited bool
 	ExpirationDate   *time.Time
+
+	// ContainerLabel and ContainerType give the batch created from this row a
+	// container, same field names and upsert rule as the PATCH
+	// (docs/specs/39-batch-containers.md, closing paragraph of "Setting and
+	// clearing a container on a batch"). Nil means no container.
+	ContainerLabel *string
+	ContainerType  *string
 }
 
 // NewIngestProduct is a product the reviewer created while confirming.
@@ -187,6 +194,8 @@ func (s *Store) ConfirmIngestion(ctx context.Context, storageID, jobID uuid.UUID
 				ExpirationSource: source,
 				Reason:           ReasonVisionIngestion,
 				CreatedBy:        userID,
+				ContainerLabel:   d.ContainerLabel,
+				ContainerType:    d.ContainerType,
 			})
 			if err != nil {
 				return err

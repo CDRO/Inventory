@@ -73,10 +73,27 @@ async function logIn(page) {
 // The list defaults to filter-only (docs/specs/16-product-maintenance.md): no
 // products render until a search or "Show all products", and once shown, a
 // row is a link (js/product-table.js's productCell), not a button.
+//
+// `#nav` starts `hidden` and js/nav.js's renderNav only reveals it once
+// products.js's init() has resolved `/api/me` — the same synchronous stretch
+// that, right afterward, attaches the `#filter` "input" listener
+// (web/static/js/pages/products.js). Under parallel load that resolution can
+// lag behind page.goto()'s own load event, so filling `#filter` first can
+// fire into a page with no listener yet: the debounced search that would
+// render the row never starts, and the click below stalls on its own
+// auto-wait for the full 30s (#423) rather than ever finding the link.
+// Waiting for `#nav` here is the same "page is ready" idiom
+// auth-journeys.spec.js and start-page.spec.js already rely on. The extra
+// `toHaveCount(1)` wait, rather than clicking straight off `fill`, also
+// covers the 250ms search debounce (products.js's SEARCH_DEBOUNCE_MS)
+// itself under load, independent of the listener race.
 async function openProduct(page, name) {
   await page.goto(`/products.html?storage=${STORAGE_ID}`);
+  await expect(page.locator("#nav")).toBeVisible();
   await page.locator("#filter").fill(name);
-  await page.getByRole("link", { name, exact: true }).click();
+  const link = page.getByRole("link", { name, exact: true });
+  await expect(link).toHaveCount(1);
+  await link.click();
 }
 
 function batchRow(page, batchId) {
@@ -614,6 +631,13 @@ test("the list renders nothing until a search or Show all products, and clearing
 }) => {
   await logIn(page);
   await page.goto(`/products.html?storage=${STORAGE_ID}`);
+  // #nav becoming visible is products.js's own "init() is done, the #filter
+  // listener is attached" signal — waiting for it here avoids the same
+  // parallel-load race openProduct above guards against (#423): without it,
+  // fill() below can fire before the listener exists and the search that
+  // would populate #list never starts, so the toBeVisible() checks below
+  // stall on their own auto-wait instead of the assertion ever settling.
+  await expect(page.locator("#nav")).toBeVisible();
 
   const list = page.locator("#list");
   await expect(list).toContainText("Type to search");
@@ -646,6 +670,8 @@ test("the list renders nothing until a search or Show all products, and clearing
 test("the list table shows category and current total stock, not just a name", async ({ page }) => {
   await logIn(page);
   await page.goto(`/products.html?storage=${STORAGE_ID}`);
+  // Same "init() is done" wait the test above and openProduct use (#423).
+  await expect(page.locator("#nav")).toBeVisible();
 
   await page.locator("#filter").fill("E2E Move Source");
   const row = page.locator("tr", { has: page.getByRole("link", { name: "E2E Move Source", exact: true }) });
@@ -842,6 +868,108 @@ test("clearing a picture through the UI does not leave icon_name to resurface on
   const after = await fetchProduct(page, EDIT_FORM_SYNC_PRODUCT);
   expect(after.icon_name).toBeNull();
   expect(after.min_stock).toBe(3);
+});
+
+// #395: save()'s "Saved." confirmation must be set after its own reload, not
+// before — otherwise reload()'s chained showDetail() call clears it via
+// clearStatus() before anyone sees it, on any stack fast enough that the
+// wipe happens before the next render. Pinned directly rather than left to
+// the timing-dependent assertion above: this test holds reload()'s own
+// GET open so the ordering is observable regardless of how fast the real
+// server answers.
+test('the "Saved." confirmation is set after save()\'s reload, not wiped by it', async ({ page }) => {
+  await logIn(page);
+  await openProduct(page, "E2E Save Status Survives Reload Source");
+
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  await page.route(
+    (url) => url.pathname === `${BASE}/products`,
+    async (route) => {
+      await held;
+      await route.continue();
+    },
+  );
+
+  await page.locator("#p-min-stock").fill("4");
+  await page.locator("form:has(#p-name)").getByRole("button", { name: "Save" }).click();
+
+  // The PATCH has already resolved — the save happened — but reload() is
+  // still blocked on the held GET. If showStatus() ran before reload() (the
+  // pre-#395 order), "Saved." would already be visible here.
+  await expect(page.locator("#status")).not.toContainText("Saved.");
+
+  release();
+
+  await expect(page.locator("#status")).toContainText("Saved.");
+});
+
+// #395: offerMerge() has the identical reload/status race as save() above,
+// and its own fix (showStatus() moved after reload()) had no coverage of its
+// own in round 1 — review-tests flagged that gap. Reached by declining the
+// rename-over-merge confirm (docs/specs/16-product-maintenance.md), which is
+// the only UI path to offerMerge().
+test('the merge confirmation is set after offerMerge()\'s reload, not wiped by it', async ({ page }) => {
+  await logIn(page);
+  await openProduct(page, "E2E Merge Status Editable Source");
+
+  // Renaming to the twin's exact name is what makes closestOtherProduct()
+  // find it; dismissing "rename anyway" is what routes to offerMerge()
+  // instead of a plain rename, and accepting the merge confirm inside it is
+  // what actually calls the merge endpoint. The second handler is registered
+  // only once the first dialog is seen — both are otherwise listening for
+  // the same "dialog" event and would race to handle the first one.
+  page.once("dialog", (dialog) => {
+    dialog.dismiss();
+    page.once("dialog", (mergeDialog) => mergeDialog.accept());
+  });
+
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  await page.route(
+    (url) => url.pathname === `${BASE}/products`,
+    async (route) => {
+      await held;
+      await route.continue();
+    },
+  );
+
+  await page.locator("#p-name").fill("E2E Merge Status Twin");
+  await page.locator("form:has(#p-name)").getByRole("button", { name: "Save" }).click();
+
+  // The merge POST has already resolved but reload() is still blocked on the
+  // held GET, so offerMerge()'s showStatus() — moved to after reload() by
+  // the #395 fix — has not run yet either.
+  await expect(page.locator("#status")).not.toContainText("Merged.");
+
+  release();
+
+  await expect(page.locator("#status")).toContainText("Merged.");
+});
+
+// #395's other acceptance criterion: clearStatus() must still fire for a
+// genuine navigation to a different product, so the reordering above must
+// not have turned it into a no-op generally — only deferred past the
+// specific reload the save/merge that set the message itself triggered.
+test("opening a different product still clears a stale status from the one left open before", async ({
+  page,
+}) => {
+  await logIn(page);
+  await openProduct(page, "E2E Stale Status Edited Source");
+
+  await page.locator("#p-min-stock").fill("2");
+  await page.locator("form:has(#p-name)").getByRole("button", { name: "Save" }).click();
+  await expect(page.locator("#status")).toContainText("Saved.");
+
+  await page.locator("#filter").fill("E2E Stale Status Switch Target");
+  await page.getByRole("link", { name: "E2E Stale Status Switch Target", exact: true }).click();
+
+  await expect(page.locator("#status")).toBeHidden();
+  await expect(page.locator("#status")).toHaveText("");
 });
 
 // docs/specs/40-icon-picker.md's own acceptance criteria: searching, picking

@@ -56,7 +56,7 @@ Sending the user to photograph them would work, but a person standing in
 front of the shelf already knows what they are — the AI adds nothing.
 
 `POST /api/storages/{storage_id}/inventory-batches` — body
-`{product_id, location_id, quantity, expiration_date?}`:
+`{product_id, location_id, quantity, expiration_date?, container_label?, container_type?}`:
 
 - `quantity` ≥ 1; `product_id` and `location_id` must both belong to the
   URL's storage — a foreign id answers `404`, indistinguishable from a
@@ -65,6 +65,10 @@ front of the shelf already knows what they are — the AI adds nothing.
   `08-expiration-and-classification.md` and stored with
   `expiration_source = 'derived'`; present (or explicitly `null`) →
   stored with `expiration_source = 'user'`.
+- `container_label`/`container_type` optionally give the new batch a
+  container in the same request that creates it, the same upsert rule and
+  field names as the batch PATCH's own container fields
+  (`39-batch-containers.md`).
 - Writes the batch and one `inventory_logs` row with `reason = 'audit'`
   and positive `change_qty`, in one transaction. `'audit'`, not
   `'purchase'`: nothing was bought in this moment — the record is being

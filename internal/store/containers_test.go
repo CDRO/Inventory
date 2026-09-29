@@ -541,3 +541,88 @@ func TestTheSpecsOwnScenario(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// TestCreatingABatchWithAContainerGivesItOneImmediately covers
+// docs/specs/39-batch-containers.md's closing paragraph: the two container
+// fields, same upsert rule as the PATCH, on the endpoint that creates the
+// batch in the first place — a client no longer needs a follow-up PATCH just
+// to name the container the stock arrived in.
+func TestCreatingABatchWithAContainerGivesItOneImmediately(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Canned Tomatoes"})
+	require.NoError(t, err)
+	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Cellar"})
+	require.NoError(t, err)
+
+	before := logCount(t, ctx, product.ID)
+
+	batch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: product.ID, LocationID: location.ID, Quantity: 24, Reason: store.ReasonPurchase,
+		ContainerLabel: ptr("24-pack box"), ContainerType: ptr("box"),
+	})
+	require.NoError(t, err)
+
+	require.NotNil(t, batch.ContainerID)
+	require.NotNil(t, batch.ContainerLabel)
+	assert.Equal(t, "24-pack box", *batch.ContainerLabel,
+		"the label has to come back joined, not as an id the caller must resolve")
+	require.NotNil(t, batch.ContainerType)
+	assert.Equal(t, "box", *batch.ContainerType)
+
+	stored := readContainer(t, ctx, *batch.ContainerID)
+	assert.Equal(t, "24-pack box", stored.Label)
+	assert.Nil(t, stored.DestroyedAt)
+
+	assert.Equal(t, before+1, logCount(t, ctx, product.ID),
+		"the batch write itself gets one log row; the container fields add none")
+}
+
+// TestCreatingABatchWithoutAContainerLeavesOneUnset guards the common case:
+// most batches are created with no container, and the two fields must not
+// become mandatory or attach an empty one by default.
+func TestCreatingABatchWithoutAContainerLeavesOneUnset(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Canned Tomatoes"})
+	require.NoError(t, err)
+	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Cellar"})
+	require.NoError(t, err)
+
+	batch, err := s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: product.ID, LocationID: location.ID, Quantity: 24, Reason: store.ReasonPurchase,
+	})
+	require.NoError(t, err)
+
+	assert.Nil(t, batch.ContainerID)
+	assert.Nil(t, batch.ContainerLabel)
+	assert.Nil(t, batch.ContainerType)
+	assert.Equal(t, 0, containerCount(t, ctx, storageID))
+}
+
+// TestCreatingABatchWithATypeButNoLabelIs422 is TestContainerTypeNeedsAContainer's
+// same rule at creation time: a container_type naming nothing to attach to is
+// refused, and refused before any container row is written.
+func TestCreatingABatchWithATypeButNoLabelIs422(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	storageID := newStorage(t, ctx)
+	product, err := s.CreateProduct(ctx, storageID, store.NewProduct{Name: "Canned Tomatoes"})
+	require.NoError(t, err)
+	location, err := s.CreateLocation(ctx, storageID, store.NewLocation{Name: "Cellar"})
+	require.NoError(t, err)
+
+	_, err = s.CreateBatch(ctx, storageID, store.NewBatch{
+		ProductID: product.ID, LocationID: location.ID, Quantity: 24, Reason: store.ReasonPurchase,
+		ContainerType: ptr("box"),
+	})
+	require.ErrorIs(t, err, store.ErrValidation, "there is nothing to attach the type to")
+
+	assert.Equal(t, 0, containerCount(t, ctx, storageID),
+		"the refused create must not have written a container, and the batch itself must not exist either")
+	batches, err := s.ListProductBatches(ctx, storageID, product.ID)
+	require.NoError(t, err)
+	assert.Empty(t, batches, "the whole create is one transaction: a refused container aborts the batch too")
+}

@@ -60,6 +60,14 @@ type Batch struct {
 }
 
 // NewBatch is the input to CreateBatch.
+//
+// ContainerLabel and ContainerType are the same upsert-on-creation fields
+// docs/specs/39-batch-containers.md's closing paragraph describes for
+// creation-time containers: the same field names and the same upsert rule
+// the PATCH already has, just applied to a batch that does not exist yet
+// instead of one already on the shelf. A nil ContainerLabel with a non-nil
+// ContainerType is the same 422 the PATCH gives — there is nothing to attach
+// the type to.
 type NewBatch struct {
 	ProductID        uuid.UUID
 	LocationID       uuid.UUID
@@ -68,6 +76,8 @@ type NewBatch struct {
 	ExpirationSource ExpirationSource
 	Reason           LogReason
 	CreatedBy        *uuid.UUID
+	ContainerLabel   *string
+	ContainerType    *string
 }
 
 // CreateBatch inserts a batch and its paired inventory_logs row in one
@@ -154,11 +164,36 @@ func createBatch(ctx context.Context, tx pgx.Tx, storageID uuid.UUID, in NewBatc
 		return nil, err
 	}
 
+	// Same upsert rule the PATCH has (docs/specs/39-batch-containers.md,
+	// "Setting and clearing a container on a batch"), just applied to a batch
+	// that has never had a container before: a fresh batch never already has
+	// one, so upsertBatchContainerLabel always creates rather than renames, and
+	// setBatchContainerType always follows it in the same call rather than
+	// landing on an existing container. No inventory_logs row here — same as
+	// every other container write, nothing about quantity changed.
+	if in.ContainerLabel != nil {
+		if err := upsertBatchContainerLabel(ctx, tx, storageID, batch.ID, *in.ContainerLabel); err != nil {
+			return nil, err
+		}
+	}
+	if in.ContainerType != nil {
+		if err := setBatchContainerType(ctx, tx, storageID, batch.ID, in.ContainerType); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := writeLog(ctx, tx, in.ProductID, &batch.ID, in.Quantity, in.Reason, in.CreatedBy); err != nil {
 		return nil, err
 	}
 	if err := bumpForLedgerReason(ctx, tx, storageID, in.CreatedBy, in.Reason, batch.ID); err != nil {
 		return nil, err
+	}
+
+	if in.ContainerLabel != nil || in.ContainerType != nil {
+		// Re-read through the joining path so the created batch carries its
+		// container's label, not just an id the caller would have to resolve —
+		// the same reasoning SplitBatch's own re-read uses.
+		return loadBatch(ctx, tx, storageID, batch.ID)
 	}
 	return batch, nil
 }

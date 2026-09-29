@@ -309,6 +309,51 @@ func TestConfirmTranslatesTheBodyIntoDecisions(t *testing.T) {
 	assert.False(t, d[3].Accept)
 }
 
+// TestConfirmAcceptsAContainerOnAnAcceptedRow covers
+// docs/specs/39-batch-containers.md's closing paragraph on the vision review
+// confirm step: a row can give the batch it creates a container, same field
+// names and upsert rule as the batch PATCH.
+func TestConfirmAcceptsAContainerOnAnAcceptedRow(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	jobID := uuid.New()
+	product, location := uuid.New(), uuid.New()
+
+	rec := f.do(http.MethodPost, f.base()+"/ingest/"+jobID.String()+"/confirm", `{"items":[
+	  {"row_id":"0","decision":"accept","product_id":"`+product.String()+`","quantity":3,"location_id":"`+location.String()+`",
+	   "container_label":"24-pack box","container_type":"box"}
+	]}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	d := f.ingest.decisions
+	require.Len(t, d, 1)
+	require.NotNil(t, d[0].ContainerLabel)
+	assert.Equal(t, "24-pack box", *d[0].ContainerLabel)
+	require.NotNil(t, d[0].ContainerType)
+	assert.Equal(t, "box", *d[0].ContainerType)
+}
+
+// TestConfirmContainerFieldsAreOptional guards the common case: most ingested
+// rows have no container, and the two fields must not become mandatory.
+func TestConfirmContainerFieldsAreOptional(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	jobID := uuid.New()
+	product, location := uuid.New(), uuid.New()
+
+	rec := f.do(http.MethodPost, f.base()+"/ingest/"+jobID.String()+"/confirm", `{"items":[
+	  {"row_id":"0","decision":"accept","product_id":"`+product.String()+`","quantity":3,"location_id":"`+location.String()+`"}
+	]}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	d := f.ingest.decisions
+	require.Len(t, d, 1)
+	assert.Nil(t, d[0].ContainerLabel)
+	assert.Nil(t, d[0].ContainerType)
+}
+
 func TestConfirmValidatesEachRow(t *testing.T) {
 	t.Parallel()
 
@@ -328,6 +373,7 @@ func TestConfirmValidatesEachRow(t *testing.T) {
 		"empty new location":       {`{"items":[{"row_id":"0","decision":"accept","product_id":"` + id + `","quantity":1,"new_location":{"names":[]}}]}`, "items[0].new_location.names"},
 		"bad date":                 {`{"items":[{"row_id":"0","decision":"accept","product_id":"` + id + `","quantity":1,"location_id":"` + id + `","expiration_date":"31/01/2027"}]}`, "items[0].expiration_date"},
 		"missing row id on reject": {`{"items":[{"decision":"reject"}]}`, "items[0].row_id"},
+		"empty container label":    {`{"items":[{"row_id":"0","decision":"accept","product_id":"` + id + `","quantity":1,"location_id":"` + id + `","container_label":""}]}`, "items[0].container_label"},
 	} {
 		rec := f.do(http.MethodPost, path, tc.body)
 		assert.Equal(t, http.StatusUnprocessableEntity, rec.Code, name)

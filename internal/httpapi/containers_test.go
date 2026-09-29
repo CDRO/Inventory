@@ -116,8 +116,9 @@ func TestPatchBatchAcceptsAContainerFieldAlone(t *testing.T) {
 }
 
 // TestPatchBatchNamingNoFieldStillNamesTheContainerFields keeps the refusal
-// honest: the 422 has to tell a client which fields it could have sent, and the
-// two container ones are now among them.
+// honest: the 422's message has to tell a client which fields it could have
+// sent, and the two container ones are now among them — even though the
+// error lands under a single "body" key rather than one copy per field.
 func TestPatchBatchNamingNoFieldStillNamesTheContainerFields(t *testing.T) {
 	t.Parallel()
 
@@ -126,8 +127,9 @@ func TestPatchBatchNamingNoFieldStillNamesTheContainerFields(t *testing.T) {
 
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 	fields := errorFields(t, rec)
-	assert.NotEmpty(t, fields["container_label"])
-	assert.NotEmpty(t, fields["container_type"])
+	require.NotEmpty(t, fields["body"])
+	assert.Contains(t, fields["body"][0], "container_label")
+	assert.Contains(t, fields["body"][0], "container_type")
 }
 
 // TestPatchBatchTypeWithoutAContainerIs422 is the store's decision, not the

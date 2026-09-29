@@ -1,5 +1,5 @@
 {
-  "cache_version": "v35",
+  "cache_version": "v36",
   "digests": {
     "/": "c7ecaf956a6eedf333caaf56a24a203bd228855e0161781649c20466a86a6f88",
     "/categories.html": "1ace1541fdc390ce3231aa6affb84e3d5b262a85ca42935ea17dc6f811217d44",
@@ -31,7 +31,7 @@
     "/js/review.js": "ba021b7e345db827d0f8cf53e911a6cc28b6ce7f77dcaa46ba58b7f39a15c5a6",
     "/js/session.js": "50c5263fadc12e480938d06c01bc4d14f17e0c39b400e43f41815f313a8878d9",
     "/js/storage-switcher.js": "d961f13db131470179074b4a46269b0093fcdab5689928a3632e1a83412925d2",
-    "/js/tree-modal.js": "6ecbbf8030781739dfb769964c06373d820fb202a245fdcc9690dab5428b91d1",
+    "/js/tree-modal.js": "de0fd86df6a06b9bcd96c2f6f43407d3634ace19c875a3962112e9279a0e8b19",
     "/js/tree.js": "ecb3098b2b0bb8f27aeb25b820e65f99dd5c61db3c410624bb7a015d8620b54f",
     "/locations.html": "3af1e5eb19ca7655fa6dd1b02715e750ca674b2e7e6e77e6df932e206b6a666b",
     "/manifest.json": "906b08dadcbeed57072d9d43cb55fae9c62ffe802228f3b6fc05d78d2fa37d88",
