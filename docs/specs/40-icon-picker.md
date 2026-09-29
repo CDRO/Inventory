@@ -153,7 +153,10 @@ edit form (`16-product-maintenance.md`, "The product edit surface"):
 - **No request this spec's endpoints make ever reaches a host outside
   this deployment** — verify by running the picker with network egress
   blocked (or a proxy that fails every external request) and confirming
-  search, pick, and alias-recording all still work.
+  search, pick, and alias-recording all still work. Enforced
+  continuously by `internal/iconlib/egress_test.go` — a source-level
+  property test, because the hypothetical call is made by the server,
+  so blocking a browser's network would not exercise it.
 - Searching a term with an existing local alias returns that icon first,
   ahead of any direct `icons.name` hits, even if a substring/trigram
   match on the name alone would rank something else first.
