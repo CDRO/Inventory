@@ -281,8 +281,9 @@ func (h *ProductHandler) Create(w http.ResponseWriter, r *http.Request) {
 			fields["icon_name"] = append(fields["icon_name"], "Send null, not an empty string, for no icon.")
 		case utf8.RuneCountInString(trimmed) > maxIconNameLength:
 			fields["icon_name"] = append(fields["icon_name"], "Keep the icon name under 100 characters.")
+		default:
+			iconName = &trimmed
 		}
-		iconName = &trimmed
 	}
 
 	if len(fields) > 0 {
@@ -843,14 +844,16 @@ func (h *ProductHandler) Update(w http.ResponseWriter, r *http.Request) {
 			fields["icon_name"] = append(fields["icon_name"], "Must be a string or null.")
 		} else if raw != nil {
 			name := strings.TrimSpace(*raw)
-			if name == "" {
+			switch {
+			case name == "":
 				// Cleared by null, not by an empty string: two spellings of
 				// "no icon" would be two states the client has to reconcile.
 				fields["icon_name"] = append(fields["icon_name"], "Send null to clear the icon.")
-			} else if utf8.RuneCountInString(name) > maxIconNameLength {
+			case utf8.RuneCountInString(name) > maxIconNameLength:
 				fields["icon_name"] = append(fields["icon_name"], "Keep the icon name under 100 characters.")
+			default:
+				patch.IconName = &name
 			}
-			patch.IconName = &name
 		}
 	}
 
