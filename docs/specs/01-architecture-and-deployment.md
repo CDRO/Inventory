@@ -132,12 +132,18 @@ Three things the sequence alone doesn't make obvious:
   `pgdata` volume carried onto it, so `psql -U e2e` answers `role "e2e" does
   not exist`. The flag is not about per-worktree isolation; it deliberately
   makes the name identical everywhere, which is why **two checkouts may never
-  run the suite at the same time.** Traefik publishes host 8443 with no
-  variable, so a second stack under a different name is refused the port, but
-  a second one under this same name is not refused anything: it recreates the
-  first's containers and takes the run over silently. Inside a sequential wave
-  that cannot happen; with `"sequential": false` the pre-flight `docker ps`
-  at the top of the compose header is the only guard.
+  run the suite at the same time.** Nothing Docker does enforces that on its
+  own: a second `up` under the same shared project name is not refused
+  anything, it recreates the first's containers and takes the run over
+  silently. Inside a sequential wave that cannot happen; with
+  `"sequential": false` the pre-flight `docker ps -a` at the top of the
+  compose header is the only guard. (Traefik used to publish a fixed host
+  port here, which incidentally refused a *second* project name the same
+  port — but it also let an ordinary dev stack in the very worktree running
+  the gate silently starve its own E2E run of that port, with no clear
+  failure message; #358 removed the `ports:` block entirely rather than try
+  to fix both at once, since the port was never load-bearing for the
+  same-name collision this rule actually cares about.)
 - **The `db` service also runs with `fsync=off`, `synchronous_commit=off` and
   `full_page_writes=off`** (docs/plans/2026-09-harness-optimization.md,
   decision D5 — that document is on branch `harness/optimization-plan`, PR
@@ -290,7 +296,11 @@ and pins both its dependencies to the exact Playwright version
 to keeping in lockstep with the pulled image tag, so a real version bump
 changes the file and invalidates the cache — which is what the lockfile
 would have keyed on if one existed here. The `e2e` service's `npm install`
-is then a no-op on a cache hit. The backup/restore round trip (issue #133)
+is then a no-op on a cache hit. A `restore-keys:` fallback on the same
+prefix means a `package.json` change that does not hit the exact key still
+restores the nearest previous cache instead of missing it entirely, so
+`npm install` only has to reconcile the difference rather than reinstall
+from scratch. The backup/restore round trip (issue #133)
 used to be a second job in `e2e.yml`, running on every push to `main`
 alongside the suite; H8 moved it into its own workflow,
 `.github/workflows/restore.yml`, triggered on a push to `main` that touches
@@ -829,6 +839,8 @@ services:
       - ./docker-compose.yml:/src/docker-compose.yml
       - ./docker-compose.nas.yml:/src/docker-compose.nas.yml
       - ./docker-compose.e2e.yml:/src/docker-compose.e2e.yml
+      - ./docker-compose.override.yml:/src/docker-compose.override.yml
+      - ./docker-compose.ci.yml:/src/docker-compose.ci.yml
       - ./.gitignore:/src/.gitignore
       - ./.dockerignore:/src/.dockerignore
       - ./.gitattributes:/src/.gitattributes
@@ -858,7 +870,10 @@ production runs Postgres on its defaults. A third file, `docker-compose.ci.yml`
 (override-style, `db` service only), adds a `tmpfs` data directory for the
 same flags on a GitHub-hosted runner, whose whole VM is destroyed at the end
 of the job anyway; it is not auto-loaded and is picked up only where a
-workflow sets `COMPOSE_FILE` to include it.
+workflow sets `COMPOSE_FILE` to include it — `.github/workflows/test.yml`
+does this (H8), so CI's `go test ./...` runs against the tmpfs data
+directory, not the override's persistent one; `.github/workflows/e2e.yml`
+does not set it and is unaffected.
 
 ## Deployment model
 

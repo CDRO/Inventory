@@ -472,7 +472,12 @@ seconds instead of at the next glance across nine open windows. The hook is
 built to never block or fail the session it is attached to: every path
 through it, including a missing toast backend or a thrown exception, falls
 through to `exit 0` within about two seconds (`scripts/tests/hooks.test.ps1`
-covers this). `.claude/settings.json`'s `permissions.allow` list is the
+covers this) — issue #330 measured an earlier version's margin on that
+budget as thin (as little as ~0.5s under load, because the toast dispatch
+spawned a whole child PowerShell process via `Start-Job`), which the hook
+now avoids by dispatching the toast on an in-process runspace instead, so a
+loaded machine no longer risks Claude Code killing the hook before the toast
+fires. `.claude/settings.json`'s `permissions.allow` list is the
 other half of the same concern, and in wave 6 it becomes load-bearing rather
 than a convenience: headless sessions there run with `--permission-mode
 dontAsk --permission-prompts none` (H19, decision D10 of the harness

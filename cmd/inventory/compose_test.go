@@ -249,6 +249,25 @@ func TestE2EAppMountsTheUploadsTheRoundTripDestroys(t *testing.T) {
 		"imagecache is not in a backup archive, so the E2E stack has no reason to hold one")
 }
 
+// TestE2ETraefikPublishesNoHostPort is issue #358: a fixed host port here
+// used to collide not only with another checkout's E2E run but with an
+// ordinary dev stack in the very worktree running the gate, silently and
+// with no clear failure message. The `e2e` service already reaches traefik
+// by compose service name over the project's own network
+// (BASE_URL=https://traefik in this same file), and CI's healthz waits do
+// the same from a throwaway container on that network — nothing needs a
+// host port at all. A `ports:` line reintroduced here would leave
+// `go test ./...` green and only fail once it actually collides with
+// something else on the machine, which is exactly the failure mode #358
+// exists to prevent.
+func TestE2ETraefikPublishesNoHostPort(t *testing.T) {
+	t.Parallel()
+
+	block := composeService(t, "docker-compose.e2e.yml", "traefik")
+	assert.NotContains(t, block, "ports:",
+		"traefik must not publish a host port (#358) - the e2e service and CI's healthz waits both reach it over the compose network by service name instead")
+}
+
 // TestE2EComposeFilePinsItsProjectName — the E2E stack is one Compose project
 // per machine, `inventory-e2e` (#190, and that file's own `name:` comment).
 // Locally every documented command passes `-p inventory-e2e`, because a
@@ -363,9 +382,37 @@ func TestCIComposeAddsTmpfsToDatabaseOnly(t *testing.T) {
 	assert.Contains(t, block, "type: tmpfs",
 		"a CI runner's whole VM is destroyed at the end of the job, so the data directory belongs in memory, not on the runner's disk")
 
+	// Enumerated rather than a single NotContains("\n  app:"): that caught an
+	// `app:` service specifically but let a `traefik:`, `setup:` or `backup:`
+	// block through unnoticed (#327/#333 item 4). Not hypothetical: wave 2's
+	// H8 already wired this file into .github/workflows/test.yml's live
+	// COMPOSE_FILE, so it is no longer an inert file nobody edits under
+	// pressure. Same text-scan approach as TestE2EComposeFilePinsItsProjectName:
+	// a two-space-indented `key:` line is a top-level service, a
+	// more-indented line is that service's own content, and anything at
+	// column 0 (or blank/a comment) ends or is outside the services map.
 	normalized := strings.ReplaceAll(repoFile(t, "docker-compose.ci.yml"), "\r\n", "\n")
-	assert.NotContains(t, normalized, "\n  app:",
-		"docker-compose.ci.yml is scoped to db only - an app service here would belong to a different package's file")
+	var services []string
+	inServices := false
+	for _, line := range strings.Split(normalized, "\n") {
+		switch {
+		case line == "services:":
+			inServices = true
+		case !inServices, line == "", strings.HasPrefix(line, "#"), strings.HasPrefix(line, "   "):
+			// not yet in the map, a blank/comment line, or a service's own
+			// nested content (3+ leading spaces) - none of these are a
+			// top-level service key.
+		case !strings.HasPrefix(line, "  "):
+			// dedented back to column 0: the services map has ended.
+			inServices = false
+		default:
+			name, _, found := strings.Cut(strings.TrimPrefix(line, "  "), ":")
+			require.True(t, found, "docker-compose.ci.yml: %q under services: is not a %q key", line, "key:")
+			services = append(services, name)
+		}
+	}
+	assert.Equal(t, []string{"db"}, services,
+		"docker-compose.ci.yml is scoped to db only - any other service here would belong to a different package's file")
 }
 
 // TestBackupArchivesAreNotCommittable — an archive holds the whole database

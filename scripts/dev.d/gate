@@ -44,8 +44,16 @@
 # A base other than `main` needs no check at all (package PRs get no
 # automatic run, docs/specs/01-architecture-and-deployment.md).
 #
-# Exit codes: 2 usage; 0 MERGE; 3 WAIT or CHECKS pending/missing;
-# 4 BLOCK or CHECKS failed.
+# A marker's sha= must be exactly 40 lowercase hex characters (a full git
+# SHA, same shape `gh pr view --json headRefOid` returns). A malformed or
+# truncated one - a reviewer prompt regressed, hand-edited a marker, or was
+# interrupted mid-comment - is never silently treated as a stale marker: it
+# would otherwise never equal any real head sha, so the affected reviewer
+# would show as permanently stale/WAIT with no indication why. That is
+# fixed by erroring loudly (exit 2) instead.
+#
+# Exit codes: 2 usage, initial lookup failure, or a malformed verdict marker;
+# 0 MERGE; 3 WAIT or CHECKS pending/missing; 4 BLOCK or CHECKS failed.
 set -u
 
 help() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
@@ -69,9 +77,13 @@ comments=$(gh pr view "$pr" --json comments -q '.comments[].body' 2>/dev/null)
 
 # Each marker line becomes "VERDICT ROUND SHA REVIEWER"; anything that is not
 # a marker line (the prose above it, an unrelated comment) is dropped here so
-# nothing later has to distinguish comments from each other.
+# nothing later has to distinguish comments from each other. The guard regex
+# recognizes anything marker-*shaped* (round=, sha=, reviewer= all present) so
+# a structurally-valid marker whose sha is the wrong shape still reaches the
+# length/charset check below instead of being silently dropped as if it were
+# ordinary prose.
 markers=$(printf '%s\n' "$comments" | awk '
-  /^<!-- verdict: (APPROVE|BLOCK) round=[0-9]+ sha=[0-9a-fA-F]+ reviewer=(go|tests|docs) -->/ {
+  /^<!-- verdict: (APPROVE|BLOCK) round=[0-9]+ sha=[^ ]+ reviewer=(go|tests|docs) -->/ {
     line = $0
     sub(/^<!-- verdict: /, "", line)
     split(line, f, " ")
@@ -79,8 +91,18 @@ markers=$(printf '%s\n' "$comments" | awk '
     round = f[2]; sub(/^round=/, "", round)
     sha = f[3]; sub(/^sha=/, "", sha)
     reviewer = f[4]; sub(/^reviewer=/, "", reviewer)
+    if (sha !~ /^[0-9a-f]{40}$/) {
+      print "gate: malformed verdict marker - sha is not 40 lowercase hex characters: " $0 > "/dev/stderr"
+      bad = 1
+      exit
+    }
     print v, round, sha, reviewer
-  }')
+  }
+  END { if (bad) exit 1 }')
+if [ $? -ne 0 ]; then
+  echo "gate: aborting - a reviewer's verdict marker is malformed (see stderr above)" >&2
+  exit 2
+fi
 
 # latest[reviewer] is that reviewer's verdict at the current round for the
 # head sha - the only thing that can make a reviewer count. last_any[reviewer]

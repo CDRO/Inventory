@@ -22,35 +22,45 @@ If an open PR exists, get its review record:
 
 ```bash
 gh pr view <PR> --json number,title,body,headRefName,mergeable,statusCheckRollup
-gh pr view <PR> --comments
+scripts/dev gate <PR>
 ```
+
+`scripts/dev gate` (`scripts/dev.d/gate`, H5) is the only source for verdicts:
+it reads each reviewer's `<!-- verdict: ... -->` marker back from GitHub,
+scoped to the PR's *current* head SHA, so a stale `APPROVE` from before the
+last push can never count. Use `gh pr view <PR> --comments` only to read a
+finding's prose when you need the detail — never to derive a verdict from it.
 
 Then read `.claude/worklog.md` if it exists (mid-task scratch: the file being
 edited, the next intended action). It is gitignored and may be absent or
 stale — treat it as a hint, never as truth.
 
-## Step 2 — Parse the review verdicts
+## Step 2 — Read the verdict
 
-Reviewer comments start with a fixed header:
+```bash
+scripts/dev gate <PR>
+```
 
-- `## Go Review — VERDICT: APPROVE|BLOCK`
-- `## Test Review — VERDICT: APPROVE|BLOCK`
-- `## Docs Review — VERDICT: APPROVE|BLOCK`
+It prints one line per reviewer — `go: APPROVE r2 @abc1234`, `tests: stale
+APPROVE r1 @def5678 (head is @abc1234)`, or `docs: missing` — followed by
+exactly one of `MERGE`, `WAIT <reviewers>` or `BLOCK <reviewers>` (exit 0, 3,
+4 respectively). A `stale` or `missing` reviewer has **not** approved the
+current head; treat it the same as `WAIT`, never as an approval. On a PR
+against `main`, `MERGE` also depends on the `test` check (see the command's
+own `--help` for the docs-only fallback).
 
-For the **current round only** (the highest `**Round:**` value present), record
-each reviewer's verdict and its blocking findings. Earlier rounds are history;
-do not re-fix findings that a later round dropped.
-
-A reviewer with no comment in the current round has **not reviewed yet** —
-that is not an approval.
+For the **current round** (the `round=<n>` the gate's own output uses), read
+each `BLOCK` reviewer's comment for its findings via `gh pr view <PR>
+--comments`. Earlier rounds are history; do not re-fix findings that a later
+round dropped.
 
 ## Step 3 — Route
 
 | State | Action |
 |---|---|
-| Open PR, any `BLOCK` in current round | Fix the blocking findings, then re-run the review round via the `ship` skill |
-| Open PR, all three `APPROVE`, tests green | Merge per the `ship` skill's gate |
-| Open PR, fewer than three verdicts this round | Spawn only the missing reviewers |
+| Open PR, `scripts/dev gate` prints `BLOCK <reviewers>` | Fix the blocking findings, then re-run the review round via the `ship` skill |
+| Open PR, `scripts/dev gate` prints `MERGE` | Merge per the `ship` skill's gate |
+| Open PR, `scripts/dev gate` prints `WAIT <reviewers>` | Spawn only the missing or stale reviewers |
 | Open PR, uncommitted local changes | Finish the change, run tests (`scripts/dev test`), push, then review |
 | No open PR, issues remain | Pick the lowest-numbered unblocked issue; start it via `ship` |
 | No open PR, no issues | Say so and ask what to do — do not invent work |

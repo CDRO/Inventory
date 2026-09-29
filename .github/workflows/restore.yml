@@ -118,16 +118,23 @@ jobs:
       # reason: `up -d` returns when containers started, not when the app can
       # serve. Here it doubles as the "before" half of the health assertion —
       # the stack that gets backed up is a stack that was demonstrably working.
+      # Runs inside a throwaway `e2e`-image container on the compose network
+      # rather than against the runner's own localhost, for the same reason
+      # e2e.yml's copy of this step does (#358: no host port to curl anymore).
       - name: Wait for the app to answer through Traefik
         run: |
-          for i in $(seq 1 30); do
-            code=$(curl -sk -o /dev/null -w '%{http_code}' https://localhost:8443/healthz || true)
-            [ "$code" = "200" ] && exit 0
-            sleep 2
-          done
-          echo "app never answered a 200 from /healthz" >&2
-          docker compose -f docker-compose.e2e.yml logs app
-          exit 1
+          docker compose -f docker-compose.e2e.yml run --rm --no-deps --entrypoint sh e2e -c '
+            for i in $(seq 1 30); do
+              code=$(curl -sk -o /dev/null -w "%{http_code}" https://traefik/healthz || true)
+              [ "$code" = "200" ] && exit 0
+              sleep 2
+            done
+            exit 1
+          ' || {
+            echo "app never answered a 200 from /healthz" >&2
+            docker compose -f docker-compose.e2e.yml logs app
+            exit 1
+          }
 
       # ON_ERROR_STOP because a half-applied fixture would make the snapshot
       # below a snapshot of the wrong thing — and it would still round-trip
@@ -270,16 +277,23 @@ jobs:
       - name: Bring the restored stack up
         run: docker compose -f docker-compose.e2e.yml up -d
 
+      # Same vehicle as the earlier readiness wait above (#358): a throwaway
+      # `e2e`-image container on the compose network, not the runner's
+      # localhost.
       - name: The restored stack answers /healthz
         run: |
-          for i in $(seq 1 30); do
-            code=$(curl -sk -o /dev/null -w '%{http_code}' https://localhost:8443/healthz || true)
-            [ "$code" = "200" ] && exit 0
-            sleep 2
-          done
-          echo "the restored app never answered a 200 from /healthz" >&2
-          docker compose -f docker-compose.e2e.yml logs app
-          exit 1
+          docker compose -f docker-compose.e2e.yml run --rm --no-deps --entrypoint sh e2e -c '
+            for i in $(seq 1 30); do
+              code=$(curl -sk -o /dev/null -w "%{http_code}" https://traefik/healthz || true)
+              [ "$code" = "200" ] && exit 0
+              sleep 2
+            done
+            exit 1
+          ' || {
+            echo "the restored app never answered a 200 from /healthz" >&2
+            docker compose -f docker-compose.e2e.yml logs app
+            exit 1
+          }
 
       # The assertion the 200 above cannot make. A stack that serves requests
       # out of an empty database is a stack that answers /healthz perfectly.

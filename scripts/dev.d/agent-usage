@@ -57,6 +57,11 @@
 # none, the sibling `<transcript>.meta.json`'s `agentType` is the fallback.
 # Anything outside `subagents/` is `main`.
 #
+# Records with `"model":"<synthetic>"` (Claude Code's own internal placeholder
+# messages, e.g. compaction markers) are legitimate, zero-cost entries - never
+# a parsing bug - but are dropped from the output entirely rather than shown
+# as their own noisy all-zero-token row with a non-zero call count.
+#
 # POSIX sh + awk, no jq (none on this machine). This is a host command
 # (Git Bash on Windows, or a shell on Linux/macOS): it reads `~/.claude` and
 # calls `gh`, neither of which exists inside the `app` dev container, so
@@ -128,6 +133,11 @@ fi
 [ -d "$projects_dir" ] || { echo "agent-usage: no transcripts at $projects_dir" >&2; exit 0; }
 
 files=$(
+  # Case-insensitive by design, not an oversight: this machine has both an
+  # uppercase-slug directory per worktree the harness/orchestrator creates and
+  # one long-lived, lowercase-slug directory for interactive sessions in the
+  # original checkout - a case-sensitive match would silently drop the latter,
+  # undercounting real usage and making `--pr` blind to interactive sessions.
   for d in "$projects_dir"/*/; do
     [ -d "$d" ] || continue
     name_lower=$(basename "$d" | tr '[:upper:]' '[:lower:]')
@@ -193,11 +203,20 @@ function extract_str(s, key,   at, rest, q) {
 # Case-insensitive suffix test, not a substring-anywhere one: a cwd
 # containing a branch's suffix in its middle (two worktrees that happen to
 # share a trailing word) must not match, only a worktree whose own directory
-# name actually ends in it.
-function ends_with(s, suf,   ls, lsuf) {
+# name actually ends in it. Anchored, too: the character immediately before
+# the match must be a path separator, a hyphen (worktree directory names join
+# the repo/prefix to the branch suffix with one), or the match must start the
+# whole string - otherwise a suffix like "test" would match any cwd whose
+# final *word* merely happens to end in those same letters (".../unittest"),
+# not just a cwd that actually ends in that word.
+function ends_with(s, suf,   ls, lsuf, start, before) {
   ls = tolower(s); lsuf = tolower(suf)
   if (length(lsuf) == 0 || length(lsuf) > length(ls)) return 0
-  return substr(ls, length(ls) - length(lsuf) + 1) == lsuf
+  start = length(ls) - length(lsuf) + 1
+  if (substr(ls, start) != lsuf) return 0
+  if (start == 1) return 1
+  before = substr(ls, start - 1, 1)
+  return before == "/" || before == "-"
 }
 BEGIN { ulen = length("\"usage\":{") }
 index($0, "\"type\":\"assistant\"") == 0 { next }
@@ -252,6 +271,7 @@ index($0, "\"type\":\"assistant\"") == 0 { next }
 
   model = extract_str(line, "\"model\":\"")
   if (model == "") model = "unknown"
+  if (model == "<synthetic>") next   # placeholder record, not a real call
 
   role = extract_str(line, "\"attributionAgent\":\"")
   if (role == "") role = rolefallback
