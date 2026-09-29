@@ -241,6 +241,14 @@ STUB
   cat > "$SC/bin/git" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$GIT_STUB_CALLS"
+first=$1
+if [ "$first" = "fetch" ] || { [ "$first" = "-C" ] && [ "$3" = "fetch" ]; }; then
+  if [ -n "${GIT_STUB_FETCH_FAIL:-}" ]; then
+    echo "fatal: stub-simulated fetch failure" >&2
+    exit 1
+  fi
+  exit 0
+fi
 case "$*" in
   *"rev-parse --verify --quiet refs/heads/"*)
     # GIT_STUB_EXISTING_BRANCHES names the branches (space-separated) this
@@ -496,6 +504,29 @@ assert_contains "$out" "git worktree add failed" "the failure names what actuall
 assert_contains "$out" "fatal: stub-simulated worktree add failure" "git's own real error text reaches the log - no longer swallowed by >/dev/null 2>&1 (cost hours of manual reproduction on the real NAS run this fixes)"
 callcount=$(claude_call_count)
 assert "$([ "$callcount" = "0" ] && echo 0 || echo 1)" "no session starts once the worktree could not be created"
+
+echo "== scenario: a fetch failure stops the loop with git's real error, not silently swallowed =="
+setup_scenario fetchfail
+# ensure_worktree's own `git fetch origin` used to run fully redirected
+# (>/dev/null 2>&1) and was never checked for a nonzero exit at all - a
+# fetch failure (a flaky network, an expired credential) fell straight
+# through into whatever `worktree add` did next instead of stopping the loop
+# with a clear reason. This is a dedicated GIT_STUB_FETCH_FAIL failure mode,
+# separate from GIT_STUB_WORKTREE_FAIL, so a future regression that reverts
+# only the fetch check (leaving the worktree-add check intact) still fails
+# a test.
+export GIT_STUB_FETCH_FAIL=1
+rc=$(run_loop --issue 706)
+unset GIT_STUB_FETCH_FAIL
+out=$(cat "$SCPATH/state/output.log")
+assert "$([ "$rc" -ne 0 ] && echo 0 || echo 1)" "a fetch failure stops the loop with a nonzero exit"
+assert_contains "$out" "FATAL" "the failure is reported as fatal"
+assert_contains "$out" "git fetch origin failed" "the failure names what actually failed"
+assert_contains "$out" "fatal: stub-simulated fetch failure" "git's own real error text reaches the log, not swallowed by >/dev/null 2>&1"
+gitcalls=$(cat "$SCPATH/state/git-calls.log")
+assert_not_contains "$gitcalls" "worktree add" "worktree add is never attempted once the fetch it depends on failed"
+callcount=$(claude_call_count)
+assert "$([ "$callcount" = "0" ] && echo 0 || echo 1)" "no session starts once fetch failed"
 
 echo "== scenario: a leftover branch from a failed attempt is reused, not fatal =="
 setup_scenario branchreuse
