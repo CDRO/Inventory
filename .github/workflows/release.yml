@@ -56,7 +56,18 @@ name: release
 
 on:
   push:
-    tags: ["v*"]
+    # `v[0-9]*`, not `v*`. Until the runner could fetch at all (#409) a junk tag
+    # was harmless — it refused at `phase=fetch` having touched nothing, which is
+    # what made the throwaway `v0.0.0-gate-*` tags of #406 safe. That is no
+    # longer true: a tag matching this filter now builds, backs up, migrates and
+    # swaps containers on the NAS. `v*` would admit `v-test`, `vendor-pin` and
+    # `version-bump`; this admits every vYYYY.MM.DD[.n] and none of those.
+    #
+    # GitHub's filter patterns are globs, not regular expressions, so this
+    # cannot express the release shape exactly — `v2` and `v1.4.0` still match.
+    # The `gate` job rejects those as its first action, before it resolves
+    # anything.
+    tags: ["v[0-9]*"]
 
 # `actions: read` is what the gate's run lookup needs
 # (GET /repos/{owner}/{repo}/actions/workflows/{file}/runs); `contents: read` is
@@ -105,6 +116,35 @@ jobs:
         run: |
           set -eu
           TAG="$GITHUB_REF_NAME"
+
+          # The shape check the `tags:` glob cannot express, and the first thing
+          # this job does: nothing is resolved, looked up or deployed until the
+          # name is a release. `v[0-9]*` still admits `v2` and `v1.4.0`, and a
+          # tag pushed by hand or through the web UI never passed
+          # `scripts/dev release`'s own check. Failing here costs one billed
+          # minute; failing later would have already touched the NAS.
+          # Deliberately the SAME construction as scripts/dev.d/release's own
+          # check, including the separate all-digits test on the counter: one
+          # release shape must not mean two different things depending on which
+          # end enforced it. A single `.[0-9]*` glob here would be LOOSER than
+          # the script and would admit `v2026.09.29.1rc`.
+          ok=1
+          case "$TAG" in
+            v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]) ;;
+            v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].*)
+              n=${TAG#v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].}
+              case "$n" in
+                ''|*[!0-9]*) ok=0 ;;
+              esac ;;
+            *) ok=0 ;;
+          esac
+          if [ "$ok" -eq 0 ]; then
+            echo "::error::$TAG is not a release tag. The release unit is an annotated" \
+                 "vYYYY.MM.DD[.n] tag (docs/specs/38-release-pipeline-and-nas-runner.md)." \
+                 "Nothing was deployed. Delete the tag: git push origin :refs/tags/$TAG"
+            exit 1
+          fi
+
           ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG")
           type=$(printf '%s' "$ref" | jq -r '.object.type')
           obj=$(printf '%s' "$ref" | jq -r '.object.sha')

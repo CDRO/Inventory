@@ -107,6 +107,20 @@ smoke_test() {
     bad "$CLONE holds no docker-compose.yml + docker-compose.nas.yml pair. Is INVENTORY_CLONE pointing at the clone?"
   fi
 
+  # 6. The clone's remote is reachable FROM IN HERE. The check that would have
+  #    caught #409 at start-up instead of at the first release: the container
+  #    shares the clone's .git with the host, and therefore its remote URL, but
+  #    not $HOME, so an SSH remote the NAS fetches from happily fails in here
+  #    with "Host key verification failed". `ls-remote` asks exactly the
+  #    question `update --ref` will ask, without fetching anything.
+  if [ -d "$CLONE/.git" ]; then
+    if git -C "$CLONE" ls-remote --exit-code origin HEAD >/dev/null 2>&1; then
+      ok "git ls-remote origin answers from inside this container"
+    else
+      bad "git cannot reach origin ($(git -C "$CLONE" remote get-url origin 2>/dev/null || echo 'no origin')) from inside this container, though it may well work on the NAS itself. Every deploy would refuse at phase=fetch. See deploy/synology/runner/README.md, 'The git transport'."
+    fi
+  fi
+
   [ "$smoke_failed" -eq 0 ] || die "start-up smoke test failed (see the FAIL lines above). The runner has taken no work and registered nothing."
   say "smoke test passed"
 }
@@ -193,6 +207,32 @@ mkdir -p "$STATE_DIR" "$WORK_DIR"
 # (where the clone is root-owned and this line is a no-op). Scoped to the one
 # path this container is allowed to care about, never "*".
 git config --global --add safe.directory "$CLONE" 2>/dev/null || true
+
+# Also not hygiene, and for the same shape of reason: this container shares the
+# clone's .git with the host, so it shares the remote URL — but it does NOT
+# share $HOME, which is where known_hosts and keys live. An SSH remote that the
+# NAS itself fetches from happily therefore fails in here with "Host key
+# verification failed", and every release deploy dies at phase=fetch (#409).
+#
+# Rewriting the transport container-side fixes that without touching anything
+# the host shares: the NAS's own `git pull` keeps using SSH, and the fix
+# survives a re-clone, which a `git remote set-url` on the clone does not.
+#
+# CONDITIONAL, and the condition is the point: an anonymous HTTPS fetch only
+# works while the repository is PUBLIC. Once it is private the container needs
+# the read-only deploy key instead, and this rewrite would then send every fetch
+# down a transport that cannot authenticate. So it applies only while no SSH
+# private key is mounted — mount one (the going-private step) and the rewrite
+# disables itself.
+if ls "$HOME"/.ssh/id_* >/dev/null 2>&1; then
+  echo "runner: an SSH key is present - leaving the git transport alone."
+else
+  # --add, not a plain set: both spellings of an SSH GitHub remote have to be
+  # rewritten, and `git config` without --add REPLACES the previous value, so
+  # setting the same key twice would silently keep only the second.
+  git config --global --add url."https://github.com/".insteadOf "git@github.com:" 2>/dev/null || true
+  git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/" 2>/dev/null || true
+fi
 
 smoke_test
 

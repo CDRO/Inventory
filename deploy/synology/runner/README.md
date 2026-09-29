@@ -216,6 +216,41 @@ behind is what produces the confusing case — a container that starts, finds a
 registration GitHub no longer knows, and fails to connect. Delete the directory
 and register again with a fresh token.
 
+## The git transport
+
+The container shares the clone's `.git` with the NAS — the same bind mount that
+puts the clone at its identical path — and therefore shares its **remote URL**.
+What it does *not* share is `$HOME`, which is where `known_hosts` and SSH keys
+live. So an SSH remote that the NAS itself fetches from without complaint fails
+in here with `Host key verification failed`, and every release deploy refuses at
+`phase=fetch`.
+
+That cost one real release to diagnose (#409), because the obvious test —
+`git fetch` typed on the NAS — passes and proves nothing. **Test it the way the
+deploy will do it:**
+
+```sh
+docker exec inventory-runner git -C /volume1/docker/inventory fetch origin --tags
+```
+
+The entrypoint therefore rewrites SSH GitHub URLs to HTTPS in the **container's
+own** global git config, which changes nothing the host shares — the NAS keeps
+using SSH for its own `git pull` — and survives a re-clone, which a
+`git remote set-url` on the clone does not.
+
+The rewrite is **conditional, and the condition is the point**: an anonymous
+HTTPS fetch only works while this repository is **public**. It is applied only
+when no SSH private key is present at `$HOME/.ssh/id_*` in the container. When
+the repository goes private and the read-only deploy key is mounted there, the
+rewrite disables itself and SSH becomes the transport again — which is what you
+want, because anonymous HTTPS would by then fail to authenticate.
+
+Mounting that key is the going-private step; it also needs GitHub's host key in
+the container, either baked into the image with `ssh-keyscan` or mounted
+alongside. The start-up smoke test's `git ls-remote` check covers both cases:
+whatever the transport is, it fails the container at start-up rather than at the
+first release.
+
 ## When something is wrong
 
 | The log says | What it means |
@@ -225,6 +260,7 @@ and register again with a fresh token.
 | `smoke: FAIL the clone is not mounted at …` | `INVENTORY_CLONE` does not match the clone's real path. Compose **creates** a missing bind-mount source as an empty directory rather than failing, which is exactly the silent mistake this check exists to catch. |
 | `smoke: FAIL … is not a git checkout` | The path is a directory but not a clone. `update --ref` fetches through the clone's own remote, so it needs the real thing. |
 | `smoke: FAIL docker-compose cannot parse …` | The app stack's compose files do not parse with the pinned Compose. A deploy would have failed in the middle; fix the files (or the pin) first. |
+| `smoke: FAIL git cannot reach origin … from inside this container` | The clone's remote is a transport this container has no credentials for — almost always an SSH remote with no key and no `known_hosts` in here. Every deploy would refuse at `phase=fetch`. **It will still work when you test it on the NAS itself**, which is what made this expensive to diagnose the first time (#409). See "The git transport" above. |
 | `FATAL: this runner is not registered yet and RUNNER_TOKEN is empty` | First start without a token, or `runner_state` was deleted. Mint a token and start once with it. |
 | GitHub shows the runner `offline` | The container is stopped, or the NAS is off the network. `logs -f runner` says which. |
 | GitHub shows **two** runners, one offline | A start with a different `RUNNER_NAME` registered a second one. Delete the offline one by id (above); the name is meant to stay `nas-inventory`. |
