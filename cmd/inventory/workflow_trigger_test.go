@@ -118,6 +118,49 @@ func TestE2EImageVerificationGuardsAgainstMultipleDependencies(t *testing.T) {
 		"the failure message must name what changed, not just fail closed silently")
 }
 
+// TestE2EHealthzWaitUsesTheComposeNetwork is issue #358: docker-compose.e2e.yml's
+// traefik no longer publishes a host port, so this step must reach it by
+// compose service name from a container on the project's own network,
+// never the runner's own localhost. A regression back to
+// `https://localhost:8443` would leave `go test ./...` green and only fail
+// once the step actually runs against a traefik with nothing bound to
+// publish — a CI failure, not a test failure, and exactly the gap #358's
+// own fix closed.
+func TestE2EHealthzWaitUsesTheComposeNetwork(t *testing.T) {
+	t.Parallel()
+
+	block := workflowStep(t, ".github/workflows/e2e.yml", "Wait for the app to answer through Traefik")
+
+	assert.Contains(t, block, "https://traefik/healthz",
+		"the healthz wait must reach traefik by its compose service name")
+	assert.NotContains(t, block, "localhost:8443",
+		"the healthz wait must never fall back to the host port docker-compose.e2e.yml no longer publishes (#358)")
+	assert.Contains(t, block, "--no-deps",
+		"the throwaway container running curl must not restart app/db, which are already up")
+}
+
+// TestRestoreHealthzWaitsUseTheComposeNetwork is #358's restore.yml half:
+// both of this workflow's own healthz waits — before the backup and after
+// the restore — must reach traefik the same way e2e.yml's copy does. Two
+// separate steps, checked individually so a regression in either names
+// itself rather than being masked by the other still passing.
+func TestRestoreHealthzWaitsUseTheComposeNetwork(t *testing.T) {
+	t.Parallel()
+
+	for _, step := range []string{
+		"Wait for the app to answer through Traefik",
+		"The restored stack answers /healthz",
+	} {
+		block := workflowStep(t, ".github/workflows/restore.yml", step)
+		assert.Contains(t, block, "https://traefik/healthz",
+			"restore.yml's %q step must reach traefik by its compose service name", step)
+		assert.NotContains(t, block, "localhost:8443",
+			"restore.yml's %q step must never fall back to the host port docker-compose.e2e.yml no longer publishes (#358)", step)
+		assert.Contains(t, block, "--no-deps",
+			"restore.yml's %q step must not restart app/db via the throwaway curl container", step)
+	}
+}
+
 // TestE2ENodeModulesCacheHasRestoreKeysFallback is issue #359 item 2: the
 // e2e/node_modules cache step must carry a restore-keys fallback under the
 // same key prefix, or any e2e/package.json change misses the cache

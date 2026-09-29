@@ -249,6 +249,25 @@ func TestE2EAppMountsTheUploadsTheRoundTripDestroys(t *testing.T) {
 		"imagecache is not in a backup archive, so the E2E stack has no reason to hold one")
 }
 
+// TestE2ETraefikPublishesNoHostPort is issue #358: a fixed host port here
+// used to collide not only with another checkout's E2E run but with an
+// ordinary dev stack in the very worktree running the gate, silently and
+// with no clear failure message. The `e2e` service already reaches traefik
+// by compose service name over the project's own network
+// (BASE_URL=https://traefik in this same file), and CI's healthz waits do
+// the same from a throwaway container on that network — nothing needs a
+// host port at all. A `ports:` line reintroduced here would leave
+// `go test ./...` green and only fail once it actually collides with
+// something else on the machine, which is exactly the failure mode #358
+// exists to prevent.
+func TestE2ETraefikPublishesNoHostPort(t *testing.T) {
+	t.Parallel()
+
+	block := composeService(t, "docker-compose.e2e.yml", "traefik")
+	assert.NotContains(t, block, "ports:",
+		"traefik must not publish a host port (#358) - the e2e service and CI's healthz waits both reach it over the compose network by service name instead")
+}
+
 // TestE2EComposeFilePinsItsProjectName — the E2E stack is one Compose project
 // per machine, `inventory-e2e` (#190, and that file's own `name:` comment).
 // Locally every documented command passes `-p inventory-e2e`, because a
