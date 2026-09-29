@@ -1,12 +1,37 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// workflowFile reads a workflow file from the repository root, or skips the
+// test when it is not there at all.
+//
+// The skip is for exactly one caller, and it is the same one
+// scripts/release_workflow_test.go's workflowFiles documents: the Dockerfile's
+// builder stage runs `go test ./...` against the build context, and
+// `.dockerignore` excludes `.github` from it — workflow files have no business
+// in a production image. Without the skip these assertions do not merely fail
+// to run there, they fail the image build itself, which takes the E2E gate
+// (`docker compose -f docker-compose.e2e.yml build`) and the release build down
+// with it. Everywhere the suite is actually a gate — a local
+// `docker compose run --rm app go test ./...`, a reviewer's run, and CI's
+// `test` job, all of which merge docker-compose.override.yml — the directory is
+// bind-mounted and every assertion below runs.
+func workflowFile(t *testing.T, name string) string {
+	t.Helper()
+
+	if _, err := os.Stat(filepath.Join("..", "..", name)); os.IsNotExist(err) {
+		t.Skipf("%s is not present (the image build's context excludes .github) - nothing to check here", name)
+	}
+	return repoFile(t, name)
+}
 
 // workflowBlock returns the lines of a top-level YAML key's block (`on:`,
 // `jobs:`, ...) from a GitHub Actions workflow file, comments dropped — the
@@ -24,7 +49,7 @@ func workflowBlock(t *testing.T, file, key string) string {
 	// Normalized first: this repository is checked out on Windows with
 	// core.autocrlf=true, so a line-exact match on "key:" would otherwise
 	// silently find nothing on one of the two checkout styles.
-	normalized := strings.ReplaceAll(repoFile(t, file), "\r\n", "\n")
+	normalized := strings.ReplaceAll(workflowFile(t, file), "\r\n", "\n")
 	lines := strings.Split(normalized, "\n")
 
 	start := -1
@@ -64,7 +89,7 @@ func workflowBlock(t *testing.T, file, key string) string {
 func workflowStep(t *testing.T, file, name string) string {
 	t.Helper()
 
-	normalized := strings.ReplaceAll(repoFile(t, file), "\r\n", "\n")
+	normalized := strings.ReplaceAll(workflowFile(t, file), "\r\n", "\n")
 	lines := strings.Split(normalized, "\n")
 
 	start := -1
