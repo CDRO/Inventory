@@ -274,6 +274,91 @@ SERPAPI_KEY=also-$marker
     Assert ($r2.Out -notmatch [regex]::Escape($marker)) "the marker secret value from .env never appears in human-readable output either"
     Assert ($r2.Out -match '18123' -and $r2.Out -match '19123') "HTTP_PORT/TRAEFIK_PORT VALUES do appear - reading and displaying them is the point of the check, not a leak"
     Remove-Item -Recurse -Force $envDir
+
+    Write-Host "check 5 does not FAIL a port already published by the operator's own compose stack (#342)"
+    $portEnvDir = Join-Path $env:TEMP "doctorports-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Force -Path $portEnvDir | Out-Null
+    $portEnvFile = Join-Path $portEnvDir '.env'
+    Set-Content -Path $portEnvFile -Encoding ASCII -Value @"
+HTTP_PORT=27391
+TRAEFIK_PORT=27392
+"@
+    # `docker run -p` always fails (simulating both ports bound), but
+    # `docker compose ps` reports only HTTP_PORT as published by a running
+    # service - the project's own stack. TRAEFIK_PORT has no such match, so
+    # it must still be reported as a genuine conflict.
+    $portShimDir = New-ShShim -Name 'docker' -Body @"
+#!/bin/sh
+case "`$1" in
+  info) exit 0 ;;
+  run) exit 1 ;;
+  compose)
+    if [ "`$2" = "ps" ]; then
+      printf 'NAME IMAGE COMMAND SERVICE CREATED STATUS PORTS\n'
+      printf 'proj-app-1 x x app x Up 0.0.0.0:27391->27391/tcp\n'
+      exit 0
+    fi
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+"@
+    $r = Invoke-WithShim $portShimDir { Invoke-Doctor -DoctorArgs @('--json') -Env @{ DOCTOR_ENV_FILE = $portEnvFile } }
+    $parsedPorts = [array]($r.Out | ConvertFrom-Json)
+    Assert ($parsedPorts[4].check -like 'ports (*') "check 5 is still the ports check (index assumption holds)"
+    Assert ([string]$parsedPorts[4].status -eq 'FAIL') "a port with no matching compose service still FAILs, got $($parsedPorts[4].status)"
+    Assert ($parsedPorts[4].remediation -match 'TRAEFIK_PORT=27392') "the FAIL names the genuinely unexplained port (TRAEFIK_PORT)"
+    Assert ($parsedPorts[4].remediation -notmatch 'HTTP_PORT=27391') "the port already published by the operator's own compose stack is NOT reported as a conflict"
+    Test-PathRestored 'after the own-stack port shim'
+    Remove-Item -Recurse -Force $portEnvDir -ErrorAction SilentlyContinue
+
+    Write-Host "DOCTOR_ROOT drives check 7 against a synthetic CRLF fixture, not this repo's own tree (#342)"
+    $rootFixture = Join-Path $env:TEMP "doctorroot-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Force -Path $rootFixture | Out-Null
+    Set-Content -Path (Join-Path $rootFixture '.gitattributes') -Encoding ASCII -Value "sample.sh text eol=lf"
+    $sampleFixture = Join-Path $rootFixture 'sample.sh'
+    try {
+        [IO.File]::WriteAllText($sampleFixture, "#!/bin/sh`r`necho hi`r`n")
+        $r = Invoke-Doctor -DoctorArgs @('--json') -Env @{ DOCTOR_ROOT = $rootFixture }
+        $parsedRoot = [array]($r.Out | ConvertFrom-Json)
+        Assert ($parsedRoot[6].check -eq 'git identity + line endings') "check 7 is still index 6 (index assumption holds)"
+        Assert ([string]$parsedRoot[6].status -eq 'FAIL') "a synthetic CRLF fixture under DOCTOR_ROOT is caught as FAIL, got $($parsedRoot[6].status)"
+        Assert ($parsedRoot[6].remediation -match 'sample\.sh') "the FAIL remediation names the offending fixture file: $($parsedRoot[6].remediation)"
+
+        # Fix the fixture to real LF endings under the same override - proves
+        # the check actually reads DOCTOR_ROOT rather than coincidentally
+        # reporting FAIL for an unrelated reason.
+        [IO.File]::WriteAllText($sampleFixture, "#!/bin/sh`necho hi`n")
+        $r2 = Invoke-Doctor -DoctorArgs @('--json') -Env @{ DOCTOR_ROOT = $rootFixture }
+        $parsedRoot2 = [array]($r2.Out | ConvertFrom-Json)
+        Assert ([string]$parsedRoot2[6].status -eq 'ok') "the same fixture with real LF endings reports ok, got $($parsedRoot2[6].status)"
+
+        # No override: check 7 must still read this repository's own,
+        # LF-clean tree - the fixture must never leak into the default path.
+        $r3 = Invoke-Doctor -DoctorArgs @('--json')
+        $parsedRoot3 = [array]($r3.Out | ConvertFrom-Json)
+        Assert ([string]$parsedRoot3[6].status -eq 'ok') "with no DOCTOR_ROOT override, check 7 reads this repo's own tree and reports ok, got $($parsedRoot3[6].status)"
+    } finally {
+        Remove-Item -Recurse -Force $rootFixture -ErrorAction SilentlyContinue
+    }
+
+    Write-Host "json_escape escapes embedded newline and tab, not just backslash/quote (#342)"
+    $normalizedDoctor = (Get-Content -Raw $doctorScript) -replace "`r`n", "`n"
+    $funcMatch = [regex]::Match($normalizedDoctor, '(?ms)^json_escape\(\) \{.*?\n\}')
+    Assert $funcMatch.Success "json_escape() function extracted from scripts/doctor for direct testing"
+    $escHarness = @'
+
+input=$(printf 'a"b\\c\nd\te')
+result=$(json_escape "$input")
+printf '%s' "$result"
+'@
+    $escFixture = Join-Path $env:TEMP "jsonescape-$([guid]::NewGuid().ToString('N')).sh"
+    [IO.File]::WriteAllText($escFixture, (($funcMatch.Value + $escHarness) -replace "`r`n", "`n"))
+    $escOut = & sh $escFixture
+    Assert ($escOut -eq 'a\"b\\c\nd\te') "json_escape round-trips backslash, quote, an embedded newline and an embedded tab into valid JSON escapes, got '$escOut'"
+    $escJson = "{`"remediation`": `"$escOut`"}"
+    $escParsed = $escJson | ConvertFrom-Json
+    Assert ($escParsed.remediation -eq "a`"b\c`nd`te") "the escaped text parses back through ConvertFrom-Json to the original raw string"
+    Remove-Item -Force $escFixture -ErrorAction SilentlyContinue
 }
 finally {
     Write-Host "Cleaning up"
