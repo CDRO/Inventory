@@ -1,0 +1,3 @@
+/pickup
+
+Work {{SPEC}} (issue #{{SPEC_ISSUE}}, wave {{WAVE_NUMBER}} of {{PLAN_NAME}}) through the full ship loop, here in this worktree, with the PR against {{INTEGRATION_BRANCH}} instead of main - wave plan #{{PLAN_ISSUE}} takes precedence over the ship skill's default target. Open PRs belonging to other packages belong to parallel sessions: do not touch them, do not ask about them. {{FOCUS}} {{CONVENTIONS}}After the merge, close the spec issue, comment on wave issue #{{WAVE_ISSUE}}, and do not switch to main. Stop and report if you hit the round limit ({{ROUND_LIMIT}}).

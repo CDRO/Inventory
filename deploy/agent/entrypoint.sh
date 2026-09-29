@@ -77,7 +77,22 @@ fi
 
 cd "$REPO_PATH"
 
-# 3. The doctor itself, as `agent` — the same user, and therefore the same
+# 3. Tell git this mounted checkout is trusted, as `agent`. Docker Desktop's
+#    bind-mount layer commonly presents the mounted directory as owned by a
+#    different uid than the container's `agent` user (root, or a Windows-side
+#    mapping — the host uid this matches natively on a Linux bind mount, like
+#    the NAS runner's, has no such mismatch, which is why this was not caught
+#    there). Git's dubious-ownership protection (CVE-2022-24765) then refuses
+#    every repository-reading command — `git rev-parse`, `git worktree add`,
+#    everything scripts/agent-loop.sh does — with "detected dubious ownership
+#    in repository", which scripts/doctor's own identity check does not
+#    exercise and therefore does not catch (#465). Scoped to exactly this
+#    mount, not `*`: the container's own reach (the Docker socket) is already
+#    broad, but there is no reason to also trust a repository this session
+#    did not choose to mount.
+gosu "$AGENT_USER" git config --global --add safe.directory "$REPO_PATH" || true
+
+# 4. The doctor itself, as `agent` — the same user, and therefore the same
 #    group membership and the same failure mode, as whatever runs after it.
 #    `sh scripts/doctor`, not `scripts/doctor` or `./scripts/doctor`: the
 #    file is checked into git without the execute bit (like the rest of
@@ -100,11 +115,11 @@ if [ "$doctor_failed" -eq 1 ]; then
 fi
 say "doctor passed"
 
-# 4. Run what was asked for, as `agent`. The same execute-bit accommodation
-#    as step 3: `docker compose run --rm agent scripts/doctor` (this
+# 5. Run what was asked for, as `agent`. The same execute-bit accommodation
+#    as step 4: `docker compose run --rm agent scripts/doctor` (this
 #    package's own acceptance criterion) names the file directly, so a
 #    non-executable checkout would otherwise turn a deliberate re-run of the
-#    doctor into the same "Permission denied" step 3 exists to avoid.
+#    doctor into the same "Permission denied" step 4 exists to avoid.
 cmd="$1"
 if [ -f "$cmd" ] && [ ! -x "$cmd" ]; then
   set -- sh "$@"
