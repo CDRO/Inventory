@@ -13,8 +13,8 @@
 # keeps this stack out of that checkout's dev project, because `name:` below
 # loses to it. See `name:`'s own comment for the measurements (#190).
 #
-#   docker ps --filter label=com.docker.compose.project=inventory-e2e \
-#     --format '{{.Names}} {{.Label "com.docker.compose.project.working_dir"}}'
+#   docker ps -a --filter label=com.docker.compose.project=inventory-e2e \
+#     --format '{{.Names}} {{.Label "com.docker.compose.project.working_dir"}} {{.Status}}'
 #   docker compose -p inventory-e2e -f docker-compose.e2e.yml build
 #   docker compose -p inventory-e2e -f docker-compose.e2e.yml run --rm app migrate up
 #   docker compose -p inventory-e2e -f docker-compose.e2e.yml up -d
@@ -24,10 +24,19 @@
 #   docker compose -p inventory-e2e -f docker-compose.e2e.yml down -v
 #
 # The first command is a pre-flight check, not part of the gate: there is
-# exactly ONE E2E project on a machine, so if it prints a container whose
-# working_dir is not this checkout, another checkout is running the gate right
-# now — wait for it. Continuing would not fail; the `up` would take that
-# stack's containers over silently (`name:` below spells out why).
+# exactly ONE E2E project on a machine, so if it prints a RUNNING container
+# whose working_dir is not this checkout, another checkout is running the
+# gate right now — wait for it. Continuing would not fail; the `up` would
+# take that stack's containers over silently (`name:` below spells out why).
+# The format prints status alongside the name for a reason (#358): existence
+# alone conflates two different situations. A traefik container stuck in
+# `Created` with a non-zero exit code — the shape left behind by a failed
+# `up`, port collision or otherwise — is a broken leftover, not a run in
+# progress, and plain `docker ps` (no `-a`) would hide it from this check
+# entirely while `app`/`db` sat there `Up ... (healthy)`, giving the false
+# impression of an active session. This command only surfaces state; turning
+# "leftover" into an automatic decision (clean it up, refuse it, whatever) is
+# further isolation work, not this check's job yet.
 #
 # The `backup` service below belongs to the second thing this file drives: the
 # backup/restore round trip (docs/specs/15-backup-restore-and-export.md, issue
@@ -94,16 +103,19 @@
 # where it is the whole of the separation.
 #
 # One project per machine means two checkouts may NEVER run the E2E suite at
-# the same time. That is a rule, not a preference, and it is only half
-# mechanical: `traefik` publishes host 8443 with no variable, so a second
-# stack under a *different* name dies on `Bind for 0.0.0.0:8443 failed: port
-# is already allocated` (verified), but under the one shared name the second
-# `up` does not fail at all — it recreates the first stack's containers and
-# takes it over silently, and a `down -v` then destroys a run that is still
-# in progress. Inside a sequential wave only one session runs at a time and
-# this is automatic; a wave with `"sequential": false` has several at once,
-# and the pre-flight `docker ps` at the top of this header is the only thing
-# between them.
+# the same time. That is a rule, not a preference, and — since #358 dropped
+# the fixed host port `traefik` used to publish — it is enforced entirely by
+# the pre-flight `docker ps -a` at the top of this header, not by anything
+# Docker refuses on its own: under the one shared project name a second `up`
+# does not fail at all, it recreates the first stack's containers and takes
+# it over silently, and a `down -v` then destroys a run that is still in
+# progress. (The old host port only ever caught a second stack running under
+# a *different* project name — the "different name" case doesn't arise here,
+# since every documented command above passes `-p inventory-e2e` — so losing
+# it costs this rule nothing it was actually relying on.) Inside a
+# sequential wave only one session runs at a time and this is automatic; a
+# wave with `"sequential": false` has several at once, and the pre-flight
+# check is the only thing between them.
 name: inventory-e2e
 
 services:
@@ -113,8 +125,13 @@ services:
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
       - --entrypoints.websecure.address=:443
-    ports:
-      - "8443:443"
+    # No `ports:` (#358) — nothing outside this compose project needs to
+    # reach traefik. The `e2e` service below already talks to it by service
+    # name over the project's own compose network (BASE_URL=https://traefik),
+    # and CI's healthz wait does the same through a throwaway container on
+    # that network instead of through the host. Publishing a fixed host port
+    # here used to collide silently with an ordinary dev stack in the very
+    # worktree running the gate, not just with another checkout's E2E run.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
