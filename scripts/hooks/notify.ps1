@@ -158,7 +158,12 @@ try {
     $ps = [PowerShell]::Create()
     [void]$ps.AddScript(${function:Send-Toast}.ToString()).AddArgument($toastTitle).AddArgument($toastBody)
     $asyncResult = $ps.BeginInvoke()
-    if (-not $asyncResult.AsyncWaitHandle.WaitOne(800)) {
+    if ($asyncResult.AsyncWaitHandle.WaitOne(800)) {
+        # Completed within budget - EndInvoke is the documented other half of
+        # BeginInvoke; it also rethrows whatever Send-Toast threw (the "throw"
+        # backend), which the outer catch below still swallows into exit 0.
+        $ps.EndInvoke($asyncResult) | Out-Null
+    } else {
         $ps.Stop()
     }
     $ps.Dispose()

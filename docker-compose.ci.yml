@@ -8,9 +8,9 @@
 #
 # so that the documented local command, `docker compose run --rm app go test
 # ./...`, stays byte-identical whether or not this file is in play - this
-# file is what changes, not the command. Wiring COMPOSE_FILE into the
-# workflows is wave 2's job (H8), not this one's; this file exists
-# unreferenced until then.
+# file is what changes, not the command. Wave 2's H8 wired this COMPOSE_FILE
+# value into .github/workflows/test.yml, so this file is live there; nothing
+# sets it in .github/workflows/e2e.yml.
 #
 # The one thing this file adds beyond docker-compose.override.yml's own
 # fsync=off/synchronous_commit=off/full_page_writes=off (which a runner

@@ -365,9 +365,10 @@ func TestCIComposeAddsTmpfsToDatabaseOnly(t *testing.T) {
 
 	// Enumerated rather than a single NotContains("\n  app:"): that caught an
 	// `app:` service specifically but let a `traefik:`, `setup:` or `backup:`
-	// block through unnoticed (#327/#333 item 4) - wave 2's H8 is named in
-	// this file's own header as the next thing to touch it, so this is not
-	// hypothetical. Same text-scan approach as TestE2EComposeFilePinsItsProjectName:
+	// block through unnoticed (#327/#333 item 4). Not hypothetical: wave 2's
+	// H8 already wired this file into .github/workflows/test.yml's live
+	// COMPOSE_FILE, so it is no longer an inert file nobody edits under
+	// pressure. Same text-scan approach as TestE2EComposeFilePinsItsProjectName:
 	// a two-space-indented `key:` line is a top-level service, a
 	// more-indented line is that service's own content, and anything at
 	// column 0 (or blank/a comment) ends or is outside the services map.
