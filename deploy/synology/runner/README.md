@@ -260,6 +260,7 @@ first release.
 | `smoke: FAIL the clone is not mounted at …` | `INVENTORY_CLONE` does not match the clone's real path. Compose **creates** a missing bind-mount source as an empty directory rather than failing, which is exactly the silent mistake this check exists to catch. |
 | `smoke: FAIL … is not a git checkout` | The path is a directory but not a clone. `update --ref` fetches through the clone's own remote, so it needs the real thing. |
 | `smoke: FAIL docker-compose cannot parse …` | The app stack's compose files do not parse with the pinned Compose. A deploy would have failed in the middle; fix the files (or the pin) first. |
+| `smoke: FAIL git cannot reach origin … from inside this container` | The clone's remote is a transport this container has no credentials for — almost always an SSH remote with no key and no `known_hosts` in here. Every deploy would refuse at `phase=fetch`. **It will still work when you test it on the NAS itself**, which is what made this expensive to diagnose the first time (#409). See "The git transport" above. |
 | `FATAL: this runner is not registered yet and RUNNER_TOKEN is empty` | First start without a token, or `runner_state` was deleted. Mint a token and start once with it. |
 | GitHub shows the runner `offline` | The container is stopped, or the NAS is off the network. `logs -f runner` says which. |
 | GitHub shows **two** runners, one offline | A start with a different `RUNNER_NAME` registered a second one. Delete the offline one by id (above); the name is meant to stay `nas-inventory`. |

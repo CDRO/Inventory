@@ -110,7 +110,7 @@ cannot live inside `gate` and has to be a conditional job of its own:
 ```yaml
 on:
   push:
-    tags: ['v*']
+    tags: ['v[0-9]*']       # the gate refuses anything not vYYYY.MM.DD[.n]
 
 jobs:
   gate:
@@ -574,7 +574,9 @@ container; **H17** `release.yml` and `scripts/dev release`.
 
 ### H17 — `release.yml` and `scripts/dev release`
 
-- `release.yml` triggers on `push: tags: ['v*']` only; `gate` runs on a hosted
+- `release.yml` triggers on `push: tags: ['v[0-9]*']` only, and `gate` refuses
+  any name that is not `vYYYY.MM.DD[.n]` before it resolves anything (see "The
+  release unit"); `gate` runs on a hosted
   runner and resolves green `test` and `e2e` runs **by the tag's SHA**, running
   them on the tag when they are missing and failing the release when they are
   red.

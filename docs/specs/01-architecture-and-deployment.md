@@ -901,8 +901,8 @@ NAS — the deployment gate above, checked by SHA instead of remembered — and 
 runner then runs `deploy/synology/update` from the clone, which stamps `VERSION`
 from the tag and takes the pre-upgrade backup itself.
 [`38-release-pipeline-and-nas-runner.md`](38-release-pipeline-and-nas-runner.md)
-is the contract for that pipeline and names the packages that build it, and they
-have landed: on that NAS an ordinary release is now `scripts/dev release <tag>`
+is the contract for that pipeline and names the packages that built it, and they
+have all landed: on that NAS an ordinary release is now `scripts/dev release <tag>`
 typed on the operator's machine
 ([`deploy/synology/README.md`](../../deploy/synology/README.md), "A release,
 start to finish"). The manual procedure described here and in
