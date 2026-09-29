@@ -32,12 +32,33 @@ printf 'gh %s\n' "$*" >> "$STUB_LOG"
 case "$1 $2" in
   "pr view")
     n=$3
+    # STUB_PRVIEW_FAIL_FIELD makes one of the five metadata lookups fail the
+    # way a rate limit or a network blip does - the case the script's guards
+    # exist for, which no other knob here can produce.
+    if [ -n "${STUB_PRVIEW_FAIL_FIELD:-}" ]; then
+      case "$*" in
+        *"--json ${STUB_PRVIEW_FAIL_FIELD} "*)
+          echo "gh: API rate limit exceeded for installation" >&2
+          exit 1 ;;
+      esac
+    fi
     case "$*" in
       *"--json number"*)
         # The script's PR-vs-issue check for a referenced #n: a PR number
-        # answers this, a real issue number does not.
+        # answers this, a real issue number does not. The failure message
+        # matters as much as the exit code - the script only reads a
+        # non-zero exit as "not a pull request" when the message looks like
+        # GitHub's not-found answer, so this stub emits the real one, and
+        # STUB_PR_<n>_ERR replaces it with a different failure to exercise
+        # the other branch.
         eval "ispr=\${STUB_PR_${n}_EXISTS:-0}"
         [ "$ispr" = "1" ] && { echo "$n"; exit 0; }
+        eval "err=\${STUB_PR_${n}_ERR:-}"
+        if [ -n "$err" ]; then
+          printf '%s\n' "$err" >&2
+          exit 1
+        fi
+        echo "GraphQL: Could not resolve to a PullRequest with the number of $n." >&2
         exit 1 ;;
       *"--json title "*) echo "$STUB_TITLE" ;;
       *"--json body "*) printf '%s\n' "$STUB_PRBODY" ;;
@@ -45,6 +66,12 @@ case "$1 $2" in
       *"--json headRefName "*) echo "$STUB_HEADREF" ;;
       *"--json headRefOid "*) echo "$STUB_SHA" ;;
       *"--json comments "*)
+        # A failed comments lookup, so the packet can be shown to say the
+        # lookup failed rather than asserting no verdict was ever posted.
+        if [ "${STUB_COMMENTS_RC:-0}" != "0" ]; then
+          echo "gh: API rate limit exceeded for installation" >&2
+          exit "$STUB_COMMENTS_RC"
+        fi
         # Actually performs the join the real query asks for, with whatever
         # separator sits between join("...") in the command line, instead of
         # a fixture pre-joined by the test - that was exactly how the round-1
@@ -101,14 +128,29 @@ case "$1" in
   fetch) exit 0 ;;
   rev-parse) exit 0 ;;
   log)
+    if [ "${STUB_LOG_FAIL:-}" = "1" ]; then
+      echo "fatal: bad revision" >&2
+      exit 128
+    fi
     [ -z "${STUB_MERGES:-}" ] || printf '%s\n' "$STUB_MERGES"
     exit 0 ;;
   diff)
+    # STUB_DIFF_FAIL names which shape of diff fails ("stat", "names",
+    # "full", "delta"), the way a revision this checkout has not fetched
+    # does: git writes to stderr and exits non-zero while printing nothing.
     case "$*" in
-      *"--stat "*) printf '%s\n' "${STUB_DIFF_STAT:-}" ;;
-      *"--name-only "*) printf '%s\n' "${STUB_DIFF_NAMES:-}" ;;
-      *"..."*) printf '%s\n' "${STUB_DIFF_FULL:-}" ;;
-      *) printf '%s\n' "${STUB_DIFF_DELTA:-}" ;;
+      *"--stat "*)
+        [ "${STUB_DIFF_FAIL:-}" = "stat" ] && { echo "fatal: bad object" >&2; exit 128; }
+        printf '%s\n' "${STUB_DIFF_STAT:-}" ;;
+      *"--name-only "*)
+        [ "${STUB_DIFF_FAIL:-}" = "names" ] && { echo "fatal: bad object" >&2; exit 128; }
+        printf '%s\n' "${STUB_DIFF_NAMES:-}" ;;
+      *"..."*)
+        [ "${STUB_DIFF_FAIL:-}" = "full" ] && { echo "fatal: bad object" >&2; exit 128; }
+        printf '%s\n' "${STUB_DIFF_FULL:-}" ;;
+      *)
+        [ "${STUB_DIFF_FAIL:-}" = "delta" ] && { echo "fatal: bad object" >&2; exit 128; }
+        printf '%s\n' "${STUB_DIFF_DELTA:-}" ;;
     esac
     exit 0 ;;
 esac
@@ -539,6 +581,26 @@ func TestPacketSinceFindsThePreviousVerdictByTheHeaderFormat(t *testing.T) {
 	if r.exit != 0 {
 		t.Fatalf("expected exit 0, got %d: %s", r.exit, r.stderr)
 	}
+	// Asserted as three separate `### Previous <X> review` sections, not as
+	// three substrings of the packet (#344, item 6). Under a reintroduced
+	// join("") the three comments arrive as one unsplit record that begins
+	// with "## Go Review", so all three verdict *lines* are still present in
+	// the packet - the old substring assertions passed against exactly the
+	// blob the bug produces - but only the Go lookup's `^## Go Review` match
+	// fires and only one section is written.
+	for _, want := range []string{
+		"### Previous Go review",
+		"### Previous Test review",
+		"### Previous Docs review",
+	} {
+		mustContain(t, r.stdout, want, "each reviewer's previous verdict gets its own section")
+	}
+	goIdx := strings.Index(r.stdout, "### Previous Go review")
+	testIdx := strings.Index(r.stdout, "### Previous Test review")
+	docsIdx := strings.Index(r.stdout, "### Previous Docs review")
+	if !(goIdx < testIdx && testIdx < docsIdx) {
+		t.Errorf("previous-verdict sections are out of the script's go/tests/docs order:\n%s", r.stdout)
+	}
 	mustContain(t, r.stdout, "Go Review — VERDICT: BLOCK", "the previous round's Go verdict")
 	mustContain(t, r.stdout, "Test Review — VERDICT: APPROVE", "the previous round's test verdict")
 	mustContain(t, r.stdout, "Docs Review — VERDICT: APPROVE", "the previous round's docs verdict")
@@ -580,4 +642,205 @@ func TestPacketRound1DoesNotLookForAPreviousVerdict(t *testing.T) {
 		t.Errorf("round 1 has no previous round to look up, but comments were fetched:\n%s", r.calls)
 	}
 	mustNotContain(t, r.stdout, "Previous round", "round 1 has no previous-round section")
+}
+
+// --- a section that is never silently blank (#344, item 1) --------------------
+
+// A `gh pr view --json <field>` that fails for any reason other than the PR
+// not existing - a rate limit, a dropped connection - used to leave that
+// field's part of the packet empty while the script still printed
+// "wrote .claude/review-packet.md" and exited 0. A reviewer reading the
+// result cannot tell an empty **Title:** from a PR that has none, so the
+// only safe answer is to fail.
+func TestPacketFailsWhenAPRFieldLookupFails(t *testing.T) {
+	for _, field := range []string{"title", "body", "baseRefName", "headRefName", "headRefOid"} {
+		env := basicEnv()
+		env["STUB_PRVIEW_FAIL_FIELD"] = field
+
+		r := runPacket(t, env, nil, "42")
+		if r.exit == 0 {
+			t.Errorf("--json %s failed but packet exited 0; packet:\n%s", field, r.stdout)
+		}
+		mustContain(t, r.stderr, field, "the error names the field that failed")
+	}
+}
+
+// The same guarantee for a lookup that succeeds but answers with nothing: a
+// PR always has a base, a head branch and a head commit, so an empty one is
+// a broken answer, not a legitimate value. The body is deliberately not in
+// this list - a PR with no body is ordinary.
+func TestPacketFailsWhenTheBaseOrHeadComesBackEmpty(t *testing.T) {
+	for _, blank := range []string{"STUB_BASE", "STUB_HEADREF", "STUB_SHA"} {
+		env := basicEnv()
+		env[blank] = ""
+
+		r := runPacket(t, env, nil, "42")
+		if r.exit == 0 {
+			t.Errorf("%s was empty but packet exited 0; packet:\n%s", blank, r.stdout)
+		}
+	}
+}
+
+func TestPacketStillWritesAPacketForAPRWithNoBody(t *testing.T) {
+	env := basicEnv()
+	env["STUB_PRBODY"] = ""
+
+	r := runPacket(t, env, nil, "42")
+	if r.exit != 0 {
+		t.Fatalf("an empty PR body is legitimate, expected exit 0, got %d: %s", r.exit, r.stderr)
+	}
+	mustContain(t, r.stdout, "## PR body", "the section is still written")
+}
+
+// Each `git diff` shape has its own section of the packet, and each used to
+// be able to fail silently - the classic cause being a reviewer's worktree
+// that has not fetched the PR's latest push, so the head SHA is not an
+// object it holds.
+func TestPacketFailsWhenADiffCannotBeRead(t *testing.T) {
+	cases := []struct {
+		name  string
+		fail  string
+		since bool
+	}{
+		{name: "whole-PR --stat", fail: "stat"},
+		{name: "whole-PR diff", fail: "full"},
+		{name: "changed-file list", fail: "names"},
+		{name: "delta diff", fail: "delta", since: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			env := basicEnv()
+			env["STUB_DIFF_FAIL"] = c.fail
+			args := []string{"42"}
+			if c.since {
+				args = append(args, "--since", "priorSHA123")
+			}
+
+			r := runPacket(t, env, nil, args...)
+			if r.exit == 0 {
+				t.Errorf("the %s failed but packet exited 0; packet:\n%s", c.name, r.stdout)
+			}
+			mustNotContain(t, r.stdout, "## CI status", "a packet that failed must not be left half-written and usable-looking")
+		})
+	}
+}
+
+// `--since` with a SHA this checkout does not have fails at the merge probe,
+// before the delta diff. Its own message is the one worth showing.
+func TestPacketFailsWhenTheMergeProbeCannotResolveTheSinceSHA(t *testing.T) {
+	env := basicEnv()
+	env["STUB_LOG_FAIL"] = "1"
+
+	r := runPacket(t, env, nil, "42", "--since", "priorSHA123")
+	if r.exit == 0 {
+		t.Errorf("git log --merges failed but packet exited 0; packet:\n%s", r.stdout)
+	}
+	mustContain(t, r.stderr, "priorSHA123", "the error names the SHA that could not be resolved")
+}
+
+// `gh pr view <n> --json number` fails both for "not a pull request" - the
+// answer the classification wants - and for a rate limit. Reading the second
+// as the first would inline a pull request's body under an "Issue #n"
+// heading; the packet says it could not classify the number instead, once,
+// and does not then also report an issue lookup for it.
+func TestPacketNotesAReferencedNumberItCouldNotClassify(t *testing.T) {
+	env := basicEnv()
+	env["STUB_PRBODY"] = "Implements #12."
+	env["STUB_PR_12_ERR"] = "gh: API rate limit exceeded for installation"
+	env["STUB_ISSUE_12_BODY"] = "This body must not be read after a failed classification."
+
+	r := runPacket(t, env, nil, "42")
+	if r.exit != 0 {
+		t.Fatalf("one unclassifiable reference must not fail the packet, got %d: %s", r.exit, r.stderr)
+	}
+	mustContain(t, r.stdout, "could not be classified", "the packet says the classification failed")
+	mustContain(t, r.stdout, "API rate limit exceeded", "and why")
+	mustNotContain(t, r.stdout, "must not be read", "the issue body is not read after a failed classification")
+	mustNotContain(t, r.stdout, "(not an issue - #12 is a pull request)", "an unclassifiable number is not reported as a PR")
+}
+
+// The not-found message is what separates the two, so the ordinary path has
+// to keep working: a referenced number that really is an issue still gets
+// its body inlined.
+func TestPacketTreatsGitHubsNotFoundAnswerAsNotAPullRequest(t *testing.T) {
+	env := basicEnv()
+	env["STUB_PRBODY"] = "Implements #12."
+	env["STUB_ISSUE_12_TITLE"] = "H7: scripts/dev packet"
+	env["STUB_ISSUE_12_BODY"] = "Build the packet command."
+
+	r := runPacket(t, env, nil, "42")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", r.exit, r.stderr)
+	}
+	mustContain(t, r.stdout, "Issue #12: H7: scripts/dev packet", "a real issue is still inlined")
+	mustNotContain(t, r.stdout, "could not be classified", "a not-found answer is a classification, not a failure")
+}
+
+// The "(no previous verdict comment found ...)" note is an assertion about
+// the PR's comments. When the lookup itself failed, the packet must say that
+// instead - a reviewer reading "none found" concludes the previous round
+// posted nothing and reviews as if it were round 1.
+func TestPacketSaysWhenThePreviousVerdictLookupFailed(t *testing.T) {
+	env := basicEnv()
+	env["STUB_COMMENTS_RC"] = "1"
+
+	r := runPacket(t, env, nil, "42", "--since", "priorSHA123")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", r.exit, r.stderr)
+	}
+	mustContain(t, r.stdout, "could NOT be read", "the packet reports a failed lookup")
+	mustContain(t, r.stdout, "API rate limit exceeded", "and why it failed")
+	mustNotContain(t, r.stdout, "no previous verdict comment found", "a failed lookup must not be reported as nothing found")
+}
+
+// --- doc comments the diff did not add (#344, item 2) ------------------------
+
+// The false "no" this fixes: a function whose signature or body changed under
+// an existing doc comment. The comment is context in the diff (a leading
+// space), not an addition, and counting only added comment lines reported the
+// identifier as undocumented - on exactly the shape a reviewer wants signal
+// about, since a changed signature under an unchanged doc comment is how a
+// doc comment goes stale.
+func TestPacketCountsADocCommentTheDiffDidNotTouch(t *testing.T) {
+	env := basicEnv()
+	env["STUB_DIFF_FULL"] = "diff --git a/internal/foo/foo.go b/internal/foo/foo.go\n" +
+		"+++ b/internal/foo/foo.go\n" +
+		"@@ -1,6 +1,6 @@\n" +
+		" package foo\n" +
+		"\n" +
+		" // Bar returns the widget and never nil.\n" +
+		"-func Bar() error {\n" +
+		"+func Bar(ctx context.Context) error {\n" +
+		" \treturn nil\n" +
+		" }\n"
+
+	r := runPacket(t, env, nil, "42")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", r.exit, r.stderr)
+	}
+	mustContain(t, r.stdout, "| Bar | func | yes |", "an untouched doc comment above a changed signature counts")
+}
+
+// The other direction stays "no": a doc comment the diff deletes documents
+// nothing, and a blank line between a comment and a declaration detaches it
+// in godoc too.
+func TestPacketDoesNotCountADeletedOrDetachedDocComment(t *testing.T) {
+	env := basicEnv()
+	env["STUB_DIFF_FULL"] = "diff --git a/internal/foo/foo.go b/internal/foo/foo.go\n" +
+		"+++ b/internal/foo/foo.go\n" +
+		"@@ -1,9 +1,9 @@\n" +
+		" package foo\n" +
+		"-// Orphan used to be documented.\n" +
+		"+func Orphan() error { return nil }\n" +
+		"\n" +
+		" // Detached is not this function's doc comment.\n" +
+		"\n" +
+		"+func Detached() error { return nil }\n"
+
+	r := runPacket(t, env, nil, "42")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", r.exit, r.stderr)
+	}
+	mustContain(t, r.stdout, "| Orphan | func | no |", "a deleted doc comment documents nothing")
+	mustContain(t, r.stdout, "| Detached | func | no |", "a blank line detaches a comment, as it does in godoc")
 }

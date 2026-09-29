@@ -36,6 +36,14 @@
 # lines and has no "Acceptance criteria" heading gets the headings list
 # alone, with the same omission line.
 #
+# Every `gh` and `git` call is checked, and a failed one aborts with a
+# message on stderr and a non-zero exit instead of leaving its section blank
+# (#344). A section that says "(none)" or reports nothing found therefore
+# means exactly that, never that the lookup fell over - the one exception is
+# `gh pr checks`, whose own exit code is reported in the CI-status heading
+# because a red or missing check is information a reviewer wants, not a
+# reason to refuse to write the packet.
+#
 # The three reviewer prompts (.claude/agents/review-{go,tests,docs}.md) read
 # this file as their first step instead of running the calls above
 # themselves.
@@ -75,11 +83,37 @@ esac
 mkdir -p .claude
 out=.claude/review-packet.md
 
-title=$(gh pr view "$pr" --json title -q .title) || exit 1
-prbody=$(gh pr view "$pr" --json body -q .body)
-base=$(gh pr view "$pr" --json baseRefName -q .baseRefName)
-headref=$(gh pr view "$pr" --json headRefName -q .headRefName)
-sha=$(gh pr view "$pr" --json headRefOid -q .headRefOid)
+# Every `gh` and `git` call below is checked. An unchecked one leaves its
+# section of the packet blank while the script still prints "wrote ..." and
+# exits 0, and a reviewer has no way to tell that from a PR that genuinely
+# has no body, no referenced issue or no test files - it reviews a hole
+# (#344, item 1). The rule throughout: fail loudly on a call that failed,
+# never on an empty result.
+pr_field() {
+  # $1 = the --json field name. Only the exit status can separate a failed
+  # call from a legitimately empty value: a PR with no body answers `--json
+  # body` with the empty string and exit 0, so `[ -n ... ]` would reject a
+  # valid PR. The caller adds `|| exit 1` - `exit` here would only leave the
+  # command substitution's subshell.
+  gh pr view "$pr" --json "$1" -q ".$1" || {
+    echo "packet: gh pr view $pr --json $1 failed" >&2
+    return 1
+  }
+}
+
+title=$(pr_field title) || exit 1
+prbody=$(pr_field body) || exit 1
+base=$(pr_field baseRefName) || exit 1
+headref=$(pr_field headRefName) || exit 1
+sha=$(pr_field headRefOid) || exit 1
+
+# These three, unlike the body, are never legitimately empty: every PR has a
+# base, a head branch and a head commit. An empty one means `gh` answered
+# without failing, which the exit-status check above cannot catch.
+if [ -z "$base" ] || [ -z "$headref" ] || [ -z "$sha" ]; then
+  echo "packet: gh returned an empty base/head/SHA for PR $pr (base='$base' head='$headref' sha='$sha')" >&2
+  exit 1
+fi
 
 git fetch origin "$base" --quiet 2>/dev/null || true
 if git rev-parse -q --verify "origin/$base" >/dev/null 2>&1; then
@@ -108,13 +142,34 @@ for n in $issue_nums; do
   # PR is an issue with a diff attached), so `gh issue view` on a PR number
   # succeeds and returns that PR's own body - it does not fail the way a
   # made-up or deleted number would.
-  if gh pr view "$n" --json number >/dev/null 2>&1; then
+  #
+  # The failure of this call is read, not discarded (#344, item 1): `gh`
+  # exits non-zero both for "this number is not a PR" - the answer the check
+  # wants - and for a rate limit or a network blip, and treating the second
+  # as the first would silently inline a PR's body under an "Issue #n"
+  # heading. Only a message that looks like GitHub's not-found answer counts
+  # as "not a PR"; anything else is reported in place of the issue body and
+  # the lookup for that number stops there, so the packet says one thing
+  # about #n rather than two.
+  prcheck_err=$(gh pr view "$n" --json number 2>&1 >/dev/null)
+  prcheck_rc=$?
+  if [ "$prcheck_rc" -eq 0 ]; then
     issues_section="$issues_section
 ## #$n
 (not an issue - #$n is a pull request)
 "
     continue
   fi
+  prcheck_err=$(printf '%s' "$prcheck_err" | tr '\n\r\t' '   ' | cut -c1-200)
+  case "$prcheck_err" in
+    *"Could not resolve to a PullRequest"*|*"no pull requests found"*|*"Could not resolve to a Pull Request"*) : ;;
+    *)
+      issues_section="$issues_section
+## #$n
+(could not be classified - \`gh pr view $n\` failed with something other than a not-found answer, so whether #$n is an issue or a pull request is unknown and its body was not read: $prcheck_err)
+"
+      continue ;;
+  esac
   ibody=$(gh issue view "$n" --json body -q .body 2>/dev/null) || {
     issues_section="$issues_section
 ## #$n
@@ -243,28 +298,60 @@ fi
 
 # --- diff --------------------------------------------------------------------
 
-full_stat=$(git diff --stat "$baseref...$sha")
+# Every `git` call here is checked too, for the same reason as the `gh` ones
+# above (#344, item 1) and with one failure mode of its own: a reviewer's
+# worktree that has not fetched the PR's very latest push has no object for
+# $sha, so `git diff` fails and - unchecked - leaves an empty "## Diff"
+# section behind a cheerful "wrote .claude/review-packet.md".
+diff_fail() {
+  echo "packet: $1 failed - is $sha fetched in this checkout? (git fetch origin $headref)" >&2
+  rm -f "$inlined_diff_file"
+  exit 1
+}
+
+full_stat=$(git diff --stat "$baseref...$sha") || {
+  echo "packet: git diff --stat $baseref...$sha failed - is $sha fetched in this checkout? (git fetch origin $headref)" >&2
+  exit 1
+}
 
 diff_note=""
 inlined_diff_file=$(mktemp)
 if [ -n "$since" ]; then
-  merges=$(git log --oneline --merges "$since..$sha" 2>/dev/null)
+  # Not silenced: a `--since` SHA this checkout does not have fails here
+  # first, and its own message is the useful one.
+  merges=$(git log --oneline --merges "$since..$sha") || diff_fail "git log --merges $since..$sha"
   if [ -n "$merges" ]; then
     diff_note="--since $since found a merge commit in $since..$sha (the base branch was merged into this PR between rounds), so the full PR diff is inlined instead of the delta:
 $merges
 "
-    git diff "$baseref...$sha" > "$inlined_diff_file"
+    git diff "$baseref...$sha" > "$inlined_diff_file" || diff_fail "git diff $baseref...$sha"
   else
     diff_note="Delta since the previous round's head ($since). The whole-PR diff --stat above covers everything changed since $base; the full PR diff is not inlined here - run \`git diff $baseref...$sha\` for it.
 "
-    git diff "$since..$sha" > "$inlined_diff_file"
+    git diff "$since..$sha" > "$inlined_diff_file" || diff_fail "git diff $since..$sha"
   fi
 else
-  git diff "$baseref...$sha" > "$inlined_diff_file"
+  git diff "$baseref...$sha" > "$inlined_diff_file" || diff_fail "git diff $baseref...$sha"
 fi
 
 # --- exported identifier table ------------------------------------------------
 
+# A doc comment counts whether or not the diff added it (#344, item 2). The
+# case that matters is a function whose signature or body changed under an
+# existing, untouched doc comment: the comment is unified-diff *context* (a
+# leading space, not a `+`), so counting only `+` comment lines reported the
+# identifier as "doc comment: no" - a false "no" on exactly the shape a
+# reviewer most wants signal about, since a changed signature under a stale
+# doc comment is the docs reviewer's bread and butter. Hence `^[ +]` here and
+# in the prefix strip below.
+#
+# Removed lines are skipped rather than resetting the pending comment: a
+# changed signature's own `-func Foo(...)` line sits between the untouched
+# doc comment and the new `+func Foo(...)`, and resetting on it would throw
+# the comment away one line before it is needed. A `-// ...` line is ignored
+# for the same reason it must be: a deleted doc comment documents nothing.
+# Anything else - code, a blank context line, a hunk header - still resets,
+# which keeps godoc's own rule that a blank line detaches a comment.
 identifier_table=$(awk '
   BEGIN {
     print "| Identifier | Kind | Doc comment |"
@@ -273,9 +360,10 @@ identifier_table=$(awk '
     top = ""
   }
   /^\+\+\+/ { pending = 0; top = ""; next }
+  /^-/ { next }
   {
     line = $0
-    if (match(line, /^\+[ \t]*\/\//)) {
+    if (match(line, /^[ +][ \t]*\/\//)) {
       if (pending == 0) { top = line }
       pending++
       next
@@ -298,7 +386,7 @@ identifier_table=$(awk '
       doc = "no"
       if (pending > 0) {
         cleaned = top
-        sub(/^\+[ \t]*\/\/[ \t]*/, "", cleaned)
+        sub(/^[ +][ \t]*\/\/[ \t]*/, "", cleaned)
         if (index(cleaned, name) == 1) {
           rest = substr(cleaned, length(name) + 1, 1)
           if (rest !~ /[A-Za-z0-9_]/) doc = "yes"
@@ -312,7 +400,17 @@ identifier_table=$(awk '
 
 # --- test files changed --------------------------------------------------------
 
-test_files=$(git diff --name-only "$baseref...$sha" | grep '_test\.go$' || true)
+# Two steps, not one pipeline: `git diff | grep` reports grep's exit status,
+# so a failed diff and a diff with no test files in it are the same "(none)"
+# (#344, item 1). "(none)" must mean the PR changed no test file - the single
+# most load-bearing line in the packet for the test reviewer - not that the
+# lookup fell over.
+changed_files=$(git diff --name-only "$baseref...$sha") || {
+  echo "packet: git diff --name-only $baseref...$sha failed - is $sha fetched in this checkout? (git fetch origin $headref)" >&2
+  rm -f "$inlined_diff_file"
+  exit 1
+}
+test_files=$(printf '%s\n' "$changed_files" | grep '_test\.go$' || true)
 [ -n "$test_files" ] || test_files="(none)"
 
 # --- CI status -----------------------------------------------------------------
@@ -321,11 +419,51 @@ ci_output=$(gh pr checks "$pr" 2>&1)
 ci_rc=$?
 
 # --- previous verdict (round >= 2) ----------------------------------------------
-
+#
+# Two ways to recognise a verdict comment below, and the second one is
+# temporary.
+#
+# The first is H5's machine-readable marker (#304): the
+# `<!-- verdict: ... reviewer=<role> -->` line each reviewer prompt's Output
+# section ends with, and the only thing `scripts/dev gate` itself reads. That
+# is the intended mechanism, and the lookup prefers it - the latest marker
+# for a role wins.
+#
+# The second, matching the `## <X> Review` header text, exists only because
+# H5 (#304) had not merged when this command shipped: PRs reviewed before it
+# carry verdict comments with no marker in them at all (#344, item 3). It is
+# a fallback for that history and nothing else. Every reviewer has emitted
+# the marker since, so the header branch is already unreachable for any PR
+# whose rounds all ran after H5 merged, and it becomes dead code outright
+# once no caller can still be reviewing a pre-H5 PR - delete it then, along
+# with `TestPacketSinceFindsThePreviousVerdictByTheHeaderFormat`.
+#
+# Until then the header text `## Go Review` / `## Test Review` /
+# `## Docs Review` is load-bearing in the three prompts under
+# `.claude/agents/`: reflowing or rewording a reviewer's header would
+# silently stop round-2 packets from finding the previous verdict on any PR
+# still on this path, with no error - the packet would simply report that it
+# found none.
 previous_section=""
 if [ -n "$since" ]; then
   rs=$(printf '\036')
-  comments=$(gh pr view "$pr" --json comments -q '[.comments[].body] | join("\u001e")' 2>/dev/null)
+  # Checked like every other call (#344, item 1): the "(no previous verdict
+  # comment found ...)" note below is an assertion about this PR's comments,
+  # and it must not be printed when the truth is that they were never read.
+  # `2>&1 >file`, in that order, splits the streams: stderr into the
+  # substitution, stdout into the file.
+  comments_file=$(mktemp)
+  comments_err=$(gh pr view "$pr" --json comments -q '[.comments[].body] | join("\u001e")' 2>&1 >"$comments_file")
+  comments_rc=$?
+  comments=$(cat "$comments_file")
+  rm -f "$comments_file"
+  if [ "$comments_rc" -ne 0 ]; then
+    comments_err=$(printf '%s' "$comments_err" | tr '\n\r\t' '   ' | cut -c1-200)
+    previous_section="
+(the previous round's verdict comments could NOT be read: \`gh pr view $pr --json comments\` failed: $comments_err. That is a lookup failure, not a statement that no verdict was posted - read the PR's own comment history before concluding anything about the previous round.)
+"
+    comments=""
+  fi
   for role in "go:Go" "tests:Test" "docs:Docs"; do
     key=${role%%:*}
     header=${role#*:}
