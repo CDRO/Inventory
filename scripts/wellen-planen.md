@@ -485,9 +485,8 @@ fires. `.claude/settings.json`'s `permissions.allow` list is the
 other half of the same concern, and in wave 6 it becomes load-bearing rather
 than a convenience: headless sessions there run with `--permission-mode
 dontAsk --permission-prompts none` (H19, decision D10 of the harness
-optimization plan — `docs/plans/2026-09-harness-optimization.md` once #293's
-plan PR merges; until then it lives on branch `harness/optimization-plan`,
-PR #319), under which anything not on the allowlist is *denied*, never
+optimization plan, `docs/plans/2026-09-harness-optimization.md`), under
+which anything not on the allowlist is *denied*, never
 prompted, so a session started that way cannot fall back on a human
 noticing a stuck prompt. That is also why `permissions.allow` carries two
 plain tool-name entries, `Edit` and `Write`, with no path restriction:
