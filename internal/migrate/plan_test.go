@@ -275,7 +275,7 @@ func TestParseClassicMarkerSkipsBlankLinesBeforeTheMarker(t *testing.T) {
 // TestParseClassicMarkerRejectsALeadingSpace is the round-1 regression at the
 // parser level: a namespace check anchored to column zero missed an indented
 // marker entirely, returning (false, nil) — no marker — instead of reporting
-// it. classicNamespace detection now trims the line first.
+// it. The "-- +inventory:" namespace detection now trims the line first.
 func TestParseClassicMarkerRejectsALeadingSpace(t *testing.T) {
 	_, err := ParseClassicMarker([]byte("-- +goose Up\n  -- +inventory:classic\nSELECT 1;\n"))
 

@@ -1,6 +1,8 @@
 -- E2E fixture: fifteen user rows (two of them admins) across fourteen
 -- storages (docs/specs/05-frontend-pwa-foundations.md).
 --
+-- expected-counts: users=15 storages=14
+--
 -- It began as "a known admin, two ordinary users, and two storages with small
 -- inventories of their own", and those first two storages — "E2E Household"
 -- and "E2E Other Household" — are still what most journeys run against. The
@@ -9,9 +11,15 @@
 -- **own** seeded user and storage, because the suite runs files in parallel.
 -- That is why this file grows by a block rather than by a row.
 --
--- Count the inserts rather than trusting this sentence if the number matters.
--- It was stale for six waves before anyone noticed, which is the failure mode
--- a comment stating a total always has.
+-- The "expected-counts" line above is checked, not just stated:
+-- scripts/dev e2e's "check seed counts" step (scripts/dev.d/e2e) runs
+-- count(*) against users and storages right after seeding and fails the gate
+-- if either number has drifted - whether from a block added here without
+-- updating the header, or from an id that silently lost an
+-- ON CONFLICT (id) DO NOTHING race and dropped a row nobody meant to drop.
+-- This comment's own count was stale for six waves before anyone noticed
+-- (#323), which is the failure mode a comment stating a total always has
+-- until something reads it back.
 --
 -- Applied directly to the disposable E2E database after migrations, NOT
 -- through the application layer, so fixed ids can be referenced by name from

@@ -13,11 +13,11 @@
 # serving (#391), and inherited CI's worker count on a machine running five
 # other compose projects (#382).
 #
-#   1. claim the gate lock          5. seed the fixtures
-#   2. down -v (clean slate)        6. wait for /healthz through Traefik
-#   3. build this checkout's image  7. check the served frontend is ours
-#   4. migrate up                   8. run the suite
-#                                   9. down -v and release the lock - ALWAYS
+#   1. claim the gate lock          6. check the seed counts (#323)
+#   2. down -v (clean slate)        7. wait for /healthz through Traefik
+#   3. build this checkout's image  8. check the served frontend is ours
+#   4. migrate up                   9. run the suite
+#   5. seed the fixtures           10. down -v and release the lock - ALWAYS
 #
 # Step 9 runs from a trap on EXIT, INT and TERM, which is most of the reason
 # this command exists. The teardown used to be the last line of a documented
@@ -449,6 +449,39 @@ check_served_assets() {
   return 1
 }
 
+# e2e/fixtures/seed.sql's header states how many user and storage rows the
+# fixture leaves behind once seeding finishes, and nothing checked that claim
+# against reality — it drifted silently twice before anyone noticed (#323).
+# docs/specs/05-frontend-pwa-foundations.md deliberately stopped restating the
+# count itself (#239), which made the header the one remaining place it could
+# go stale in silence.
+#
+# The header's prose is for a reader; the "-- expected-counts:" line right
+# below it is what this function actually parses; a count(*) is more honest
+# than re-counting the file's own VALUES lines because it also catches an id
+# that silently lost an ON CONFLICT (id) DO NOTHING race - a row present in
+# the file and absent from the database, which a check against the file alone
+# would never see.
+check_seed_counts() {
+  seed=e2e/fixtures/seed.sql
+  marker=$(grep -m1 '^-- expected-counts:' "$seed") || marker=
+  want_users=$(printf '%s\n' "$marker" | sed -n 's/.*users=\([0-9][0-9]*\).*/\1/p')
+  want_storages=$(printf '%s\n' "$marker" | sed -n 's/.*storages=\([0-9][0-9]*\).*/\1/p')
+  if [ -z "$want_users" ] || [ -z "$want_storages" ]; then
+    echo "e2e: $seed has no parseable '-- expected-counts: users=N storages=N' line - there is nothing to check the seeded database against" >&2
+    return 1
+  fi
+
+  got_users=$(compose exec -T db psql -U e2e -d e2e -tAc 'select count(*) from users;')
+  got_storages=$(compose exec -T db psql -U e2e -d e2e -tAc 'select count(*) from storages;')
+
+  if [ "$got_users" != "$want_users" ] || [ "$got_storages" != "$want_storages" ]; then
+    echo "e2e: $seed says $want_users users and $want_storages storages, but the freshly seeded database has $got_users users and $got_storages storages." >&2
+    echo "e2e: update the header's expected-counts line if seed.sql really changed the fixture, or look for a row that silently lost an ON CONFLICT (id) DO NOTHING race if it did not." >&2
+    return 1
+  fi
+}
+
 torn_down=
 release_and_down() {
   if [ -n "$torn_down" ]; then return 0; fi
@@ -581,6 +614,15 @@ cmd_run() {
   # the top of this file is what keeps Git Bash from rewriting it into a host
   # path, which is why this needs no prefix of its own.
   step "seed the fixtures" compose exec -T db psql -U e2e -d e2e -f /fixtures/seed.sql
+  # Deliberately not wrapped in `step`, for the same reason check_served_assets
+  # below is not: the message is the whole value of this check, and `step`'s
+  # `tail -15` of the log would not even show it, since the query runs directly
+  # rather than through a logged command.
+  if check_seed_counts; then
+    echo "check seed counts: ok"
+  else
+    exit 1
+  fi
   # `up -d` returns when the containers have started, not when the app answers
   # a request. /healthz only answers 200 once the app's own database connection
   # succeeds, unlike a static asset, which is served without touching Postgres

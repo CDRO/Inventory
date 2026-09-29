@@ -19,20 +19,18 @@ import (
 // fixes as the classic-deploy signal.
 const classicMarker = "-- +inventory:classic"
 
-// classicNamespace is the directive prefix this package owns. It sits outside
-// goose's own "-- +goose" namespace on purpose (D3), so the pinned goose never
-// mistakes it for a directive — but that also means goose does not validate it
-// for us, so ParseClassicMarker treats any line that starts with this prefix
-// and is not the exact, correctly placed classicMarker as a mistake to report
-// rather than a comment to ignore.
-const classicNamespace = "-- +inventory:"
-
-// classicNamespacePattern detects an *attempt* at classicNamespace even when
-// the whitespace between "--" and "+inventory:" itself is irregular — doubled
-// ("--  +inventory:classic") or absent ("--+inventory:classic") — one level
-// more precise than the outer TrimSpace/ToLower normalization below, which
-// only covers whitespace and case around the whole line, not inside the
-// prefix. \s* rather than \s+ deliberately also matches zero whitespace.
+// classicNamespacePattern detects an *attempt* at the "-- +inventory:"
+// directive prefix this package owns. It sits outside goose's own
+// "-- +goose" namespace on purpose (D3), so the pinned goose never mistakes
+// it for a directive - but that also means goose does not validate it for
+// us, so ParseClassicMarker treats any line that starts with this prefix and
+// is not the exact, correctly placed classicMarker as a mistake to report
+// rather than a comment to ignore, even when the whitespace between "--" and
+// "+inventory:" itself is irregular — doubled ("--  +inventory:classic") or
+// absent ("--+inventory:classic") — one level more precise than the outer
+// TrimSpace/ToLower normalization below, which only covers whitespace and
+// case around the whole line, not inside the prefix. \s* rather than \s+
+// deliberately also matches zero whitespace.
 var classicNamespacePattern = regexp.MustCompile(`^--\s*\+inventory:`)
 
 // gooseUpMarker is the directive goose itself requires to start an Up block.
@@ -136,8 +134,9 @@ func ParseClassicMarker(content []byte) (classic bool, err error) {
 		// wrong case, neither of which goose itself would reject either,
 		// since it is not goose's own directive. Without the trim, a line
 		// like "  -- +inventory:classic" starts with neither the exact
-		// marker nor classicNamespace, so it fell through both switch cases
-		// silently — read as no marker at all rather than reported — which
+		// marker nor the "-- +inventory:" prefix, so it fell through both
+		// switch cases silently — read as no marker at all rather than
+		// reported — which
 		// is exactly the silent failure decision D3 exists to prevent.
 		// Acceptance itself stays byte-exact: only line == classicMarker,
 		// untrimmed, ever sets classic true.

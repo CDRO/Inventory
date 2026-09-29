@@ -41,6 +41,9 @@ import (
 //	STUB_HEALTHZ_RC    the readiness poll's exit code
 //	STUB_REFUSE_CREATE=1  the daemon refuses every `network create`, with no
 //	                      lock existing — a dead daemon or an exhausted pool
+//	STUB_SEED_USERS    what `select count(*) from users` answers (default 15,
+//	                    matching e2e/fixtures/seed.sql's own expected-counts)
+//	STUB_SEED_STORAGES what `select count(*) from storages` answers (default 14)
 const e2eDockerStub = `#!/bin/sh
 printf 'docker %s\n' "$*" >> "$STUB_LOG"
 lockfile="$STUB_DIR/lock"
@@ -117,6 +120,10 @@ case "$*" in
   *"-e E2E_WORKERS="*)
     [ -z "${STUB_SUITE_OUT:-}" ] || printf '%s\n' "$STUB_SUITE_OUT"
     exit ${STUB_SUITE_RC:-0} ;;
+  *"count(*) from users"*)
+    echo "${STUB_SEED_USERS:-15}"; exit 0 ;;
+  *"count(*) from storages"*)
+    echo "${STUB_SEED_STORAGES:-14}"; exit 0 ;;
 esac
 exit 0
 `
@@ -160,9 +167,15 @@ const suiteFlaky = `Running 192 tests using 4 workers
   189 passed (51.3s)
 `
 
+// seedHeader is the "-- expected-counts:" line check_seed_counts (scripts/dev.d/e2e)
+// parses, matching e2eDockerStub's own defaults (STUB_SEED_USERS=15,
+// STUB_SEED_STORAGES=14) so the happy-path scenarios need no override.
+const seedHeader = "-- expected-counts: users=15 storages=14\n"
+
 // runE2E copies the dispatcher and its commands into a throwaway repository
-// root, writes the docker stub and a web/shell-manifest.json, and runs
-// `scripts/dev e2e <args>` there.
+// root, writes the docker stub, a web/shell-manifest.json and a stand-in
+// e2e/fixtures/seed.sql (check_seed_counts reads its header, not the real
+// fixture), and runs `scripts/dev e2e <args>` there.
 func runE2E(t *testing.T, env map[string]string, args ...string) result {
 	t.Helper()
 
@@ -182,6 +195,17 @@ func runE2E(t *testing.T, env map[string]string, args ...string) result {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "web", "shell-manifest.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	header := seedHeader
+	if h, ok := env["TEST_SEED_HEADER"]; ok {
+		header = h
+	}
+	if err := os.MkdirAll(filepath.Join(root, "e2e", "fixtures"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "e2e", "fixtures", "seed.sql"), []byte(header), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -501,6 +525,58 @@ func TestE2EFailsLoudlyWhenTheManifestHasNoJSDigests(t *testing.T) {
 		t.Fatal("expected a failure when no /js/ digests can be parsed")
 	}
 	mustContain(t, r.stderr, "web/shell-manifest.json", "the message names the file it could not read digests from")
+}
+
+// --- the seed-count self-check (#323) ---------------------------------------
+
+// TestE2EFailsWhenTheSeededUserCountDoesNotMatchTheHeader pins the whole
+// point of check_seed_counts: e2e/fixtures/seed.sql's header claims a count,
+// and a freshly seeded database that does not match it - whether the header
+// went stale or a row silently lost an ON CONFLICT (id) DO NOTHING race -
+// must fail the gate instead of running the suite against a fixture that is
+// not what it says it is.
+func TestE2EFailsWhenTheSeededUserCountDoesNotMatchTheHeader(t *testing.T) {
+	env := greenRun()
+	env["STUB_SEED_USERS"] = "14" // header (seedHeader) says 15
+	r := runE2E(t, env)
+	if r.exit == 0 {
+		t.Fatal("a seeded user count that disagrees with the header must fail the gate")
+	}
+	mustContain(t, r.stderr, "e2e/fixtures/seed.sql", "the message names the file whose header disagreed")
+	mustContain(t, r.stderr, "15 users", "the message states what the header expected")
+	mustContain(t, r.stderr, "14 users", "the message states what the database actually had")
+
+	// And it fails before the suite runs, the same as the asset self-check
+	// above: a mismatched fixture invalidates every journey the suite is
+	// about to run, so there is nothing useful left to read from its output.
+	if strings.Contains(r.calls, "-e E2E_WORKERS=") {
+		t.Error("the suite must not run once the seeded counts are known to be wrong")
+	}
+	mustContain(t, r.calls, "network rm inventory-e2e-gate-lock", "a refused run still releases the lock")
+}
+
+func TestE2EFailsWhenTheSeededStorageCountDoesNotMatchTheHeader(t *testing.T) {
+	env := greenRun()
+	env["STUB_SEED_STORAGES"] = "13" // header (seedHeader) says 14
+	r := runE2E(t, env)
+	if r.exit == 0 {
+		t.Fatal("a seeded storage count that disagrees with the header must fail the gate")
+	}
+	mustContain(t, r.stderr, "14 storages", "the message states what the header expected")
+	mustContain(t, r.stderr, "13 storages", "the message states what the database actually had")
+}
+
+// TestE2EFailsWhenTheHeaderHasNoExpectedCountsLine guards the check itself:
+// a seed.sql that lost its "-- expected-counts:" line (or never had a
+// parseable one) must not be read as "nothing to check" and waved through.
+func TestE2EFailsWhenTheHeaderHasNoExpectedCountsLine(t *testing.T) {
+	env := greenRun()
+	env["TEST_SEED_HEADER"] = "-- no counts here\n"
+	r := runE2E(t, env)
+	if r.exit == 0 {
+		t.Fatal("a seed.sql with no parseable expected-counts line must fail the gate, not pass it silently")
+	}
+	mustContain(t, r.stderr, "expected-counts", "the message names what it could not find")
 }
 
 // --- refusals --------------------------------------------------------------
