@@ -73,10 +73,27 @@ async function logIn(page) {
 // The list defaults to filter-only (docs/specs/16-product-maintenance.md): no
 // products render until a search or "Show all products", and once shown, a
 // row is a link (js/product-table.js's productCell), not a button.
+//
+// `#nav` starts `hidden` and js/nav.js's renderNav only reveals it once
+// products.js's init() has resolved `/api/me` — the same synchronous stretch
+// that, right afterward, attaches the `#filter` "input" listener
+// (web/static/js/pages/products.js). Under parallel load that resolution can
+// lag behind page.goto()'s own load event, so filling `#filter` first can
+// fire into a page with no listener yet: the debounced search that would
+// render the row never starts, and the click below stalls on its own
+// auto-wait for the full 30s (#423) rather than ever finding the link.
+// Waiting for `#nav` here is the same "page is ready" idiom
+// auth-journeys.spec.js and start-page.spec.js already rely on. The extra
+// `toHaveCount(1)` wait, rather than clicking straight off `fill`, also
+// covers the 250ms search debounce (products.js's SEARCH_DEBOUNCE_MS)
+// itself under load, independent of the listener race.
 async function openProduct(page, name) {
   await page.goto(`/products.html?storage=${STORAGE_ID}`);
+  await expect(page.locator("#nav")).toBeVisible();
   await page.locator("#filter").fill(name);
-  await page.getByRole("link", { name, exact: true }).click();
+  const link = page.getByRole("link", { name, exact: true });
+  await expect(link).toHaveCount(1);
+  await link.click();
 }
 
 function batchRow(page, batchId) {

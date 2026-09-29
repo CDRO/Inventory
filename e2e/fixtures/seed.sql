@@ -628,8 +628,20 @@ ON CONFLICT (id) DO NOTHING;
 -- and that wiring is a different file (web/static/js/pages/consume-review.js)
 -- from review.html's. Only ever dismissed, never processed, so it survives
 -- every run.
+--
+-- ...079 is the same fixture again, for the "Process as shopping list" click
+-- on that same page (#425): consume-review.js wires that action separately
+-- from review.html's own copy (its own POST to .../shopping-lists with
+-- {from_job_id}, its own redirect to the new list), so it needs a job of its
+-- own to discard — sharing ...078 would make that test collide with the
+-- "keep" one above on every parallel run.
 INSERT INTO jobs (id, storage_id, kind, status, payload, created_by) VALUES
   ('00000000-0000-7000-8000-000000000078', '00000000-0000-7000-8000-000000000010', 'consumption_photo', 'done',
+   '{"rows":[],
+     "looks_like_shopping_list":true,
+     "shopping_list_lines":["canned tomatoes","oat milk","sourdough bread"]}',
+   '00000000-0000-7000-8000-000000000003'),
+  ('00000000-0000-7000-8000-000000000079', '00000000-0000-7000-8000-000000000010', 'consumption_photo', 'done',
    '{"rows":[],
      "looks_like_shopping_list":true,
      "shopping_list_lines":["canned tomatoes","oat milk","sourdough bread"]}',

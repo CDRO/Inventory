@@ -47,9 +47,16 @@ test("Count this shelf on the product page corrects the quantity, and Back retur
   await logIn(page);
   await page.goto(`/products.html?storage=${STORAGE}`);
   // The list defaults to filter-only (docs/specs/16-product-maintenance.md):
-  // a search finds the row, which is a link now, not a button.
+  // a search finds the row, which is a link now, not a button. `#nav`
+  // becoming visible is products.js's own "init() is done, the #filter
+  // listener is attached" signal — waiting for it here, and for exactly one
+  // matching link before the click, avoids the parallel-load race #423
+  // describes (see products.spec.js's openProduct for the full account).
+  await expect(page.locator("#nav")).toBeVisible();
   await page.locator("#filter").fill(PRODUCT_NAME);
-  await page.getByRole("link", { name: PRODUCT_NAME, exact: true }).click();
+  const productLink = page.getByRole("link", { name: PRODUCT_NAME, exact: true });
+  await expect(productLink).toHaveCount(1);
+  await productLink.click();
 
   // The stock card no longer claims locations or expiry dates are edited on
   // the stocktake sheet — only quantities are, corrected shelf by shelf.
@@ -74,9 +81,14 @@ test("Count this shelf on the product page corrects the quantity, and Back retur
   // the batch row inside it — is not shown until the product is selected
   // again (products.js only auto-opens one from a ?product= deep link, and
   // the list itself is filter-only by default, so it has to be searched for
-  // again too).
+  // again too). #back is a real navigation (the toHaveURL above), so this is
+  // the same page-ready race as the first search above, not just the search
+  // debounce.
+  await expect(page.locator("#nav")).toBeVisible();
   await page.locator("#filter").fill(PRODUCT_NAME);
-  await page.getByRole("link", { name: PRODUCT_NAME, exact: true }).click();
+  const productLinkAgain = page.getByRole("link", { name: PRODUCT_NAME, exact: true });
+  await expect(productLinkAgain).toHaveCount(1);
+  await productLinkAgain.click();
   await expect(row).toContainText("7 × Fridge");
 });
 
