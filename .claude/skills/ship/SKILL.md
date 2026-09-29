@@ -157,6 +157,39 @@ to 4 (`roundLimitPackage` / `roundLimitConsolidation` in the wave plan's JSON,
 read at `scripts/wellen-orchestrator.ps1:873` and `:893`): the loop's limits
 are sized for a package PR, and a PR several times that size states its own.
 
+### A stalled reviewer — no verdict comment posted
+
+An agent can spend its whole turn budget investigating and stop, `maxTurns`
+reached, without ever calling `gh pr comment` (#370, #387, #393). To
+`scripts/dev gate` that is indistinguishable from a reviewer nobody spawned
+this round — both read as `missing` — so only the spawning session can tell
+the difference, because it is the only party that knows which three reviewers
+it actually dispatched.
+
+Check each reviewer's own returned summary (the two-line report its prompt's
+last instruction asks for) as soon as it comes back. A summary with no verdict
+line, or one that says it stopped at its turn limit, is a **stall** — a third
+state, distinct from `BLOCK` and from "has not reviewed yet". Treat it as
+neither.
+
+On a stall:
+
+1. **Resume it once, automatically, before this counts as a round.** Try
+   resuming the same agent first (`SendMessage` to its id or name) — cheaper,
+   since it keeps the context it already gathered. Resume frequently fails
+   (`No transcript found for agent ID: …`, observed on #387); when it does,
+   respawn that one reviewer fresh instead of retrying the resume.
+2. Either way, the resume/respawn prompt must say explicitly: *"A previous
+   agent on this PR stopped at its turn limit without posting a verdict. Your
+   PR comment is the only output that counts — post it with turns to spare,
+   and do not call the advisor."*
+3. If it stalls a second time, stop and tell the user instead of retrying
+   again. Two stalls on the same reviewer in the same round is no longer a
+   routine hiccup this loop should paper over.
+
+Only once all three reviewers have a posted verdict for the round — or you
+have stopped to report a repeat stall — does step 6 run.
+
 ## 6. The gate — read verdicts back from GitHub
 
 ```bash

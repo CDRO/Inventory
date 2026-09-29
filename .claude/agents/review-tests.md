@@ -130,6 +130,16 @@ large the spawning session says so in your prompt and names the budget to work
 to; `.claude/skills/ship/SKILL.md` §5 ("Turn budget: size it to the diff") is
 where that line comes from.
 
+**Your posted `gh pr comment` is the only output that exists.** An agent that
+investigates well and then hits `maxTurns` before calling `gh pr comment` has
+produced nothing — `scripts/dev gate` cannot see partial work, and a missing
+verdict costs the PR a whole extra round (#370, #387, #393, all the same
+failure at different scales). Post with turns to spare: draft your verdict as
+soon as you have enough evidence for it rather than continuing to polish. Do
+**not** call the `advisor` tool — it is not budgeted for, and reviewers
+reaching for it in their last few turns is the single most common cause of a
+stall with no verdict posted (#387).
+
 ## What makes a test meaningless
 
 Hunt these specifically. They are the ways a diff gets test coverage without
