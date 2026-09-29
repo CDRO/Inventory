@@ -165,11 +165,11 @@ columns. This spec adds one layout modifier to `base.css`:
 .shell--wide { max-width: 80rem; }
 ```
 
-`inventory.html` puts it on **both** its `<header>` and its `<main>`, so the
-header stays aligned with the table beneath it. On a wide screen the table
-is therefore up to 1280 px wide, well past the 800 px the page needs to be
-readable. *(`.shell--wide` was this page's own one-off when this spec was
-written; [`05-frontend-pwa-foundations.md`](05-frontend-pwa-foundations.md)'s
+`inventory.html` puts it on its `<header>`, `<nav>`, and `<main>` alike, so
+the header and nav stay aligned with the table beneath them. On a wide
+screen the table is therefore up to 1280 px wide, well past the 800 px the
+page needs to be readable. *(`.shell--wide` was this page's own one-off when
+this spec was written; [`05-frontend-pwa-foundations.md`](05-frontend-pwa-foundations.md)'s
 "Layout width" amendment later made it every page's default — nothing
 below changes as a result, since this page already used it.)*
 
