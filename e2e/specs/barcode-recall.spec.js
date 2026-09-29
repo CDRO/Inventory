@@ -482,9 +482,16 @@ test("the product page adds and removes a barcode whatever the offer preference 
 
   await page.goto(`/products.html?storage=${BARCODE_HOUSEHOLD}`);
   // The list defaults to filter-only (docs/specs/16-product-maintenance.md):
-  // a search finds the row, which is a link now, not a button.
+  // a search finds the row, which is a link now, not a button. `#nav`
+  // becoming visible is products.js's own "init() is done, the #filter
+  // listener is attached" signal — waiting for it here, and for exactly one
+  // matching link before the click, avoids the parallel-load race #423
+  // describes (see products.spec.js's openProduct for the full account).
+  await expect(page.locator("#nav")).toBeVisible();
   await page.locator("#filter").fill("Hand-typed Beans");
-  await page.getByRole("link", { name: "Hand-typed Beans", exact: true }).click();
+  const beansLink = page.getByRole("link", { name: "Hand-typed Beans", exact: true });
+  await expect(beansLink).toHaveCount(1);
+  await beansLink.click();
 
   const card = page.locator(".card", { has: page.getByRole("heading", { name: "Barcodes" }) });
   await expect(card).toBeVisible();

@@ -28,6 +28,10 @@ const PROCESS_JOB = "00000000-0000-7000-8000-000000000077";
 // wiring the same shared banner, and because internal/consume's payload has
 // no `mode` field at all — the banner's copy comes from the job's kind.
 const CONSUMPTION_JOB = "00000000-0000-7000-8000-000000000078";
+// A second consumption-photo job, dedicated to the "Process as shopping
+// list" click below: that action DISCARDS its job, so it cannot share
+// CONSUMPTION_JOB with the "keep" test, which revisits it on every run.
+const CONSUMPTION_PROCESS_JOB = "00000000-0000-7000-8000-000000000079";
 // An ordinary shelf proposal, seeded for e2e/specs/ingestion.spec.js: the
 // overwhelming majority case, which this spec must leave looking untouched.
 const ORDINARY_JOB = "00000000-0000-7000-8000-000000000074";
@@ -158,4 +162,45 @@ test("a consumption photo read as a list offers the same choice, naming its own 
   const job = await page.request.get(`/api/storages/${HOUSEHOLD}/jobs/${CONSUMPTION_JOB}`);
   expect(job.status()).toBe(200);
   expect((await job.json()).status).toBe("done");
+});
+
+// consume-review.js wires "Process as shopping list" separately from
+// review.html's own copy (docs/specs/41-mixed-photo-classification.md), so
+// this is the frontend's only browser coverage of that wiring for a
+// consumption_photo job — the backend contract itself is already covered,
+// kind and all, by internal/httpapi/shoppinglists_photo_test.go's
+// TestEveryPhysicalJobKindCanBeReclassified (#425).
+test("processing a consumption photo as a shopping list lands on a real, resolvable list and discards the job", async ({
+  page,
+}) => {
+  await logInAsBob(page);
+  await page.goto(`/consume-review.html?storage=${HOUSEHOLD}&job=${CONSUMPTION_PROCESS_JOB}`);
+
+  const banner = page.locator("#shopping-list-banner");
+  await expect(banner).toBeVisible();
+  await banner.getByRole("button", { name: "Process as shopping list" }).click();
+
+  // The same place a person lands after any other list ingestion.
+  await page.waitForURL(/\/shopping-list\.html\?.*list=/);
+  const listId = new URL(page.url()).searchParams.get("list");
+  expect(listId).toBeTruthy();
+
+  // A real list: every extracted line is a row, resolved through the same
+  // matching service every other shopping list uses — "canned tomatoes"
+  // matches this storage's own Canned Tomatoes.
+  const items = page.locator("#items .item");
+  await expect(items).toHaveCount(3);
+  await expect(items.nth(0)).toContainText("canned tomatoes");
+  await expect(items.nth(0).locator('[data-field="status"]')).toHaveText("Match");
+  await expect(items.nth(1)).toContainText("oat milk");
+  await expect(items.nth(2)).toContainText("sourdough bread");
+
+  // The origin job is discarded, and reclassifying is not idempotent: the
+  // same call again is the 404 an id that names nothing gets.
+  const gone = await page.request.get(`/api/storages/${HOUSEHOLD}/jobs/${CONSUMPTION_PROCESS_JOB}`);
+  expect(gone.status()).toBe(404);
+  const again = await page.request.post(`/api/storages/${HOUSEHOLD}/shopping-lists`, {
+    data: { from_job_id: CONSUMPTION_PROCESS_JOB },
+  });
+  expect(again.status()).toBe(404);
 });
