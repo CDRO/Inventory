@@ -135,6 +135,37 @@ func TestConfirmIngestionAppliesEveryDecisionInOneGo(t *testing.T) {
 	assert.Equal(t, 3, f.batchCount(t))
 }
 
+// TestConfirmIngestionGivesAnAcceptedRowsBatchAContainer covers
+// docs/specs/39-batch-containers.md's closing paragraph on the vision review
+// confirm step: a row's container fields reach the batch createBatch creates
+// for it, in the same transaction, through ConfirmIngestion's real database
+// path rather than a fake store.
+func TestConfirmIngestionGivesAnAcceptedRowsBatchAContainer(t *testing.T) {
+	s := requireDB(t)
+	ctx := context.Background()
+	f := newIngestFixture(t, s, 1)
+
+	result, err := s.ConfirmIngestion(ctx, f.storageID, f.jobID, &f.userID, []store.IngestDecision{
+		{RowID: "0", Accept: true, ProductID: &f.beans, Quantity: 3, LocationID: &f.pantry,
+			ContainerLabel: ptr("24-pack box"), ContainerType: ptr("box")},
+	})
+	require.NoError(t, err)
+	require.Len(t, result.BatchIDs, 1)
+
+	batches, err := s.ListProductBatches(ctx, f.storageID, f.beans)
+	require.NoError(t, err)
+	require.Len(t, batches, 1)
+	require.NotNil(t, batches[0].ContainerLabel)
+	assert.Equal(t, "24-pack box", *batches[0].ContainerLabel)
+	require.NotNil(t, batches[0].ContainerType)
+	assert.Equal(t, "box", *batches[0].ContainerType)
+
+	assert.Equal(t, f.logsBefore+1, countRows(t, ctx, `
+		SELECT count(*) FROM inventory_logs l JOIN products p ON p.id = l.product_id
+		 WHERE p.storage_id = $1`, f.storageID),
+		"the batch write gets its one vision_ingestion log row; the container fields add none")
+}
+
 // TestConfirmIngestionGivesANewProductItsPictureButNeverTheCatalog — a picture
 // cut from the reviewed photo is the storage's own. It lands on the product,
 // never on the anonymous catalog row, and only the storage whose product uses

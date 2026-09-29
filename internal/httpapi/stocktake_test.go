@@ -3,6 +3,7 @@ package httpapi_test
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,7 +72,7 @@ func TestPatchBatchValidatesTheRequest(t *testing.T) {
 		body      string
 		wantField string
 	}{
-		{"no field at all", `{}`, "quantity"},
+		{"no field at all", `{}`, "body"},
 		{"negative quantity", `{"quantity":-1}`, "quantity"},
 		{"absurd quantity", `{"quantity":100001}`, "quantity"},
 		{"fractional quantity", `{"quantity":2.5}`, "body"},
@@ -185,6 +186,67 @@ func TestFoundStockValidatesTheRequest(t *testing.T) {
 			require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 			assert.NotEmpty(t, errorFields(t, rec)[tc.wantField])
 			assert.Zero(t, f.stocktake.lastCreate.Quantity, "a refused body never reaches the store")
+		})
+	}
+}
+
+// TestFoundStockAcceptsAContainerAtCreation covers
+// docs/specs/39-batch-containers.md's closing paragraph: a batch can be given
+// a container in the same request that creates it, not just through a
+// follow-up PATCH.
+func TestFoundStockAcceptsAContainerAtCreation(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	rec := f.do(http.MethodPost, f.base()+"/inventory-batches",
+		foundStockBody(uuid.New(), uuid.New(), `"container_label":"24-pack box","container_type":"box"`))
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	require.NotNil(t, f.stocktake.lastCreate.ContainerLabel)
+	assert.Equal(t, "24-pack box", *f.stocktake.lastCreate.ContainerLabel)
+	require.NotNil(t, f.stocktake.lastCreate.ContainerType)
+	assert.Equal(t, "box", *f.stocktake.lastCreate.ContainerType)
+}
+
+// TestFoundStockContainerFieldsAreOptional guards the common case: most found
+// stock has no container, and the two fields must not become mandatory.
+func TestFoundStockContainerFieldsAreOptional(t *testing.T) {
+	t.Parallel()
+
+	f := newAPIFixture(t)
+	rec := f.do(http.MethodPost, f.base()+"/inventory-batches", foundStockBody(uuid.New(), uuid.New(), ""))
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	assert.Nil(t, f.stocktake.lastCreate.ContainerLabel)
+	assert.Nil(t, f.stocktake.lastCreate.ContainerType)
+}
+
+func TestFoundStockValidatesTheContainerFields(t *testing.T) {
+	t.Parallel()
+
+	id := uuid.New().String()
+	tooLong := `"` + strings.Repeat("x", 256) + `"`
+	tests := []struct {
+		name      string
+		extra     string
+		wantField string
+	}{
+		{"empty label", `"container_label":""`, "container_label"},
+		{"whitespace-only label", `"container_label":"   "`, "container_label"},
+		{"label too long", `"container_label":` + tooLong, "container_label"},
+		{"empty type", `"container_type":""`, "container_type"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newAPIFixture(t)
+			rec := f.do(http.MethodPost, f.base()+"/inventory-batches",
+				`{"product_id":"`+id+`","location_id":"`+id+`","quantity":1,`+tc.extra+`}`)
+
+			require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+			assert.NotEmpty(t, errorFields(t, rec)[tc.wantField])
 		})
 	}
 }

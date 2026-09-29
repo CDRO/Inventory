@@ -212,13 +212,12 @@ func (h *BatchHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if body.LocationID == nil && body.Quantity == nil && body.ContainerLabel == nil && body.ContainerType == nil {
 		// A PATCH naming no field is a request the server cannot carry out, and
 		// answering 200 would tell the caller their change landed when nothing
-		// changed.
-		const required = "A location_id, a quantity, a container_label or a container_type is required."
+		// changed. This is wrong with the request as a whole, not with any one
+		// field, so it is one "body" entry rather than the same sentence repeated
+		// under every field key — the same "body" key decodeJSON's own
+		// malformed-body error uses, for the same reason.
 		h.errors.WriteError(w, r, ValidationFailed(map[string][]string{
-			"location_id":     {required},
-			"quantity":        {required},
-			"container_label": {required},
-			"container_type":  {required},
+			"body": {"Name at least one of location_id, quantity, container_label or container_type."},
 		}, nil))
 		return
 	}
@@ -260,8 +259,9 @@ func (h *BatchHandler) Update(w http.ResponseWriter, r *http.Request) {
 			case utf8.RuneCountInString(label) > maxContainerLabelLength:
 				fields["container_label"] = append(fields["container_label"],
 					"Keep the container label under 255 characters.")
+			default:
+				patch.ContainerLabel = &label
 			}
-			patch.ContainerLabel = &label
 		}
 	}
 
@@ -336,6 +336,44 @@ func (h *BatchHandler) DestroyContainer(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, http.StatusNoContent, nil)
+}
+
+// parseCreationContainerFields validates container_label/container_type on an
+// endpoint that creates a batch — the stocktake CreateBatch and the ingest
+// confirm step both take these two fields at creation time, same names and
+// same upsert rule the PATCH above has
+// (docs/specs/39-batch-containers.md, "Setting and clearing a container on a
+// batch", closing paragraph).
+//
+// Unlike the PATCH's RawMessage handling, a batch being created has no
+// existing container to detach from, so absent and explicit null are the same
+// "no container" and a plain *string carries that with no ambiguity to lose.
+// A container_type with no container_label is not rejected here — the store's
+// own setBatchContainerType already refuses it with the same ErrValidation
+// the PATCH's identical case reaches the wire as a 422 through, so the check
+// only needs to exist once.
+func parseCreationContainerFields(label, containerType *string, fields map[string][]string) (*string, *string) {
+	var outLabel, outType *string
+	if label != nil {
+		trimmed := strings.TrimSpace(*label)
+		switch {
+		case trimmed == "":
+			fields["container_label"] = append(fields["container_label"], "Must not be empty.")
+		case utf8.RuneCountInString(trimmed) > maxContainerLabelLength:
+			fields["container_label"] = append(fields["container_label"], "Keep the container label under 255 characters.")
+		default:
+			outLabel = &trimmed
+		}
+	}
+	if containerType != nil {
+		trimmed := strings.TrimSpace(*containerType)
+		if trimmed == "" {
+			fields["container_type"] = append(fields["container_type"], "Must not be empty.")
+		} else {
+			outType = &trimmed
+		}
+	}
+	return outLabel, outType
 }
 
 // containerIDFromPath parses {id} on the container routes, answering 404 for

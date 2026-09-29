@@ -65,6 +65,15 @@ func (h *StocktakeHandler) CreateBatch(w http.ResponseWriter, r *http.Request) {
 		LocationID     string          `json:"location_id"`
 		Quantity       int             `json:"quantity"`
 		ExpirationDate json.RawMessage `json:"expiration_date"`
+		// ContainerLabel and ContainerType give this batch a container at
+		// creation time, same field names and upsert rule as the PATCH
+		// (docs/specs/39-batch-containers.md, "Setting and clearing a
+		// container on a batch", closing paragraph). Absent and null are the
+		// same thing here — unlike the PATCH, a brand-new batch has no
+		// existing container to detach from — so a plain pointer is enough;
+		// there is no "leave it alone" reading to lose.
+		ContainerLabel *string `json:"container_label"`
+		ContainerType  *string `json:"container_type"`
 	}
 	if failure := decodeJSON(w, r, &body); failure != nil {
 		h.errors.WriteError(w, r, failure)
@@ -92,6 +101,8 @@ func (h *StocktakeHandler) CreateBatch(w http.ResponseWriter, r *http.Request) {
 		fields["expiration_date"] = append(fields["expiration_date"], failure...)
 	}
 
+	containerLabel, containerType := parseCreationContainerFields(body.ContainerLabel, body.ContainerType, fields)
+
 	if len(fields) > 0 {
 		h.errors.WriteError(w, r, ValidationFailed(fields, nil))
 		return
@@ -110,6 +121,8 @@ func (h *StocktakeHandler) CreateBatch(w http.ResponseWriter, r *http.Request) {
 		ExpirationSource: source,
 		Reason:           store.ReasonAudit,
 		CreatedBy:        actingUser(r),
+		ContainerLabel:   containerLabel,
+		ContainerType:    containerType,
 	})
 	if err != nil {
 		h.errors.WriteError(w, r, FromStoreError(err, "product or location not in this storage or nonexistent"))

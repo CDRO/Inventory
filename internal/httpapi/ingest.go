@@ -204,6 +204,15 @@ type confirmItem struct {
 	// default and the batch gets a derived date; present — a date, or null for
 	// "does not expire" — is the reviewer's own and recorded as a user date.
 	ExpirationDate json.RawMessage `json:"expiration_date"`
+
+	// ContainerLabel and ContainerType give the batch created from this row a
+	// container at confirm time, same field names and upsert rule as the
+	// batch PATCH (docs/specs/39-batch-containers.md, closing paragraph of
+	// "Setting and clearing a container on a batch"). Absent or null is no
+	// container — a row being confirmed has no existing batch to detach one
+	// from, so there is no "leave it alone" state to distinguish.
+	ContainerLabel *string `json:"container_label"`
+	ContainerType  *string `json:"container_type"`
 }
 
 // Confirm serves POST /api/storages/{storage_id}/ingest/{job_id}/confirm.
@@ -583,6 +592,14 @@ func parseDecisions(body confirmRequest) ([]store.IngestDecision, []productImage
 				add(i, "expiration_date", "Must be a YYYY-MM-DD date or null.")
 			}
 			d.ExpirationEdited, d.ExpirationDate = true, date
+		}
+
+		itemFields := map[string][]string{}
+		d.ContainerLabel, d.ContainerType = parseCreationContainerFields(item.ContainerLabel, item.ContainerType, itemFields)
+		for field, msgs := range itemFields {
+			for _, msg := range msgs {
+				add(i, field, msg)
+			}
 		}
 
 		out = append(out, d)
