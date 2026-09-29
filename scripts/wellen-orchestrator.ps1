@@ -399,6 +399,12 @@ function Import-WavePlan {
 # Exit code of the last Invoke-Native call.
 $script:NativeExit = 0
 
+# stderr of the last Invoke-Native call made with -CaptureStderr; $null
+# otherwise (every other caller still gets stderr silently discarded, as
+# before - CaptureStderr is opt-in precisely so it changes nothing for the 15+
+# existing call sites that never asked for this).
+$script:NativeStderr = $null
+
 # Runs a native command (gh, git, docker, claude) with stderr discarded,
 # returns its stdout, and leaves the exit code in $script:NativeExit.
 #
@@ -410,13 +416,33 @@ $script:NativeExit = 0
 # daemon would end a multi-day run instead of being treated as "not yet" and
 # retried on the next poll. Lowering the preference for just this call is the
 # only form that works.
+#
+# -CaptureStderr additionally saves stderr text into $script:NativeStderr
+# instead of discarding it (H11 follow-up, #372 item 1): Invoke-DoctorPreflight
+# needs it to report a real `sh` exec failure (not a doctor FAIL) with
+# something other than an empty message - `sh` writes "cannot execute"/"No
+# such file" style errors to stderr, not stdout. Redirecting stderr to a FILE
+# (2>$path) does not give raw bytes on PS 5.1: each stderr line still becomes
+# an ErrorRecord internally, and writing that to a file goes through the
+# default formatter, which prepends "In Zeile:… Zeichen:…"/CategoryInfo noise.
+# Merging with 2>&1 and reading each ErrorRecord's own .Exception.Message
+# (never rendered through that formatter) is what actually recovers the plain
+# text `sh` wrote.
 function Invoke-Native {
-    param([scriptblock]$Command)
+    param([scriptblock]$Command, [switch]$CaptureStderr)
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $output = & $Command 2>$null
-        $script:NativeExit = $LASTEXITCODE
+        if ($CaptureStderr) {
+            $combined = & $Command 2>&1
+            $script:NativeExit = $LASTEXITCODE
+            $output = @($combined | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })
+            $stderrLines = @($combined | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { $_.Exception.Message })
+            $script:NativeStderr = ($stderrLines -join "`n")
+        } else {
+            $output = & $Command 2>$null
+            $script:NativeExit = $LASTEXITCODE
+        }
         return $output
     } finally {
         $ErrorActionPreference = $previous
@@ -452,9 +478,14 @@ function Invoke-DoctorPreflight {
     if (-not (Get-Command sh -ErrorAction SilentlyContinue)) {
         throw "sh (Git Bash) not found on PATH - scripts/doctor needs it, and every package session's own ship loop already requires Git Bash on PATH for the same reason."
     }
-    $output = Invoke-Native { sh $script:DoctorScript }
+    $output = Invoke-Native -CaptureStderr { sh $script:DoctorScript }
     if ($script:NativeExit -ne 0) {
-        throw "scripts/doctor found a problem that must be fixed before starting anything:`n$($output -join "`n")"
+        # A doctor FAIL reports on stdout; `sh` failing to execute the script
+        # at all (missing file, not executable, …) reports on stderr instead
+        # and leaves stdout empty - fall back to it rather than throw with no
+        # message at all (#372 item 1).
+        $body = if (($output -join "`n").Trim()) { $output -join "`n" } else { $script:NativeStderr }
+        throw "scripts/doctor found a problem that must be fixed before starting anything:`n$body"
     }
     Write-Log "scripts/doctor: all checks passed."
 }
@@ -531,7 +562,7 @@ function Wait-ForRemoteBranch {
 # ---------------------------------------------------------------------------
 
 # Slug -> the UTC time a session was actually started for that package
-# (Invoke-Package), used as the "last activity" floor when none of the three
+# (Invoke-Package), used as the "last activity" floor when none of the four
 # real signals below has anything yet - a session that has not committed,
 # written a worklog, or received a PR comment in its first few minutes is new,
 # not stale.
@@ -542,9 +573,10 @@ $script:PackageStartedAt = @{}
 # if nothing already has a floor for it, so a second restart does not keep
 # pushing the floor forward and never seeds a package Invoke-Package already
 # started for real in THIS process's own lifetime. Without this, a package
-# with none of the three real signals (never committed, never wrote a
-# worklog, no PR yet) would never be flagged stale after a restart at all -
-# exactly the "crashed window" case the heartbeat's own header names.
+# with none of the four real signals (never committed, never wrote a
+# worklog, no PR yet, no uncommitted worktree change) would never be flagged
+# stale after a restart at all - exactly the "crashed window" case the
+# heartbeat's own header names.
 function Register-PackageStartIfUnknown {
     param([string]$Slug)
     if (-not $script:PackageStartedAt.ContainsKey($Slug)) {
@@ -556,7 +588,7 @@ function Register-PackageStartIfUnknown {
 # for hours gets one log line and one toast per hour, not one per poll.
 $script:PackageLastWarnedAt = @{}
 
-# Signal 1/3: last commit date on the package branch. A PR's own `updatedAt`
+# Signal 1/4: last commit date on the package branch. A PR's own `updatedAt`
 # already reflects its head commit in one call - cheaper than the two-call
 # form below, and covers most polls once a package has opened its PR. Only a
 # package with no PR yet falls through to `git ls-remote` (the branch's
@@ -575,7 +607,7 @@ function Get-BranchLastCommitDate {
     return (Get-ParsedDateOrNull -Text $date)
 }
 
-# Signal 2/3: the package worktree's own .claude/worklog.md mtime - the ship
+# Signal 2/4: the package worktree's own .claude/worklog.md mtime - the ship
 # loop's local scratch file, rewritten at every phase boundary per the pickup
 # skill.
 function Get-WorklogLastWriteDate {
@@ -585,7 +617,7 @@ function Get-WorklogLastWriteDate {
     return $null
 }
 
-# Signal 3/3: the newest comment on the package's PR (a reviewer round, a
+# Signal 3/4: the newest comment on the package's PR (a reviewer round, a
 # reply, anything) - $null when there is no PR yet or it has no comments.
 function Get-NewestReviewerCommentDate {
     param([string]$Branch)
@@ -594,6 +626,33 @@ function Get-NewestReviewerCommentDate {
     $newest = Invoke-Native { gh pr view (($prNumber -split '\s+') | Select-Object -First 1) --repo $GhRepo --json comments -q '([.comments[].createdAt]) | if length == 0 then "" else max end' }
     if ($script:NativeExit -ne 0 -or [string]::IsNullOrWhiteSpace($newest)) { return $null }
     return (Get-ParsedDateOrNull -Text $newest)
+}
+
+# Signal 4/4 (#429): the newest mtime across the worktree's own uncommitted
+# changes (tracked and untracked alike) - `git status --porcelain` lists the
+# paths, Get-Item reads each one's own LastWriteTimeUtc. None of the three
+# signals above reflect a session actively editing, writing tests, or running
+# `docker compose run --rm app go test ./...` between commits: a package
+# heads-down on a long edit-test-edit cycle with no commit or worklog write
+# for 45+ minutes was flagged stale twice in the new-features wave even though
+# it was making real, uncommitted progress. A clean worktree (nothing
+# uncommitted) contributes no signal here, same as the other three when they
+# have nothing to report - never invented as "now".
+function Get-WorktreeFileLastWriteDate {
+    param([string]$WorktreePath)
+    $lines = Invoke-Native { git -C $WorktreePath status --porcelain }
+    if ($script:NativeExit -ne 0) { return $null }
+    $dates = foreach ($line in @($lines)) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        # Porcelain status is "XY path", or "XY orig -> path" for a rename -
+        # the path starts at column 4 ("XY "); a rename uses the NEW path.
+        $entryPath = $line.Substring([Math]::Min(3, $line.Length)).Trim('"')
+        if ($entryPath -match '^(.+?)" -> "?(.+)$') { $entryPath = $Matches[2] }
+        elseif ($entryPath -match '^(.+) -> (.+)$') { $entryPath = $Matches[2] }
+        $full = Join-Path $WorktreePath $entryPath
+        if (Test-Path -LiteralPath $full) { (Get-Item -LiteralPath $full).LastWriteTimeUtc }
+    }
+    return Get-LatestDate -Dates @($dates)
 }
 
 # A native command's stdout is not a contract - a transient gh/git hiccup, a
@@ -626,7 +685,8 @@ function Get-PackageLastActivity {
     return Get-LatestDate -Dates @(
         (Get-BranchLastCommitDate -Branch $Package.branch),
         (Get-WorklogLastWriteDate -WorktreePath $WorktreePath),
-        (Get-NewestReviewerCommentDate -Branch $Package.branch)
+        (Get-NewestReviewerCommentDate -Branch $Package.branch),
+        (Get-WorktreeFileLastWriteDate -WorktreePath $WorktreePath)
     )
 }
 

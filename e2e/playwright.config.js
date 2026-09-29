@@ -7,14 +7,51 @@
 // @ts-check
 import { defineConfig, devices } from "@playwright/test";
 
+// Two knobs a local run may set, and CI never does (#382). Both are read from
+// the environment rather than branched on `process.env.CI`, so the default is
+// literally the configuration this file had before they existed: unset means
+// Playwright's own worker count and no retries, which is what every CI run
+// gets, since `.github/workflows/e2e.yml` passes neither.
+//
+// `scripts/dev e2e` is what sets them locally — see that command's header for
+// the measurements. Setting them by hand is fine too:
+//
+//   docker compose -p inventory-e2e -f docker-compose.e2e.yml \
+//     run --rm -e E2E_WORKERS=4 -e E2E_RETRIES=1 e2e
+const positiveInt = (name) => {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`${name} must be a non-negative integer, got ${JSON.stringify(raw)}`);
+  }
+  return n;
+};
+
 export default defineConfig({
   testDir: "./specs",
   timeout: 30_000,
   fullyParallel: true,
-  // No retries: a flaky E2E result must be investigated, not quietly
+  // Playwright's default worker count is derived from the machine's CPU count,
+  // which on a developer machine comes out CI-shaped (12 measured) while the
+  // machine also runs several other compose projects — and the suite then
+  // fails in bulk on an unmodified commit, in clusters that vary run to run
+  // (#382: 28 failed and 5 did not run on a commit CI passed 191/191 twice).
+  // E2E_WORKERS caps it for a local run. Undefined here is Playwright's own
+  // default, exactly as before, which is what CI keeps.
+  workers: positiveInt("E2E_WORKERS"),
+  // No retries on CI: a flaky E2E result must be investigated, not quietly
   // absorbed by trying again. This is a deployment gate — passing on the
   // second attempt is not the same guarantee as passing on the first.
-  retries: 0,
+  //
+  // E2E_RETRIES exists for the local gate only, where the opposite is true:
+  // there the dominant failure cause is contention with whatever else the
+  // machine is running, and a red suite that is actually a flake is worse than
+  // useless — it teaches a reviewer to wave failures away. With one retry
+  // Playwright reports such a test as `flaky` in its own summary line, which
+  // names the problem instead of hiding it. A genuinely broken test still
+  // fails both attempts and still reports as `failed`.
+  retries: positiveInt("E2E_RETRIES") ?? 0,
   reporter: [["list"]],
   use: {
     baseURL: process.env.BASE_URL || "https://traefik",

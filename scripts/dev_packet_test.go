@@ -301,6 +301,42 @@ func TestPacketHappyPathWritesEveryTopLevelSection(t *testing.T) {
 	}
 }
 
+// #379: a PR whose only tests are PowerShell (scripts/tests/*.test.ps1, the
+// harness orchestrator's own suites) used to report "Test files changed:
+// (none)" - false, and the single line review-tests leans on hardest, since
+// the old pattern only recognised Go's `_test.go` convention. The packet
+// must also say these are not runnable from review-tests' own toolset, since
+// listing them correctly does not by itself give the reviewer a way to
+// execute them.
+func TestPacketRecognisesPowerShellTestFiles(t *testing.T) {
+	env := basicEnv()
+	env["STUB_DIFF_NAMES"] = "scripts/tests/wellen-orchestrator.test.ps1\nscripts/tests/hooks.test.ps1\nscripts/dev.d/packet"
+
+	r := runPacket(t, env, nil, "42")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", r.exit, r.stderr)
+	}
+	mustContain(t, r.stdout, "scripts/tests/wellen-orchestrator.test.ps1", "the PowerShell suite is listed as a test file")
+	mustContain(t, r.stdout, "scripts/tests/hooks.test.ps1", "so is the second one")
+	mustNotContain(t, r.stdout, "Test files changed:\n(none)", "PowerShell-only test changes must not read as no tests changed")
+	mustContain(t, r.stdout, "not runnable from review-tests' own toolset", "the packet flags that it cannot execute these itself")
+}
+
+// A PR with no test files at all - Go or PowerShell - must still say so
+// plainly, and must not print the PowerShell caveat when there is nothing
+// PowerShell to caveat about.
+func TestPacketStillReportsNoneWhenNoTestFilesChanged(t *testing.T) {
+	env := basicEnv()
+	env["STUB_DIFF_NAMES"] = "internal/foo/foo.go"
+
+	r := runPacket(t, env, nil, "42")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", r.exit, r.stderr)
+	}
+	mustContain(t, r.stdout, "## Test files changed\n(none)", "no test files changed is still reported plainly")
+	mustNotContain(t, r.stdout, "not runnable from review-tests' own toolset", "the PowerShell caveat must not appear when there are no PowerShell test files")
+}
+
 // The bug the round-1 test review caught on this PR itself: a PR's own body
 // routinely mentions its own number (this PR's "Size proof" section names
 // #335), and gh issue view resolves a PR number too - it does not fail the
@@ -612,6 +648,48 @@ func TestPacketSinceFindsThePreviousVerdictByTheHeaderFormat(t *testing.T) {
 	if !r.called(`join("\u001e")`) {
 		t.Errorf("expected the real gh query to join with the \\u001e escape, got calls:\n%s", r.calls)
 	}
+}
+
+// #371: the fallback is per-role, not per-PR. A reviewer whose own round-1
+// comment is missing - a transient `gh` failure, a race, or it truly never
+// posted one - must get an explicit "not found for <it>" signal even when
+// the lookup succeeded and every OTHER role's verdict was found fine. Before
+// the fix, a missing role's subsection was silently omitted with no
+// statement that it had been looked for, so that role's own round-2 rule
+// ("if you had no round-1 blocking findings, say that") would fire on
+// silence rather than on an actual clean history.
+func TestPacketSaysPerRoleWhenOnlyOneRolesVerdictIsMissing(t *testing.T) {
+	env := basicEnv()
+	env["STUB_COMMENT_1"] = "## Go Review — VERDICT: BLOCK\n\n**Round:** 1"
+	// No STUB_COMMENT_2 / STUB_COMMENT_3: tests and docs posted nothing.
+
+	r := runPacket(t, env, nil, "42", "--since", "priorSHA123")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", r.exit, r.stderr)
+	}
+	mustContain(t, r.stdout, "### Previous Go review", "the role that was found still gets its section")
+	mustContain(t, r.stdout, "Go Review — VERDICT: BLOCK", "and its verdict")
+	mustContain(t, r.stdout, "no previous verdict comment found for tests", "the role with no comment gets its own explicit miss")
+	mustContain(t, r.stdout, "no previous verdict comment found for docs", "same for the other missing role")
+	mustNotContain(t, r.stdout, "no previous verdict comment found for go", "the role that WAS found must not also be reported missing")
+}
+
+// The all-missing case the old blanket "(no previous verdict comment found
+// for any reviewer ...)" message used to cover: the lookup itself succeeded
+// (no comments posted since round 1, not a `gh` failure), so all three roles
+// now get their own explicit miss rather than one generic line.
+func TestPacketSaysPerRoleWhenAllThreeRolesVerdictsAreMissing(t *testing.T) {
+	env := basicEnv()
+	// No STUB_COMMENT_* at all: the lookup succeeds and returns zero comments.
+
+	r := runPacket(t, env, nil, "42", "--since", "priorSHA123")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d: %s", r.exit, r.stderr)
+	}
+	for _, role := range []string{"go", "tests", "docs"} {
+		mustContain(t, r.stdout, "no previous verdict comment found for "+role, "each role gets its own explicit miss, not a blanket one")
+	}
+	mustNotContain(t, r.stdout, "no previous verdict comment found for any reviewer", "the old blanket message must not reappear")
 }
 
 // The H5 marker (docs/plans/2026-09-harness-optimization.md decision C3),

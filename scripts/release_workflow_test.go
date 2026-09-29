@@ -162,6 +162,29 @@ func jobBlock(t *testing.T, body, name string) string {
 	return strings.Join(lines[start:], "\n")
 }
 
+// significantLines strips blank lines and #-comment lines from a workflow
+// body - the same filter TestReleaseIsTheOnlyWorkflowNamingASelfHostedRunner
+// and TestReleaseWorkflowNeverChecksOutTheRepository already apply inline,
+// pulled out so every guard-string assertion below can share it. Without it,
+// a `strings.Contains` against the raw body cannot tell a live guard from a
+// comment that merely mentions it: release.yml:249 spells out `!cancelled()`
+// while explaining the very guard three lines below, so deleting the real
+// line left the explanatory comment standing in for it and the assertion
+// green (issue #408).
+func significantLines(body string) string {
+	// A Windows checkout hands these files back with CRLF; jobBlock's own
+	// comment explains why that has to be normalised before splitting.
+	var kept []string
+	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
 // The guards spec 38's H17 criteria name, each of which is a line somebody
 // could reasonably delete while tidying and nothing else would notice.
 //
@@ -169,7 +192,7 @@ func jobBlock(t *testing.T, body, name string) string {
 // against the whole file, so that deleting it from `deploy` fails this test
 // even when an identical line survives elsewhere in the workflow.
 func TestReleaseDeployJobKeepsItsGuards(t *testing.T) {
-	body := workflowFiles(t)["release.yml"]
+	body := significantLines(workflowFiles(t)["release.yml"])
 	deploy := jobBlock(t, body, "deploy")
 
 	// The trigger is the workflow's, not the deploy job's.
@@ -212,7 +235,7 @@ func TestReleaseDeployJobKeepsItsGuards(t *testing.T) {
 // enforces success - and a tag whose `test` job went red deploys to the NAS.
 // Nothing else in this repository would notice.
 func TestReleaseDeployRunsOnlyWhenTheGateAndBothCallsPassed(t *testing.T) {
-	body := workflowFiles(t)["release.yml"]
+	body := significantLines(workflowFiles(t)["release.yml"])
 	for _, want := range []struct {
 		text string
 		why  string
@@ -244,7 +267,7 @@ func TestReleaseDeployRunsOnlyWhenTheGateAndBothCallsPassed(t *testing.T) {
 //     sentence "not deploy: classic yet" in a release note forces a stack
 //     restart - the exact failure the decision spells the rule out to avoid.
 func TestReleaseGateReadsTheTagMessageAsSpecifiedByD3(t *testing.T) {
-	body := workflowFiles(t)["release.yml"]
+	body := significantLines(workflowFiles(t)["release.yml"])
 	for _, want := range []struct {
 		text string
 		why  string
@@ -265,7 +288,7 @@ func TestReleaseGateReadsTheTagMessageAsSpecifiedByD3(t *testing.T) {
 // serves the tag. Flip this comparison, or drop its `exit 1`, and a release
 // that left the previous version serving reports green.
 func TestReleaseAssertsHealthzReportsTheTag(t *testing.T) {
-	body := workflowFiles(t)["release.yml"]
+	body := significantLines(workflowFiles(t)["release.yml"])
 	for _, want := range []struct {
 		text string
 		why  string
@@ -298,7 +321,7 @@ func TestReleaseAssertsHealthzReportsTheTag(t *testing.T) {
 // branch" - the trap test.yml's own header documents. `head_sha=` is the
 // query parameter that makes it exact.
 func TestReleaseGateLooksRunsUpByTheTagsCommit(t *testing.T) {
-	body := workflowFiles(t)["release.yml"]
+	body := significantLines(workflowFiles(t)["release.yml"])
 	if !strings.Contains(body, "runs?head_sha=$SHA") {
 		t.Error("release.yml's gate no longer filters the run lookup by head_sha - " +
 			"a release could be gated by a green run of a different commit")
@@ -316,7 +339,7 @@ func TestReleaseGateLooksRunsUpByTheTagsCommit(t *testing.T) {
 // has already been touched. Deleting this case statement would leave a workflow
 // that still looks correct and deploys `v2`.
 func TestReleaseGateRefusesATagThatIsNotAReleaseTag(t *testing.T) {
-	gate := jobBlock(t, workflowFiles(t)["release.yml"], "gate")
+	gate := jobBlock(t, significantLines(workflowFiles(t)["release.yml"]), "gate")
 	for _, want := range []struct {
 		text string
 		why  string
@@ -353,7 +376,7 @@ func TestReleaseGateRefusesATagThatIsNotAReleaseTag(t *testing.T) {
 // and `deploy` puts it on the NAS. The `-gt 0` is what turns the count into
 // the decision.
 func TestReleaseGateCountsOnlySuccessfulRuns(t *testing.T) {
-	gate := jobBlock(t, workflowFiles(t)["release.yml"], "gate")
+	gate := jobBlock(t, significantLines(workflowFiles(t)["release.yml"]), "gate")
 	for _, want := range []struct {
 		text string
 		why  string
@@ -373,16 +396,17 @@ func TestReleaseGateCountsOnlySuccessfulRuns(t *testing.T) {
 // fails at the `uses:` rather than into a slower one.
 func TestTestAndE2EAreCallableByTheReleaseGate(t *testing.T) {
 	files := workflowFiles(t)
-	release := files["release.yml"]
+	release := significantLines(files["release.yml"])
 
 	for _, wf := range []string{"test.yml", "e2e.yml"} {
 		if !strings.Contains(release, "uses: ./.github/workflows/"+wf) {
 			t.Errorf("release.yml no longer calls %s as a reusable workflow", wf)
 		}
-		body, ok := files[wf]
+		raw, ok := files[wf]
 		if !ok {
 			t.Fatalf("%s does not exist", wf)
 		}
+		body := significantLines(raw)
 		if !strings.Contains(body, "workflow_call:") {
 			t.Errorf("%s no longer declares `workflow_call`, so release.yml's gate cannot run it "+
 				"on a tag whose commit has no green run", wf)

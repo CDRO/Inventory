@@ -275,7 +275,7 @@ func TestParseClassicMarkerSkipsBlankLinesBeforeTheMarker(t *testing.T) {
 // TestParseClassicMarkerRejectsALeadingSpace is the round-1 regression at the
 // parser level: a namespace check anchored to column zero missed an indented
 // marker entirely, returning (false, nil) — no marker — instead of reporting
-// it. classicNamespace detection now trims the line first.
+// it. The "-- +inventory:" namespace detection now trims the line first.
 func TestParseClassicMarkerRejectsALeadingSpace(t *testing.T) {
 	_, err := ParseClassicMarker([]byte("-- +goose Up\n  -- +inventory:classic\nSELECT 1;\n"))
 
@@ -301,6 +301,28 @@ func TestParseClassicMarkerRejectsWrongCase(t *testing.T) {
 // ignore, wherever it appears.
 func TestParseClassicMarkerRejectsATypoInTheDirective(t *testing.T) {
 	_, err := ParseClassicMarker([]byte("-- +goose Up\n-- +inventory:classi\nSELECT 1;\n"))
+
+	var placement *MarkerPlacementError
+	require.ErrorAs(t, err, &placement)
+	assert.Equal(t, 2, placement.Line)
+}
+
+// TestParseClassicMarkerRejectsDoubledInternalWhitespace is issue #381's
+// round-2 regression: irregular whitespace INSIDE the "-- +inventory:" prefix
+// itself, not just around the whole line (already covered by
+// TestParseClassicMarkerRejectsALeadingSpace).
+func TestParseClassicMarkerRejectsDoubledInternalWhitespace(t *testing.T) {
+	_, err := ParseClassicMarker([]byte("-- +goose Up\n--  +inventory:classic\nSELECT 1;\n"))
+
+	var placement *MarkerPlacementError
+	require.ErrorAs(t, err, &placement)
+	assert.Equal(t, 2, placement.Line)
+}
+
+// TestParseClassicMarkerRejectsMissingInternalWhitespace is #381's other
+// confirmed repro: no whitespace at all between "--" and "+inventory:".
+func TestParseClassicMarkerRejectsMissingInternalWhitespace(t *testing.T) {
+	_, err := ParseClassicMarker([]byte("-- +goose Up\n--+inventory:classic\nSELECT 1;\n"))
 
 	var placement *MarkerPlacementError
 	require.ErrorAs(t, err, &placement)

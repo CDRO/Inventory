@@ -410,8 +410,16 @@ changed_files=$(git diff --name-only "$baseref...$sha") || {
   rm -f "$inlined_diff_file"
   exit 1
 }
-test_files=$(printf '%s\n' "$changed_files" | grep '_test\.go$' || true)
+test_files=$(printf '%s\n' "$changed_files" | grep -E '(_test\.go|\.test\.ps1)$' || true)
 [ -n "$test_files" ] || test_files="(none)"
+# The harness's own suites (scripts/tests/*.test.ps1, e.g.
+# wellen-orchestrator.test.ps1, hooks.test.ps1) matter here too (#379): a PR
+# whose only tests are PowerShell used to report "(none)" - false, and the
+# single line review-tests leans on hardest - because the pattern above only
+# knew Go's convention. review-tests' own toolset has no PowerShell, so it
+# cannot run these even once they are correctly listed; say that explicitly
+# rather than let a listed-but-unrunnable file read as "checked".
+ps1_test_files=$(printf '%s\n' "$test_files" | grep '\.test\.ps1$' || true)
 
 # --- CI status -----------------------------------------------------------------
 
@@ -488,11 +496,23 @@ if [ -n "$since" ]; then
 
 $verdict
 "
+    elif [ "$comments_rc" -eq 0 ]; then
+      # Per-role, not per-PR (#371): a role whose own comment is missing -
+      # a transient `gh` failure, a race, or it truly never posted one -
+      # used to get no subsection and no explicit signal, so its own round-2
+      # "if you had no round-1 blocking findings, say that" instruction would
+      # fire on silence even when the packet simply never found its comment.
+      # State the miss for that role by name so it cannot be read as "clean
+      # round 1" - this only fires when the lookup itself succeeded
+      # ($comments_rc -eq 0); a failed lookup is already covered by the
+      # message above and must not also claim nothing was found (#344, item 1).
+      previous_section="$previous_section
+### Previous $header review
+
+(no previous verdict comment found for $key - this may be this role's first round, a transient lookup issue, or that it never posted one; read the PR's comment history directly for $key before concluding it had no round-1 blocking findings.)
+"
     fi
   done
-  [ -n "$previous_section" ] || previous_section="
-(no previous verdict comment found for any reviewer - this may be the packet's first run against an older round, or H5's machine-readable marker is not yet in place; the reviewers fall back to reading round history from the PR comments directly in that case.)
-"
 fi
 
 # --- assemble ------------------------------------------------------------------
@@ -527,6 +547,10 @@ fi
   echo
   echo "## Test files changed"
   printf '%s\n' "$test_files"
+  if [ -n "$ps1_test_files" ]; then
+    echo
+    echo "(PowerShell suites above are not runnable from review-tests' own toolset - no PowerShell in it - so their pass/fail must come from the PR body or a run log, not from re-executing them here.)"
+  fi
   echo
   echo "## CI status (gh pr checks, exit $ci_rc)"
   echo '```'

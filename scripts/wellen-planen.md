@@ -485,9 +485,8 @@ fires. `.claude/settings.json`'s `permissions.allow` list is the
 other half of the same concern, and in wave 6 it becomes load-bearing rather
 than a convenience: headless sessions there run with `--permission-mode
 dontAsk --permission-prompts none` (H19, decision D10 of the harness
-optimization plan — `docs/plans/2026-09-harness-optimization.md` once #293's
-plan PR merges; until then it lives on branch `harness/optimization-plan`,
-PR #319), under which anything not on the allowlist is *denied*, never
+optimization plan, `docs/plans/2026-09-harness-optimization.md`), under
+which anything not on the allowlist is *denied*, never
 prompted, so a session started that way cannot fall back on a human
 noticing a stuck prompt. That is also why `permissions.allow` carries two
 plain tool-name entries, `Edit` and `Write`, with no path restriction:
@@ -534,10 +533,13 @@ so and refuse.
 
 Once a package's session is running, the orchestrator has one more thing to
 notice: whether it is still moving. On every poll it computes each open
-package's most recent activity as the newest of three signals — the last
+package's most recent activity as the newest of four signals — the last
 commit date on the package's branch, its worktree's own
-`.claude/worklog.md` mtime, and the newest comment on its PR — and, if
-nothing has moved for `staleAfterMinutes` (default 45, per-plan via
+`.claude/worklog.md` mtime, the newest comment on its PR, and the newest
+mtime across the worktree's own uncommitted changes (`git status
+--porcelain`) — the last of which exists specifically so a session actively
+editing or testing without committing anything is still counted as moving
+(#429) — and, if nothing has moved for `staleAfterMinutes` (default 45, per-plan via
 `standards.staleAfterMinutes` or per-package via `staleAfterMinutes`, both
 optional), logs a `WARN` and raises the same toast the `Notification`/`Stop`
 hooks use (`scripts/hooks/notify.ps1 stale "<window title>"`), at most once

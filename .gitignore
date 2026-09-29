@@ -18,6 +18,7 @@
 .claude/worklog.md
 .claude/*.log
 .claude/*.diff
+.claude/*.patch
 .claude/*.txt
 .claude/*.md
 

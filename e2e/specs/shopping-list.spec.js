@@ -31,6 +31,8 @@
 
 import { test, expect } from "@playwright/test";
 
+import { fixtureLogin } from "../support/fixture-login.js";
+
 const STORAGE_ID = "00000000-0000-4000-8000-000000000000";
 const BASE = `/api/storages/${STORAGE_ID}`;
 const HASH = "a".repeat(64);
@@ -41,7 +43,6 @@ const OTHER_HOUSEHOLD = "00000000-0000-7000-8000-000000000011";
 // e2e/specs/ingestion.spec.js's own zero-locations test, which uses "E2E
 // Admin Household" for the same acceptance criterion on the review screen.
 const ZERO_LOCATIONS_HOUSEHOLD = "00000000-0000-7000-8000-000000000013";
-const PASSWORD = "e2e-fixture-password";
 // Fixture ids in OTHER_HOUSEHOLD (e2e/fixtures/seed.sql). Garage is its only
 // location, so it is where every confirmed line in this suite lands.
 const SOURDOUGH_BREAD = "00000000-0000-7000-8000-000000000042";
@@ -55,10 +56,7 @@ test("shopping-list.html loads for a member with no console errors", async ({ pa
     if (msg.type() === "error") consoleErrors.push(`${msg.text()} (${msg.location()?.url ?? ""})`);
   });
 
-  const login = await page.request.post("/api/auth/login", {
-    data: { username: "e2e-bob", password: "e2e-fixture-password" },
-  });
-  expect(login.status()).toBe(200);
+  await fixtureLogin(page, "e2e-bob");
 
   await page.goto("/shopping-list.html");
   await expect(page).toHaveTitle(/Shopping list/);
@@ -76,10 +74,7 @@ test("shopping-list.html loads for a member with no console errors", async ({ pa
 test("Match waits for the storage's locations and categories, and stays disabled if they fail", async ({ page }) => {
   const isCategories = (url) => new URL(url).pathname.endsWith("/categories");
 
-  const login = await page.request.post("/api/auth/login", {
-    data: { username: "e2e-bob", password: PASSWORD },
-  });
-  expect(login.status(), "fixture login").toBe(200);
+  await fixtureLogin(page, "e2e-bob");
 
   // Hold the categories response until the button has been seen disabled.
   let release;
@@ -156,10 +151,7 @@ test("the image endpoints are never reachable without a session, so no provider 
 // --- Required journey 6 -----------------------------------------------------
 
 async function pasteList(page, lines) {
-  const login = await page.request.post("/api/auth/login", {
-    data: { username: "e2e-alice", password: PASSWORD },
-  });
-  expect(login.status(), "fixture login").toBe(200);
+  await fixtureLogin(page, "e2e-alice");
 
   await page.goto(`/shopping-list.html?storage=${OTHER_HOUSEHOLD}`);
   await expect(page.locator("#compose")).toBeVisible();
@@ -662,10 +654,7 @@ test("a refused location trigger fetches nothing either", async ({ page }) => {
 test("a location can be created from the resolution screen, in a storage seeded with zero locations", async ({
   page,
 }) => {
-  const login = await page.request.post("/api/auth/login", {
-    data: { username: "e2e-casey", password: PASSWORD },
-  });
-  expect(login.status(), "fixture login").toBe(200);
+  await fixtureLogin(page, "e2e-casey");
 
   await page.goto(`/shopping-list.html?storage=${ZERO_LOCATIONS_HOUSEHOLD}`);
   await expect(page.locator("#compose")).toBeVisible();
