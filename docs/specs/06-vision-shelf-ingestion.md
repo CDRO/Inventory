@@ -89,9 +89,11 @@ jars sit in the cellar and one is carried to the kitchen: that is a
 accepts `{location_id}` to move an entire batch, logged the same way.
 
 *(Extended by [`39-batch-containers.md`](39-batch-containers.md): the
-split endpoint gains an optional `container_disposition` field, and the
-PATCH endpoint gains `container_label`/`container_type`, for a batch's
-optional container — orthogonal to `location_id`, so nothing above
+split endpoint gains an optional `container_disposition` field, the
+PATCH endpoint gains `container_label`/`container_type`, and the same two
+fields are also accepted at creation time — on this section's confirm
+step and on `13-stocktake-and-audit.md`'s "found stock" route — for a
+batch's optional container, orthogonal to `location_id`, so nothing above
 changes.)*
 
 A product that exists in several places is therefore simply several
@@ -257,8 +259,12 @@ local to the storage and is never published to the catalog
 entry per proposed row, each carrying `row_id` and an explicit
 `decision` of `accept` or `reject` (`09-consumption-logging.md`), with
 accepted rows adding `{product_id | new_product: {name, category_id,
-item_type, image}, quantity, location_id, expiration_date}`. The server rejects a
+item_type, image}, quantity, location_id, expiration_date, container_label?,
+container_type?}`. The server rejects a
 payload whose `row_id` set does not exactly match the proposal it issued.
+`container_label`/`container_type` give the batch created for that row a
+container, the same optional fields and upsert rule as the manual "found
+stock" creation route above (`39-batch-containers.md`).
 
 `new_product.image` is `"crop"` (the row's own `bounding_box`), `"photo"`
 (the whole photo), `"cutout"` with `new_product.cutout_id` (one of those with
