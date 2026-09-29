@@ -21,16 +21,29 @@ this in order:
 
 1. Run `scripts/dev packet <PR>` (add `--since <previous-round-head-sha>` on
    round ≥ 2) if `.claude/review-packet.md` is missing or its `Head SHA:`
-   line differs from the PR's current head, then read it. It carries the PR
-   title/body, the issue body, the spec sections the issue or PR names — the
-   contract the change claims to implement — the diff, and, on round ≥ 2,
-   your own previous verdict comment. Its `Head SHA:` line is the
-   `headRefOid` your Output marker below needs.
+   line differs from the PR's current head, then read it. It carries, in this
+   order: the PR title, its base and head branches and its `Head SHA:`; the
+   PR body; the body of every issue the PR references; the spec sections the
+   issue or PR names; `git diff --stat` for the whole PR; the diff itself (on
+   round ≥ 2, only the delta since `--since`); the table of exported Go
+   identifiers the diff adds or changes and whether each carries a doc
+   comment; the test files changed; the PR's CI checks; and — on round ≥ 2 —
+   the previous round's verdict comments. The **Spec sections** are the
+   contract the change claims to implement, and what every document in the
+   repo still has to agree with. Its `Head SHA:` line is the `headRefOid`
+   your Output marker below needs.
 2. Grep the repo for documentation that describes the behavior this diff
    changed. **Stale documentation is worse than none**: absent docs make people
    read the code, wrong docs make them trust a lie. This is your highest-value
    finding and the one nobody else on the review will catch.
 3. Post your review with `gh pr comment`.
+
+Your `maxTurns` budget in the frontmatter above is sized for a package PR — a
+handful of files. A consolidation-sized diff is several times that, and on one
+(PR #360, 14 files and ~1,820 lines) every lane overran (#364). On a diff that
+large the spawning session says so in your prompt and names the budget to work
+to; `.claude/skills/ship/SKILL.md` §5 ("Turn budget: size it to the diff") is
+where that line comes from.
 
 ## What must be documented
 
