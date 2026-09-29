@@ -96,9 +96,11 @@ this container starts through the socket has **its own** bind-mount sources
 resolved by the **host's** daemon, not by this container's filesystem. Two
 consequences:
 
-- A worktree `claude` creates inside the container (`git worktree add
-  ../some-issue`, say) lands under `$REPO_PATH` and is therefore visible on
-  the host at the exact same path, immediately — no syncing.
+- A worktree `scripts/agent-loop.sh` creates inside the container (nested at
+  `$REPO_PATH/.worktrees/<slug>`, never as a sibling of `$REPO_PATH` — #468,
+  see `ensure_worktree`'s own comment) lands under `$REPO_PATH` and is
+  therefore visible on the host at the exact same path, immediately — no
+  syncing.
 - Nested `docker compose` commands the session runs against this
   repository's own stack (`docker compose run --rm app go test ./...`) see
   the same `./pgdata`, `./uploads`, `./imagecache` the host would.
@@ -175,8 +177,14 @@ fails there with `fatal: not a git repository: ...`. `entrypoint.sh`'s own
 git-identity setup treats that as non-fatal — see its comment — but the
 doctor check still correctly reports `FAIL`, and the container still refuses
 to start. This is the one case decision D10's "same path" design does not
-cover; H19's own worktrees stay fine because they are created **inside** the
-mounted primary checkout, never as a second mount.
+cover; `scripts/agent-loop.sh`'s own worktrees stay fine because they are
+created **inside** the mounted primary checkout (`$REPO_PATH/.worktrees/`),
+never as a second mount or a sibling directory outside it — the latter is
+what #468 tracked: on a Docker-Desktop-backed host, and separately on a
+Synology NAS via its shared-folder ACLs resetting the parent directory's
+ownership between operations, creating a *new top-level entry next to*
+`$REPO_PATH` fails with `Permission denied` even though `$REPO_PATH` itself
+is writable.
 
 ## When something is wrong
 

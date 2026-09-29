@@ -102,7 +102,6 @@ set -u
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 repo_name=$(basename "$root")
-parent_dir=$(dirname "$root")
 
 log()  { printf 'agent-loop: %s\n' "$*"; }
 warn() { printf 'agent-loop: WARN: %s\n' "$*" >&2; }
@@ -318,6 +317,25 @@ apply_worktree_env_overrides() {
 }
 
 # --- Worktree lifecycle -------------------------------------------------------
+# Nested inside the mounted checkout (`$root/.worktrees/<slug>`), not created
+# as a sibling of it (`$parent_dir/$repo_name-<slug>`, this script's original
+# layout, mirroring wellen-orchestrator.ps1's own convention - which has no
+# container boundary to worry about). #468: deploy/agent's compose file mounts
+# exactly one directory (`${REPO_PATH}:${REPO_PATH}`), and on a Docker-Desktop
+# host the parent directory is only visible for path traversal, not writable -
+# `git worktree add` there fails with "could not create leading directories
+# ... Permission denied". Verifying #468's own "likely fine on the NAS" guess
+# against real Synology hardware hit the identical failure by a different
+# route: DSM's shared-folder ACLs reset the *parent* directory's ownership
+# between operations even right after an explicit `chown`, so creating a
+# brand-new top-level entry under it kept failing long after every individual
+# permission fix seemed to hold. Both hosts fail for the same underlying
+# reason - creating a new directory OUTSIDE the one path Docker guarantees is
+# both mounted and correctly owned - so the fix is the same on both: never
+# create anything outside it. `.worktrees/` is gitignored and dockerignored
+# (a worktree's own nested `.git` file and checkout are not meant to be seen
+# by the primary checkout's own `git status` or build context).
+#
 # Sets $ensured_worktree on success - deliberately NOT "prints the path on
 # stdout" for the caller to capture via $(...): a command substitution runs
 # in a subshell, and die()'s `exit 1` inside one only kills that subshell,
@@ -329,15 +347,30 @@ apply_worktree_env_overrides() {
 ensure_worktree() {
   # $1 slug, $2 branch, $3 base branch
   slug=$1; branch=$2; base=$3
-  wt="$parent_dir/$repo_name-$slug"
+  wt="$root/.worktrees/$slug"
   if [ -d "$wt" ]; then
     warn "worktree '$wt' already exists - not created again"
     ensured_worktree="$wt"
     return 0
   fi
-  git -C "$root" fetch origin >/dev/null 2>&1
-  if ! git -C "$root" worktree add --no-track -b "$branch" "$wt" "origin/$base" >/dev/null 2>&1; then
-    die "git worktree add failed for '$slug' (branch $branch from origin/$base)"
+  # Both `fetch` and `worktree add` used to run with stderr fully discarded
+  # (`>/dev/null 2>&1`), so every real failure - a permission error, a stale
+  # lock, a genuinely full disk - surfaced identically as this function's own
+  # generic die() message. That cost real time on the NAS run this all came
+  # from: each failure needed a hand-typed reproduction of the same command,
+  # without the redirect, just to see what git had actually said.
+  fetch_err=$(git -C "$root" fetch origin 2>&1) || die "git fetch origin failed (needed before creating a worktree for '$slug'): $fetch_err"
+  if git -C "$root" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1; then
+    # `git worktree add -b` always creates the branch before it creates the
+    # worktree directory, so a failed attempt leaves the branch behind with
+    # no worktree using it yet - observed on nearly every retry during the
+    # NAS run. Reusing it here instead of failing on "branch already exists"
+    # means a retry actually retries, rather than requiring a manual
+    # `git branch -D` before every single attempt.
+    warn "branch '$branch' already exists with no worktree - reusing it (a previous attempt's leftover, or a resume)"
+    add_err=$(git -C "$root" worktree add --no-track "$wt" "$branch" 2>&1) || die "git worktree add failed for '$slug' (reusing existing branch $branch): $add_err"
+  else
+    add_err=$(git -C "$root" worktree add --no-track -b "$branch" "$wt" "origin/$base" 2>&1) || die "git worktree add failed for '$slug' (branch $branch from origin/$base): $add_err"
   fi
   ensured_worktree="$wt"
 }

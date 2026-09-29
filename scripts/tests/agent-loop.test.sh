@@ -241,6 +241,20 @@ STUB
   cat > "$SC/bin/git" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$GIT_STUB_CALLS"
+case "$*" in
+  *"rev-parse --verify --quiet refs/heads/"*)
+    # GIT_STUB_EXISTING_BRANCHES names the branches (space-separated) this
+    # stub should report as already existing locally - the "leftover branch
+    # from a previous failed attempt" case ensure_worktree now reuses instead
+    # of failing on "branch already exists".
+    last=""
+    for a in "$@"; do last=$a; done
+    branch=${last#refs/heads/}
+    for b in ${GIT_STUB_EXISTING_BRANCHES:-}; do
+      [ "$b" = "$branch" ] && exit 0
+    done
+    exit 1 ;;
+esac
 is_worktree_add=0
 for a in "$@"; do [ "$a" = "worktree" ] && is_worktree_add=1; done
 if [ "$is_worktree_add" -eq 1 ]; then
@@ -456,6 +470,7 @@ out=$(cat "$SCPATH/state/output.log")
 assert "$rc" "--issue mode exits 0"
 gitcalls=$(cat "$SCPATH/state/git-calls.log")
 assert_contains "$gitcalls" "issue-703" "the worktree created is for the named issue, #703"
+assert_contains "$gitcalls" ".worktrees/issue-703" "the worktree is nested inside the checkout, not a sibling of it (#468)"
 calls=$(cat "$SCPATH/state/claude-calls.log")
 assert_contains "$calls" "issue #703" "the rendered prompt names issue #703"
 ghcalls=$(cat "$SCPATH/state/gh-calls.log")
@@ -478,8 +493,29 @@ out=$(cat "$SCPATH/state/output.log")
 assert "$([ "$rc" -ne 0 ] && echo 0 || echo 1)" "a worktree-add failure stops the loop with a nonzero exit"
 assert_contains "$out" "FATAL" "the failure is reported as fatal"
 assert_contains "$out" "git worktree add failed" "the failure names what actually failed"
+assert_contains "$out" "fatal: stub-simulated worktree add failure" "git's own real error text reaches the log - no longer swallowed by >/dev/null 2>&1 (cost hours of manual reproduction on the real NAS run this fixes)"
 callcount=$(claude_call_count)
 assert "$([ "$callcount" = "0" ] && echo 0 || echo 1)" "no session starts once the worktree could not be created"
+
+echo "== scenario: a leftover branch from a failed attempt is reused, not fatal =="
+setup_scenario branchreuse
+# git worktree add -b always creates the branch before creating the worktree
+# directory, so a previous failed attempt leaves the branch behind with no
+# worktree using it - observed on nearly every retry during the real NAS
+# debugging session this fixes. ensure_worktree must reuse it instead of
+# dying on "branch already exists".
+export GIT_STUB_EXISTING_BRANCHES="agent-loop/issue-705"
+printf '%s\n' "$FIXDIR/success.jsonl" > "$SCPATH/state/claude-queue"
+rc=$(run_loop --issue 705)
+unset GIT_STUB_EXISTING_BRANCHES
+out=$(cat "$SCPATH/state/output.log")
+assert "$rc" "the loop succeeds instead of dying on the leftover branch"
+assert_contains "$out" "already exists with no worktree - reusing it" "the reuse is logged, not silently guessed at"
+assert_not_contains "$out" "FATAL" "no fatal error for a leftover branch that can be reused"
+gitcalls=$(cat "$SCPATH/state/git-calls.log")
+assert_not_contains "$gitcalls" "-b agent-loop/issue-705" "the reused branch is checked out as-is, never re-created with -b"
+callcount=$(claude_call_count)
+assert "$([ "$callcount" -eq 1 ] && echo 0 || echo 1)" "the session still runs once the branch is reused"
 
 echo "== unit: render_package_prompt preserves the template's trailing newline byte-for-byte (#462) =="
 # Isolated from the rest of the script on purpose: render_package_prompt and

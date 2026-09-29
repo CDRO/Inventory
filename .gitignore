@@ -65,3 +65,11 @@ scripts/konsol-welle-*.started
 # as .claude/*.log above) and its one-loop-per-repository lock directory.
 /scripts/agent-loop.log/
 /scripts/agent-loop.lock/
+
+# scripts/agent-loop.sh's per-issue worktrees (#468: nested inside the
+# checkout so deploy/agent's single-directory mount never has to create a new
+# top-level entry next to it - see ensure_worktree's own comment). Each one is
+# a full nested checkout; git already keeps them out of `git status` via
+# .git/worktrees bookkeeping, but this stops a stray `git add -A` from ever
+# trying to add one as a submodule-like blob.
+/.worktrees/
