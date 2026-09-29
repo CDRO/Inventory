@@ -112,9 +112,11 @@ Three things the sequence alone doesn't make obvious:
   trustworthy. A red result against a stack that has already run the suite
   once is not evidence of a bug — reset (`down -v`, then the full sequence
   again) and re-run before trusting it. A reused stack has a quieter failure
-  mode too: `e2e/specs/barcode-recall.spec.js` runs under
-  `test.describe.configure({ mode: "serial" })`, so when its first test fails
-  against a used stack, the rest of that file is *skipped*, not failed. A
+  mode too: any spec file running under
+  `test.describe.configure({ mode: "serial" })` — currently
+  `e2e/specs/barcode-recall.spec.js`, `e2e/specs/gamification.spec.js` and
+  `e2e/specs/stocktake.spec.js` — skips the rest of its tests, rather than
+  failing them, once its first test fails against a used stack. A
   "did not run" count is as much a reset signal as a failure count is — a
   reviewer who reads only pass/fail can conclude the suite merely flaked when
   part of it never executed at all.

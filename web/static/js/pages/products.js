@@ -910,12 +910,16 @@ async function save(product, inputs) {
   try {
     const updated = await patch(`${basePath()}/${product.id}`, body);
     clearError();
+    // After reload(), not before: reload() re-runs showDetail() on the
+    // product just saved, and showDetail() clears the status line at its own
+    // start (#395) — set after it runs, so the confirmation is not wiped
+    // before anyone sees it.
+    await reload();
     if (typeof updated.recomputed_batches === "number") {
       showStatus(tCount("products.save.shelfLifeRecalculated", updated.recomputed_batches));
     } else {
       showStatus(t("products.save.saved"));
     }
-    await reload();
   } catch (err) {
     showError(err);
   }
@@ -952,14 +956,15 @@ async function offerMerge(survivor, source) {
   try {
     const result = await post(`${basePath()}/${survivor.id}/merge`, { source_product_id: source.id });
     clearError();
+    selectedId = survivor.id;
+    // After reload(), not before — same reason as save()'s reordering (#395).
+    await reload();
     showStatus(
       t("products.merge.result", {
         batches: tCount("products.merge.movedBatches", result.moved_batches),
         dates: tCount("products.merge.recomputedDates", result.recomputed_batches),
       }),
     );
-    selectedId = survivor.id;
-    await reload();
   } catch (err) {
     showError(err);
   }

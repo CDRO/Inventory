@@ -1080,4 +1080,16 @@ INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock, i
   ('00000000-0000-7000-8000-000000000151', '00000000-0000-7000-8000-000000000010', 'E2E Icon Picker Clear Source',  NULL, 'non_perishable', 0, 'noto:cheese-wedge')
 ON CONFLICT (id) DO NOTHING;
 
+-- One product dedicated to #395: the "Saved." confirmation must survive
+-- save()'s own reload rather than being wiped by it. ...0152 is the next free
+-- id after ...0151, the icon-picker block above.
+--
+-- Its own row rather than reusing an existing one: this scenario holds the
+-- reload's GET open with page.route to observe the status line's state while
+-- the reload is still in flight, and the suite runs fullyParallel, so a
+-- shared product's reload could be held open by two scenarios at once.
+INSERT INTO products (id, storage_id, name, category_id, item_type, min_stock, icon_name) VALUES
+  ('00000000-0000-7000-8000-000000000152', '00000000-0000-7000-8000-000000000010', 'E2E Save Status Survives Reload Source', NULL, 'non_perishable', 0, NULL)
+ON CONFLICT (id) DO NOTHING;
+
 COMMIT;

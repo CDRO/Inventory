@@ -870,6 +870,42 @@ test("clearing a picture through the UI does not leave icon_name to resurface on
   expect(after.min_stock).toBe(3);
 });
 
+// #395: save()'s "Saved." confirmation must be set after its own reload, not
+// before — otherwise reload()'s chained showDetail() call clears it via
+// clearStatus() before anyone sees it, on any stack fast enough that the
+// wipe happens before the next render. Pinned directly rather than left to
+// the timing-dependent assertion above: this test holds reload()'s own
+// GET open so the ordering is observable regardless of how fast the real
+// server answers.
+test('the "Saved." confirmation is set after save()\'s reload, not wiped by it', async ({ page }) => {
+  await logIn(page);
+  await openProduct(page, "E2E Save Status Survives Reload Source");
+
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  await page.route(
+    (url) => url.pathname === `${BASE}/products`,
+    async (route) => {
+      await held;
+      await route.continue();
+    },
+  );
+
+  await page.locator("#p-min-stock").fill("4");
+  await page.locator("form:has(#p-name)").getByRole("button", { name: "Save" }).click();
+
+  // The PATCH has already resolved — the save happened — but reload() is
+  // still blocked on the held GET. If showStatus() ran before reload() (the
+  // pre-#395 order), "Saved." would already be visible here.
+  await expect(page.locator("#status")).not.toContainText("Saved.");
+
+  release();
+
+  await expect(page.locator("#status")).toContainText("Saved.");
+});
+
 // docs/specs/40-icon-picker.md's own acceptance criteria: searching, picking
 // a direct-name hit, and confirming the pick silently recorded a new alias by
 // searching the same term again.
