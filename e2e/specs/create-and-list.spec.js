@@ -12,17 +12,14 @@
 
 import { test, expect } from "@playwright/test";
 
-const PASSWORD = "e2e-fixture-password";
+import { fixtureLogin } from "../support/fixture-login.js";
 
 function unique(prefix) {
   return `${prefix} ${Math.random().toString(36).slice(2, 8)}`;
 }
 
 async function logIn(page) {
-  const res = await page.request.post("/api/auth/login", {
-    data: { username: "e2e-bob", password: PASSWORD },
-  });
-  expect(res.status(), "fixture login").toBe(200);
+  await fixtureLogin(page, "e2e-bob");
 }
 
 test("a location is created from the page, nests a child, and survives a reload", async ({ page }) => {

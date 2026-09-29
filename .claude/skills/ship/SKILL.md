@@ -71,6 +71,47 @@ scripts/dev ci-status "$(git rev-parse HEAD)" --dispatch spec/<NN>-<slug>   # no
 Slower than local Docker — each round-trip is a push and a runner boot — but
 it means a red suite is still caught before opening the PR, not after.
 
+### If you run the E2E gate: `scripts/dev e2e`, and you owe the teardown
+
+The E2E suite is the deployment gate, not a per-PR check — `review-tests`
+treats E2E journeys as "not verified here", and `e2e.yml` never runs on a pull
+request (`docs/specs/01-architecture-and-deployment.md`). So most package PRs
+never touch it. When something does need it — a consolidation, a frontend
+change you want to see driven for real — run it as one command:
+
+```bash
+scripts/dev e2e                 # claim the gate, run the sequence, tear down
+scripts/dev e2e status          # who holds it, and whether a suite is really running
+scripts/dev e2e break-lock      # release a hold whose owner is gone
+```
+
+Never paste the compose commands from `docker-compose.e2e.yml`'s header
+instead. A machine has exactly one `inventory-e2e` project shared by every
+checkout on it, and the wrapper is what takes the lock that keeps two sessions
+out of each other's stack (#389), tags the image per checkout so another
+checkout's build cannot serve its frontend under your tests (#391), and checks
+that the frontend being served is this working tree's before it believes a
+single result.
+
+**Bringing that stack up obliges you to tear it down.** `scripts/dev e2e` does
+it from a trap, so it survives an interrupt; a hand-run sequence does not. A
+session that stopped one command early once left its containers `Up` and
+`healthy` for over half an hour while the next checkout waited, reading them as
+a run in progress (#377). If you are ever unsure whether a stack is yours to
+clear, `scripts/dev e2e status` answers it with evidence — is there a container
+for the `e2e` service at all, has `app` logged anything lately, what does the
+holder's own worklog say — and says `ACTIVE` or `STALE` rather than leaving you
+to guess from three healthy containers.
+
+**Reading a local result.** The wrapper caps workers and sets one retry, both
+for local runs only (#382: 28 failed and 5 did not run on an unmodified commit
+that CI passed 191/191 twice, on a machine also running five other compose
+projects). So a local run can end with a `flaky` count, which CI can never
+produce — CI keeps `retries: 0`. A `flaky` line means the test passed on the
+retry: contention, not a regression, and not something to "fix". A `failed`
+line still means failed on both attempts. A `did not run` count is a reset
+signal, not a pass — see spec 01's note on the suite not being idempotent.
+
 ## 4. Open the PR
 
 ```bash
@@ -268,3 +309,6 @@ caught, and what is next.
 - If tests cannot run at all (Docker down, DB unreachable), stop and tell the
   user. Do not merge with an unrun suite, and do not describe an unrun suite as
   passing.
+- Never leave an E2E stack up. If you brought `inventory-e2e` up, it comes down
+  before you finish — `scripts/dev e2e` does that for you, and `scripts/dev e2e
+  down` is the manual escape if you ran the raw commands (#377).

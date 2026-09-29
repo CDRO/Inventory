@@ -17,6 +17,8 @@
 
 import { test, expect } from "@playwright/test";
 
+import { fixtureLogin } from "../support/fixture-login.js";
+
 test.describe.configure({ mode: "serial" });
 
 const STORAGE = "00000000-0000-7000-8000-00000000001a";
@@ -37,10 +39,7 @@ const FOREIGN_LOCATION = "00000000-0000-7000-8000-0000000000b0";
 const EMPTY_STORAGE = "00000000-0000-7000-8000-00000000001b";
 
 async function logIn(page, username = "e2e-stocktake") {
-  const res = await page.request.post("/api/auth/login", {
-    data: { username, password: "e2e-fixture-password" },
-  });
-  expect(res.status(), "fixture login").toBe(200);
+  await fixtureLogin(page, username);
 }
 
 test("Count this shelf on the product page corrects the quantity, and Back returns to the product page", async ({ page }) => {

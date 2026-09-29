@@ -13,6 +13,63 @@
 # keeps this stack out of that checkout's dev project, because `name:` below
 # loses to it. See `name:`'s own comment for the measurements (#190).
 #
+# ## Locally, run the gate through `scripts/dev e2e`
+#
+#   scripts/dev e2e            claim the gate and run the whole sequence
+#   scripts/dev e2e status     who holds it, and whether a suite is really running
+#   scripts/dev e2e break-lock release a lock whose holder is gone
+#   scripts/dev e2e down       tear down this checkout's stack and release the lock
+#
+# That command (`scripts/dev.d/e2e`, whose header carries the measurements) is
+# how a local run happens now, and the seven compose lines this header used to
+# ask a session to paste by hand are the sequence it performs. It exists
+# because pasting them could not be done safely:
+#
+#   * It takes a real lock first (#389). The `docker ps` pre-flight this
+#     header used to prescribe was a check-then-act race with a minutes-wide
+#     window — the next command is `down -v`, and a build, a `git` sequence or
+#     a Go suite run happens in between — so two checkouts could both pass it
+#     and then destroy each other's stack. Measured: the single project ended
+#     up holding containers from two working directories at once, after which
+#     neither session could safely operate it. **The pre-flight below is
+#     evidence, not protection; the lock is the protection.**
+#   * It tears the stack down on the way out whatever happens (#377), from a
+#     trap on EXIT/INT/TERM rather than as a last line a session can stop
+#     before.
+#   * It refuses with a reason, naming which kind of refusal it is: a live run
+#     to wait for, or a lock with nothing behind it to break. See "the
+#     teardown obligation" below.
+#   * It builds and runs under an image tag derived from the checkout (#391,
+#     the `image:` key on `app`), and checks the served `/js/*` against
+#     web/shell-manifest.json before trusting a single test result.
+#   * It caps the worker count, which Playwright would otherwise size from the
+#     machine's CPUs — CI-shaped on a developer box that is also running five
+#     other compose projects (#382).
+#
+# ## The teardown obligation
+#
+# **A session that brings this stack up owes it a `down -v`, and the gate is
+# not free again until that has run.** This used to be the last line of the
+# sequence, which meant a session that stopped early — finished its work, was
+# interrupted, crashed — simply never reached it. Measured (#377): a finished
+# session's containers stayed `Up` and `healthy` for over half an hour while
+# the next checkout waited, reading them as an active run, because existence
+# was all the pre-flight could report. `scripts/dev e2e` discharges the
+# obligation for you; if you run the raw commands below instead, it is yours.
+#
+# Note that the orchestrator's own Docker cleanup does NOT cover this
+# (scripts/wellen-docker-cleanup.ps1): it deliberately refuses to sweep a
+# project with a container outside the wave's worktrees, which the shared
+# `inventory-e2e` project always is.
+#
+# ## The raw sequence, for CI and for debugging
+#
+# .github/workflows/e2e.yml and restore.yml run these directly and should keep
+# doing so — a runner has one checkout, one job, no other compose project and
+# no `.env`, so none of the problems above exist there. Run them by hand
+# locally only when you are deliberately stepping through a failure, and know
+# that doing so takes NO lock and discharges NO teardown:
+#
 #   docker ps -a --filter label=com.docker.compose.project=inventory-e2e \
 #     --format '{{.Names}} {{.Label "com.docker.compose.project.working_dir"}} {{.Status}}'
 #   docker compose -p inventory-e2e -f docker-compose.e2e.yml build
@@ -23,20 +80,16 @@
 #   docker compose -p inventory-e2e -f docker-compose.e2e.yml run --rm e2e
 #   docker compose -p inventory-e2e -f docker-compose.e2e.yml down -v
 #
-# The first command is a pre-flight check, not part of the gate: there is
-# exactly ONE E2E project on a machine, so if it prints a RUNNING container
-# whose working_dir is not this checkout, another checkout is running the
-# gate right now — wait for it. Continuing would not fail; the `up` would
-# take that stack's containers over silently (`name:` below spells out why).
-# The format prints status alongside the name for a reason (#358): existence
-# alone conflates two different situations. A traefik container stuck in
-# `Created` with a non-zero exit code — the shape left behind by a failed
-# `up`, port collision or otherwise — is a broken leftover, not a run in
-# progress, and plain `docker ps` (no `-a`) would hide it from this check
-# entirely while `app`/`db` sat there `Up ... (healthy)`, giving the false
-# impression of an active session. This command only surfaces state; turning
-# "leftover" into an automatic decision (clean it up, refuse it, whatever) is
-# further isolation work, not this check's job yet.
+# The first line is the old pre-flight. It is still worth reading — it says
+# who else has containers here — but it is not a guard: it reports existence
+# after the fact, and `scripts/dev e2e status` reports the same list plus the
+# three things that actually distinguish a live run from a leftover (is there
+# a container for the `e2e` service at all, has `app` logged anything lately,
+# what does the holder's own worklog say). The format prints status alongside
+# the name for a reason (#358): a traefik container stuck in `Created` with a
+# non-zero exit code — the shape left behind by a failed `up` — is a broken
+# leftover, not a run in progress, and plain `docker ps` (no `-a`) would hide
+# it entirely while `app`/`db` sat there `Up ... (healthy)`.
 #
 # The `backup` service below belongs to the second thing this file drives: the
 # backup/restore round trip (docs/specs/15-backup-restore-and-export.md, issue
@@ -103,19 +156,25 @@
 # where it is the whole of the separation.
 #
 # One project per machine means two checkouts may NEVER run the E2E suite at
-# the same time. That is a rule, not a preference, and — since #358 dropped
-# the fixed host port `traefik` used to publish — it is enforced entirely by
-# the pre-flight `docker ps -a` at the top of this header, not by anything
-# Docker refuses on its own: under the one shared project name a second `up`
-# does not fail at all, it recreates the first stack's containers and takes
-# it over silently, and a `down -v` then destroys a run that is still in
-# progress. (The old host port only ever caught a second stack running under
-# a *different* project name — the "different name" case doesn't arise here,
-# since every documented command above passes `-p inventory-e2e` — so losing
-# it costs this rule nothing it was actually relying on.) Inside a
-# sequential wave only one session runs at a time and this is automatic; a
-# wave with `"sequential": false` has several at once, and the pre-flight
-# check is the only thing between them.
+# the same time. That is a rule, not a preference, and nothing Docker does
+# enforces it on its own: under the one shared project name a second `up` does
+# not fail at all, it recreates the first stack's containers and takes it over
+# silently, and a `down -v` then destroys a run that is still in progress.
+# (Before #358 `traefik` published a fixed host port, which incidentally
+# refused a second stack under a *different* project name — a case that does
+# not arise here, since every documented command passes `-p inventory-e2e` —
+# so losing it cost this rule nothing it was actually relying on.)
+#
+# What enforces it is `scripts/dev e2e`'s lock: a Docker network named
+# `inventory-e2e-gate-lock`, claimed with `docker network create`, which the
+# daemon refuses to create twice (measured on Docker 27.4.0 — the second
+# create exits 1). So the claim is atomic, which the pre-flight `docker ps -a`
+# never was; that command reports existence after the fact and cannot see a
+# run that starts ten seconds later. A lock is held for the duration of a run
+# and released by the teardown, and a stale one is broken deliberately with
+# `scripts/dev e2e break-lock`. Inside a sequential wave only one session runs
+# at a time and none of this is exercised; a wave with `"sequential": false`
+# has several at once, and the lock is what stands between them.
 name: inventory-e2e
 
 services:
@@ -139,6 +198,27 @@ services:
     build:
       context: .
       target: prod
+    # The built image's tag, per checkout rather than per machine (#391).
+    #
+    # Without an explicit `image:`, Compose synthesizes `<project>-<service>`
+    # — `inventory-e2e-app` — from the project name, which is deliberately the
+    # same on every checkout of this machine (see the header). So a second
+    # checkout's `build` replaced the binary and the embedded `web/static`
+    # under a stack the first was about to run, WITHOUT touching a single
+    # container: every container could be yours, healthy, labelled with your
+    # own working_dir, and still serve somebody else's frontend. Measured
+    # during the wave-16 consolidation: four of that wave's own new tests
+    # failed with exactly the message its unfixed source produces, which is
+    # what an adversarial reviewer reads as a blocking finding.
+    #
+    # `scripts/dev e2e` sets E2E_APP_IMAGE to a tag derived from the
+    # checkout's own path, so two checkouts cannot share one built image even
+    # if they do share the project name. The DEFAULT is the exact tag Compose
+    # would have synthesized, so nothing that sets no variable changes
+    # behaviour — .github/workflows/e2e.yml and restore.yml both build
+    # `inventory-e2e-app:latest` by hand and then check that this file
+    # resolves to what they loaded, and a runner has one checkout anyway.
+    image: ${E2E_APP_IMAGE:-inventory-e2e-app:latest}
     environment:
       # A fixed, non-production configuration for a throwaway database.
       # APP_ENV=prod deliberately — the E2E suite validates the deployment
