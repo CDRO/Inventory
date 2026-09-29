@@ -80,6 +80,17 @@ func itoa(n int) string {
 // TestAgentUsageTrap1DropsInterimSnapshotWithoutOutputTokens: msg_trap1 in
 // the fixture has an interim line with no `output_tokens` key at all, then a
 // final line with output=20. Only the final line's numbers may appear.
+//
+// msg_trap1_only_interim, also on 2026-09-24, goes further: it has NO line
+// that ever carries `output_tokens` for its id - a session that streamed a
+// partial response and was cut off before the final flush. Without the
+// trap-1 guard (`if (out == "") next` in scripts/dev.d/agent-usage), this
+// line's in/cc/cr (555/555/555) would still land in `best_*` as a third call
+// (out coerces to 0, but input/cache figures would not), changing both the
+// call count and the sums below - so the exact row this test pins already
+// proves it contributes nothing; commenting out the guard makes this test
+// fail (verified by hand: reverting the guard turns "calls 2" into "calls
+// 3" and inflates the input/cache_creation/cache_read sums by 555 each).
 func TestAgentUsageTrap1DropsInterimSnapshotWithoutOutputTokens(t *testing.T) {
 	r := run(t, agentUsageEnv(t, "testrepo", nil), "agent-usage", "--since", "2026-09-24", "--until", "2026-09-24")
 	if r.exit != 0 {
@@ -91,6 +102,7 @@ func TestAgentUsageTrap1DropsInterimSnapshotWithoutOutputTokens(t *testing.T) {
 	// Two calls -> an even-count median: (100+172)/2 = 136.0; max is the
 	// larger, 172.
 	row(t, r.stdout, "claude-sonnet-5", "main", 2, "12", "120", "80", "60", "172", "136.0")
+	mustNotContain(t, r.stdout, "555", "msg_trap1_only_interim (no line ever carries output_tokens) must contribute nothing to any total")
 }
 
 // TestAgentUsageTrap2TakesTheLastUsageObjectOnTheLine: msg_trap2's line
@@ -133,6 +145,20 @@ func TestAgentUsageTrap3DedupesByMessageIDKeepingTheFinalBlock(t *testing.T) {
 	// call (ctx=34).
 	// A single call -> its own context is both the max and the median.
 	row(t, r.stdout, "claude-sonnet-5", "main", 1, "5", "6", "7", "8", "26", "26.0")
+}
+
+// TestAgentUsageSyntheticModelRowsAreFiltered: msg_synthetic_compaction
+// (2026-09-26) carries `"model":"<synthetic>"` - Claude Code's own internal
+// placeholder record (e.g. a compaction marker), legitimate and zero-cost,
+// not a parsing bug. It must not appear as its own row at all, rather than
+// showing up as a noisy all-zero-token row with calls=1.
+func TestAgentUsageSyntheticModelRowsAreFiltered(t *testing.T) {
+	r := run(t, agentUsageEnv(t, "testrepo", nil), "agent-usage", "--since", "2026-09-26", "--until", "2026-09-26")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d\n%s", r.exit, r.stderr)
+	}
+	mustContain(t, r.stdout, "(no calls in range)", "the only record in range is a <synthetic> placeholder and must not produce a row")
+	mustNotContain(t, r.stdout, "synthetic", "stdout")
 }
 
 // --- role: attributionAgent, the meta.json fallback, and "main" -------
@@ -243,6 +269,29 @@ func TestAgentUsagePRCwdFallbackIsASuffixMatchNotASubstringOne(t *testing.T) {
 	mustContain(t, r.stdout, "(no calls in range)", "a cwd that merely contains the branch suffix, without ending in it, must not match")
 }
 
+// TestAgentUsagePRCwdFallbackRequiresBoundaryBeforeSuffix: the "boundaryscope"
+// fixture has two calls, both genuinely ending in the branch suffix "test" as
+// a plain string - one at ".../Repo-unittest" (the match is the tail of a
+// longer word, "unittest", with no separator before "test") and one at
+// ".../Repo-test" (hyphen-anchored). Only the second is a real suffix-of-
+// path-segment match; the first is the same class of false positive the
+// round-1 substring-anywhere fix addressed, one level more precise - suffix-
+// of-string is not suffix-of-path-segment. Reverting the boundary check in
+// ends_with() (scripts/dev.d/agent-usage) makes both match, pulling "6000"
+// into the total.
+func TestAgentUsagePRCwdFallbackRequiresBoundaryBeforeSuffix(t *testing.T) {
+	env := agentUsageEnv(t, "boundaryscope", map[string]string{
+		"AGENT_USAGE_GH": writeGhStub(t),
+		"STUB_PR_BRANCH": "feature/test",
+	})
+	r := run(t, env, "agent-usage", "--pr", "42")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d\n%s", r.exit, r.stderr)
+	}
+	mustNotContain(t, r.stdout, "6000", "a cwd ending in the suffix with no boundary before it (.../Repo-unittest) must not match")
+	row(t, r.stdout, "claude-sonnet-5", "main", 1, "7000", "7000", "7000", "7000")
+}
+
 // TestAgentUsagePRLookupFailureExitsNonZero also pins that `gh`'s own error
 // text reaches stderr (review-go, PR #353 round 1: an auth failure, a
 // network error and "no such PR" used to all produce the identical generic
@@ -296,6 +345,21 @@ func TestAgentUsageJSONShapeAndTotal(t *testing.T) {
 	if strings.Count(r.stdout, "{") != strings.Count(r.stdout, "}") {
 		t.Errorf("unbalanced braces in JSON output:\n%s", r.stdout)
 	}
+}
+
+// TestAgentUsageJSONPinsMaxAndMedianContextByKey: the review-go row on
+// 2026-09-25 is a single call (in=3,cc=4,cr=5,out=6 -> context 18), so its
+// max_context and median_context are both 18/18.0. Checking the two fields
+// together, in the order flushgrp()'s printf actually emits them, is the
+// point: swapping their order in that printf (scripts/dev.d/agent-usage)
+// left the whole suite green before this test existed, since nothing
+// asserted either field by key/value.
+func TestAgentUsageJSONPinsMaxAndMedianContextByKey(t *testing.T) {
+	r := run(t, agentUsageEnv(t, "testrepo", nil), "agent-usage", "--since", "2026-09-25", "--until", "2026-09-25", "--json")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d\n%s", r.exit, r.stderr)
+	}
+	mustContain(t, r.stdout, `"output":6,"max_context":18,"median_context":18.0`, "stdout")
 }
 
 // TestAgentUsageEmptyRangeProducesNoRows exercises the zero-groups path in
