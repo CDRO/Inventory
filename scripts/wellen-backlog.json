@@ -7,7 +7,7 @@
   "standards": {
     "model": "claude-sonnet-5",
     "effort": "high",
-    "consolidationModel": "claude-opus-5",
+    "consolidationModel": "claude-sonnet-5",
     "consolidationEffort": "xhigh",
     "advisor": true,
     "roundLimitPackage": 2,
