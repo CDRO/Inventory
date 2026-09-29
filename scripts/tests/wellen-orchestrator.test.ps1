@@ -111,6 +111,13 @@ $sb = [ScriptBlock]::Create($functionsOnly)
 # saved copy first.
 $script:RealInvokeNative = (Get-Item function:Invoke-Native).ScriptBlock
 
+# Same reasoning, for Invoke-Package (#372 items 2/3): several sections below
+# permanently shadow it with an empty stub to isolate Invoke-Wave's own
+# polling logic from it. The restart-floor and staleAfterMinutes-precedence
+# tests near the end of this file need the REAL Invoke-Package, so they
+# restore this saved copy first.
+$script:RealInvokePackage = (Get-Item function:Invoke-Package).ScriptBlock
+
 $script:DryRun = $false
 # Redirect away from the real scripts/wellen-orchestrator.log (gitignored,
 # but a real orchestrator may be writing to it concurrently) - Write-Log
@@ -906,6 +913,171 @@ try {
     Remove-Item -Force -Path $script:LogFile -ErrorAction SilentlyContinue
 }
 
+Write-Host "== Invoke-Package: an already-existing worktree still registers a start-time floor (#372 item 2) =="
+
+# Register-PackageStartIfUnknown has its own unit test above, but nothing
+# exercised the call SITE in Invoke-Package's restart-meets-existing-worktree
+# branch: deleting that call leaves the rest of this suite green. Restores the
+# REAL Invoke-Package first - several sections above this one (the #188 and
+# heartbeat-wiring sections) permanently shadow it with an empty stub so
+# Invoke-Wave's own polling logic can be tested in isolation from it.
+Set-Item function:Invoke-Package -Value $script:RealInvokePackage
+
+$savedParentDirIp = $ParentDir
+$savedRepoNameIp = $RepoName
+$ipParentDir = Join-Path $env:TEMP "wotest-invoke-package-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Force -Path $ipParentDir | Out-Null
+$ParentDir = $ipParentDir
+$RepoName = 'wotest-repo'
+$ipExistingSlug = 'ip-existing-pkg'
+New-Item -ItemType Directory -Force -Path (Join-Path $ipParentDir "$RepoName-$ipExistingSlug") | Out-Null
+
+$script:PackageStartedAt = @{}
+$script:DryRun = $true
+Reset-Log
+try {
+    $ipPackage = [pscustomobject]@{ slug = $ipExistingSlug; branch = 'ip-branch'; specIssue = 555; spec = 'IP' }
+    $ipWave = [pscustomobject]@{ number = 1; integrationBranch = 'integration/ip-test' }
+    Invoke-Package -Plan ([pscustomobject]@{ planIssue = 1; name = 'IP Plan' }) -Standards ([pscustomobject]@{}) -Wave $ipWave -Package $ipPackage
+    Assert ($script:PackageStartedAt.ContainsKey($ipExistingSlug)) `
+        'an existing worktree still calls Register-PackageStartIfUnknown, seeding a start-time floor'
+    Assert ((Get-LogText) -match 'already existed') 'and logs that no new session was started'
+} finally {
+    $ParentDir = $savedParentDirIp
+    $RepoName = $savedRepoNameIp
+    $script:DryRun = $false
+    Remove-Item -Recurse -Force -Path $ipParentDir -ErrorAction SilentlyContinue
+    Remove-Item -Force -Path $script:LogFile -ErrorAction SilentlyContinue
+}
+
+Write-Host "== Invoke-Package: per-package staleAfterMinutes overrides standards.staleAfterMinutes end-to-end (#372 item 3) =="
+
+# The precedence itself (Get-Field $Package 'staleAfterMinutes' (Get-Field
+# $Standards 'staleAfterMinutes' 45)) is never asserted end-to-end anywhere
+# else in this file - the existing "Start-ClaudeSession -DryRun" test below
+# calls Start-ClaudeSession directly with an already-resolved value, which
+# would stay green even if Invoke-Package's own Get-Field call swapped
+# $Package and $Standards. This drives Invoke-Package itself (still the REAL
+# one, restored above) against a brand-new (non-existing) worktree and reads
+# the resolved threshold back out of Start-ClaudeSession's own -DryRun log
+# line.
+$savedParentDirPrec = $ParentDir
+$savedRepoNamePrec = $RepoName
+$precParentDir = Join-Path $env:TEMP "wotest-stale-precedence-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Force -Path $precParentDir | Out-Null
+$ParentDir = $precParentDir
+$RepoName = 'wotest-repo'
+$script:DryRun = $true
+try {
+    $precStandards = [pscustomobject]@{ model = 'claude-sonnet-5'; effort = 'high'; staleAfterMinutes = 45 }
+    $precWave = [pscustomobject]@{ number = 1; integrationBranch = 'integration/prec-test' }
+    $precPlan = [pscustomobject]@{ planIssue = 1; name = 'Precedence Plan' }
+
+    Reset-Log
+    $precPackageNoOverride = [pscustomobject]@{ slug = 'prec-no-override'; branch = 'prec-branch-1'; specIssue = 601; spec = 'Prec1' }
+    Invoke-Package -Plan $precPlan -Standards $precStandards -Wave $precWave -Package $precPackageNoOverride
+    Assert ((Get-LogText) -match 'stale threshold 45min') `
+        'with no per-package override, the resolved threshold is standards.staleAfterMinutes (45)'
+
+    Reset-Log
+    $precPackageOverride = [pscustomobject]@{ slug = 'prec-override'; branch = 'prec-branch-2'; specIssue = 602; spec = 'Prec2'; staleAfterMinutes = 20 }
+    Invoke-Package -Plan $precPlan -Standards $precStandards -Wave $precWave -Package $precPackageOverride
+    Assert ((Get-LogText) -match 'stale threshold 20min') `
+        'a per-package staleAfterMinutes (20) overrides standards.staleAfterMinutes (45) - this fails if the precedence is ever swapped'
+} finally {
+    $ParentDir = $savedParentDirPrec
+    $RepoName = $savedRepoNamePrec
+    $script:DryRun = $false
+    Remove-Item -Recurse -Force -Path $precParentDir -ErrorAction SilentlyContinue
+    Remove-Item -Force -Path $script:LogFile -ErrorAction SilentlyContinue
+}
+
+Write-Host "== Invoke-PackageRoundsBookkeeping: both WARN-and-return-null branches (#372 item 4) =="
+
+# Neither branch has ever been exercised: no PR found for the branch yet, and
+# a PR found but its comments unreadable (a transient gh hiccup). Both must
+# log a WARN and return $null rather than throw, so a single bad poll never
+# ends a multi-day orchestrator run.
+Reset-Log
+function Invoke-Native { param([scriptblock]$Command) $script:NativeExit = 1; return '' }
+$rbNoPr = Invoke-PackageRoundsBookkeeping -Package ([pscustomobject]@{ slug = 'rb-no-pr'; branch = 'rb-branch-1' })
+Assert ($null -eq $rbNoPr) 'no PR found for the branch: returns $null, not a throw'
+Assert ((Get-LogText) -match "Rounds bookkeeping for 'rb-no-pr': no PR found for branch 'rb-branch-1' - skipping\." ) `
+    'and logs a WARN naming the branch'
+Assert ((Get-LogText) -match '\[WARN\]') 'at WARN level'
+
+Reset-Log
+$script:rbCallCount = 0
+function Invoke-Native {
+    param([scriptblock]$Command)
+    $script:rbCallCount++
+    if ($script:rbCallCount -eq 1) { $script:NativeExit = 0; return '77' }
+    $script:NativeExit = 1
+    return ''
+}
+$rbUnreadable = Invoke-PackageRoundsBookkeeping -Package ([pscustomobject]@{ slug = 'rb-unreadable'; branch = 'rb-branch-2' })
+Assert ($null -eq $rbUnreadable) 'a PR found but its comments unreadable: also returns $null, not a throw'
+Assert ((Get-LogText) -match "Rounds bookkeeping for 'rb-unreadable': could not read PR #77's comments - skipping\.") `
+    'and logs a WARN naming the PR number'
+Assert ((Get-LogText) -match '\[WARN\]') 'at WARN level'
+
+Write-Host "== Get-PackageLastActivity: worktree file mtime as a fourth activity signal (#429) =="
+
+# Restore the REAL Invoke-Native - the rounds-bookkeeping section just above
+# leaves a stateful stub in place, and this test needs the real thing to run
+# `git status --porcelain` against a real scratch repo below.
+Set-Item function:Invoke-Native -Value $script:RealInvokeNative
+
+# #429: the three existing signals (branch commit date, worklog mtime, newest
+# PR comment) never reflect a session actively editing/testing without
+# committing - observed twice in the new-features wave as false-positive
+# staleness warnings. Get-WorktreeFileLastWriteDate adds the newest mtime
+# across the worktree's own changed (tracked+untracked) files, via `git
+# status --porcelain` plus Get-Item, as a fourth source into Get-LatestDate.
+$gplaDir = Join-Path $env:TEMP "wotest-worktree-mtime-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Force -Path $gplaDir | Out-Null
+try {
+    git -C $gplaDir init --quiet 2>$null
+    git -C $gplaDir config user.email 'test@example.com' 2>$null
+    git -C $gplaDir config user.name 'Test' 2>$null
+    Set-Content -Path (Join-Path $gplaDir 'committed.txt') -Value 'v1'
+    git -C $gplaDir add committed.txt 2>$null
+    git -C $gplaDir commit -m 'initial' --quiet 2>$null
+
+    # No signal at all from the three original sources; only an uncommitted,
+    # freshly-written file in the worktree.
+    function Get-BranchLastCommitDate { param([string]$Branch) return $null }
+    function Get-WorklogLastWriteDate { param([string]$WorktreePath) return $null }
+    function Get-NewestReviewerCommentDate { param([string]$Branch) return $null }
+    Start-Sleep -Milliseconds 50
+    Set-Content -Path (Join-Path $gplaDir 'wip.txt') -Value 'uncommitted work'
+    $expectedMtime = (Get-Item -LiteralPath (Join-Path $gplaDir 'wip.txt')).LastWriteTimeUtc
+
+    $gplaPackage = [pscustomobject]@{ slug = 'gpla-mtime-test'; branch = 'x' }
+    $result = Get-PackageLastActivity -Package $gplaPackage -WorktreePath $gplaDir
+    Assert ($null -ne $result) 'an uncommitted, untracked change in the worktree counts as activity, even with no other signal'
+    Assert ([Math]::Abs(($result - $expectedMtime).TotalSeconds) -lt 5) `
+        "the reported activity time matches the changed file's own mtime (got $result, expected ~$expectedMtime)"
+
+    # A newer signal from elsewhere (e.g. a PR comment) still wins over an
+    # OLDER worktree change - this is one more source into Get-LatestDate's
+    # existing "pick the newest" combinator, not a replacement for it.
+    $newerComment = (Get-Date).ToUniversalTime().AddMinutes(5)
+    function Get-NewestReviewerCommentDate { param([string]$Branch) return $newerComment }
+    $result2 = Get-PackageLastActivity -Package $gplaPackage -WorktreePath $gplaDir
+    Assert ($result2 -eq $newerComment) 'a newer signal from an existing source still wins over the worktree mtime'
+
+    # A worktree with no uncommitted changes at all contributes no signal -
+    # git status --porcelain is empty, so there is nothing to take an mtime of.
+    function Get-NewestReviewerCommentDate { param([string]$Branch) return $null }
+    git -C $gplaDir add -A 2>$null
+    git -C $gplaDir commit -m 'wip committed' --quiet 2>$null
+    $result3 = Get-PackageLastActivity -Package $gplaPackage -WorktreePath $gplaDir
+    Assert ($null -eq $result3) 'a clean worktree (nothing uncommitted) contributes no mtime signal - not "now"'
+} finally {
+    Remove-Item -Recurse -Force -Path $gplaDir -ErrorAction SilentlyContinue
+}
+
 Write-Host "== Invoke-DoctorPreflight (H11): fails fast with the doctor's own message, never with a generic one =="
 
 # Restore the REAL Invoke-Native - every section above this one (the #188
@@ -945,6 +1117,22 @@ exit 0
     try { Invoke-DoctorPreflight } catch { $threw = $true }
     Assert (-not $threw) 'a passing doctor stub does not throw'
     Assert ((Get-LogText) -match 'scripts/doctor: all checks passed') 'and logs that the pre-flight passed'
+
+    # #372 item 1: a real `sh` exec failure (not a doctor FAIL) - pointing
+    # $script:DoctorScript at a path that does not exist at all, so `sh`
+    # itself fails ("No such file or directory") rather than the stub script
+    # running and exiting non-zero. `sh` writes that message to STDERR with
+    # empty stdout, which Invoke-Native used to discard entirely, making the
+    # thrown message empty.
+    $script:DoctorScript = Join-Path $env:TEMP "wotest-doctor-missing-$([guid]::NewGuid().ToString('N'))"
+    Reset-Log
+    $threw = $false; $err = $null
+    try { Invoke-DoctorPreflight } catch { $threw = $true; $err = $_.Exception.Message }
+    Assert $threw 'sh failing to execute the doctor script at all still stops the pre-flight'
+    Assert (-not [string]::IsNullOrWhiteSpace($err) -and $err.Trim() -ne 'scripts/doctor found a problem that must be fixed before starting anything:') `
+        "the thrown message is not empty - it carries sh's own stderr, not a blank body (`"$err`")"
+    Assert ($err -match 'No such file or directory') "the thrown message is sh's own raw stderr text, not PowerShell's formatted error-record noise (`"$err`")"
+    Assert ($err -notmatch 'CategoryInfo|FullyQualifiedErrorId') "and carries no PowerShell error-record formatting (`"$err`")"
 } finally {
     $script:DoctorScript = $savedDoctorScript
     Remove-Item -Force -Path $script:LogFile -ErrorAction SilentlyContinue

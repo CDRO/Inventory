@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -25,6 +26,14 @@ const classicMarker = "-- +inventory:classic"
 // and is not the exact, correctly placed classicMarker as a mistake to report
 // rather than a comment to ignore.
 const classicNamespace = "-- +inventory:"
+
+// classicNamespacePattern detects an *attempt* at classicNamespace even when
+// the whitespace between "--" and "+inventory:" itself is irregular — doubled
+// ("--  +inventory:classic") or absent ("--+inventory:classic") — one level
+// more precise than the outer TrimSpace/ToLower normalization below, which
+// only covers whitespace and case around the whole line, not inside the
+// prefix. \s* rather than \s+ deliberately also matches zero whitespace.
+var classicNamespacePattern = regexp.MustCompile(`^--\s*\+inventory:`)
 
 // gooseUpMarker is the directive goose itself requires to start an Up block.
 const gooseUpMarker = "-- +goose Up"
@@ -132,7 +141,7 @@ func ParseClassicMarker(content []byte) (classic bool, err error) {
 		// is exactly the silent failure decision D3 exists to prevent.
 		// Acceptance itself stays byte-exact: only line == classicMarker,
 		// untrimmed, ever sets classic true.
-		namespaced := strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), strings.ToLower(classicNamespace))
+		namespaced := classicNamespacePattern.MatchString(strings.ToLower(strings.TrimSpace(line)))
 		switch {
 		case i == requiredLine && line == classicMarker:
 			classic = true
