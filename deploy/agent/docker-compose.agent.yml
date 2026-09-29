@@ -1,0 +1,80 @@
+# The Claude Code agent runtime. Contract: issue #317 ("H18"),
+# docs/plans/2026-09-harness-optimization.md section 3.4 and decision D10.
+# Operator instructions: README.md, beside this file.
+#
+# Run with -f from the repository root, after exporting REPO_PATH (Compose
+# resolves ${REPO_PATH} below for itself, before env_file ever reaches the
+# container, so it cannot come from deploy/agent/.env.agent — see that file's
+# own header):
+#
+#   export REPO_PATH=$(pwd)
+#   docker compose -f deploy/agent/docker-compose.agent.yml run --rm agent
+#
+# Its own Compose project ("name:" below), deliberately not part of the app
+# stack's file pair — an agent session and the app stack it works on are
+# independent, and merging them would mean a `dc down` on one disturbing the
+# other.
+name: inventory-agent
+
+services:
+  agent:
+    build:
+      # The repository root, two directories up from this file — the build
+      # needs nothing from the repo itself (the Dockerfile COPYs only its own
+      # entrypoint.sh), but a context narrower than the root would still work
+      # today and break the moment this image needs anything else from the
+      # tree. Root keeps that a non-event.
+      context: ../..
+      dockerfile: deploy/agent/Dockerfile
+    image: inventory-agent:local
+
+    # REQUIRED, no default: unlike docker-compose.runner.yml's
+    # INVENTORY_CLONE (which has one real value, the NAS's fixed path), this
+    # repository's checkout path is different on every machine that runs it.
+    # A missing value would otherwise make Compose create an EMPTY directory
+    # at ${REPO_PATH} as the mount source and bind that in — the exact silent
+    # failure scripts/doctor's own bind-mount-path check exists to catch,
+    # just one layer further out than that check can see.
+    environment:
+      REPO_PATH: ${REPO_PATH:?export REPO_PATH to this repository's absolute host path before running this file (see README.md)}
+
+    env_file:
+      - path: .env.agent
+        required: false
+
+    working_dir: ${REPO_PATH}
+
+    # Interactive by default — the common case is `claude` itself, run at a
+    # terminal. `run --rm agent scripts/doctor` (this package's own
+    # acceptance criterion) still works fine without a tty attached.
+    stdin_open: true
+    tty: true
+
+    volumes:
+      # 1. The host's Docker daemon. entrypoint.sh joins its group at start;
+      #    without it mounted, scripts/doctor reports why and the container
+      #    refuses to start anything else (this package's other acceptance
+      #    criterion — the doctor output with the socket removed).
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      # 2. The clone, at THE IDENTICAL PATH inside and out. Load-bearing, not
+      #    tidy, for the same reason as the NAS runner's own clone mount
+      #    (deploy/synology/runner/docker-compose.runner.yml): a
+      #    `docker compose run` this container starts through the socket
+      #    above has ITS bind-mount sources resolved by the HOST's daemon,
+      #    not by this container's filesystem. A worktree created inside the
+      #    container is therefore visible on the host at the same path, and
+      #    vice versa. Both halves of this line interpolate the same
+      #    variable; do not edit one half.
+      - ${REPO_PATH}:${REPO_PATH}
+
+      # 3. Claude Code's own state — credentials cache, settings, session
+      #    history under ~/.claude inside the `agent` user's $HOME. A named
+      #    volume, not a bind mount: it has no meaningful host path to be
+      #    identical about, and a named volume survives `down` the same way
+      #    the runner's runner_state/ bind mount does, without needing a
+      #    directory to exist on the host first.
+      - agent-home:/home/agent/.claude
+
+volumes:
+  agent-home:

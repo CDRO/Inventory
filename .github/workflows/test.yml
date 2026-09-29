@@ -69,6 +69,12 @@
 # the reasons for them; the trade-off is that a commit which is not about the
 # runner still starts that job for a few seconds before it says so and builds
 # nothing. Its own comment block, above the job, has the rest.
+#
+# A third, equally unrelated job, `agent-image` (H18, #317): builds the
+# Claude Code agent runtime (deploy/agent/) and runs its doctor gate with
+# neither the Docker socket nor any credentials mounted, only on a commit
+# that changed `deploy/agent/**`. Same path-filter-as-a-step reason as
+# `runner-image` above; its own comment block, above the job, has the rest.
 name: test
 
 on:
@@ -352,3 +358,99 @@ jobs:
             -e "INVENTORY_CLONE=$GITHUB_WORKSPACE" \
             -e RUNNER_SMOKE_ONLY=1 \
             inventory-runner:local
+
+  # H18 (issue #317): build the agent runtime's image (deploy/agent/) and
+  # prove its entrypoint refuses to start without being told to, whenever
+  # anything in deploy/agent/** changes - and only then. Unlike
+  # `runner-image` above, there is no credential-free "smoke only" mode here:
+  # this image's own gate IS scripts/doctor, and scripts/doctor's checks span
+  # gh/git/claude auth that a public PR run has no business carrying as
+  # secrets. So what this job proves is the refusal path itself - with
+  # neither the socket nor any credentials mounted, the container must exit
+  # non-zero having run nothing else. The "all ok" path (this package's other
+  # acceptance criterion) is proved by hand, on the PC, with real
+  # credentials, and its output lives in the PR body - see
+  # deploy/agent/README.md's own "Verify" section for the exact commands.
+  agent-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # fetch-depth: 0, because the next step diffs against a base commit.
+      # The default shallow checkout has neither HEAD~1 nor the PR's base sha.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      # The path filter. Same three-event logic as `runner-image`'s own step
+      # above (each event's own honest answer to "compared with what?"); see
+      # its comment for why.
+      - name: Did deploy/agent/ change?
+        id: filter
+        run: |
+          set -eu
+          case "${{ github.event_name }}" in
+            pull_request) base='${{ github.event.pull_request.base.sha }}' ;;
+            push)         base='${{ github.event.before }}' ;;
+            *)            base='' ;;
+          esac
+          case "$base" in
+            ''|0000000000000000000000000000000000000000)
+              base=$(git rev-parse --verify --quiet HEAD~1) || base= ;;
+          esac
+          if [ -z "$base" ]; then
+            echo "no base commit to compare against - building the agent image"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$base" HEAD -- deploy/agent/ | wc -l)
+          echo "base=$base  files changed under deploy/agent/: $changed"
+          if [ "$changed" -gt 0 ]; then
+            git diff --name-only "$base" HEAD -- deploy/agent/
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy/agent/ unchanged - NOT building the agent image"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Plain `docker build`, not buildx with a layer cache: this changes as
+      # rarely as the runner image, and the expensive layers (the base image,
+      # the tool downloads) are fetched either way. Also the exact command
+      # deploy/agent/README.md names, so a green tick here means that command
+      # works.
+      - name: Build the agent image
+        if: steps.filter.outputs.changed == 'true'
+        run: docker build -t inventory-agent:local -f deploy/agent/Dockerfile .
+
+      # The refusal path, with nothing mounted but the checkout itself:
+      # neither the Docker socket nor GH_TOKEN/GIT_AUTHOR_*/
+      # CLAUDE_CODE_OAUTH_TOKEN are given, so every doctor check that needs
+      # them must FAIL and the entrypoint must exit non-zero having started
+      # nothing else. `$GITHUB_WORKSPACE` stands in for `$REPO_PATH` - a real
+      # path on this host, which is all REPO_PATH needs to be here since
+      # nothing nested runs.
+      - name: Run the agent image's doctor gate with nothing mounted
+        if: steps.filter.outputs.changed == 'true'
+        run: |
+          set +e
+          out=$(docker run --rm \
+            -e REPO_PATH="$GITHUB_WORKSPACE" \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            -w "$GITHUB_WORKSPACE" \
+            inventory-agent:local scripts/doctor 2>&1)
+          status=$?
+          echo "$out"
+          echo "exit status: $status"
+          if [ "$status" -eq 0 ]; then
+            echo "expected a non-zero exit (no socket, no credentials mounted) but got 0" >&2
+            exit 1
+          fi
+          # A non-zero exit alone would also pass for a crash unrelated to
+          # scripts/doctor itself (entrypoint.sh dying some other way before
+          # ever reaching the gate) - this is entrypoint.sh's own message for
+          # the gate specifically refusing, not just "something went wrong".
+          case "$out" in
+            *"agent-entrypoint: FATAL: scripts/doctor failed"*) ;;
+            *)
+              echo "expected the doctor-gate refusal message, got something else" >&2
+              exit 1 ;;
+          esac

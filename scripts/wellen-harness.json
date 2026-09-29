@@ -1,0 +1,234 @@
+{
+  "plan": {
+    "name": "Harness optimization (2026-09)",
+    "planIssue": 293,
+    "conventions": "These packages change the HARNESS (CI, the review loop, the orchestrator, deployment tooling), not the product: the package issue body is the contract and docs/plans/2026-09-harness-optimization.md is context - until PR #319 merges that document lives only on branch harness/optimization-plan, so read it with git show origin/harness/optimization-plan:docs/plans/2026-09-harness-optimization.md (its section 9 holds the decisions the issues cite as D1 to D10); for waves 4 and 5 docs/specs/38-release-pipeline-and-nas-runner.md is the contract. Shared files (CLAUDE.md, .claude/skills/ship/SKILL.md, the three reviewer prompts under .claude/agents, docs/specs/01-architecture-and-deployment.md, deploy/synology/README.md) are edited ONLY in the section the issue names, appending rather than reflowing, so parallel PRs merge cleanly - never reorder or reformat a section another package owns. Every package that claims a saving puts its before/after numbers in the PR body using the commands in the plan's appendix. No host toolchain: a new tool goes into the Dockerfile dev stage, pinned. The three reviewers run on every PR; the test reviewer runs the suite locally and falls back to CI only when no local Docker daemon can be reached. Never run docker system, volume, network or image prune. Do not touch docker-compose.yml or docker-compose.nas.yml (production) unless the issue names them."
+  },
+  "standards": {
+    "model": "claude-sonnet-5",
+    "effort": "high",
+    "consolidationModel": "claude-opus-5",
+    "consolidationEffort": "xhigh",
+    "advisor": true,
+    "roundLimitPackage": 2,
+    "roundLimitConsolidation": 4
+  },
+  "waves": [
+    {
+      "number": 1,
+      "waveIssue": 294,
+      "integrationBranch": "integration/harness-welle-1",
+      "sequential": false,
+      "dockerCleanup": true,
+      "packages": [
+        {
+          "specIssue": 300,
+          "slug": "h1-dev-dispatcher",
+          "branch": "harness/h1-dev-dispatcher",
+          "spec": "H1 dev dispatcher",
+          "advisor": false,
+          "focus": "Build scripts/dev as a POSIX sh dispatcher over scripts/dev.d/<command> files with LF pinned in .gitattributes; ship test, vet, ci-status and ci-usage exactly as the issue specifies (compact output, full log in .claude/last-test.log, poll CI by exact head SHA). Edit the ship skill only in its step 3 block and the pickup skill only where it names the test recipe; do not touch docs/specs/01 in this package (H2 owns its CI section this wave). Test the dispatcher with stubs like deploy/synology/update_test.go does. Measure output lines per test run before and after."
+        },
+        {
+          "specIssue": 301,
+          "slug": "h2-ci-cache",
+          "branch": "harness/h2-ci-cache",
+          "spec": "H2 CI cache",
+          "advisor": false,
+          "focus": "Change .github/workflows/test.yml only: Go build cache as a bind volume saved by actions/cache, BuildKit GitHub Actions layer cache for the dev image, one docker compose run for vet and test, a concurrency group with cancel-in-progress on pull requests only, timeout 8 minutes, and the docs-only path filter exactly as decision D7 in the plan says. Amend spec 01's Continuous integration section and nothing else in that file. Prove the cache hit and the billed minute with two consecutive runs and paste the job timings; nothing here may install Go, Node or Postgres on the runner."
+        },
+        {
+          "specIssue": 302,
+          "slug": "h3-test-db-speed",
+          "branch": "harness/h3-test-db-speed",
+          "spec": "H3 test DB speed",
+          "advisor": false,
+          "focus": "Decision D5: add fsync=off, synchronous_commit=off and full_page_writes=off to the db service of BOTH docker-compose.e2e.yml and docker-compose.override.yml (the override keeps its persistent volume), and create docker-compose.ci.yml adding a tmpfs data directory for CI, selected later through COMPOSE_FILE. Never touch docker-compose.yml or docker-compose.nas.yml, and add an assertion in cmd/inventory/compose_test.go that production keeps the defaults. Measure internal/store and internal/migrate three times before and after with -count=1 and put the medians in the PR body. Do not edit .github/workflows/test.yml (H2 owns it this wave; H8 wires COMPOSE_FILE in wave 2)."
+        },
+        {
+          "specIssue": 303,
+          "slug": "h4-attention",
+          "branch": "harness/h4-attention",
+          "spec": "H4 attention",
+          "advisor": true,
+          "focus": "This allowlist becomes the only permission guard for headless sessions in wave 6 (decision D10: --permission-mode dontAsk denies, never prompts), so write it for that use: the edit tools and every command the ship loop runs end to end. Derive the new allowlist entries from a scan of the last 14 days of transcripts and paste the prefix table into the PR body; keep the deny list and never allow force-push, reset --hard, any prune, volume rm, or reading .env. Add Notification and Stop hooks calling scripts/hooks/notify.ps1 that always exit 0 within 2 seconds. Only .claude/settings.json, scripts/hooks, scripts/tests and a new Attention section in scripts/wellen-planen.md change."
+        }
+      ]
+    },
+    {
+      "number": 2,
+      "waveIssue": 295,
+      "integrationBranch": "integration/harness-welle-2",
+      "sequential": false,
+      "dockerCleanup": true,
+      "packages": [
+        {
+          "specIssue": 304,
+          "slug": "h5-verdict-gate",
+          "branch": "harness/h5-verdict-gate",
+          "spec": "H5 verdict gate",
+          "advisor": false,
+          "focus": "Add the verdict marker line to the Output section of the three reviewer prompts and one task-list line that reads the head SHA - nothing else in those files (H7 edits their Your task section in parallel). Build scripts/dev.d/gate with the exact MERGE, WAIT and BLOCK semantics and exit codes of the issue, a stale-SHA rule, and stub-driven tests. Ship skill: only step 6 changes."
+        },
+        {
+          "specIssue": 305,
+          "slug": "h6-pre-gate",
+          "branch": "harness/h6-pre-gate",
+          "spec": "H6 pre-gate",
+          "advisor": false,
+          "focus": "Install staticcheck and revive pinned in the Dockerfile dev stage only; write revive.toml with the exported and package-comments rules; scripts/dev.d/check runs gofmt -l, go vet, staticcheck, revive and the new TestEnvExampleParity in one container invocation. Fix lint findings on main in this PR only if they are a handful of doc comments; otherwise file issues and exclude with the issue number. Add one step to test.yml and one line to ship skill step 3; touch no other section."
+        },
+        {
+          "specIssue": 306,
+          "slug": "h7-review-packet",
+          "branch": "harness/h7-review-packet",
+          "spec": "H7 review packet",
+          "advisor": false,
+          "focus": "Build scripts/dev.d/packet writing .claude/review-packet.md (gitignored) with the exact contents and order the issue lists, including named spec sections instead of whole specs, the exported-identifier table and the --since delta mode. In the reviewer prompts edit ONLY the Your task section and the maxTurns frontmatter to the number decision D2 in the plan states (H5 edits their Output section in parallel); ship skill: only step 5. Prove the packet is under 60 percent of the token size of the raw inputs."
+        },
+        {
+          "specIssue": 307,
+          "slug": "h8-e2e-workflow",
+          "branch": "harness/h8-e2e-workflow",
+          "spec": "H8 e2e workflow",
+          "advisor": false,
+          "focus": "Change .github/workflows/e2e.yml: one build job shared by both jobs (measure docker save artifact versus layer cache and keep the faster, numbers in the header comment), cached e2e/node_modules, concurrency and tighter timeouts; move restore-round-trip into a new .github/workflows/restore.yml with exactly decision D8's triggers (path filter, v* tags, weekly schedule, dispatch) and rewrite e2e.yml's header accordingly; add the top-level env COMPOSE_FILE line selecting H3's docker-compose.ci.yml to test.yml (H6 adds a step to that file in parallel - append only, different hunk). Amend only spec 01's E2E paragraph. Never bring the E2E stack up locally while another session might use it; use workflow_dispatch on the branch for proof."
+        },
+        {
+          "specIssue": 308,
+          "slug": "h9-agent-usage",
+          "branch": "harness/h9-agent-usage",
+          "spec": "H9 agent usage",
+          "advisor": false,
+          "focus": "Build scripts/dev.d/agent-usage in POSIX sh and awk (no jq on the machine) handling the three transcript traps the issue names, with fixture-based tests, --since/--until/--pr/--json, and add the command's own September 2026 row to the plan's section 1.4. Never print message contents, only counts."
+        },
+        {
+          "specIssue": 309,
+          "slug": "h10-doctor",
+          "branch": "harness/h10-doctor",
+          "spec": "H10 doctor",
+          "advisor": false,
+          "focus": "Build scripts/doctor with the ten checks and remediation lines the issue lists, --json and --fix (create the volume only, never install software), and PATH-shim tests for the socket-unwritable and daemon-cannot-run-containers cases. Read only HTTP_PORT and TRAEFIK_PORT from .env with grep and prove no .env value ever appears in the output. Do not wire it into the orchestrator (H11, next wave)."
+        }
+      ]
+    },
+    {
+      "number": 3,
+      "waveIssue": 296,
+      "integrationBranch": "integration/harness-welle-3",
+      "sequential": false,
+      "dockerCleanup": true,
+      "packages": [
+        {
+          "specIssue": 310,
+          "slug": "h11-orchestrator-attention",
+          "branch": "harness/h11-orchestrator-attention",
+          "spec": "H11 orchestrator attention",
+          "advisor": false,
+          "focus": "Change scripts/wellen-orchestrator.ps1 only in the pre-flight (call scripts/doctor), a new heartbeat per package with staleAfterMinutes, and rounds bookkeeping at issue close; never act on a stale session. Extend the schema validation and scripts/wellen-planen.md. Prove with the existing test file style that a plan file without the new field validates and dry-runs identically. The orchestrator reads itself once at start, so say in the PR when the change takes effect."
+        },
+        {
+          "specIssue": 311,
+          "slug": "h12-reviewer-tuning",
+          "branch": "harness/h12-reviewer-tuning",
+          "spec": "H12 reviewer tuning",
+          "advisor": false,
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "Apply decisions D2 and D9 from the plan verbatim: frontmatter model/effort/maxTurns per reviewer and a Round 2 and later section; the Output format and the H5 marker stay untouched. Before merging, run the replay validation on six past PRs the issue names, in read-only mode (reviewers must post nothing), and put the 18-row table into the plan and the PR body; a tuned reviewer that misses a blocking finding the original caught steps back one setting. All three reviewers stay on every PR."
+        },
+        {
+          "specIssue": 312,
+          "slug": "h13-spec-38",
+          "branch": "harness/h13-spec-38",
+          "spec": "H13 spec 38",
+          "advisor": false,
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "Write docs/specs/38-release-pipeline-and-nas-runner.md in the house style with acceptance criteria labelled H14 to H17, encoding the plan's sections 3.2 and 3.3 and decisions D3 and D4 verbatim (marker line, migrate plan output and exit codes, tag keyword, registration mode, labels, the public-phase security controls with the socket-is-root residual risk named). Amend specs 00, 01 (Deployment model, Continuous integration) and 18 (Upgrades) with pointers plus one paragraph each, migrations/README.md with the marker rule, and .env.example with BACKUP_KEEP. No implementation."
+        }
+      ]
+    },
+    {
+      "number": 4,
+      "waveIssue": 297,
+      "integrationBranch": "integration/harness-welle-4",
+      "sequential": false,
+      "dockerCleanup": true,
+      "packages": [
+        {
+          "specIssue": 313,
+          "slug": "h14-migrate-plan",
+          "branch": "harness/h14-migrate-plan",
+          "spec": "H14 migrate plan",
+          "advisor": false,
+          "focus": "Implement inventory migrate plan against spec 38's contract: pending list, marker parser strict about placement inside the goose Up block and tolerant of CRLF, the exact stdout words and exit codes, ahead-of-binary as spec 18's fatal error. Throwaway-database tests for every case the issue lists. Add one checklist line to .claude/agents/review-go.md and an example to migrations/README.md; touch no existing migration and not deploy/synology/update."
+        },
+        {
+          "specIssue": 314,
+          "slug": "h15-update-auto",
+          "branch": "harness/h15-update-auto",
+          "spec": "H15 update auto",
+          "advisor": true,
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "Extend deploy/synology/update with --ref, --auto and --backup exactly as spec 38 and the issue define, keeping every existing guarantee and test; every new path gets a stub-recorded test in update_test.go, including backup failure aborting before any migrate call and retention never deleting a .part. Run the README's scratch-stack table once against a scratch clone with INVENTORY_PROJECT=scratch and paste the results. This script touches production data on the NAS: no shortcuts, no untested branch."
+        },
+        {
+          "specIssue": 315,
+          "slug": "h16-runner-container",
+          "branch": "harness/h16-runner-container",
+          "spec": "H16 runner container",
+          "advisor": true,
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "Build deploy/synology/runner (Dockerfile from the pinned actions/runner image plus git, the Docker CLI and a pinned standalone docker-compose >= 2.24; docker-compose.runner.yml as its own project mounting the socket and the clone at the identical host path; README) with the registration mode, user and labels decision D4 fixes and a start-up smoke test. Register a test runner from the PC against this repository, prove it picks up a dispatch job, then remove it and say so in the PR. Add one path-filtered build job to test.yml and one row to deploy/synology/README.md."
+        }
+      ]
+    },
+    {
+      "number": 5,
+      "waveIssue": 298,
+      "integrationBranch": "integration/harness-welle-5",
+      "sequential": true,
+      "dockerCleanup": true,
+      "packages": [
+        {
+          "specIssue": 316,
+          "slug": "h17-release-workflow",
+          "branch": "harness/h17-release-workflow",
+          "spec": "H17 release workflow",
+          "advisor": true,
+          "model": "claude-opus-5",
+          "effort": "xhigh",
+          "focus": "Write .github/workflows/release.yml (gate by SHA reusing green runs, deploy job on runs-on self-hosted nas with environment production, the repository and actor guard, no checkout, DEPLOY_MODE from the tag annotation, the healthz version assertion and the step summary), add workflow_call triggers to test.yml and e2e.yml only, build scripts/dev.d/release with its three refusals, and write the runbook section. The first real release on the NAS (runner registered, rolling then forced classic) is done together with Tizian - stop and ask for that appointment before that step, never register the real runner or push a production tag without him."
+        }
+      ]
+    },
+    {
+      "number": 6,
+      "waveIssue": 299,
+      "integrationBranch": "integration/harness-welle-6",
+      "sequential": true,
+      "dockerCleanup": true,
+      "packages": [
+        {
+          "specIssue": 317,
+          "slug": "h18-agent-image",
+          "branch": "harness/h18-agent-image",
+          "spec": "H18 agent image",
+          "advisor": true,
+          "focus": "Build deploy/agent (linux/amd64 Dockerfile with the pinned claude native install, gh, git, Docker CLI with Compose plugin; non-root user joined to the socket's group; env-var auth; entrypoint runs scripts/doctor --json and refuses on failure), docker-compose.agent.yml mounting the repo at the identical host path, .env.agent.example, README, and a path-filtered CI build job. Prove the doctor output with and without the socket and that go test runs from inside; no secret in any image layer."
+        },
+        {
+          "specIssue": 318,
+          "slug": "h19-agent-loop",
+          "branch": "harness/h19-agent-loop",
+          "spec": "H19 agent loop",
+          "advisor": true,
+          "focus": "Build scripts/agent-loop.sh in the shape decision D10 fixes: a separate Linux entry point over the same wave JSON (no -Headless switch), the package prompt extracted from Get-PackagePrompt into scripts/package-prompt.template that both the orchestrator and the loop fill (the orchestrator test asserts the rendered prompt is unchanged), one claude -p session per issue with --permission-mode dontAsk --permission-prompts none --max-turns 400 --output-format stream-json as a non-root user under the project allowlist (never --dangerously-skip-permissions, refuse root, refuse when the doctor fails, lock file), stream-json result parsing with the stop conditions the issue lists and --resume after a usage-limit backoff. Verify the OAuth token variable name against the current CLI docs before relying on it. Stub-driven tests for every stop condition. One real headless run on a small follow-up issue chosen with Tizian - ask which one before running it. Every gate stays inside the ship skill; the loop never merges, reviews or closes anything itself."
+        }
+      ]
+    }
+  ]
+}

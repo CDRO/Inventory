@@ -941,11 +941,24 @@ function Get-PackagePrompt {
     # plan the wave was deliberately kept out of.
     $planIssue = Get-Field $Wave 'planIssue' $Plan.planIssue
     $planName = Get-Field $Wave 'planName' $Plan.name
-    return @"
-/pickup
-
-Work $($Package.spec) (issue #$($Package.specIssue), wave $($Wave.number) of $planName) through the full ship loop, here in this worktree, with the PR against $($Wave.integrationBranch) instead of main - wave plan #$planIssue takes precedence over the ship skill's default target. Open PRs belonging to other packages belong to parallel sessions: do not touch them, do not ask about them. $($Package.focus) ${conventions}After the merge, close the spec issue, comment on wave issue #$($Wave.waveIssue), and do not switch to main. Stop and report if you hit the round limit ($limit).
-"@
+    # The literal text lives in scripts/package-prompt.template (H19, #318),
+    # shared with scripts/agent-loop.sh's own renderer, so the two entry
+    # points send sessions the identical prompt - .Replace() (System.String,
+    # a literal substring replace, not a regex) so none of these values can
+    # be misread as a replacement pattern.
+    $templatePath = Join-Path $PSScriptRoot 'package-prompt.template'
+    $template = Get-Content -Raw -LiteralPath $templatePath
+    return $template.
+        Replace('{{SPEC}}', "$($Package.spec)").
+        Replace('{{SPEC_ISSUE}}', "$($Package.specIssue)").
+        Replace('{{WAVE_NUMBER}}', "$($Wave.number)").
+        Replace('{{PLAN_NAME}}', "$planName").
+        Replace('{{INTEGRATION_BRANCH}}', "$($Wave.integrationBranch)").
+        Replace('{{PLAN_ISSUE}}', "$planIssue").
+        Replace('{{FOCUS}}', "$($Package.focus)").
+        Replace('{{CONVENTIONS}}', "$conventions").
+        Replace('{{WAVE_ISSUE}}', "$($Wave.waveIssue)").
+        Replace('{{ROUND_LIMIT}}', "$limit")
 }
 
 function Get-ConsolidationPrompt {
