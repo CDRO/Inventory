@@ -263,6 +263,34 @@ Before the orchestrator can work through a wave, these must exist:
   the consolidation PR against `main` will carry it in naturally. Do not
   wait on a separate PR just to satisfy "branch from main" as a formality.
 
+## Automatic release tagging
+
+When the **last** wave in the file consolidates, the orchestrator itself (not
+the consolidation session) checks whether the plan's cumulative diff since it
+started touched anything outside `scripts/`, `deploy/`, `.github/`, `.claude/`
+or `docs/` - harness/tooling and documentation, neither of which changes what
+runs on the NAS. If it did, the orchestrator cuts and pushes an annotated tag
+(`vYYYY.MM.DD`, or `.1`/`.2`/… for a same-day repeat) straight to `origin` -
+**with no pause for confirmation**. That push is what the release pipeline
+(`.github/workflows/release.yml`,
+`docs/specs/38-release-pipeline-and-nas-runner.md`) reacts to; nothing here
+calls it directly, and the tag carries no `deploy: classic` line, so the
+pipeline's own `--auto` logic still decides rolling vs. classic from the real
+migration - this only decides *whether* to release, never *how*.
+
+This is a deliberate choice (confirmed with Tizian, 2026-09-29): every real
+deploy before this shipped from a tag he pushed by hand; a plan whose last
+wave touches product code now deploys itself the moment it lands on `main`.
+
+**Known gap:** the "since it started" baseline is captured when the
+orchestrator *process* starts, not when the plan itself began. A `-StartWave`
+resume (a fresh process beginning mid-plan, e.g. to pick up a wave-file edit)
+only sees the diff from its own start onward - if an earlier wave in the same
+plan, merged under a previous process invocation, touched product code, that
+won't be seen and no tag will be cut automatically. The orchestrator logs a
+WARN and skips tagging outright when it holds no start commit to diff
+against, rather than guessing; cut the tag by hand in that case.
+
 ## Wave-file schema
 
 ```jsonc

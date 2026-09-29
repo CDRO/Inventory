@@ -976,6 +976,75 @@ try {
 }
 Assert ($dryRunSessionLog -match 'stale threshold 30min') "-DryRun's per-package line shows the resolved stale threshold"
 
+Write-Host "== Test-ChangedFilesAffectProduct: infra/docs paths never count, anything else does =="
+Assert (-not (Test-ChangedFilesAffectProduct -Files @('scripts/agent-loop.sh', 'deploy/agent/entrypoint.sh'))) 'scripts/ and deploy/ alone: no product code'
+Assert (-not (Test-ChangedFilesAffectProduct -Files @('.github/workflows/test.yml', '.claude/agents/review-go.md'))) '.github/ and .claude/ alone: no product code'
+Assert (-not (Test-ChangedFilesAffectProduct -Files @('docs/specs/39-batch-containers.md', 'docs/plans/2026-09-harness-optimization.md'))) 'docs/ alone (specs or plans): no product code - nothing runtime changes'
+Assert (-not (Test-ChangedFilesAffectProduct -Files @())) 'an empty change set: no product code'
+Assert (Test-ChangedFilesAffectProduct -Files @('internal/httpapi/products.go')) 'a Go source file under internal/: product code'
+Assert (Test-ChangedFilesAffectProduct -Files @('web/static/js/pages/products.js')) 'a frontend file under web/: product code'
+Assert (Test-ChangedFilesAffectProduct -Files @('migrations/00018_x.sql')) 'a migration: product code'
+Assert (Test-ChangedFilesAffectProduct -Files @('go.mod')) 'go.mod at the repo root: product code (a dependency bump ships in the binary)'
+Assert (Test-ChangedFilesAffectProduct -Files @('scripts/agent-loop.sh', 'internal/store/products.go')) 'a mix of infra and product paths: product code wins'
+
+Write-Host "== Get-NextReleaseTagName: bare date, then .1, .2, ... for same-day repeats =="
+Assert ((Get-NextReleaseTagName -ExistingTags @() -Today '2026.09.30') -ceq 'v2026.09.30') 'no tag yet today: the bare date'
+Assert ((Get-NextReleaseTagName -ExistingTags @('v2026.09.29') -Today '2026.09.30') -ceq 'v2026.09.30') "yesterday's tag existing does not affect today's name"
+Assert ((Get-NextReleaseTagName -ExistingTags @('v2026.09.30') -Today '2026.09.30') -ceq 'v2026.09.30.1') 'one tag already today: .1'
+Assert ((Get-NextReleaseTagName -ExistingTags @('v2026.09.30', 'v2026.09.30.1') -Today '2026.09.30') -ceq 'v2026.09.30.2') 'two tags already today: .2'
+Assert ((Get-NextReleaseTagName -ExistingTags @('v2026.09.30', 'v2026.09.30.2') -Today '2026.09.30') -ceq 'v2026.09.30.1') 'a gap (.1 missing, .2 present) still fills .1 first, not .3'
+
+Write-Host "== Invoke-AutoReleaseTagIfNeeded: only tags when there is a start sha AND the diff leaves infra/docs =="
+$savedInvokeNative = ${function:Invoke-Native}
+try {
+    # No start sha (the -StartWave resume gap): skip and warn, no git calls at all.
+    function Invoke-Native { param([scriptblock]$Command) throw 'Invoke-Native must not be called when PlanStartSha is empty' }
+    Reset-Log
+    Invoke-AutoReleaseTagIfNeeded -PlanStartSha '' -PlanName 'Test Plan'
+    Assert ((Get-LogText) -match 'no plan-start commit recorded') 'missing start sha: skipped with a WARN, no tag attempted'
+
+    # Infra-only diff: no tag pushed.
+    function Invoke-Native {
+        param([scriptblock]$Command)
+        $script:NativeExit = 0
+        $cmdText = $Command.ToString()
+        if ($cmdText -match 'git diff --name-only') { return "scripts/agent-loop.sh`ndeploy/agent/entrypoint.sh" }
+        if ($cmdText -match 'git push') { throw 'must not push a tag for an infra-only diff' }
+        if ($cmdText -match 'git tag -a') { throw 'must not create a tag for an infra-only diff' }
+        return ''
+    }
+    Reset-Log
+    Invoke-AutoReleaseTagIfNeeded -PlanStartSha 'deadbeef' -PlanName 'Infra Plan'
+    Assert ((Get-LogText) -match "'Infra Plan' touched only infra/docs paths - no tag") 'infra-only diff: no tag, logged why'
+
+    # Product-affecting diff: tag created and pushed, name derived from
+    # ls-remote. Get-Date drives the function's own idea of "today", so the
+    # fixture's existing tag has to be built from the same real today rather
+    # than a hardcoded date - a hardcoded one only matches "today" on the day
+    # this test happens to be written, and silently proves nothing every day
+    # after that.
+    $todayForTest = Get-Date -Format 'yyyy.MM.dd'
+    $script:pushedTag = $null
+    function Invoke-Native {
+        param([scriptblock]$Command)
+        $script:NativeExit = 0
+        $cmdText = $Command.ToString()
+        if ($cmdText -match 'git diff --name-only') { return 'internal/httpapi/products.go' }
+        if ($cmdText -match 'git ls-remote --tags') { return "abc123`trefs/tags/v$todayForTest`ndef456`trefs/tags/v$todayForTest^{}" }
+        if ($cmdText -match 'git tag -a') { return '' }
+        if ($cmdText -match 'git push') { $script:pushedTag = $true; return '' }
+        return ''
+    }
+    Reset-Log
+    Invoke-AutoReleaseTagIfNeeded -PlanStartSha 'deadbeef' -PlanName 'Product Plan'
+    Assert ($script:pushedTag) 'product-affecting diff: a tag was actually pushed'
+    Assert ((Get-LogText) -match [regex]::Escape("pushed v$todayForTest.1")) "the peeled '^{}' entry is not mistaken for a second existing tag - .1 is next, not .2"
+    Assert ((Get-LogText) -match "triggered for 'Product Plan'") 'the log names the plan the tag was cut for'
+} finally {
+    ${function:Invoke-Native} = $savedInvokeNative
+    Remove-Item -Force -Path $script:LogFile -ErrorAction SilentlyContinue
+}
+
 Write-Host ""
 if ($script:failures -gt 0) {
     Write-Host "$($script:failures) assertion(s) FAILED" -ForegroundColor Red
