@@ -39,12 +39,18 @@ import (
 //	STUB_SUITE_RC      the suite's exit code
 //	STUB_FAIL_STEP     a compose subcommand to fail (e.g. "build")
 //	STUB_HEALTHZ_RC    the readiness poll's exit code
+//	STUB_REFUSE_CREATE=1  the daemon refuses every `network create`, with no
+//	                      lock existing — a dead daemon or an exhausted pool
 const e2eDockerStub = `#!/bin/sh
 printf 'docker %s\n' "$*" >> "$STUB_LOG"
 lockfile="$STUB_DIR/lock"
 
 case "$1 $2" in
   "network create")
+    if [ "${STUB_REFUSE_CREATE:-0}" = "1" ]; then
+      echo "Error response from daemon: all predefined address pools have been fully subnetted" >&2
+      exit 1
+    fi
     if [ -f "$lockfile" ] || [ "${STUB_LOCK_HELD:-0}" = "1" ]; then
       echo "Error response from daemon: network with name $3 already exists" >&2
       exit 1
@@ -273,6 +279,26 @@ func TestE2EIsListedByTheDispatcher(t *testing.T) {
 	mustContain(t, r.stdout, "\n  e2e", "usage lists the e2e command")
 	mustContain(t, r.stdout, "Run the E2E deployment gate under a machine-wide lock",
 		"usage carries the e2e command's description")
+}
+
+// Pinned as source text rather than behaviour because the failure it prevents
+// only exists under Git Bash, and the Go suite runs in a Linux container where
+// MSYS does not exist — so no amount of stubbing here can reproduce it.
+//
+// Measured on Git Bash before this line existed: the lock's own working_dir
+// label came back as `C:/Users/...` where the script had written
+// `/c/Users/...`, so the checkout did not recognise its own lock and never
+// released it — the stack came down and the gate stayed locked, which is the
+// exact failure #377 is about, reintroduced by the fix for it. The asset
+// check's `/js/*.js` were rewritten the same way, so every fetch missed and a
+// correct frontend was reported as foreign.
+func TestE2EDisablesMSYSPathConversionForEveryContainerPathItPasses(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("dev.d", "e2e"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, string(src), "export MSYS_NO_PATHCONV",
+		"scripts/dev.d/e2e must disable MSYS path conversion for the whole script")
 }
 
 func TestE2EHelpIsTheHeaderAndRunsNothing(t *testing.T) {
@@ -544,6 +570,28 @@ func TestE2EStillTearsDownWhenAStepFails(t *testing.T) {
 	mustContain(t, r.calls, "network rm inventory-e2e-gate-lock", "a failed run still releases the lock")
 	if strings.Contains(r.calls, "-e E2E_WORKERS=") {
 		t.Error("the suite must not run after a step failed")
+	}
+}
+
+// A claim can fail for reasons that are not a held lock - the daemon is down,
+// or out of address pools. Saying "the gate is locked, break it" then would
+// send a session after a lock that does not exist.
+func TestE2ESaysSoWhenTheDaemonRefusesTheClaimForAnotherReason(t *testing.T) {
+	env := greenRun()
+	// The stub refuses every `network create` while reporting no lock at all,
+	// which is exactly the shape a dead daemon or an exhausted address pool has.
+	env["STUB_REFUSE_CREATE"] = "1"
+	r := runE2E(t, env)
+	if r.exit != 1 {
+		t.Fatalf("expected exit 1, got %d", r.exit)
+	}
+	mustContain(t, r.stderr, "there is no lock either", "it does not blame a lock that is absent")
+	mustContain(t, r.stderr, "docker network create", "it names the command to run to see why")
+	mustNotContain(t, r.stderr, "break-lock", "and it does not send anyone after a nonexistent lock")
+	for _, forbidden := range []string{"down -v", "build", "up -d"} {
+		if strings.Contains(r.calls, forbidden) {
+			t.Errorf("a run that never claimed the gate ran %q", forbidden)
+		}
 	}
 }
 

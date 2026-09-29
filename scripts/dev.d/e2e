@@ -117,9 +117,12 @@
 # runner, no other compose project and no `.env`, so every problem above is
 # already absent there and a lock would be pure overhead.
 #
-# Exit codes: 2 usage; 3 the gate is held by a live run (wait for it); 4 the
-# gate is held by a lock with nothing running behind it (break it); otherwise
-# the failing step's own exit code, or the suite's.
+# Exit codes: 2 usage; 3 the gate is held by ANOTHER checkout's live run (wait
+# for it); 4 the gate is held by a lock with nothing running behind it (break
+# it); 1 the daemon refused the claim for a reason that is not a held lock;
+# otherwise the failing step's own exit code, or the suite's. A gate held by
+# THIS checkout is not a refusal - `status` exits 0 on it and a run reclaims
+# it - so 3 and 4 always mean somebody else.
 set -u
 
 help() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
@@ -137,6 +140,29 @@ STALE_AFTER=900
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$root" || exit 1
+
+# Every path this script hands to `docker` is either a path INSIDE a container
+# (/fixtures/seed.sql, /js/api.js) or a label value that must come back byte for
+# byte - never a host path Windows should see rewritten. Under Git Bash, MSYS
+# rewrites an argument that merely looks like an absolute POSIX path before the
+# Windows docker.exe sees it, so without this both of those break, and both
+# broke when measured:
+#
+#   * the seed's /fixtures/seed.sql became a host path and psql answered
+#     "No such file or directory" (already documented in
+#     docs/specs/01-architecture-and-deployment.md);
+#   * the asset check's /js/*.js became C:/Program Files/Git/js/*.js, so every
+#     fetch missed and the check reported the whole frontend as foreign;
+#   * the lock's own working_dir label came back as `C:/Users/...` where the
+#     script had written `/c/Users/...`, so a checkout did not recognise its own
+#     lock - and therefore never released it. That one is the dangerous shape:
+#     the stack came down and the gate stayed locked.
+#
+# Exported once here rather than prefixed onto individual commands, because the
+# rule is uniform: nothing in this file wants MSYS conversion. It is inert
+# everywhere that is not Git Bash.
+MSYS_NO_PATHCONV=1
+export MSYS_NO_PATHCONV
 
 case "${1:-}" in
   -h|--help|help) help; exit 0 ;;
@@ -191,6 +217,9 @@ app_last_log() {
 lock_age() {
   since=$(lock_label claimed_epoch)
   case "$since" in
+    # A lock with no readable claim time reports age 0, which makes it ACTIVE
+    # below rather than stale. That is the safe direction: an unreadable lock is
+    # refused with "wait for it" instead of being broken on no evidence.
     '' | *[!0-9]*) echo 0; return ;;
   esac
   echo $(($(date -u +%s) - since))
@@ -230,7 +259,9 @@ report_gate() {
     echo "runner:   none - no container for the e2e service, so no suite is executing"
   fi
 
-  if app_is_talking; then
+  if [ -z "$(service_containers app '{{.Names}}')" ]; then
+    echo "app:      no app container at all, so nothing has been served"
+  elif app_is_talking; then
     echo "app:      logged something within $IDLE_WINDOW (last $(app_last_log))"
   else
     echo "app:      silent for over $IDLE_WINDOW (last $(app_last_log))"
@@ -435,6 +466,16 @@ cmd_run() {
     echo "gate:     claimed by this checkout"
   elif [ "$(lock_label working_dir)" = "$root" ]; then
     echo "gate:     reclaiming this checkout's own lock from an earlier run"
+  elif ! lock_held; then
+    # The claim failed and there is no lock, so the daemon refused for some
+    # other reason entirely - it is down, or out of address pools. Saying "the
+    # gate is locked, break it" here would send a session after a lock that
+    # does not exist.
+    echo "e2e: could not claim the gate, and there is no lock either - so the" >&2
+    echo "e2e: daemon refused to create $LOCK for another reason (is it" >&2
+    echo "e2e: running? is its address pool exhausted?). Run this to see why:" >&2
+    echo "e2e:   docker network create $LOCK" >&2
+    return 1
   else
     report=$(report_gate)
     printf '%s\n' "$report" >&2
@@ -461,10 +502,10 @@ cmd_run() {
   step "build the image" compose build
   step "migrate up" compose run --rm app migrate up
   step "start the stack" compose up -d
-  # MSYS_NO_PATHCONV, or Git Bash rewrites the container path /fixtures/seed.sql
-  # into a host path and psql answers "No such file or directory".
-  step "seed the fixtures" env MSYS_NO_PATHCONV=1 docker compose -p "$PROJECT" \
-    -f docker-compose.e2e.yml exec -T db psql -U e2e -d e2e -f /fixtures/seed.sql
+  # /fixtures/seed.sql is a path inside the `db` container; MSYS_NO_PATHCONV at
+  # the top of this file is what keeps Git Bash from rewriting it into a host
+  # path, which is why this needs no prefix of its own.
+  step "seed the fixtures" compose exec -T db psql -U e2e -d e2e -f /fixtures/seed.sql
   # `up -d` returns when the containers have started, not when the app answers
   # a request. /healthz only answers 200 once the app's own database connection
   # succeeds, unlike a static asset, which is served without touching Postgres
