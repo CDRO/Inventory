@@ -530,10 +530,13 @@ so and refuse.
 
 Once a package's session is running, the orchestrator has one more thing to
 notice: whether it is still moving. On every poll it computes each open
-package's most recent activity as the newest of three signals — the last
+package's most recent activity as the newest of four signals — the last
 commit date on the package's branch, its worktree's own
-`.claude/worklog.md` mtime, and the newest comment on its PR — and, if
-nothing has moved for `staleAfterMinutes` (default 45, per-plan via
+`.claude/worklog.md` mtime, the newest comment on its PR, and the newest
+mtime across the worktree's own uncommitted changes (`git status
+--porcelain`) — the last of which exists specifically so a session actively
+editing or testing without committing anything is still counted as moving
+(#429) — and, if nothing has moved for `staleAfterMinutes` (default 45, per-plan via
 `standards.staleAfterMinutes` or per-package via `staleAfterMinutes`, both
 optional), logs a `WARN` and raises the same toast the `Notification`/`Stop`
 hooks use (`scripts/hooks/notify.ps1 stale "<window title>"`), at most once

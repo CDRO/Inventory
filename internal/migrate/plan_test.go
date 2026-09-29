@@ -307,6 +307,28 @@ func TestParseClassicMarkerRejectsATypoInTheDirective(t *testing.T) {
 	assert.Equal(t, 2, placement.Line)
 }
 
+// TestParseClassicMarkerRejectsDoubledInternalWhitespace is issue #381's
+// round-2 regression: irregular whitespace INSIDE the "-- +inventory:" prefix
+// itself, not just around the whole line (already covered by
+// TestParseClassicMarkerRejectsALeadingSpace).
+func TestParseClassicMarkerRejectsDoubledInternalWhitespace(t *testing.T) {
+	_, err := ParseClassicMarker([]byte("-- +goose Up\n--  +inventory:classic\nSELECT 1;\n"))
+
+	var placement *MarkerPlacementError
+	require.ErrorAs(t, err, &placement)
+	assert.Equal(t, 2, placement.Line)
+}
+
+// TestParseClassicMarkerRejectsMissingInternalWhitespace is #381's other
+// confirmed repro: no whitespace at all between "--" and "+inventory:".
+func TestParseClassicMarkerRejectsMissingInternalWhitespace(t *testing.T) {
+	_, err := ParseClassicMarker([]byte("-- +goose Up\n--+inventory:classic\nSELECT 1;\n"))
+
+	var placement *MarkerPlacementError
+	require.ErrorAs(t, err, &placement)
+	assert.Equal(t, 2, placement.Line)
+}
+
 // TestParseClassicMarkerReturnsFalseWithoutTheNamespace is the ordinary
 // negative case: a migration with no opinion about deploy mode at all, the
 // overwhelming majority of them.
