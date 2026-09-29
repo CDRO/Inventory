@@ -37,3 +37,9 @@ e2e/
 # GitHub Actions with into an image layer. Full path, not a bare name: the
 # patterns above match at the context root only.
 deploy/synology/runner/runner_state
+
+# scripts/agent-loop.sh's per-issue worktrees (#468), nested inside the
+# checkout. Each one is a full copy of the repository; without this line a
+# build run from the primary checkout would ship every one of them into the
+# build context.
+.worktrees
