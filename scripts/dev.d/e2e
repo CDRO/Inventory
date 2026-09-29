@@ -338,11 +338,27 @@ cmd_break_lock() {
 }
 
 cmd_down() {
-  holder=$(lock_label working_dir)
-  if lock_held && [ "$holder" != "$root" ]; then
-    echo "e2e: the gate is held by $holder, not this checkout." >&2
-    echo "e2e: read scripts/dev e2e status first; break-lock is how a stale hold is cleared." >&2
-    return 3
+  if lock_held; then
+    holder=$(lock_label working_dir)
+    if [ "$holder" != "$root" ]; then
+      echo "e2e: the gate is held by $holder, not this checkout." >&2
+      echo "e2e: read scripts/dev e2e status first; break-lock is how a stale hold is cleared." >&2
+      return 3
+    fi
+    # Our own lock is not a licence to tear down either: another terminal in
+    # this same checkout wrote the identical working_dir, so without this a
+    # `down` from the second terminal would destroy the first one's live suite.
+    # Same reasoning as the claim's own-lock branch in cmd_run.
+    report=$(report_gate)
+    if [ "$(verdict_of "$report")" = "ACTIVE" ]; then
+      printf '%s\n' "$report" >&2
+      echo >&2
+      echo "e2e: this checkout holds the gate and a run is live behind it, so" >&2
+      echo "e2e: tearing down now would destroy it. Wait for that run, or only" >&2
+      echo "e2e: if you are certain it is dead:" >&2
+      echo "e2e:   scripts/dev e2e break-lock --force" >&2
+      return 3
+    fi
   fi
   compose down -v --remove-orphans
   docker network rm "$LOCK" >/dev/null 2>&1
@@ -423,16 +439,32 @@ check_served_assets() {
 }
 
 torn_down=
-teardown() {
-  code=$?
-  trap - EXIT INT TERM
-  if [ -n "$torn_down" ]; then exit "$code"; fi
+release_and_down() {
+  if [ -n "$torn_down" ]; then return 0; fi
   torn_down=yes
   echo
   echo "tearing down and releasing the gate"
   compose down -v --remove-orphans >> "$log" 2>&1
   release_lock
+}
+
+teardown() {
+  code=$?
+  trap - EXIT INT TERM
+  release_and_down
   exit "$code"
+}
+
+# A signal is not an ordinary exit, and $? at that moment is whatever the
+# interrupted command happened to leave behind - frequently 0, which would have
+# an interrupted gate report success. Exit 128+signal instead, the conventional
+# encoding, so a caller can tell "you stopped it" from "it passed". The
+# teardown itself is identical either way: the stack comes down and the lock is
+# released.
+on_signal() {
+  trap - EXIT INT TERM
+  release_and_down
+  exit "$1"
 }
 
 cmd_run() {
@@ -451,8 +483,15 @@ cmd_run() {
     esac
     shift
   done
+  # Both numbers are checked here, before the lock is claimed and before
+  # anything is built: playwright.config.js would reject a bad one too, but only
+  # inside the container, after a full reset/build/migrate/up cycle has already
+  # been spent on a typo.
   case "$workers" in
     '' | *[!0-9]*) echo "e2e: --workers must be a number, got '$workers'" >&2; return 2 ;;
+  esac
+  case "$retries" in
+    '' | *[!0-9]*) echo "e2e: E2E_RETRIES must be a number, got '$retries'" >&2; return 2 ;;
   esac
 
   # The claim, and the one place this command may not be interrupted: the trap
@@ -464,8 +503,6 @@ cmd_run() {
       --label "$LABEL.claimed_epoch=$(date -u +%s)" \
       --label "$LABEL.claimed_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1; then
     echo "gate:     claimed by this checkout"
-  elif [ "$(lock_label working_dir)" = "$root" ]; then
-    echo "gate:     reclaiming this checkout's own lock from an earlier run"
   elif ! lock_held; then
     # The claim failed and there is no lock, so the daemon refused for some
     # other reason entirely - it is down, or out of address pools. Saying "the
@@ -477,21 +514,48 @@ cmd_run() {
     echo "e2e:   docker network create $LOCK" >&2
     return 1
   else
+    # A lock this checkout wrote is NOT on its own evidence that the run behind
+    # it is over. Two terminals in one checkout write the same working_dir, so
+    # taking a matching label as "my own abandoned run" would let the second
+    # one `down -v` the first one's live suite - the very failure the lock
+    # exists to prevent, readmitted through the one branch that skipped the
+    # check. So the same discriminators decide for our own lock as for anybody
+    # else's, and only the wording differs.
     report=$(report_gate)
-    printf '%s\n' "$report" >&2
+    mine=no
+    if [ "$(lock_label working_dir)" = "$root" ]; then mine=yes; fi
     case "$(verdict_of "$report")" in
       ACTIVE)
+        printf '%s\n' "$report" >&2
         echo >&2
-        echo "e2e: another checkout is running the gate - wait for it." >&2
+        if [ "$mine" = yes ]; then
+          echo "e2e: THIS checkout already holds the gate, and the evidence above" >&2
+          echo "e2e: says a run is live behind it - another terminal here is using" >&2
+          echo "e2e: it. Wait for that run. Only if you are certain it is dead:" >&2
+          echo "e2e:   scripts/dev e2e break-lock --force" >&2
+        else
+          echo "e2e: another checkout is running the gate - wait for it." >&2
+        fi
         return 3 ;;
       *)
-        echo >&2
-        echo "e2e: the gate is locked with nothing running behind it." >&2
-        echo "e2e: break it deliberately:  scripts/dev e2e break-lock" >&2
-        return 4 ;;
+        # Provably nothing running. Our own lock at that point really is an
+        # abandoned run - the hard-kill case, since an ordinary interrupt
+        # releases it from the trap - so reclaim rather than send a session to
+        # break a lock that names itself.
+        if [ "$mine" = yes ]; then
+          echo "gate:     reclaiming this checkout's own lock - nothing is running behind it"
+        else
+          printf '%s\n' "$report" >&2
+          echo >&2
+          echo "e2e: the gate is locked with nothing running behind it." >&2
+          echo "e2e: break it deliberately:  scripts/dev e2e break-lock" >&2
+          return 4
+        fi ;;
     esac
   fi
-  trap teardown EXIT INT TERM
+  trap teardown EXIT
+  trap 'on_signal 130' INT
+  trap 'on_signal 143' TERM
 
   mkdir -p .claude
   : > "$log"

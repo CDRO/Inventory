@@ -64,7 +64,9 @@ case "$1 $2" in
     exit 0 ;;
   "network inspect")
     if [ -f "$lockfile" ]; then
-      dir=$(cat "$lockfile"); age=0
+      dir=$(sed -n 1p "$lockfile")
+      age=$(sed -n 2p "$lockfile")
+      [ -n "$age" ] || age=0
     elif [ "${STUB_LOCK_HELD:-0}" = "1" ]; then
       dir=${STUB_LOCK_DIR:-}; age=${STUB_LOCK_AGE:-60}
     else
@@ -191,13 +193,16 @@ func runE2E(t *testing.T, env map[string]string, args ...string) result {
 		t.Fatal(err)
 	}
 
-	// TEST_PRESEED_LOCK=self writes the stub's own lock file before the run, so
-	// the script finds a lock already held — by itself, since STUB_DIR is the
-	// repository root the script resolves.
-	if env["TEST_PRESEED_LOCK"] == "self" {
-		if err := os.WriteFile(filepath.Join(root, "lock"), []byte(root+"\n"), 0o644); err != nil {
+	// TEST_PRESEED_LOCK writes the stub's own lock file before the run, so the
+	// script finds a lock already held BY ITSELF — STUB_DIR is the repository
+	// root the script resolves. The second line is the age the stub reports for
+	// it, which is what decides ACTIVE versus STALE.
+	if age, ok := map[string]string{"self-stale": "3000", "self-active": "45"}[env["TEST_PRESEED_LOCK"]]; ok {
+		if err := os.WriteFile(filepath.Join(root, "lock"), []byte(root+"\n"+age+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	} else if env["TEST_PRESEED_LOCK"] != "" {
+		t.Fatalf("unknown TEST_PRESEED_LOCK value %q", env["TEST_PRESEED_LOCK"])
 	}
 
 	log := filepath.Join(root, "calls.log")
@@ -538,13 +543,13 @@ func TestE2ERefusesAStaleGateWithADifferentCodeAndNamesTheRemedy(t *testing.T) {
 	}
 }
 
-// A lock left behind by THIS checkout is its own abandoned run, not somebody
-// else's, so it is reclaimed rather than refused - otherwise one interrupted
-// run would lock a session out of its own gate until it thought to break a
-// lock that names itself.
-func TestE2EReclaimsALockItAlreadyHolds(t *testing.T) {
+// A lock left behind by THIS checkout with nothing running behind it is its own
+// abandoned run - the hard-kill case, since an ordinary interrupt releases the
+// lock from the trap - so it is reclaimed rather than refused. Otherwise a
+// session would be sent to break a lock that names itself.
+func TestE2EReclaimsItsOwnLockWhenNothingIsRunningBehindIt(t *testing.T) {
 	env := greenRun()
-	env["TEST_PRESEED_LOCK"] = "self"
+	env["TEST_PRESEED_LOCK"] = "self-stale"
 	r := runE2E(t, env)
 	if r.exit != 0 {
 		t.Fatalf("expected the run to proceed, got exit %d\n%s", r.exit, r.stderr)
@@ -552,6 +557,91 @@ func TestE2EReclaimsALockItAlreadyHolds(t *testing.T) {
 	mustContain(t, r.stdout, "reclaiming this checkout's own lock", "it says what it did")
 	mustContain(t, r.calls, "-e E2E_WORKERS=", "and the suite actually ran")
 	mustContain(t, r.calls, "network rm inventory-e2e-gate-lock", "and the reclaimed lock is released")
+}
+
+// The other half, and the one that matters: a lock this checkout wrote is NOT
+// on its own evidence that the run behind it is over. Two terminals in one
+// checkout write the same working_dir, so taking a matching label as "my own
+// abandoned run" let the second one `down -v` the first one's live suite —
+// exactly the failure the lock exists to prevent, readmitted through the one
+// branch that skipped the check. Raised by review-go on PR #469 round 1.
+func TestE2EWillNotReclaimItsOwnLockWhileASuiteIsRunningBehindIt(t *testing.T) {
+	env := greenRun()
+	env["TEST_PRESEED_LOCK"] = "self-active"
+	// Terminal A is mid-suite: a container for the `e2e` service exists and the
+	// app is being hit constantly.
+	env["STUB_RUNNER"] = "inventory-e2e-e2e-run-aa1 (Up 4 minutes)"
+	env["STUB_APP"] = "inventory-e2e-app-1"
+	env["STUB_APP_RECENT"] = "1"
+
+	r := runE2E(t, env)
+	if r.exit != 3 {
+		t.Fatalf("terminal B must be refused with exit 3, got %d\n%s", r.exit, r.stdout)
+	}
+	mustContain(t, r.stderr, "THIS checkout already holds the gate",
+		"the refusal distinguishes itself from the foreign-holder case")
+	mustContain(t, r.stderr, "break-lock --force", "and names the deliberate override")
+	mustNotContain(t, r.stdout, "reclaiming", "it must not claim to be reclaiming an abandoned run")
+
+	// The whole point: terminal A's stack and lock survive untouched.
+	for _, forbidden := range []string{"down -v", "build", "up -d", "network rm"} {
+		if strings.Contains(r.calls, forbidden) {
+			t.Errorf("a second terminal in the same checkout ran %q against a live run:\n%s", forbidden, r.calls)
+		}
+	}
+}
+
+// A young lock of our own with no runner yet is the gap between `up -d` and the
+// suite's first request in the other terminal - still a live run, still not
+// ours to reclaim.
+func TestE2EWillNotReclaimItsOwnYoungLockEvenBeforeTheRunnerExists(t *testing.T) {
+	env := greenRun()
+	env["TEST_PRESEED_LOCK"] = "self-active"
+	r := runE2E(t, env)
+	if r.exit != 3 {
+		t.Fatalf("expected exit 3, got %d\n%s", r.exit, r.stdout)
+	}
+	if strings.Contains(r.calls, "down -v") {
+		t.Error("a young lock of our own must not be torn down")
+	}
+}
+
+// cmd_down has the same hole if it only checks the holder's name: a `down` from
+// a second terminal in the same checkout would destroy the first's live suite.
+func TestE2EDownRefusesItsOwnLockWhileASuiteIsRunning(t *testing.T) {
+	env := map[string]string{
+		"TEST_PRESEED_LOCK": "self-active",
+		"STUB_RUNNER":       "inventory-e2e-e2e-run-aa1 (Up 4 minutes)",
+		"STUB_APP":          "inventory-e2e-app-1",
+		"STUB_APP_RECENT":   "1",
+	}
+	r := runE2E(t, env, "down")
+	if r.exit != 3 {
+		t.Fatalf("expected exit 3, got %d\n%s", r.exit, r.stdout)
+	}
+	mustContain(t, r.stderr, "would destroy it", "it says what it refused to do")
+	mustContain(t, r.stderr, "break-lock --force", "and names the deliberate override")
+	for _, forbidden := range []string{"down -v", "network rm"} {
+		if strings.Contains(r.calls, forbidden) {
+			t.Errorf("down ran %q against this checkout's own live run", forbidden)
+		}
+	}
+}
+
+// E2E_RETRIES is validated in the wrapper, like --workers, rather than only by
+// playwright.config.js inside the container - which would spend a whole
+// reset/build/migrate/up cycle before reporting a typo.
+func TestE2ERejectsANonNumericRetryCountBeforeClaimingTheGate(t *testing.T) {
+	env := greenRun()
+	env["E2E_RETRIES"] = "once"
+	r := runE2E(t, env)
+	if r.exit != 2 {
+		t.Fatalf("expected exit 2, got %d", r.exit)
+	}
+	mustContain(t, r.stderr, "E2E_RETRIES must be a number", "it names the variable and the problem")
+	if strings.Contains(r.calls, "network create") || strings.Contains(r.calls, "build") {
+		t.Error("a bad retry count must be caught before the lock is claimed and anything is built")
+	}
 }
 
 // Every exit path tears down and releases, because the teardown is a trap and
