@@ -63,3 +63,17 @@ scripts/agent_usage_test.go text eol=lf
 # continuations, which CRLF has broken in Docker builds before.
 deploy/synology/runner/entrypoint.sh text eol=lf
 deploy/synology/runner/Dockerfile text eol=lf
+
+# Same reason, same fix, for the agent runtime container (deploy/agent/, H18).
+deploy/agent/entrypoint.sh text eol=lf
+deploy/agent/Dockerfile text eol=lf
+
+# scripts/agent-loop.sh (H19, #318) runs under sh the same way scripts/dev and
+# scripts/doctor do - same CRLF shebang problem, same fix. Its test file is
+# sh too. scripts/package-prompt.template carries no shebang, but a CRLF copy
+# would leave a trailing \r on every rendered prompt line when agent-loop.sh's
+# sed-based renderer fills it in (Get-PackagePrompt reads the same file and
+# is CRLF-tolerant, so only the sh side actually needs this pin).
+scripts/agent-loop.sh text eol=lf
+scripts/tests/agent-loop.test.sh text eol=lf
+scripts/package-prompt.template text eol=lf

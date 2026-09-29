@@ -556,3 +556,111 @@ PR) — it does not feed into anything the orchestrator decides.
 the orchestrator reads its own script once, at start — a change to the
 pre-flight, the heartbeat, or the rounds bookkeeping only applies to a run
 started after the change has reached the checkout it is running from.
+
+## Headless: scripts/agent-loop.sh
+
+This script (H19, decision D10 of the harness optimization plan) is
+**not** a headless mode of this orchestrator. It is a **separate,
+Linux-side entry point over the same wave JSON**: where
+`wellen-orchestrator.ps1`'s job is opening visible, interactive Claude
+windows on the owner's Windows machine — and teaching it to `docker run` a
+Linux session instead would mean re-implementing its restart-safety and
+Docker-cleanup rules for containers it does not otherwise touch —
+`scripts/agent-loop.sh` runs unattended, one `claude -p` session per issue,
+inside `deploy/agent`'s container (H18) or any Linux host with the same
+tools (`git`, `gh`, `jq`, `claude`, a writable Docker socket for
+`scripts/doctor`). Both scripts read the identical package prompt from
+`scripts/package-prompt.template` — `Get-PackagePrompt` above renders it for
+an interactive session, `agent-loop.sh` renders the same file with its own
+`sed`-based substitution for a headless one — so there is one prompt with
+two renderers, not two prompts that can drift apart.
+
+Start it from the repository root, inside `deploy/agent`'s container:
+
+```console
+$ export REPO_PATH=$(pwd)
+$ docker compose -f deploy/agent/docker-compose.agent.yml run --rm agent \
+    sh scripts/agent-loop.sh --wave-file scripts/wellen-harness.json --wave 6
+```
+
+or against the plain issue queue instead of a wave file — the lowest-
+numbered open issue whose every `Blocked by #N` is closed, the same routing
+`/pickup` itself uses:
+
+```console
+$ docker compose -f deploy/agent/docker-compose.agent.yml run --rm agent \
+    sh scripts/agent-loop.sh --queue
+```
+
+or against exactly one named issue, bypassing both the wave file and the
+queue's own routing — for an operator who already knows which issue to
+work, and for a one-off verification run:
+
+```console
+$ docker compose -f deploy/agent/docker-compose.agent.yml run --rm agent \
+    sh scripts/agent-loop.sh --issue 435
+```
+
+`--dry-run` prints the session(s) it would start — model, effort, advisor
+and the deterministic `HTTP_PORT`/`TRAEFIK_PORT` pair each wave-mode package
+gets (see "Avoiding collisions between parallel packages" above; the same
+base numbers and the same whole-file ordinal index, so a worktree this
+script creates and one the orchestrator creates never collide even if the
+same wave file is later opened by both) — without starting anything, and
+marks an already-closed package `SKIPPED` rather than omitting it, so
+running it against a finished wave still shows what would have run.
+
+**Every gate stays inside the `ship` skill.** This script only ever decides
+*which* issue and *when* to start the next `claude -p` session; it never
+merges a PR, never runs a reviewer, and never closes an issue itself — a
+session it starts does all of that exactly the way an interactive one
+would, through `/pickup` and `ship`. "Done" for an issue is that issue
+closing on GitHub, the same signal the orchestrator polls for above — never
+the `claude` process's own exit code, which a round-limit report or a
+mid-turn resume leaves non-terminal in perfectly ordinary operation.
+
+Safety, refused in this order before a single worktree or session is
+created: never root (never `--dangerously-skip-permissions` either — the
+non-root user plus this same `permissions.allow` list, see "Attention"
+above, is what an unattended session runs under instead); one loop per
+repository, held with an exclusive lock directory; `scripts/doctor` must
+pass; and the `CLAUDE_CODE_OAUTH_TOKEN` used to authenticate must be set
+(from `claude setup-token`, run once on a trusted machine — never baked
+into an image, see `deploy/agent/README.md`). `scripts/tests/agent-loop.test.sh`
+drives every one of these, plus every stop condition below, against a fully
+faked `claude`/`gh`/`git` — see that file's own header for how to run it (it
+needs `jq` and GNU coreutils' `date`, which is why it is not part of
+`docker compose run --rm app go test ./...`; `scripts/agent_loop_test.go` is
+the thin slice of this that *is*, covering argument parsing only).
+
+A session's stream is watched for four outcomes, checked in this order
+once it ends:
+
+1. **The issue closed.** Move to the next issue — this is what a normal,
+   successful `ship` run looks like from the loop's side.
+2. **`error_max_turns`.** Comment on the issue naming the session id and
+   `--resume`, then move to the next issue — a human (or a later loop run)
+   picks it back up deliberately, rather than the loop silently retrying an
+   issue that may need a person's attention.
+3. **A usage-limit signal** — a `system/api_retry` stream event carrying
+   `error: rate_limit`, or result text that reads like a usage-limit
+   message. Decision D10 could not verify the exact subtype or wording a
+   real usage-limit stop produces; this is deliberately two independent
+   signals rather than one guessed string. The loop waits — until a reset
+   time named in the result text, else a capped backoff
+   (`--limit-backoff-minutes`, default 60) — and resumes the **same**
+   session with `claude -p "continue" --resume <session_id>`, on the same
+   issue.
+4. **Anything else that is an error.** Stop the whole loop, print the
+   transcript's log path (`scripts/agent-loop.log/<slug>.jsonl`, gitignored,
+   one issue's whole stream even across a resume), and exit non-zero. This
+   is the one condition that does not move on to the next issue — an error
+   this script does not recognize is exactly the kind a person, not another
+   automatic retry, should look at first.
+
+A session that succeeds but leaves its issue still open (most commonly: it
+hit `ship`'s own two-round review cap and stopped to report, or a PR is
+still waiting on review) is not one of D10's four listed conditions; this
+script's own choice is to log it plainly and move on to the next issue
+rather than immediately re-running an unattended session against a package
+that may need a person's judgment call.

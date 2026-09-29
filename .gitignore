@@ -53,3 +53,14 @@ scripts/konsol-welle-*.started
 # GitHub Actions with. Never committed. `git clean -x` in the clone deletes it;
 # re-registering with a fresh one-hour token is the recovery.
 /deploy/synology/runner/runner_state/
+
+# The agent runtime's own secrets (deploy/agent/README.md): the OAuth token,
+# GH_TOKEN and git identity that make deploy/agent/docker-compose.agent.yml's
+# env_file work. Copied from .env.agent.example, never committed.
+/deploy/agent/.env.agent
+
+# scripts/agent-loop.sh's own run state (H19, #318): the per-session
+# stream-json transcripts (may carry prompt and code content, same reasoning
+# as .claude/*.log above) and its one-loop-per-repository lock directory.
+/scripts/agent-loop.log/
+/scripts/agent-loop.lock/
