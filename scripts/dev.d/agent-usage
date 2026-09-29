@@ -176,6 +176,15 @@ if [ -n "$pr" ]; then
     exit 1
   fi
   [ -z "$gh_err" ] || rm -f "$gh_err"
+  # #373: `$(...)` only strips a trailing newline, not a trailing `\r` - a
+  # native Windows binary's CRLF output would leave one on `want_branch`,
+  # which then can never equal a JSON-extracted `gitBranch` (never carries a
+  # CR) and, since it is neither "-" nor "HEAD" either, skips the cwd
+  # fallback too: every record in scope would silently fail to match,
+  # `--pr` printing "(no calls in range)" while `--since` over the same
+  # files finds them fine. Not reproduced on `gh`'s current output on this
+  # machine (checked by hand), but cheap enough to guard unconditionally.
+  want_branch=$(printf '%s' "$want_branch" | tr -d '\r')
   want_suffix=${want_branch##*/}
 fi
 
@@ -255,6 +264,7 @@ index($0, "\"type\":\"assistant\"") == 0 { next }
   if (until != "" && date > until) next
 
   branch = extract_str(line, "\"gitBranch\":\"")
+  gsub(/\r$/, "", branch)   # same CR defense as wantbranch's own trim (#373)
   if (branch == "") branch = "-"
   cwd = extract_str(line, "\"cwd\":\"")
 

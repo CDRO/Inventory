@@ -316,6 +316,46 @@ func TestAgentUsageRejectsNonNumericPR(t *testing.T) {
 	}
 }
 
+// #373: `$(...)` strips a trailing LF but not a trailing CR, so a `gh`
+// invocation whose stdout is CRLF-terminated (as a native Windows binary's
+// can be) would leave `want_branch` with an invisible trailing `\r`. That
+// value can then never equal a JSON-extracted `gitBranch` (never carries a
+// CR) and, since it is also neither "-" nor "HEAD", never falls back to the
+// cwd match either - every record in scope silently fails to match, and
+// `--pr` reports no calls for a PR whose transcripts genuinely exist. This
+// pins the fix (`tr -d '\r'` on `want_branch`) with a stub that emits the
+// branch name CRLF-terminated, the same shape a native `gh.exe` could.
+const prGhStubCRLF = `#!/bin/sh
+case "$*" in
+  "pr view "*"--json headRefName -q .headRefName")
+    printf '%s\r\n' "$STUB_PR_BRANCH"; exit 0 ;;
+esac
+exit 1
+`
+
+func writeGhStubCRLF(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gh-stub-crlf.sh")
+	if err := os.WriteFile(path, []byte(prGhStubCRLF), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestAgentUsagePRToleratesACRLFTerminatedBranchName(t *testing.T) {
+	env := agentUsageEnv(t, "prscope", map[string]string{
+		"AGENT_USAGE_GH": writeGhStubCRLF(t),
+		"STUB_PR_BRANCH": "feature/target-branch",
+	})
+	r := run(t, env, "agent-usage", "--pr", "42")
+	if r.exit != 0 {
+		t.Fatalf("expected exit 0, got %d\n%s", r.exit, r.stderr)
+	}
+	mustNotContain(t, r.stdout, "(no calls in range)", "a CRLF-terminated branch name from gh must not blind --pr to every record")
+	row(t, r.stdout, "claude-sonnet-5", "main", 2, "32", "34", "36", "38", "90", "70.0")
+}
+
 // --- never prints message content -----------------------------------------
 
 func TestAgentUsageNeverPrintsMessageContent(t *testing.T) {
