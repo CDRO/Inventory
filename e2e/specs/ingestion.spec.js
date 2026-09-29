@@ -2387,6 +2387,59 @@ test("a category can be created from the review screen's new-product form, as a 
   expect(accepted.new_product.category_id).toBe(categoryId);
 });
 
+// #385: categoryShelfLife.failed (js/category-shelf-life.js:116) was the one
+// per-attempt banner sentence from #347 that no test exercised — the argument
+// could be dropped, renamed, or wired to the wrong key and every suite stayed
+// green. Follows the rename/move journey above: only the PATCH is aborted, so
+// this never reaches the server and writes nothing to the shared "E2E
+// Household" — "Canned Goods" keeps its real 730-day rule for every other
+// test that reads Canned Tomatoes' batches.
+test("a failed category shelf-life save names the category", async ({ page }) => {
+  await logInAsBob(page);
+  await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOCATION_MODAL_JOB}`);
+  const first = page.locator("#rows .review-row").first();
+
+  await first.locator('[data-role="new-product-category-add"]').click();
+  const dialog = page.getByRole("dialog", { name: "Categories" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Canned Goods");
+
+  // Addressed by data-id, not text, for the same reason as the location test
+  // above: a .tree-node's textContent includes its action-button labels.
+  const cannedGoods = dialog.locator(`.tree-node[data-id="${CANNED_GOODS}"]`);
+  await expect(cannedGoods).toContainText("730 days");
+  await cannedGoods.getByRole("button", { name: "730 days" }).click();
+  const input = cannedGoods.locator('input[type="number"]');
+  await expect(input).toHaveValue("730");
+  await input.fill("365");
+
+  // Only the shelf-life PATCH fails; the tree's own GET still goes through, so
+  // the redraw after the failed save comes from the server's real, unchanged
+  // answer.
+  await page.route(`**/api/storages/${HOUSEHOLD}/categories/**`, async (route) => {
+    if (route.request().method() !== "PATCH") {
+      await route.continue();
+      return;
+    }
+    await route.abort("failed");
+  });
+
+  await cannedGoods.getByRole("button", { name: "Save" }).click();
+
+  // Named by the category the save was for, not merely the generic
+  // network-error sentence a missing argument would fall back to.
+  await expect(dialog.getByRole("alert")).toContainText("Could not save the shelf life for “Canned Goods”.");
+  await expect(dialog.getByRole("alert")).toContainText("Could not reach the server");
+
+  // The save did not happen: the reload redrew the real, unchanged rule.
+  await expect(cannedGoods).toContainText("730 days");
+  await expect(cannedGoods).not.toContainText("365 days");
+
+  await page.unroute(`**/api/storages/${HOUSEHOLD}/categories/**`);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+});
+
 // docs/specs/27-category-quick-create.md's first acceptance criterion, the
 // same "zero" scenario the location test above covers, for categories: "E2E
 // Admin Household" has none seeded either, so the placeholder-only select
