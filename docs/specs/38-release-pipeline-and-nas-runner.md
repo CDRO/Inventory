@@ -70,6 +70,17 @@ promise (the client contract in `12-client-api-contract.md` is versioned by its
 own rules, not by the deployment), and the question actually asked of a NAS is
 "how old is what is running", which a date answers directly.
 
+- **Only that shape starts the pipeline.** `release.yml` triggers on
+  `tags: ["v[0-9]*"]`, and its `gate` job refuses anything that is not
+  `vYYYY.MM.DD[.n]` as its first action — before it resolves the tag, looks up a
+  run, or reaches the NAS. `v-test`, `vendor-pin`, `v2` and `v1.4.0` all stop
+  there. The glob and the gate are two halves of one guard because GitHub's tag
+  filters are globs rather than regular expressions, so the glob alone cannot
+  express the shape. The gate's check is written as the same `case` construction
+  as `scripts/dev.d/release`'s, counter digit test included: one release shape
+  must not mean two different things depending on which end enforced it.
+  Before the pipeline could deploy at all, a stray `v*` tag was harmless — it
+  refused at `phase=fetch`; it is not harmless now.
 - **Annotated, not lightweight.** The tag object carries a message, and the
   message is the only place a forced-classic deploy can be declared (see
   "Classic or rolling"). A lightweight tag is still a valid release; it simply
@@ -99,7 +110,7 @@ cannot live inside `gate` and has to be a conditional job of its own:
 ```yaml
 on:
   push:
-    tags: ['v*']
+    tags: ['v[0-9]*']       # the gate refuses anything not vYYYY.MM.DD[.n]
 
 jobs:
   gate:
@@ -563,7 +574,9 @@ container; **H17** `release.yml` and `scripts/dev release`.
 
 ### H17 — `release.yml` and `scripts/dev release`
 
-- `release.yml` triggers on `push: tags: ['v*']` only; `gate` runs on a hosted
+- `release.yml` triggers on `push: tags: ['v[0-9]*']` only, and `gate` refuses
+  any name that is not `vYYYY.MM.DD[.n]` before it resolves anything (see "The
+  release unit"); `gate` runs on a hosted
   runner and resolves green `test` and `e2e` runs **by the tag's SHA**, running
   them on the tag when they are missing and failing the release when they are
   red.
