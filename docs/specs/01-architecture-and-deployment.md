@@ -829,6 +829,8 @@ services:
       - ./docker-compose.yml:/src/docker-compose.yml
       - ./docker-compose.nas.yml:/src/docker-compose.nas.yml
       - ./docker-compose.e2e.yml:/src/docker-compose.e2e.yml
+      - ./docker-compose.override.yml:/src/docker-compose.override.yml
+      - ./docker-compose.ci.yml:/src/docker-compose.ci.yml
       - ./.gitignore:/src/.gitignore
       - ./.dockerignore:/src/.dockerignore
       - ./.gitattributes:/src/.gitattributes
@@ -858,7 +860,10 @@ production runs Postgres on its defaults. A third file, `docker-compose.ci.yml`
 (override-style, `db` service only), adds a `tmpfs` data directory for the
 same flags on a GitHub-hosted runner, whose whole VM is destroyed at the end
 of the job anyway; it is not auto-loaded and is picked up only where a
-workflow sets `COMPOSE_FILE` to include it.
+workflow sets `COMPOSE_FILE` to include it — `.github/workflows/test.yml`
+does this (H8), so CI's `go test ./...` runs against the tmpfs data
+directory, not the override's persistent one; `.github/workflows/e2e.yml`
+does not set it and is unaffected.
 
 ## Deployment model
 

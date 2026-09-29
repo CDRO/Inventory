@@ -363,9 +363,36 @@ func TestCIComposeAddsTmpfsToDatabaseOnly(t *testing.T) {
 	assert.Contains(t, block, "type: tmpfs",
 		"a CI runner's whole VM is destroyed at the end of the job, so the data directory belongs in memory, not on the runner's disk")
 
+	// Enumerated rather than a single NotContains("\n  app:"): that caught an
+	// `app:` service specifically but let a `traefik:`, `setup:` or `backup:`
+	// block through unnoticed (#327/#333 item 4) - wave 2's H8 is named in
+	// this file's own header as the next thing to touch it, so this is not
+	// hypothetical. Same text-scan approach as TestE2EComposeFilePinsItsProjectName:
+	// a two-space-indented `key:` line is a top-level service, a
+	// more-indented line is that service's own content, and anything at
+	// column 0 (or blank/a comment) ends or is outside the services map.
 	normalized := strings.ReplaceAll(repoFile(t, "docker-compose.ci.yml"), "\r\n", "\n")
-	assert.NotContains(t, normalized, "\n  app:",
-		"docker-compose.ci.yml is scoped to db only - an app service here would belong to a different package's file")
+	var services []string
+	inServices := false
+	for _, line := range strings.Split(normalized, "\n") {
+		switch {
+		case line == "services:":
+			inServices = true
+		case !inServices, line == "", strings.HasPrefix(line, "#"), strings.HasPrefix(line, "   "):
+			// not yet in the map, a blank/comment line, or a service's own
+			// nested content (3+ leading spaces) - none of these are a
+			// top-level service key.
+		case !strings.HasPrefix(line, "  "):
+			// dedented back to column 0: the services map has ended.
+			inServices = false
+		default:
+			name, _, found := strings.Cut(strings.TrimPrefix(line, "  "), ":")
+			require.True(t, found, "docker-compose.ci.yml: %q under services: is not a %q key", line, "key:")
+			services = append(services, name)
+		}
+	}
+	assert.Equal(t, []string{"db"}, services,
+		"docker-compose.ci.yml is scoped to db only - any other service here would belong to a different package's file")
 }
 
 // TestBackupArchivesAreNotCommittable — an archive holds the whole database
