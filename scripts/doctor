@@ -31,6 +31,10 @@
 #   DOCTOR_SOCKET     path checked in place of /var/run/docker.sock
 #   DOCTOR_VOLUME     volume name checked/created in place of the real one
 #   DOCTOR_ENV_FILE   .env path checked in place of the repo's own
+#   DOCTOR_ROOT       repo root check 7 (git identity + line endings) reads
+#                     .gitattributes and its patterns from, in place of the
+#                     real repo root - so a test can point it at a synthetic
+#                     CRLF fixture instead of this checkout's own tree
 set -u
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -53,6 +57,7 @@ done
 : "${DOCTOR_SOCKET:=/var/run/docker.sock}"
 : "${DOCTOR_VOLUME:=inventory-go-build-cache}"
 : "${DOCTOR_ENV_FILE:=$root/.env}"
+: "${DOCTOR_ROOT:=$root}"
 
 results=$(mktemp)
 trap 'rm -f "$results"' EXIT
@@ -160,6 +165,19 @@ check_build_cache_volume() {
   fi
 }
 
+# A `docker run -p` bind failure alone can't tell a stranger process from
+# the operator's own already-running compose stack for this checkout - both
+# fail the bind identically. Before check 5 reports FAIL, this asks whether
+# the project's own compose stack (resolved from $root exactly the way a
+# plain `docker compose` invocation there would be - COMPOSE_PROJECT_NAME
+# from .env if set, else the directory name) already has a service
+# publishing exactly this port; if so it is the operator's own stack, not a
+# conflict.
+port_held_by_own_stack() {
+  port="$1"
+  (cd "$root" 2>/dev/null && docker compose ps 2>/dev/null) | grep -q ":$port->"
+}
+
 # 5. HTTP_PORT/TRAEFIK_PORT, read only with grep - never the whole file, and
 #    a port number is not a secret, so it may appear in the output.
 check_ports_free() {
@@ -182,7 +200,9 @@ check_ports_free() {
   for kv in "HTTP_PORT=$http_port" "TRAEFIK_PORT=$traefik_port"; do
     port=${kv#*=}
     case "$port" in ''|*[!0-9]*) continue ;; esac
-    docker run --rm -p "$port:$port" busybox true >/dev/null 2>&1 || busy="$busy ${kv%%=*}=$port"
+    docker run --rm -p "$port:$port" busybox true >/dev/null 2>&1 && continue
+    port_held_by_own_stack "$port" && continue
+    busy="$busy ${kv%%=*}=$port"
   done
   if [ -z "$busy" ]; then
     add_result "$label" ok ""
@@ -249,7 +269,7 @@ check_git_identity_and_line_endings() {
     return
   fi
   bad=""
-  attrs="$root/.gitattributes"
+  attrs="$DOCTOR_ROOT/.gitattributes"
   if [ -f "$attrs" ]; then
     while IFS= read -r line; do
       case "$line" in
@@ -258,14 +278,14 @@ check_git_identity_and_line_endings() {
       case "$line" in
         *"eol=lf"*)
           pattern=${line%% *}
-          for f in "$root"/$pattern; do
+          for f in "$DOCTOR_ROOT"/$pattern; do
             [ -f "$f" ] || continue
             # Not `grep -c "$(printf '\r')"`: Git Bash's grep runs its input
             # through a text-mode read that silently strips CR before the
             # pattern ever sees it, so that command reports 0 matches against
             # a real CRLF file on the platform this check exists for. `od`
             # reads bytes, not lines, so it is not subject to that translation.
-            if od -An -c "$f" 2>/dev/null | grep -q '\\r'; then bad="$bad ${f#"$root"/}"; fi
+            if od -An -c "$f" 2>/dev/null | grep -q '\\r'; then bad="$bad ${f#"$DOCTOR_ROOT"/}"; fi
           done
           ;;
       esac
@@ -371,7 +391,23 @@ check_claude_cli
 check_disk_space
 check_bind_mount_path
 
-json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+# Backslash and double-quote need escaping for any JSON string value; a
+# remediation message can also carry an embedded newline or tab (a
+# multi-line socket path, a list of bad files), which is not valid unescaped
+# inside a JSON string either, so both round-trip through \n / \t too. Order
+# matters: backslash first (so the backslash the tab/newline substitutions
+# introduce below is never itself re-escaped), then quote, then tab (a
+# literal tab character captured via $(printf '\t') for portability - a
+# bare \t in a sed pattern is a GNU extension busybox/dash sed do not
+# share), then newline last, via the classic label/N/branch loop that
+# slurps the whole, possibly multi-line, input into one pattern space
+# before replacing each real newline with the two characters `\` and `n`.
+json_escape() {
+  tab=$(printf '\t')
+  printf '%s' "$1" |
+    sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e "s/${tab}/\\\\t/g" |
+    sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/\\n/g'
+}
 
 if [ "$json" -eq 1 ]; then
   printf '[\n'
