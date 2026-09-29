@@ -308,8 +308,10 @@ export function openTreeManager(storageId, { kind }) {
     // #281 is the bug report for choosing the second. It is also the second of
     // the two shapes #281 itself offers — "clear only messages belonging to the
     // mutation being started, or nothing at all while an unacknowledged failure
-    // exists" — and since #347 the first shape is what happens as well, there
-    // simply being no banner yet that belongs to the attempt being started.
+    // exists" — and the conditional clearError() call below is what implements
+    // the first shape, for the one case it can ever apply to. See clearError's
+    // own comment for which banner that is and why discarding it is the right
+    // trade — it is not that no banner exists yet to discard.
     //
     // What a lingering banner no longer costs is attribution. It used to be
     // readable as the *current* mutation's failure, because one box held

@@ -870,6 +870,108 @@ test("clearing a picture through the UI does not leave icon_name to resurface on
   expect(after.min_stock).toBe(3);
 });
 
+// #395: save()'s "Saved." confirmation must be set after its own reload, not
+// before — otherwise reload()'s chained showDetail() call clears it via
+// clearStatus() before anyone sees it, on any stack fast enough that the
+// wipe happens before the next render. Pinned directly rather than left to
+// the timing-dependent assertion above: this test holds reload()'s own
+// GET open so the ordering is observable regardless of how fast the real
+// server answers.
+test('the "Saved." confirmation is set after save()\'s reload, not wiped by it', async ({ page }) => {
+  await logIn(page);
+  await openProduct(page, "E2E Save Status Survives Reload Source");
+
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  await page.route(
+    (url) => url.pathname === `${BASE}/products`,
+    async (route) => {
+      await held;
+      await route.continue();
+    },
+  );
+
+  await page.locator("#p-min-stock").fill("4");
+  await page.locator("form:has(#p-name)").getByRole("button", { name: "Save" }).click();
+
+  // The PATCH has already resolved — the save happened — but reload() is
+  // still blocked on the held GET. If showStatus() ran before reload() (the
+  // pre-#395 order), "Saved." would already be visible here.
+  await expect(page.locator("#status")).not.toContainText("Saved.");
+
+  release();
+
+  await expect(page.locator("#status")).toContainText("Saved.");
+});
+
+// #395: offerMerge() has the identical reload/status race as save() above,
+// and its own fix (showStatus() moved after reload()) had no coverage of its
+// own in round 1 — review-tests flagged that gap. Reached by declining the
+// rename-over-merge confirm (docs/specs/16-product-maintenance.md), which is
+// the only UI path to offerMerge().
+test('the merge confirmation is set after offerMerge()\'s reload, not wiped by it', async ({ page }) => {
+  await logIn(page);
+  await openProduct(page, "E2E Merge Status Editable Source");
+
+  // Renaming to the twin's exact name is what makes closestOtherProduct()
+  // find it; dismissing "rename anyway" is what routes to offerMerge()
+  // instead of a plain rename, and accepting the merge confirm inside it is
+  // what actually calls the merge endpoint. The second handler is registered
+  // only once the first dialog is seen — both are otherwise listening for
+  // the same "dialog" event and would race to handle the first one.
+  page.once("dialog", (dialog) => {
+    dialog.dismiss();
+    page.once("dialog", (mergeDialog) => mergeDialog.accept());
+  });
+
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  await page.route(
+    (url) => url.pathname === `${BASE}/products`,
+    async (route) => {
+      await held;
+      await route.continue();
+    },
+  );
+
+  await page.locator("#p-name").fill("E2E Merge Status Twin");
+  await page.locator("form:has(#p-name)").getByRole("button", { name: "Save" }).click();
+
+  // The merge POST has already resolved but reload() is still blocked on the
+  // held GET, so offerMerge()'s showStatus() — moved to after reload() by
+  // the #395 fix — has not run yet either.
+  await expect(page.locator("#status")).not.toContainText("Merged.");
+
+  release();
+
+  await expect(page.locator("#status")).toContainText("Merged.");
+});
+
+// #395's other acceptance criterion: clearStatus() must still fire for a
+// genuine navigation to a different product, so the reordering above must
+// not have turned it into a no-op generally — only deferred past the
+// specific reload the save/merge that set the message itself triggered.
+test("opening a different product still clears a stale status from the one left open before", async ({
+  page,
+}) => {
+  await logIn(page);
+  await openProduct(page, "E2E Stale Status Edited Source");
+
+  await page.locator("#p-min-stock").fill("2");
+  await page.locator("form:has(#p-name)").getByRole("button", { name: "Save" }).click();
+  await expect(page.locator("#status")).toContainText("Saved.");
+
+  await page.locator("#filter").fill("E2E Stale Status Switch Target");
+  await page.getByRole("link", { name: "E2E Stale Status Switch Target", exact: true }).click();
+
+  await expect(page.locator("#status")).toBeHidden();
+  await expect(page.locator("#status")).toHaveText("");
+});
+
 // docs/specs/40-icon-picker.md's own acceptance criteria: searching, picking
 // a direct-name hit, and confirming the pick silently recorded a new alias by
 // searching the same term again.
