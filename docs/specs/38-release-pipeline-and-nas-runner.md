@@ -430,7 +430,17 @@ on the NAS. While the repository is **public**, these controls are what stand
 between a tag push and that:
 
 - **The trigger is a tag push only.** A fork cannot push a tag to this
-  repository, and a `pull_request` from a fork never runs this workflow.
+  repository, and a `pull_request` from a fork never runs this workflow. That
+  push itself may now come from the orchestrator rather than a person -
+  `scripts/wellen-orchestrator.ps1`'s `Invoke-AutoReleaseTagIfNeeded`
+  (`scripts/wellen-planen.md`, "Automatic release tagging") pushes a real
+  triggering tag with no human review at push-time, the moment it decides a
+  wave-plan's last wave touched product code. The controls below are
+  unaffected either way - they gate on the push existing and reaching this
+  repository, not on who or what made it - but the threat model this section
+  enumerates was written for a human deliberately running
+  `scripts/dev release <tag>`, and now has a second, unattended trigger path
+  worth knowing about.
 - **`release.yml` checks `github.repository` and `github.actor`** before it runs
   anything, so a workflow file carried into a fork does not act on the NAS.
 - **Actions is set to "allow selected actions"**, so only the pinned actions

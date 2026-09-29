@@ -986,6 +986,7 @@ Assert (Test-ChangedFilesAffectProduct -Files @('web/static/js/pages/products.js
 Assert (Test-ChangedFilesAffectProduct -Files @('migrations/00018_x.sql')) 'a migration: product code'
 Assert (Test-ChangedFilesAffectProduct -Files @('go.mod')) 'go.mod at the repo root: product code (a dependency bump ships in the binary)'
 Assert (Test-ChangedFilesAffectProduct -Files @('scripts/agent-loop.sh', 'internal/store/products.go')) 'a mix of infra and product paths: product code wins'
+Assert (Test-ChangedFilesAffectProduct -Files @('docs-generator/main.go')) 'a path that merely STARTS WITH the text "docs" but is not under docs/ (e.g. docs-generator/) is still product code - the prefix check must match on docs/ with the slash, not just the four letters'
 
 Write-Host "== Get-NextReleaseTagName: bare date, then .1, .2, ... for same-day repeats =="
 Assert ((Get-NextReleaseTagName -ExistingTags @() -Today '2026.09.30') -ceq 'v2026.09.30') 'no tag yet today: the bare date'
@@ -1002,6 +1003,86 @@ try {
     Reset-Log
     Invoke-AutoReleaseTagIfNeeded -PlanStartSha '' -PlanName 'Test Plan'
     Assert ((Get-LogText) -match 'no plan-start commit recorded') 'missing start sha: skipped with a WARN, no tag attempted'
+
+    # A failed fetch must not fall through to diffing against a stale
+    # origin/main - round 1 of #487 shipped this unchecked; a silent failure
+    # here either misses a real release or tags a commit missing the
+    # just-landed work.
+    function Invoke-Native {
+        param([scriptblock]$Command)
+        $cmdText = $Command.ToString()
+        if ($cmdText -match 'git fetch') { $script:NativeExit = 1; return '' }
+        throw "must not reach '$cmdText' after a failed fetch"
+    }
+    Reset-Log
+    Invoke-AutoReleaseTagIfNeeded -PlanStartSha 'deadbeef' -PlanName 'Fetch-Fail Plan'
+    Assert ((Get-LogText) -match "'git fetch origin main --tags' failed") 'a failed fetch is caught, not silently ignored'
+    Assert ((Get-LogText) -notmatch 'pushed v') 'and nothing gets tagged off a possibly-stale origin/main'
+
+    # A failed ls-remote must not fall through to Get-NextReleaseTagName with
+    # an empty tag list - it would confidently pick an already-taken name and
+    # only discover the collision at the push step, with a message naming the
+    # wrong cause.
+    function Invoke-Native {
+        param([scriptblock]$Command)
+        $script:NativeExit = 0
+        $cmdText = $Command.ToString()
+        if ($cmdText -match 'git fetch') { return '' }
+        if ($cmdText -match 'git diff --name-only') { return 'internal/httpapi/products.go' }
+        if ($cmdText -match 'git ls-remote --tags') { $script:NativeExit = 1; return '' }
+        throw "must not reach '$cmdText' after a failed ls-remote"
+    }
+    Reset-Log
+    Invoke-AutoReleaseTagIfNeeded -PlanStartSha 'deadbeef' -PlanName 'LsRemote-Fail Plan'
+    Assert ((Get-LogText) -match "'git ls-remote --tags origin' failed") 'a failed ls-remote is caught, not silently ignored'
+    Assert ((Get-LogText) -notmatch 'pushed v') 'and nothing gets tagged with a name picked from an empty/unknown tag list'
+
+    # A failed diff must not fall through to "no product code found" - that
+    # would silently skip a real release with no warning distinguishable from
+    # a genuinely infra-only plan.
+    function Invoke-Native {
+        param([scriptblock]$Command)
+        $cmdText = $Command.ToString()
+        if ($cmdText -match 'git fetch') { $script:NativeExit = 0; return '' }
+        if ($cmdText -match 'git diff --name-only') { $script:NativeExit = 1; return '' }
+        throw "must not reach '$cmdText' after a failed diff"
+    }
+    Reset-Log
+    Invoke-AutoReleaseTagIfNeeded -PlanStartSha 'deadbeef' -PlanName 'Diff-Fail Plan'
+    Assert ((Get-LogText) -match 'could not diff') 'a failed diff is caught, not read as "touched only infra/docs"'
+    Assert ((Get-LogText) -notmatch 'touched only infra') 'the failure is never worded as if the check actually ran'
+
+    # A failed tag creation must not be treated as success, and must not push
+    # a name that was never actually tagged locally.
+    function Invoke-Native {
+        param([scriptblock]$Command)
+        $cmdText = $Command.ToString()
+        if ($cmdText -match 'git fetch') { $script:NativeExit = 0; return '' }
+        if ($cmdText -match 'git diff --name-only') { $script:NativeExit = 0; return 'internal/httpapi/products.go' }
+        if ($cmdText -match 'git ls-remote --tags') { $script:NativeExit = 0; return '' }
+        if ($cmdText -match 'git tag -a') { $script:NativeExit = 1; return '' }
+        throw "must not reach '$cmdText' after a failed tag creation"
+    }
+    Reset-Log
+    Invoke-AutoReleaseTagIfNeeded -PlanStartSha 'deadbeef' -PlanName 'TagCreate-Fail Plan'
+    Assert ((Get-LogText) -match 'failed to create tag') 'a failed tag creation is caught, not silently ignored'
+    Assert ((Get-LogText) -notmatch 'pushed v') 'and nothing is pushed for a tag that was never actually created'
+
+    # A failed push must not be logged as a successful release.
+    function Invoke-Native {
+        param([scriptblock]$Command)
+        $cmdText = $Command.ToString()
+        if ($cmdText -match 'git fetch') { $script:NativeExit = 0; return '' }
+        if ($cmdText -match 'git diff --name-only') { $script:NativeExit = 0; return 'internal/httpapi/products.go' }
+        if ($cmdText -match 'git ls-remote --tags') { $script:NativeExit = 0; return '' }
+        if ($cmdText -match 'git tag -a') { $script:NativeExit = 0; return '' }
+        if ($cmdText -match 'git push') { $script:NativeExit = 1; return '' }
+        throw "must not reach '$cmdText' after a failed push"
+    }
+    Reset-Log
+    Invoke-AutoReleaseTagIfNeeded -PlanStartSha 'deadbeef' -PlanName 'Push-Fail Plan'
+    Assert ((Get-LogText) -match 'failed to push tag') 'a failed push is caught, not silently ignored'
+    Assert ((Get-LogText) -notmatch "triggered for 'Push-Fail Plan'") 'a failed push is never logged as if the release pipeline was actually triggered'
 
     # Infra-only diff: no tag pushed.
     function Invoke-Native {

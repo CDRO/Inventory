@@ -1048,7 +1048,20 @@ function Invoke-AutoReleaseTagIfNeeded {
         Write-Log "Auto-release: no plan-start commit recorded (likely a -StartWave resume) - skipping the product-code check, no tag. Cut one by hand if this plan touched product code." 'WARN'
         return
     }
+    # This fetch is the only place in the whole script that ever advances the
+    # local origin/main tracking ref - everywhere else watches for a merge
+    # through the gh API, never local git state. A silent failure here would
+    # leave the diff below comparing against a STALE origin/main: either a
+    # false "touched only infra/docs" verdict for a plan that plainly shipped
+    # product code (no tag, no warning, run reports success), or a tag cut on
+    # a commit missing the just-landed work, sent through the real release
+    # pipeline incomplete. Checked explicitly for exactly that reason - the
+    # round-1 review of this PR found it unchecked.
     Invoke-Native { git fetch origin main --tags } | Out-Null
+    if ($script:NativeExit -ne 0) {
+        Write-Log "Auto-release: 'git fetch origin main --tags' failed - origin/main may be stale, refusing to diff against it. No tag. Check by hand." 'WARN'
+        return
+    }
     $changedRaw = Invoke-Native { git diff --name-only "$PlanStartSha" origin/main }
     if ($script:NativeExit -ne 0) {
         Write-Log "Auto-release: could not diff $PlanStartSha..origin/main - skipping, no tag. Check by hand." 'WARN'
@@ -1059,7 +1072,16 @@ function Invoke-AutoReleaseTagIfNeeded {
         Write-Log "Auto-release: '$PlanName' touched only infra/docs paths - no tag."
         return
     }
+    # A failed ls-remote must not fall through to Get-NextReleaseTagName with
+    # an empty $existingTags: it would confidently name the bare vYYYY.MM.DD
+    # even when that name is already taken, and only discover the collision
+    # at the push step below with a "check by hand" message that names the
+    # wrong cause.
     $tagsRaw = Invoke-Native { git ls-remote --tags origin }
+    if ($script:NativeExit -ne 0) {
+        Write-Log "Auto-release: 'git ls-remote --tags origin' failed - cannot safely pick a tag name. No tag. Check by hand." 'WARN'
+        return
+    }
     $existingTags = @($tagsRaw -split "`n" |
         ForEach-Object { ($_ -split "`t")[1] } |
         Where-Object { $_ -and $_ -notlike '*^{}' } |
