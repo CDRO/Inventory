@@ -30,6 +30,7 @@ import { get, patch, post, postForm, del, ApiError } from "../api.js";
 import { fetchCategories, appendCategoryOptions } from "../category-options.js";
 import { fetchLocations, appendLocationOptions, openLocationField } from "../location-options.js";
 import { clearChildren, el, text } from "../dom.js";
+import { iconLabel } from "../icons.js";
 import { openScanSheet } from "../barcode.js";
 import { renderImagePicker } from "../image-picker.js";
 import { renderIconPicker } from "../icon-picker.js";
@@ -1350,14 +1351,19 @@ function renderBatchRow(batch, locationSelects, containerBatchCount) {
         : text(""),
     ]),
     el("div", { class: "row" }, [
-      el("a", { class: "btn btn--ghost", href: stocktakeHref(batch.location_id) }, [
-        text(t("products.batch.countThisShelf")),
-      ]),
+      // Four actions on one batch: icons alone below 48rem, with their labels
+      // above it (js/icons.js, `.btn--compact`), so the row stays one line
+      // on a phone instead of a block of text under every batch.
+      el(
+        "a",
+        { class: "btn btn--ghost btn--compact", href: stocktakeHref(batch.location_id) },
+        iconLabel("clipboard", t("products.batch.countThisShelf")),
+      ),
       el(
         "button",
         {
           type: "button",
-          class: "btn btn--ghost",
+          class: "btn btn--ghost btn--compact",
           "data-role": "split-toggle",
           onclick: () => {
             const opening = splitForm.hidden;
@@ -1365,13 +1371,13 @@ function renderBatchRow(batch, locationSelects, containerBatchCount) {
             splitForm.hidden = !opening;
           },
         },
-        [text(t("products.batch.split"))],
+        iconLabel("split", t("products.batch.split")),
       ),
       el(
         "button",
         {
           type: "button",
-          class: "btn btn--ghost",
+          class: "btn btn--ghost btn--compact",
           "data-role": "move-toggle",
           onclick: () => {
             const opening = moveForm.hidden;
@@ -1379,13 +1385,13 @@ function renderBatchRow(batch, locationSelects, containerBatchCount) {
             moveForm.hidden = !opening;
           },
         },
-        [text(t("products.batch.move"))],
+        iconLabel("arrow-right", t("products.batch.move")),
       ),
       el(
         "button",
         {
           type: "button",
-          class: "btn btn--ghost",
+          class: "btn btn--ghost btn--compact",
           "data-role": "container-toggle",
           onclick: () => {
             const opening = containerForm.hidden;
@@ -1393,7 +1399,7 @@ function renderBatchRow(batch, locationSelects, containerBatchCount) {
             containerForm.hidden = !opening;
           },
         },
-        [text(batch.container_id ? t("products.batch.containerEdit") : t("products.batch.containerAdd"))],
+        iconLabel("box", batch.container_id ? t("products.batch.containerEdit") : t("products.batch.containerAdd")),
       ),
     ]),
   ]);

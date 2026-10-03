@@ -58,6 +58,7 @@ web/static/
 │   ├── icon-picker.js         # shared searchable icon picker (40)
 │   ├── tree.js                # shared tree view (locations + categories)
 │   ├── dom.js                 # small helpers: el(), render templates, escape
+│   ├── icons.js               # inline SVG icons for compact buttons (see "Compact buttons")
 │   ├── i18n.js                # loads the active catalog, translates data-i18n (19)
 │   ├── nav.js                 # shared navigation bar + logout (34)
 │   ├── photo-picker.js        # library-or-camera photo picker + selection list (36)
@@ -178,7 +179,10 @@ Used for both `locations` and `categories` (identical shape per
 HTML5 drag events (`06-vision-shelf-ingestion.md`). A page may pass an
 optional `renderDetail` callback to draw something beside each node's name
 — the category tree uses it for each node's shelf-life rule
-(`08-expiration-and-classification.md`); the location tree does not.
+(`08-expiration-and-classification.md`); the location tree uses it for the
+node's audit state (`13-stocktake-and-audit.md`). A node's actions are
+compact buttons, and below 48rem the node wraps onto two lines — see
+"Compact buttons" under Styling.
 
 ## Styling
 
@@ -201,6 +205,33 @@ No literal color values in component CSS or inline styles; components
 reference tokens so urgency looks identical everywhere it appears. Layout
 uses CSS grid/flexbox; the app must be usable one-handed on a phone, since
 the primary flows start with a camera capture.
+
+### Compact buttons
+
+A row that carries several actions beside a name — a tree node's Rename,
+Add and Move to…, a batch's Count, Split, Move and Container — has no room
+for that many text labels on a phone, and the name is what lost: at 375 px
+the category and location trees showed buttons and nothing else. Such a
+button carries `.btn--compact` and is built with `iconLabel()` from
+`js/icons.js`: an inline SVG icon (no icon font, no CDN — a handful of path
+commands per icon, in `currentColor`) followed by the label in a
+`.btn__label` span.
+
+- Below 48rem the label is visually hidden and the icon stands alone; from
+  48rem up icon and label sit side by side. Hidden, not removed: the
+  button's accessible name is the same at every width, so screen readers,
+  the i18n swap and the e2e role queries all see the button they always
+  did. A new compact action therefore needs no new catalog key.
+- A label that *is* the information — a category's "365 days" shelf-life
+  rule — is never compacted: it gets its icon and keeps its text.
+- The tree node (`js/tree.js`) wraps below 48rem: toggle, name and the
+  icon-only actions on the first line, the `renderDetail` content on a
+  second line under the name, so neither the detail nor the actions can
+  push the name to zero width. The same rule holds inside the quick-create
+  dialog (`26`, `27`), the narrowest place the tree is drawn.
+- Inline add/rename/save forms carry `.inline-form`: their input takes
+  whatever width the buttons leave, instead of the browser's default input
+  width pushing the buttons onto the next line.
 
 ## Layout width
 

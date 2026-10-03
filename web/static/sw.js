@@ -20,7 +20,7 @@
 // a test opening a cache the service worker never uses — caches.open() creates
 // a missing cache rather than failing, which would have made that test pass
 // while checking nothing.
-const CACHE_VERSION = "v36";
+const CACHE_VERSION = "v37";
 const CACHE_NAME = `inventory-shell-${CACHE_VERSION}`;
 
 // The app shell: everything a cold load needs before the network is asked
@@ -53,6 +53,7 @@ const SHELL_ASSETS = [
   "/css/base.css",
   "/css/components.css",
   "/js/dom.js",
+  "/js/icons.js",
   "/js/api.js",
   "/js/i18n.js",
   "/i18n/en.json",
