@@ -283,7 +283,7 @@ function setupPictureChoice(el, row, photoJob) {
   if (!(box && box.width > 0 && box.height > 0)) {
     qs('[data-role="new-product-image"] option[value="crop"]', el).remove();
   }
-  if (backgroundRemoval) setupCutout(el, row);
+  if (backgroundRemoval) setupCutout(el, row, photoJob);
 }
 
 // setupCutout offers to remove the background of the picture just chosen
@@ -292,7 +292,7 @@ function setupPictureChoice(el, row, photoJob) {
 // next to the original, which stays chosen until the other one is picked. If
 // it fails for any reason the original is simply kept — this is a nicety, and
 // must never stand in the way of confirming.
-function setupCutout(el, row) {
+function setupCutout(el, row, photoJob) {
   const wrap = qs('[data-role="cutout"]', el);
   const picture = qs('[data-role="new-product-image"]', el);
   const request = qs('[data-role="cutout-request"]', el);
@@ -301,12 +301,6 @@ function setupCutout(el, row) {
   const [keepOriginal, keepCutout] = qsa('[data-role="cutout-keep"]', el);
   keepOriginal.name = keepCutout.name = `cutout-${row.row_id}`;
   const entry = rows.get(row.row_id);
-
-  // The <img alt> for the without-background picture: static in the
-  // template's markup, but img `alt` has no data-i18n-* hook in i18n.js
-  // (only textContent/placeholder/title/aria-label do) — set directly here
-  // instead of adding one more attribute kind to that shared file.
-  qs('[data-role="cutout-image"]', el).alt = t("review.row.withoutBackgroundAlt");
 
   // A cutout belongs to the picture it was cut from: choosing another one
   // starts over.
