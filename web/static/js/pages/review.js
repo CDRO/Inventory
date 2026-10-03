@@ -29,6 +29,7 @@ import { fetchProducts } from "../product-options.js";
 import { get, post, del, ApiError } from "../api.js";
 import { pollJob, JobFailedError, reanalyzeJob, reanalyzeFailureMessage } from "../jobs.js";
 import { qs, qsa, clearChildren } from "../dom.js";
+import { rowCropURL, variantURL } from "../images.js";
 import { offerBarcodeCapture, offerScannedBarcode } from "../barcode-offer.js";
 
 const statusLine = qs("#status");
@@ -165,7 +166,7 @@ async function render(job) {
   for (const row of proposal.rows) {
     const el = rowsContainer.querySelector(`[data-row-id="${CSS.escape(row.row_id)}"]`);
     rows.set(row.row_id, { row, el, cutout: null });
-    setupRow(el, row, proposal, locations, categories, products, job.has_image);
+    setupRow(el, row, proposal, locations, categories, products, job.has_image ? job : null);
   }
 
   if (proposal.rows.length === 0) {
@@ -213,18 +214,19 @@ async function processAsShoppingList() {
   }
 }
 
-function setupRow(el, row, proposal, locations, categories, products, hasImage) {
-  // The crop: the whole photo as a background, scaled and shifted so only the
-  // item's bounding box shows. A product photo has no box and shows whole.
+function setupRow(el, row, proposal, locations, categories, products, photoJob) {
+  // The crop: the item cut from the photo on the server, at the size shown.
+  // A product photo has no box and shows whole.
+  const hasImage = photoJob != null;
   const crop = qs('[data-role="crop"]', el);
   if (hasImage) {
-    paintCrop(crop, row.bounding_box);
-    crop.setAttribute("aria-label", t("review.photoOfAriaLabel", { label: row.label }));
+    paintCrop(crop, photoJob, row);
+    crop.alt = t("review.photoOfAriaLabel", { label: row.label });
   }
   // Without a photo the crop stays an empty placeholder, keeping every row's
   // columns aligned.
 
-  setupPictureChoice(el, row, hasImage);
+  setupPictureChoice(el, row, photoJob);
 
   qs('[data-role="confidence"]', el).textContent = `${Math.round((row.confidence || 0) * 100)}%`;
 
@@ -241,19 +243,28 @@ function setupRow(el, row, proposal, locations, categories, products, hasImage) 
   });
 }
 
-// paintCrop draws the job's photo into node as a background, scaled and
-// shifted so only box shows. With no usable box the whole photo shows.
-function paintCrop(node, box) {
-  node.style.backgroundImage = `url("/api/storages/${storageId}/jobs/${jobId}/image")`;
+// paintCrop points img at the row's crop — the item cut from the photo on
+// the server along its bounding box, framed as object-fit: cover frames it —
+// at the two sizes a 72 px square needs across device pixel ratios
+// (docs/specs/43-image-derivatives.md). With no usable box the whole photo
+// shows, at preview size; the full-size original is never requested here.
+//
+// The job's updated_at rides along as the crop's version: "Analyze again"
+// gives the same row id a new box, and the browser cache must not hand back
+// the old crop under it.
+function paintCrop(img, job, row) {
+  const imageURL = `/api/storages/${storageId}/jobs/${jobId}/image`;
+  const box = row?.bounding_box;
   if (box && box.width > 0 && box.height > 0) {
-    node.style.backgroundSize = `${100 / box.width}% ${100 / box.height}%`;
-    const px = box.width >= 1 ? 0 : (box.x / (1 - box.width)) * 100;
-    const py = box.height >= 1 ? 0 : (box.y / (1 - box.height)) * 100;
-    node.style.backgroundPosition = `${px}% ${py}%`;
+    img.srcset = [192, 384].map((n) => `${rowCropURL(imageURL, row.row_id, n, job.updated_at)} ${n}w`).join(", ");
+    img.sizes = "4.5rem";
+    img.src = rowCropURL(imageURL, row.row_id, 192, job.updated_at);
   } else {
-    node.style.backgroundSize = "";
-    node.style.backgroundPosition = "";
+    img.removeAttribute("srcset");
+    img.removeAttribute("sizes");
+    img.src = variantURL(imageURL, "preview");
   }
+  img.hidden = false;
 }
 
 // setupPictureChoice offers a new product a picture taken from this photo —
@@ -261,7 +272,8 @@ function paintCrop(node, box) {
 // (docs/specs/05-frontend-pwa-foundations.md, "Shared review component").
 // The server cuts the picture; this only names which one. With no photo there
 // is nothing to offer, and a row with no usable box has no crop to offer.
-function setupPictureChoice(el, row, hasImage) {
+function setupPictureChoice(el, row, photoJob) {
+  const hasImage = photoJob != null;
   const field = qs('[data-role="new-product-image-field"]', el);
   if (!hasImage) {
     field.hidden = true;
@@ -328,7 +340,7 @@ function setupCutout(el, row) {
     if (picture.value !== source) return; // the reviewer moved on meanwhile
 
     entry.cutout = { source, id: result.cutout_id };
-    paintCrop(qs('[data-role="cutout-original"]', el), source === "crop" ? row.bounding_box : null);
+    paintCrop(qs('[data-role="cutout-original"]', el), photoJob, source === "crop" ? row : null);
     qs('[data-role="cutout-image"]', el).src = result.url;
     keepOriginal.checked = true;
     status.hidden = true;

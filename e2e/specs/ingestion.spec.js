@@ -1264,7 +1264,10 @@ test("a new product's picture can be taken from the reviewed photo", async ({ pa
     job.payload.rows[1].bounding_box = null;
     await route.fulfill({ response, json: job });
   });
-  await page.route(`**/jobs/${LOOK_ONLY_JOB}/image`, (route) =>
+  // The original and every variant beneath it (docs/specs/43-image-derivatives.md):
+  // the review page asks for `/image/rows/{row}/thumb-…` and `/image/preview`,
+  // never for the bare route.
+  await page.route(new RegExp(`/jobs/${LOOK_ONLY_JOB}/image(/|$)`), (route) =>
     route.fulfill({ contentType: "image/png", body: TINY_PNG }),
   );
 
@@ -1274,9 +1277,17 @@ test("a new product's picture can be taken from the reviewed photo", async ({ pa
     await route.fulfill({ json: { batch_ids: [], products_created: 2, locations_created: 0 } });
   });
 
+  // docs/specs/43-image-derivatives.md: the review shows server-cut crops and
+  // the preview, and never asks for the original photo — the one request
+  // that could cost a phone a 50 MP decode.
+  const originals = [];
+  page.on("request", (request) => {
+    if (/\/jobs\/[^/]+\/image$/.test(new URL(request.url()).pathname)) originals.push(request.url());
+  });
   await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOOK_ONLY_JOB}`);
   const rows = page.locator("#rows .review-row");
   await expect(rows).toHaveCount(2);
+  expect(originals, "the original photo must never be requested by the review").toEqual([]);
 
   const rice = rows.nth(0);
   const lentils = rows.nth(1);

@@ -345,7 +345,7 @@ func (f *fakeCacheStore) CachedImageHashes(context.Context) (map[string]struct{}
 }
 
 // fakeJobsStore satisfies jobs.Store without a database, so
-// TestBackgroundLoopsCoversAllSix can enter and stop jobRunner.RunLeases for
+// TestBackgroundLoopsCoversAllSeven can enter and stop jobRunner.RunLeases for
 // real.
 type fakeJobsStore struct{}
 
@@ -466,13 +466,14 @@ func assertLoopBlocksUntilCancelled(t *testing.T, name string, run func(context.
 	}
 }
 
-// TestBackgroundLoopsCoversAllSix is the concrete half of issue #214's fix:
-// serve() must wire up exactly the six loops the issue names, and each one
+// TestBackgroundLoopsCoversAllSeven is the concrete half of issue #214's fix:
+// serve() must wire up exactly the six loops the issue names — plus the
+// derived-picture maintenance of docs/specs/43-image-derivatives.md — and each one
 // must actually be reachable when started — not just present as a line of
 // code. Deleting any entry from backgroundLoops, or breaking how one of them
 // enters, fails this test; each loop's own package tests call it directly and
 // so cannot notice serve() failing to start it.
-func TestBackgroundLoopsCoversAllSix(t *testing.T) {
+func TestBackgroundLoopsCoversAllSeven(t *testing.T) {
 	t.Parallel()
 
 	log := discardLogger()
@@ -486,7 +487,10 @@ func TestBackgroundLoopsCoversAllSix(t *testing.T) {
 	// runWeeklyGamificationJobs both check ctx.Done() before ever touching
 	// their *store.Store argument, so entering them below never dereferences
 	// it, whether the context handed to them is cancelled or still live.
-	loops := backgroundLoops(imageCache, jobRunner, sweepDB, nil, nil, notifier)
+	// The derive service and its directories are nil here too: with no cache
+	// volume the maintenance loop has nothing to do and lasts for as long as
+	// its context, which assertLoopBlocksUntilCancelled below proves it does.
+	loops := backgroundLoops(imageCache, jobRunner, sweepDB, nil, nil, notifier, nil, nil, nil)
 
 	wantNames := []string{
 		"image suggestion cache sweep",
@@ -495,6 +499,7 @@ func TestBackgroundLoopsCoversAllSix(t *testing.T) {
 		"nightly gamification recompute",
 		"weekly gamification jobs",
 		"expiry notifications",
+		"derived picture maintenance",
 	}
 	gotNames := make([]string, len(loops))
 	byName := make(map[string]func(context.Context), len(loops))
@@ -503,7 +508,7 @@ func TestBackgroundLoopsCoversAllSix(t *testing.T) {
 		byName[l.name] = l.run
 	}
 	assert.ElementsMatch(t, wantNames, gotNames,
-		"serve() must start all six loops issue #214 names — deleting one keeps `go test ./...` green everywhere else")
+		"serve() must start all seven loops — deleting one keeps `go test ./...` green everywhere else")
 
 	// The two sweeps do real, unconditional work the instant they are
 	// entered — sweep() runs once before either ever looks at ctx — so a
@@ -533,11 +538,11 @@ func TestBackgroundLoopsCoversAllSix(t *testing.T) {
 	assert.GreaterOrEqual(t, sweepDB.calls.Load(), int32(1),
 		"store retention sweep must actually reach the store, not just return")
 
-	// The remaining three all check ctx.Done() before touching anything, so
+	// The remaining four all check ctx.Done() before touching anything, so
 	// an already-cancelled context would make even a no-op indistinguishable
 	// from the real loop; assertLoopBlocksUntilCancelled proves entry instead
 	// by requiring the real one to still be running a moment later.
-	for _, name := range []string{"nightly gamification recompute", "weekly gamification jobs", "expiry notifications"} {
+	for _, name := range []string{"nightly gamification recompute", "weekly gamification jobs", "expiry notifications", "derived picture maintenance"} {
 		assertLoopBlocksUntilCancelled(t, name, byName[name])
 	}
 

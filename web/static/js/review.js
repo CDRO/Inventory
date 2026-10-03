@@ -12,6 +12,7 @@
 // 07-shopping-list-reconciliation.md, 09-consumption-logging.md).
 
 import { fromTemplate, clearChildren, el, text } from "./dom.js";
+import { setThumb } from "./images.js";
 import { applyI18n, t } from "./i18n.js";
 
 // Row decisions, mirroring the confirm payload shape in
@@ -209,7 +210,9 @@ function bindFields(rowEl, item) {
   const thumb = rowEl.querySelector('[data-role="thumb"]');
   if (thumb) {
     const src = item.crop_url || item.image_url;
-    if (src) thumb.src = src;
+    // A product picture at thumbnail size; any other picture as it is
+    // (docs/specs/43-image-derivatives.md).
+    if (src) setThumb(thumb, src, 56);
   }
 }
 

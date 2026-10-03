@@ -588,18 +588,19 @@ th[aria-sort="descending"] .sort-button::after {
   font-size: var(--text-sm);
 }
 
-/* A crop of the job's photo, drawn from the item's bounding box with CSS
-   alone: the whole photo is the background, scaled and positioned so only the
-   box shows. No canvas, no second image, and the same photo request serves
-   every crop on the page. */
+/* A crop of the job's photo: the item cut along its bounding box on the
+   server, at the size shown, so the page never downloads the whole photo
+   (docs/specs/43-image-derivatives.md). The server frames the crop as a
+   square already; object-fit: cover is for a crop smaller than the box
+   (never scaled up) and for the whole-photo preview a row without a box
+   shows. The background is the placeholder while it loads. */
 .review-crop {
+  display: block;
   width: 4.5rem;
   height: 4.5rem;
   border-radius: var(--radius-sm);
   background-color: var(--color-bg);
-  background-repeat: no-repeat;
-  background-size: cover;
-  background-position: center;
+  object-fit: cover;
 }
 
 .review-row .field {

@@ -124,14 +124,15 @@ vanilla JavaScript with no build step — see
 | — | Icon picker with alias search, replacing free-text `icon_name` | `40-icon-picker.md` |
 | — | Mixed-batch photo classification: spotting a shopping list among shelf photos | `41-mixed-photo-classification.md` |
 | — | Local icon library: a vendored offline icon set, no external search dependency | `42-local-icon-library.md` |
+| — | Image derivatives: pre-rendered thumbnails and crops, never the original on screen | `43-image-derivatives.md` |
 | — | *Later phase:* gamification of inventory upkeep | `50`, `51`, `52` |
 
 **Numbering:** `00`–`11` are the core system in build order; `12`–`20`, `24`,
-`26`–`30` and `32`–`42` are further accepted core work. **Specs and spikes
+`26`–`30` and `32`–`43` are further accepted core work. **Specs and spikes
 share one number space**: a number in `docs/specs/` is accepted work, a number
-in `docs/spikes/` is a candidate (`21`–`23`, `25`, `31` and `43` are currently
-claimed by spikes), and a promoted spike keeps its number as it moves folders.
-`44`–`49` are still free; numbers are never reused. `50`+ is a later, optional
+in `docs/spikes/` is a candidate (`21`–`23`, `25` and `31` are currently
+claimed by spikes), and a promoted spike keeps its number as it moves folders
+(`43` did, on 2026-10-03). `44`–`49` are still free; numbers are never reused. `50`+ is a later, optional
 phase — nothing in `00`–`42` may depend on it, and the system must be complete and
 shippable with the `50` range unimplemented.
 

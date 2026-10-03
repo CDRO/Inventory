@@ -283,6 +283,11 @@ deployed on the NAS reaches phones that cannot be updated in step.
   stated deprecation window. A breaking change is: removing or renaming a
   field, changing a type, tightening validation, changing a status code, or
   altering the meaning of an existing value.
+- **Picture URLs stay fetchable as handed out.** `image_url` and the job
+  image route serve the original file; the sizes a screen shows are
+  additive path segments beneath that URL (`…/thumb-192`, `…/preview`,
+  `43-image-derivatives.md`). A client that wants the original asks for the
+  URL it was given and nothing else.
 - Clients send `X-Client-Version: <name>/<version>` on every request. It is for
   diagnostics only and must never gate behavior — version-sniffing to alter
   responses is how one API quietly becomes several. The server reads it in

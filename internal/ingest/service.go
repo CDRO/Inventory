@@ -73,7 +73,11 @@ type Service struct {
 	matcher  Matcher
 	store    Store
 	photos   Photos
-	log      *slog.Logger
+	// derivatives, when set, makes the pictures a screen shows from a job's
+	// photo ahead of the first request (derivatives.go). Nil makes none; the
+	// serving route makes them on request instead.
+	derivatives Derivatives
+	log         *slog.Logger
 }
 
 // NewService wires the ingestion flow.
@@ -82,6 +86,13 @@ func NewService(runner Runner, analyzer Analyzer, models Models, matcher Matcher
 		log = slog.Default()
 	}
 	return &Service{runner: runner, analyzer: analyzer, models: models, matcher: matcher, store: s, photos: photos, log: log}
+}
+
+// WithDerivatives makes the service render a job's thumbnails and crops as
+// part of its work (docs/specs/43-image-derivatives.md).
+func (s *Service) WithDerivatives(d Derivatives) *Service {
+	s.derivatives = d
+	return s
 }
 
 // Available reports whether photos can be analysed right now, and names the
@@ -184,6 +195,12 @@ func (s *Service) work(storageID uuid.UUID, mode vision.Mode, filename string, h
 			return nil, err
 		}
 
+		// The inbox thumbnail and the review preview are made while the
+		// model call is in flight, so they cost the job no latency; the row
+		// crops follow once the proposal says where the items are.
+		wait := s.startPhotoSet(ctx, filename, image)
+		defer wait()
+
 		model, err := s.models.EffectiveModel(ctx)
 		if err != nil {
 			return nil, err
@@ -213,6 +230,7 @@ func (s *Service) work(storageID uuid.UUID, mode vision.Mode, filename string, h
 		if err != nil {
 			return nil, err
 		}
+		s.replaceRowSet(ctx, filename, image, proposal.Rows)
 		return json.Marshal(proposal)
 	}
 }

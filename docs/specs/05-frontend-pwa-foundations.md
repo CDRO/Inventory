@@ -59,6 +59,7 @@ web/static/
 │   ├── tree.js                # shared tree view (locations + categories)
 │   ├── dom.js                 # small helpers: el(), render templates, escape
 │   ├── icons.js               # inline SVG icons for compact buttons (see "Compact buttons")
+│   ├── images.js              # picture sizes: thumbnail srcset, variant and crop URLs (43)
 │   ├── i18n.js                # loads the active catalog, translates data-i18n (19)
 │   ├── nav.js                 # shared navigation bar + logout (34)
 │   ├── photo-picker.js        # library-or-camera photo picker + selection list (36)

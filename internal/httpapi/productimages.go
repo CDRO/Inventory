@@ -33,7 +33,11 @@ func productImageURL(storageID uuid.UUID, name string) string {
 type ProductImageHandler struct {
 	store  ProductImageStore
 	images PhotoStore
-	errors *ErrorWriter
+	// variants serves a picture at the sizes screens show it
+	// (docs/specs/43-image-derivatives.md). Set after construction by the
+	// router; nil serves the stored picture for every size.
+	variants VariantStore
+	errors   *ErrorWriter
 }
 
 // NewProductImageHandler wires the product picture route. images may be nil
@@ -50,27 +54,42 @@ func NewProductImageHandler(s ProductImageStore, images PhotoStore, errs *ErrorW
 // (docs/specs/03-auth-and-multi-tenancy.md) — the name is a UUID, but being
 // hard to guess is not the access check.
 func (h *ProductImageHandler) Serve(w http.ResponseWriter, r *http.Request) {
-	storageID, ok := StorageIDFrom(r.Context())
+	_, name, ok := h.usedPicture(w, r)
 	if !ok {
-		h.errors.WriteError(w, r, Internal(errNoStorageInContext))
 		return
 	}
-	name := chi.URLParam(r, "name")
+	h.serveStored(w, r, name)
+}
+
+// usedPicture is the access check Serve and ServeVariant share: the picture
+// named in the path must be used by a product in the storage in the path. It
+// writes the error itself and reports false when the handler should stop.
+func (h *ProductImageHandler) usedPicture(w http.ResponseWriter, r *http.Request) (storageID uuid.UUID, name string, ok bool) {
+	storageID, ok = StorageIDFrom(r.Context())
+	if !ok {
+		h.errors.WriteError(w, r, Internal(errNoStorageInContext))
+		return uuid.Nil, "", false
+	}
+	name = chi.URLParam(r, "name")
 	if h.images == nil {
 		h.errors.WriteError(w, r, NotFound("product images unavailable"))
-		return
+		return uuid.Nil, "", false
 	}
 
 	used, err := h.store.ProductImageInStorage(r.Context(), storageID, productImageURL(storageID, name))
 	if err != nil {
 		h.errors.WriteError(w, r, Internal(err))
-		return
+		return uuid.Nil, "", false
 	}
 	if !used {
 		h.errors.WriteError(w, r, NotFound("product image not used in storage"))
-		return
+		return uuid.Nil, "", false
 	}
+	return storageID, name, true
+}
 
+// serveStored answers with the picture as it is on disk.
+func (h *ProductImageHandler) serveStored(w http.ResponseWriter, r *http.Request, name string) {
 	data, err := h.images.Read(name)
 	switch {
 	case errors.Is(err, uploads.ErrInvalidName), errors.Is(err, os.ErrNotExist):

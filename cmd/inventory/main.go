@@ -29,6 +29,7 @@ import (
 	"github.com/CDRO/Inventory/internal/auth"
 	"github.com/CDRO/Inventory/internal/config"
 	"github.com/CDRO/Inventory/internal/consume"
+	"github.com/CDRO/Inventory/internal/derive"
 	"github.com/CDRO/Inventory/internal/httpapi"
 	"github.com/CDRO/Inventory/internal/iconlib"
 	"github.com/CDRO/Inventory/internal/imagesearch"
@@ -364,7 +365,7 @@ func startBackgroundLoops(ctx context.Context, loops []backgroundLoop) {
 	}
 }
 
-// backgroundLoops names the six loops serve() runs before it opens the
+// backgroundLoops names the seven loops serve() runs before it opens the
 // listener (issue #214). Building them apart from serve() itself is what
 // lets a test invoke each one directly with fakes and a cancelled context,
 // asserting it is actually entered rather than trusting that a bare `go`
@@ -376,6 +377,8 @@ func backgroundLoops(
 	gamificationDB *store.Store,
 	ingestSweep func(context.Context, time.Time) (int, error),
 	notifier *notify.Service,
+	derived *derive.Service,
+	pictures, photos *uploads.Dir,
 ) []backgroundLoop {
 	return []backgroundLoop{
 		// Cap enforcement and orphan collection for the suggestion-image cache
@@ -402,6 +405,18 @@ func backgroundLoops(
 		// Expired sessions, pairing codes, idempotency records, tombstones,
 		// and — when photo ingestion is enabled — reviewed job photos.
 		{"store retention sweep", func(ctx context.Context) { runStoreSweeps(ctx, sweepDB, ingestSweep) }},
+
+		// Orphaned thumbnails and crops, and a one-time warm-up of the
+		// product pictures' thumbnails (docs/specs/43-image-derivatives.md).
+		// With no usable cache volume there is nothing to maintain, and the
+		// loop simply lasts as long as the process does, like every other.
+		{"derived picture maintenance", func(ctx context.Context) {
+			if derived == nil {
+				<-ctx.Done()
+				return
+			}
+			derived.RunMaintenance(ctx, pictures, photos)
+		}},
 
 		// Nightly gamification recompute and storage achievements
 		// (docs/specs/51-gamification-scoring.md).
@@ -508,18 +523,44 @@ func serve() error {
 		photoStore   httpapi.PhotoStore
 		productStore httpapi.PhotoStore
 		ingestSweep  func(context.Context, time.Time) (int, error)
+		// The two directories themselves, for the derived-picture loop: it
+		// sweeps against what is really on disk, not through the stores.
+		picturesDir, photosDir *uploads.Dir
 	)
+	// Derived pictures — thumbnails, previews, crops — live on the cache
+	// volume (docs/specs/43-image-derivatives.md). An unusable cache volume
+	// disables them and nothing else: the job variant routes answer 404 and
+	// product pictures are served at their stored size, which is exactly the
+	// state before they existed.
+	var (
+		variants     httpapi.VariantStore
+		derivedStore *uploads.Derived
+		deriver      *derive.Service
+	)
+	if store, err := uploads.NewDerived(uploads.DerivedDir); err != nil {
+		slog.Error("derived pictures disabled: cache volume unusable", slog.Any("err", err))
+	} else {
+		derivedStore = store
+		deriver = derive.New(store, slog.Default())
+		variants = deriver
+	}
 	// Product pictures taken from a reviewed photo live apart from the photos
 	// themselves: those are swept after review, these are kept for as long as
 	// the product exists (docs/specs/07-shopping-list-reconciliation.md).
 	if pictures, err := uploads.NewPictureDir(uploads.ProductImagesDir); err != nil {
 		slog.Error("product pictures from photos disabled: upload volume unusable", slog.Any("err", err))
 	} else {
-		productStore = pictures
+		picturesDir, productStore = pictures, pictures
+		if deriver != nil {
+			// Removing a picture removes its thumbnails; saving one makes them.
+			pictures.RemoveDerivedWith(derivedStore, uploads.AreaProducts)
+			productStore = derive.Saving{Dir: pictures, Service: deriver}
+		}
 	}
 	if photos, err := uploads.NewDir(uploads.IngestDir); err != nil {
 		slog.Error("photo uploads disabled: upload volume unusable", slog.Any("err", err))
 	} else {
+		photosDir = photos
 		service := ingest.NewService(jobRunner, vision.NewClient(cfg.GeminiAPIKey), checker, matcher, db, photos, slog.Default())
 		ingester, photoStore, ingestSweep = service, photos, service.SweepImages
 		// Consumption photos share the same upload volume as shelf and
@@ -527,7 +568,15 @@ func serve() error {
 		// ingestSweep above already covers their retention: its query is
 		// kind-agnostic, matching every consumed job's image regardless of
 		// which service created it.
-		consumer = consume.NewService(jobRunner, vision.NewClient(cfg.GeminiAPIKey), checker, matcher, photos, slog.Default())
+		consumption := consume.NewService(jobRunner, vision.NewClient(cfg.GeminiAPIKey), checker, matcher, photos, slog.Default())
+		consumer = consumption
+		if deriver != nil {
+			// A discarded or swept photo takes its thumbnails and crops with
+			// it; a job makes them as part of its work.
+			photos.RemoveDerivedWith(derivedStore, uploads.AreaIngest)
+			service.WithDerivatives(derive.ForJobs(deriver))
+			consumption.WithDerivatives(derive.ForJobs(deriver))
+		}
 	}
 
 	// Background removal (docs/specs/09-consumption-logging.md) exists only
@@ -554,12 +603,12 @@ func serve() error {
 	notifier := notify.New(db, slog.Default())
 
 	// Every loop started here runs for as long as the process serves.
-	// backgroundLoops names all six in one place, so deleting one is a change
+	// backgroundLoops names all seven in one place, so deleting one is a change
 	// to that function's return value rather than the disappearance of a bare
-	// `go` statement — covered by TestBackgroundLoopsCoversAllSix in
+	// `go` statement — covered by TestBackgroundLoopsCoversAllSeven in
 	// main_test.go, since each loop's own package tests call it directly and
 	// so cannot notice serve() failing to start it.
-	startBackgroundLoops(ctx, backgroundLoops(imageCache, jobRunner, db, db, ingestSweep, notifier))
+	startBackgroundLoops(ctx, backgroundLoops(imageCache, jobRunner, db, db, ingestSweep, notifier, deriver, picturesDir, photosDir))
 
 	srv := &http.Server{
 		Addr: net.JoinHostPort("", cfg.HTTPPort),
@@ -585,6 +634,7 @@ func serve() error {
 			Ingester:        ingester,
 			Photos:          photoStore,
 			ProductImages:   productStore,
+			Variants:        variants,
 			Consumer:        consumer,
 			Backgrounds:     backgrounds,
 			Cutouts:         cutoutStore,
