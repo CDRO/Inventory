@@ -54,7 +54,9 @@
        through textContent or a form control's value, never as markup. -->
   <template id="row-template">
     <div class="review-row">
-      <div class="review-crop" data-role="crop" role="img"></div>
+      <!-- One detected item, cut from the photo on the server at the size
+           shown (docs/specs/43-image-derivatives.md); alt is set per row. -->
+      <img class="review-crop" data-role="crop" alt="" hidden>
       <div class="review-row__fields">
         <div class="row row--between">
           <strong data-field="label"></strong>
@@ -98,11 +100,11 @@
             <p class="muted" data-role="cutout-status" role="status" hidden></p>
             <div class="cutout-compare" data-role="cutout-compare" hidden>
               <label class="cutout-choice">
-                <span class="review-crop" data-role="cutout-original" role="img" data-i18n-aria-label="review.row.originalPictureAlt" aria-label="Original picture"></span>
+                <img class="review-crop" data-role="cutout-original" data-i18n-alt="review.row.originalPictureAlt" alt="Original picture">
                 <span><input type="radio" data-role="cutout-keep" value="original" checked> <span data-i18n="review.row.original">Original</span></span>
               </label>
               <label class="cutout-choice">
-                <img class="review-crop cutout-image" data-role="cutout-image" alt="The picture without its background">
+                <img class="review-crop cutout-image" data-role="cutout-image" data-i18n-alt="review.row.withoutBackgroundAlt" alt="The picture without its background">
                 <span><input type="radio" data-role="cutout-keep" value="cutout"> <span data-i18n="review.row.withoutBackground">Without background</span></span>
               </label>
             </div>

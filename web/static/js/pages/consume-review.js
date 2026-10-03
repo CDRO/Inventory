@@ -40,6 +40,7 @@ import { pollJob, JobFailedError, reanalyzeJob, reanalyzeFailureMessage } from "
 // parameter name for a row's own DOM element (mirroring review.html's page
 // module), so the element-builder import is renamed to avoid shadowing it.
 import { el as buildEl, text, clearChildren, qs, qsa } from "../dom.js";
+import { rowCropURL, variantURL } from "../images.js";
 
 const statusLine = qs("#status");
 const errorBox = qs("#error");
@@ -172,7 +173,7 @@ async function render(job) {
     const el = rowsContainer.querySelector(`[data-row-id="${CSS.escape(row.row_id)}"]`);
     rows.set(row.row_id, { row, el });
   }
-  await Promise.all(proposal.rows.map((row) => setupRow(rows.get(row.row_id).el, row, job.has_image)));
+  await Promise.all(proposal.rows.map((row) => setupRow(rows.get(row.row_id).el, row, job.has_image ? job : null)));
 
   if (proposal.rows.length === 0) {
     setStatus(t("consumeReview.nothingFound"));
@@ -219,18 +220,24 @@ async function processAsShoppingList() {
   }
 }
 
-async function setupRow(el, row, hasImage) {
+async function setupRow(el, row, photoJob) {
+  // The crop is cut on the server at the size shown; the full-size original
+  // is never requested here (docs/specs/43-image-derivatives.md). Same
+  // addressing as review.js's paintCrop, including the job's updated_at as
+  // the crop's version.
   const crop = qs('[data-role="crop"]', el);
-  if (hasImage) {
-    crop.style.backgroundImage = `url("/api/storages/${storageId}/jobs/${jobId}/image")`;
+  if (photoJob) {
+    const imageURL = `/api/storages/${storageId}/jobs/${jobId}/image`;
     const box = row.bounding_box;
     if (box && box.width > 0 && box.height > 0) {
-      crop.style.backgroundSize = `${100 / box.width}% ${100 / box.height}%`;
-      const px = box.width >= 1 ? 0 : (box.x / (1 - box.width)) * 100;
-      const py = box.height >= 1 ? 0 : (box.y / (1 - box.height)) * 100;
-      crop.style.backgroundPosition = `${px}% ${py}%`;
+      crop.srcset = [192, 384].map((n) => `${rowCropURL(imageURL, row.row_id, n, photoJob.updated_at)} ${n}w`).join(", ");
+      crop.sizes = "4.5rem";
+      crop.src = rowCropURL(imageURL, row.row_id, 192, photoJob.updated_at);
+    } else {
+      crop.src = variantURL(imageURL, "preview");
     }
-    crop.setAttribute("aria-label", t("consumeReview.photoOfAriaLabel", { label: row.label }));
+    crop.alt = t("consumeReview.photoOfAriaLabel", { label: row.label });
+    crop.hidden = false;
   }
 
   qs('[data-role="confidence"]', el).textContent = `${Math.round((row.confidence || 0) * 100)}%`;

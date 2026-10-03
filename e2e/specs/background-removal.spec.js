@@ -47,7 +47,10 @@ async function asPhotoJob(page, { offer } = {}) {
     if (offer !== undefined) job.background_removal = offer;
     await route.fulfill({ response, json: job });
   });
-  await page.route(`**/jobs/${LOOK_ONLY_JOB}/image`, (route) =>
+  // The original and every variant beneath it (docs/specs/43-image-derivatives.md):
+  // the review page asks for `/image/rows/{row}/thumb-…` and `/image/preview`,
+  // never for the bare route.
+  await page.route(new RegExp(`/jobs/${LOOK_ONLY_JOB}/image(/|$)`), (route) =>
     route.fulfill({ contentType: "image/png", body: TINY_PNG }),
   );
   return seen;

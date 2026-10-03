@@ -58,6 +58,46 @@
   width: 100%;
 }
 
+/* An icon inside a button (js/icons.js). Sized to the text it sits beside,
+   and `flex: none` so a narrow button shrinks its label, never its icon. */
+.btn__icon {
+  width: 1.25rem;
+  height: 1.25rem;
+  flex: none;
+}
+
+/* Compact buttons: icon and label side by side where there is room, the icon
+   alone below 48rem. The label is hidden visually, not removed, so the
+   button's accessible name — and the e2e role queries built on it — stay as
+   they are. Needed because a row carrying three or four actions beside a
+   name (a tree node, a batch) left the name no room at all on a phone. */
+@media (max-width: 47.9375rem) {
+  .btn--compact {
+    padding-left: var(--space-2);
+    padding-right: var(--space-2);
+    min-width: 2.75rem;
+  }
+
+  .btn--compact .btn__label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+}
+
+/* An inline add/rename/save form: the input takes what its buttons leave,
+   instead of its browser default width pushing them onto the next line. */
+.inline-form > input {
+  flex: 1 1 8rem;
+  min-width: 0;
+}
+
 /* --- Forms --- */
 
 .field {
@@ -269,6 +309,44 @@
 
 .tree-shelf-life-input {
   width: 6rem;
+}
+
+/* A node's actions keep to one line, at the right edge. */
+.tree-actions {
+  flex: none;
+  flex-wrap: nowrap;
+  margin-left: auto;
+}
+
+.tree-rename-input {
+  flex: 1 1 6rem;
+  min-width: 0;
+}
+
+/* Below 48rem a node wraps onto two lines: toggle, name and the icon-only
+   actions first, the detail — a shelf-life rule, an audit state — on its own
+   line beneath. Kept on one line, the detail and the actions together could
+   push the name to zero width, which is what made the tree unusable on a
+   phone. The name's flex-basis is what makes the wrap happen at all: with a
+   basis of 0 the line never looks full to the layout, however little the
+   name gets. */
+@media (max-width: 47.9375rem) {
+  .tree-node {
+    flex-wrap: wrap;
+  }
+
+  .tree-name {
+    /* 4rem, not more: inside the quick-create dialog (js/tree-modal.js) the
+       row is narrower still, and a larger basis puts the actions on a line
+       of their own under the name. */
+    flex: 1 1 4rem;
+  }
+
+  .tree-detail {
+    flex: 1 1 100%;
+    order: 1;
+    padding-left: calc(1.5rem + var(--space-2));
+  }
 }
 
 /* --- Review list (js/review.js): 06/07/09 ingestion proposals --- */
@@ -510,18 +588,19 @@ th[aria-sort="descending"] .sort-button::after {
   font-size: var(--text-sm);
 }
 
-/* A crop of the job's photo, drawn from the item's bounding box with CSS
-   alone: the whole photo is the background, scaled and positioned so only the
-   box shows. No canvas, no second image, and the same photo request serves
-   every crop on the page. */
+/* A crop of the job's photo: the item cut along its bounding box on the
+   server, at the size shown, so the page never downloads the whole photo
+   (docs/specs/43-image-derivatives.md). The server frames the crop as a
+   square already; object-fit: cover is for a crop smaller than the box
+   (never scaled up) and for the whole-photo preview a row without a box
+   shows. The background is the placeholder while it loads. */
 .review-crop {
+  display: block;
   width: 4.5rem;
   height: 4.5rem;
   border-radius: var(--radius-sm);
   background-color: var(--color-bg);
-  background-repeat: no-repeat;
-  background-size: cover;
-  background-position: center;
+  object-fit: cover;
 }
 
 .review-row .field {

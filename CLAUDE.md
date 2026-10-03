@@ -7,9 +7,9 @@ existing code.
 
 - `docs/specs/00-overview.md` — start here; map of the whole set
 - `docs/specs/` numbering: `00`–`11` core, in build order · `12`–`20`, `24`,
-  `26`–`30` and `32`–`42` further accepted core work · specs and spikes share
+  `26`–`30` and `32`–`43` further accepted core work · specs and spikes share
   one number space (`21`–`23`, `25` and `31` are currently spikes; a promoted
-  spike keeps its number) · `43`–`49` free ·
+  spike keeps its number) · `44`–`49` free ·
   `50`–`52` gamification (later phase, nothing in `00`–`42` may depend on it)
 - **`docs/explanations/` is not a contract.** It is human-facing narrative.
   Ignore it when implementing.

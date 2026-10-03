@@ -9,6 +9,7 @@
 // differ per page and stay in each page's own module.
 
 import { el, text } from "./dom.js";
+import { thumbAttrs } from "./images.js";
 
 /**
  * productCell renders an `.inventory-table__product` cell: a thumbnail
@@ -23,7 +24,13 @@ import { el, text } from "./dom.js";
  *   `{href, onclick}`.
  */
 export function productCell(imageUrl, name, anchorAttrs) {
-  const thumb = imageUrl ? [el("img", { class: "inventory-table__thumb", src: imageUrl, alt: "" })] : [];
+  // 36 px on screen, so the 96 px file at 1× and 2×, never the 1024 px
+  // picture (docs/specs/43-image-derivatives.md). Lazy, with its size
+  // declared, so a long table neither fetches every picture at once nor
+  // shifts as they arrive.
+  const thumb = imageUrl
+    ? [el("img", { class: "inventory-table__thumb", ...thumbAttrs(imageUrl, 36), alt: "", loading: "lazy", width: "36", height: "36" })]
+    : [];
   return el("span", { class: "inventory-table__product" }, [
     ...thumb,
     el("a", anchorAttrs, [text(name)]),

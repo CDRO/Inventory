@@ -184,7 +184,7 @@ export function formatNumber(value, options) {
 /**
  * applyI18n fills every `data-i18n*` element under `root` (default: the
  * whole document) from the loaded catalog: `data-i18n` (textContent),
- * `data-i18n-placeholder`, `data-i18n-title`, `data-i18n-aria-label`.
+ * `data-i18n-placeholder`, `data-i18n-title`, `data-i18n-aria-label`, `data-i18n-alt`.
  *
  * Called once automatically below for the document at load. A `<template>`'s
  * content is not part of the live document until cloned (`dom.js`'s
@@ -216,6 +216,9 @@ export function applyI18n(root = document) {
   }
   for (const el of matches("[data-i18n-aria-label]")) {
     el.setAttribute("aria-label", t(el.getAttribute("data-i18n-aria-label")));
+  }
+  for (const el of matches("[data-i18n-alt]")) {
+    el.setAttribute("alt", t(el.getAttribute("data-i18n-alt")));
   }
 }
 

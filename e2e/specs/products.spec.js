@@ -1463,10 +1463,14 @@ test("the detail view's upload control posts the chosen photo and shows it", asy
 
   // The picture is re-rendered from what the route answered, and the edit form
   // beside it survives — renderPicture redraws the picture alone.
+  // The detail shows the picture's preview variant, a path segment beneath
+  // the URL the route answered (docs/specs/43-image-derivatives.md); the
+  // bare image_url is what the server recorded, asserted on the response in
+  // the test above this one.
   const picture = page.locator('[data-role="product-picture"] img');
   await expect(picture).toHaveAttribute(
     "src",
-    new RegExp(`^${BASE}/product-images/[0-9a-f-]+\\.png$`),
+    new RegExp(`^${BASE}/product-images/[0-9a-f-]+\\.png/preview$`),
   );
   await expect(page.locator('[data-role="picture-status"]')).toContainText("Picture updated.");
   await expect(page.locator("#p-name")).toHaveValue("E2E Picture Upload UI Source");

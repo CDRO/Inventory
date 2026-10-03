@@ -232,8 +232,9 @@ across several sittings, without losing anything.
 ## Review UI
 
 For each detected item, the reviewer sees: the cropped region of the photo
-(rendered from `bounding_box`; for single-product photos, the whole
-image), the matched/candidate product name — editable, offered as a picker
+(cut on the server from `bounding_box` and served at the size shown — the
+screen never downloads the original, `43-image-derivatives.md`; for
+single-product photos, the whole image at preview size), the matched/candidate product name — editable, offered as a picker
 listing every product in the storage alongside the AI's own matches, so an
 existing product the model did not propose is still one choice away rather
 than becoming an accidental duplicate "new" one — an editable quantity, an

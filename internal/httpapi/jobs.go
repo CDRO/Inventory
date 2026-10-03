@@ -50,7 +50,11 @@ type JobHandler struct {
 	// offer, and what discarding or re-analysing a job clears away.
 	cutouts     CutoutStore
 	backgrounds BackgroundRemover
-	errors      *ErrorWriter
+	// variants serves a job's photo at the sizes screens show it
+	// (docs/specs/43-image-derivatives.md). Set after construction by the
+	// router; nil answers every variant route 404.
+	variants VariantStore
+	errors   *ErrorWriter
 }
 
 // NewJobHandler wires the job routes. photos may be nil for a deployment with

@@ -86,6 +86,11 @@ func (s *Service) listWork(storageID uuid.UUID, filename string, createdBy *uuid
 			return nil, err
 		}
 
+		// Only the inbox card shows this photo, so only the whole-picture
+		// set is made; a list has no boxes to cut.
+		wait := s.startPhotoSet(ctx, filename, image)
+		defer wait()
+
 		model, err := s.models.EffectiveModel(ctx)
 		if err != nil {
 			return nil, err

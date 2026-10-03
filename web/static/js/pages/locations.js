@@ -24,6 +24,7 @@ import { TreeView } from "../tree.js";
 import { formatAudited } from "../audited.js";
 import { get, post, patch, ApiError } from "../api.js";
 import { clearChildren, el, text } from "../dom.js";
+import { iconLabel } from "../icons.js";
 import { t, apiErrorMessage } from "../i18n.js";
 
 const switcherContainer = document.querySelector("#storage-switcher");
@@ -103,7 +104,7 @@ function showAddRootForm() {
     "form",
     {
       id: "add-root-form",
-      class: "row",
+      class: "row inline-form",
       onsubmit: (event) => {
         event.preventDefault();
         const name = input.value.trim();
@@ -114,11 +115,11 @@ function showAddRootForm() {
     },
     [
       input,
-      el("button", { type: "submit", class: "btn" }, [text(t("locations.add"))]),
+      el("button", { type: "submit", class: "btn btn--compact" }, iconLabel("plus", t("locations.add"))),
       el(
         "button",
-        { type: "button", class: "btn btn--ghost", onclick: () => form.remove() },
-        [text(t("common.cancel"))],
+        { type: "button", class: "btn btn--ghost btn--compact", onclick: () => form.remove() },
+        iconLabel("x", t("common.cancel")),
       ),
     ],
   );
@@ -144,7 +145,9 @@ function renderAuditState(node) {
         class: "btn btn--ghost",
         href: `/stocktake.html?location=${encodeURIComponent(node.id)}&storage=${encodeURIComponent(storageId)}`,
       },
-      [text(t("locations.stocktakeLink"))],
+      // Icon and label at every width: on a phone this sits on the node's
+      // second line, where there is room for the word.
+      iconLabel("clipboard", t("locations.stocktakeLink")),
     ),
   ]);
 }
