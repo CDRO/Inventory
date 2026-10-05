@@ -14,6 +14,7 @@
 
 import { get } from "./api.js";
 import { clearChildren, el, text } from "./dom.js";
+import { icon } from "./icons.js";
 import { withStorageParam } from "./session.js";
 import { t } from "./i18n.js";
 
@@ -45,7 +46,7 @@ export async function renderInboxLink(container, storageId, { current = false } 
         href: withStorageParam(storageId, "/inbox.html"),
         "aria-current": current ? "page" : null,
       },
-      [text(t("inboxBadge.inbox")), badge],
+      [icon("inbox"), el("span", { class: "nav__label" }, [text(t("inboxBadge.inbox"))]), badge],
     ),
   );
   container.hidden = false;

@@ -865,6 +865,144 @@ th[aria-sort="descending"] .sort-button::after {
   background: var(--color-border);
 }
 
+/* Every entry carries an icon (js/icons.js): beside its label in the row,
+   above it in a phone layout. */
+.nav .btn__icon {
+  width: 1.125rem;
+  height: 1.125rem;
+}
+
+/* The entries a phone tab bar keeps behind More. On a wide screen the group
+   is flattened into the row and `order` puts each entry where the spec lists
+   it; the More button itself is not shown at all. */
+.nav__sheet {
+  display: contents;
+}
+
+.nav__more {
+  display: none;
+}
+
+@media (max-width: 47.9375rem) {
+  /* Variant A — a wrapping grid of icon tiles: nothing scrolls, every
+     destination visible, at the price of two or three rows of header. */
+  .nav--grid {
+    flex-wrap: wrap;
+    overflow-x: visible;
+    gap: var(--space-1) 0;
+  }
+
+  .nav--grid .nav__link {
+    flex-direction: column;
+    gap: 2px;
+    width: 4.2rem;
+    padding: var(--space-1) 0;
+    font-size: 0.6875rem;
+    line-height: 1.1;
+    text-align: center;
+    white-space: normal;
+  }
+
+  .nav--grid .nav__separator {
+    display: none;
+  }
+
+  .nav--grid .btn__icon {
+    width: 1.375rem;
+    height: 1.375rem;
+  }
+
+  /* Variant B — a tab bar fixed to the bottom of the screen, in thumb reach:
+     the five main destinations and More, which lifts the rest into a sheet
+     above the bar. */
+  .nav--tabbar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 20;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 0;
+    width: auto;
+    max-width: none;
+    margin: 0;
+    padding: var(--space-1) var(--space-1) calc(var(--space-1) + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--color-border);
+    border-bottom: 0;
+    background: var(--color-surface);
+    overflow: visible;
+  }
+
+  .nav--tabbar ~ main {
+    padding-bottom: 5.5rem;
+  }
+
+  .nav--tabbar .nav__link {
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+    min-height: 2.75rem;
+    padding: var(--space-1) 0;
+    font-size: 0.625rem;
+    line-height: 1.1;
+    text-align: center;
+    white-space: normal;
+  }
+
+  .nav--tabbar .nav__link--current {
+    background: var(--color-bg);
+    box-shadow: none;
+  }
+
+  .nav--tabbar .nav__more {
+    display: inline-flex;
+  }
+
+  .nav--tabbar .inbox-link {
+    position: relative;
+  }
+
+  .nav--tabbar .inbox-link .badge {
+    position: absolute;
+    top: 0;
+    right: 12%;
+  }
+
+  .nav--tabbar .nav__sheet {
+    display: none;
+  }
+
+  .nav--tabbar.nav--more-open .nav__sheet {
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: calc(3.6rem + env(safe-area-inset-bottom));
+    gap: var(--space-1);
+    padding: var(--space-2);
+    border-top: 1px solid var(--color-border);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-card);
+  }
+
+  .nav--tabbar .nav__sheet .nav__link {
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
+  }
+
+  .nav--tabbar .nav__sheet .nav__separator {
+    align-self: auto;
+    width: auto;
+    height: 1px;
+    margin: var(--space-1) 0;
+  }
+}
+
 /* The wordmark is the home link and goes to the chosen start page. It is a
    link now, so the browser's default underline and link colour have to be
    turned off to keep the header looking as it did. */

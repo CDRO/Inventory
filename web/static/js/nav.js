@@ -24,6 +24,7 @@
 // which the user cannot see.
 
 import { el, text, clearChildren } from "./dom.js";
+import { icon } from "./icons.js";
 import { post } from "./api.js";
 import { withStorageParam } from "./session.js";
 import { renderInboxLink } from "./inbox-badge.js";
@@ -133,15 +134,20 @@ export function startPageFor(storages, storageId) {
 // docs/specs/35-stocktake-entry-points.md renders as a location chooser: the
 // tree in read-only mode plus a "Stalest first" shortlist, rather than a page
 // that needs a location and offers no way to pick one.
+//
+// `order` is the bar's order from docs/specs/34-navigation-and-start-page.md
+// and `primary` marks the entries a phone's tab bar shows directly; the rest
+// sit behind More there. Both are CSS hooks: on a wide screen every entry is
+// in the one row, in this order, as the spec lists them.
 const NAV_ITEMS = [
-  { key: "dashboard", path: "/dashboard.html", label: "nav.dashboard" },
-  { key: "inventory", path: "/inventory.html", label: "nav.inventory" },
-  { key: "products", path: "/products.html", label: "nav.products" },
-  { key: "locations", path: "/locations.html", label: "nav.locations" },
-  { key: "categories", path: "/categories.html", label: "nav.categories" },
-  { key: "shopping_list", path: "/shopping-list.html", label: "nav.shoppingList" },
-  { key: "stocktake", path: "/stocktake.html", label: "nav.stocktake" },
-  { key: "ingest", path: "/ingest.html", label: "nav.scan" },
+  { key: "dashboard", path: "/dashboard.html", label: "nav.dashboard", icon: "dashboard", order: 1, primary: true },
+  { key: "inventory", path: "/inventory.html", label: "nav.inventory", icon: "box", order: 2, primary: true },
+  { key: "products", path: "/products.html", label: "nav.products", icon: "tag", order: 3, primary: true },
+  { key: "locations", path: "/locations.html", label: "nav.locations", icon: "map-pin", order: 4 },
+  { key: "categories", path: "/categories.html", label: "nav.categories", icon: "folder", order: 5 },
+  { key: "shopping_list", path: "/shopping-list.html", label: "nav.shoppingList", icon: "cart", order: 6 },
+  { key: "stocktake", path: "/stocktake.html", label: "nav.stocktake", icon: "clipboard", order: 7 },
+  { key: "ingest", path: "/ingest.html", label: "nav.scan", icon: "camera", order: 8, primary: true },
 ];
 
 /**
@@ -172,31 +178,64 @@ export function renderNav(container, { storageId, current, startPage } = {}) {
 
   if (!container) return;
   clearChildren(container);
+  // PROTOTYPE SWITCH — removed once the owner has picked a layout.
+  const proto = globalThis.__navProto;
+  container.classList.toggle("nav--grid", proto === "A");
+  container.classList.toggle("nav--tabbar", proto === "B");
+
+  // The entries a phone's tab bar keeps behind More live in their own group.
+  // On a wide screen the group is `display: contents`, so every entry sits in
+  // the one row and `order` puts it where the spec lists it.
+  const sheet = el("div", { class: "nav__sheet", id: "nav-sheet" });
 
   let currentLink = null;
   for (const item of NAV_ITEMS) {
-    const link = navLink(item.label, withStorageParam(storageId, item.path), item.key === current);
+    const link = navLink(item, withStorageParam(storageId, item.path), item.key === current);
     if (item.key === current) currentLink = link;
-    container.append(link);
+    (item.primary ? container : sheet).append(link);
   }
 
   // The inbox entry is the existing badge component rather than a link built
   // here, so the waiting count keeps one implementation. The container keeps
   // the id the badge has always been rendered into, so a page or a test that
   // reaches for `#inbox-link` finds it in the bar rather than finding nothing.
-  const inbox = el("span", { id: "inbox-link", class: "nav__item" });
+  const inbox = el("span", { id: "inbox-link", class: "nav__item", style: "order: 9", "data-primary": "" });
   container.append(inbox);
   renderInboxLink(inbox, storageId, { current: current === "inbox" });
   if (current === "inbox") currentLink = inbox;
 
+  // More: the phone tab bar's way to the rest. Hidden on a wide screen.
+  const more = el(
+    "button",
+    {
+      type: "button",
+      class: "nav__link nav__link--button nav__more",
+      style: "order: 20",
+      "aria-expanded": "false",
+      "aria-controls": "nav-sheet",
+      onclick: () => {
+        const open = !container.classList.contains("nav--more-open");
+        container.classList.toggle("nav--more-open", open);
+        more.setAttribute("aria-expanded", String(open));
+      },
+    },
+    [icon("more"), el("span", { class: "nav__label" }, [text(t("nav.more"))])],
+  );
+  container.append(more);
+
   // Settings and Log out, visually separated by a rule rather than by being
   // pushed to the far end: inside a horizontally scrolling row there is no
   // "far end" to push them to.
-  container.append(el("span", { class: "nav__separator", "aria-hidden": "true" }));
-  const settings = navLink("common.settings", withStorageParam(storageId, "/settings.html"), current === "settings");
-  container.append(settings);
+  sheet.append(el("span", { class: "nav__separator", "aria-hidden": "true", style: "order: 10" }));
+  const settings = navLink(
+    { label: "common.settings", icon: "settings", order: 11 },
+    withStorageParam(storageId, "/settings.html"),
+    current === "settings",
+  );
+  sheet.append(settings);
   if (current === "settings") currentLink = settings;
-  container.append(logoutButton());
+  sheet.append(logoutButton());
+  container.append(sheet);
 
   container.hidden = false;
 
@@ -219,15 +258,17 @@ export function renderNav(container, { storageId, current, startPage } = {}) {
  * @param {boolean} isCurrent
  * @returns {HTMLElement}
  */
-function navLink(labelKey, href, isCurrent) {
+function navLink(item, href, isCurrent) {
   return el(
     "a",
     {
       class: isCurrent ? "nav__link nav__link--current" : "nav__link",
       href,
+      style: `order: ${item.order}`,
+      "data-primary": item.primary ? "" : null,
       "aria-current": isCurrent ? "page" : null,
     },
-    [text(t(labelKey))],
+    [icon(item.icon), el("span", { class: "nav__label" }, [text(t(item.label))])],
   );
 }
 
@@ -244,8 +285,8 @@ function navLink(labelKey, href, isCurrent) {
 function logoutButton() {
   return el(
     "button",
-    { type: "button", id: "logout", class: "nav__link nav__link--button", onclick: handleLogout },
-    [text(t("common.logout"))],
+    { type: "button", id: "logout", class: "nav__link nav__link--button", style: "order: 12", onclick: handleLogout },
+    [icon("logout"), el("span", { class: "nav__label" }, [text(t("common.logout"))])],
   );
 }
 
