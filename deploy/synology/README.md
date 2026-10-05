@@ -437,9 +437,31 @@ release: https://github.com/CDRO/Inventory/actions/runs/1234567890
 `-m "<message>"` writes your own tag annotation instead of the default
 `Release <tag>`.
 
+### 1b. Or cut it on GitHub
+
+Without a clone to hand — a phone, or a session whose git access stops at
+branches — the same tag is cut by the pipeline itself: **Actions → release →
+Run workflow**, on `main`. Leave `tag` empty for today's date (the next free
+`.n` when the day already has a release), tick `classic` only when a forced
+classic deploy is wanted. A `cut` job runs first and makes the same refusals
+as the command above, against GitHub's view instead of the clone's:
+
+| It stops with | Because |
+|---|---|
+| `a release is cut from main` | The workflow was dispatched on a branch. |
+| `'…' is not a release tag name` | A `tag` input the gate would refuse anyway. |
+| `tag … already exists` | Releases are not re-pointed. |
+| `no successful test.yml run for …, and none in progress` | Nothing green for `main`'s head and nothing running — start `test`/`e2e` on `main` from the Actions tab, then dispatch again. |
+| `… still in progress after 720 seconds` | `main`'s own runs took longer than the wait. Dispatch again when they are green. |
+
+The job summary names the tag it cut, and the rest of the run is the run
+below: the tag is created with the run's own token, which starts no second
+`release` run, so this one deploys it.
+
 ### 2. Watch the run
 
-Open that URL, or `gh run watch <id> --exit-status`. Four jobs:
+Open that URL, or `gh run watch <id> --exit-status`. Four jobs (five from the
+Actions tab, where `cut` comes first):
 
 - **`gate`** — a hosted runner, under a minute. It resolves the tag to its
   commit and looks for a successful `test` and `e2e` run **for that exact

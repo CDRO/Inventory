@@ -133,7 +133,8 @@ change at all — it is still restoring that archive, because migrations stay
 forward-only — only who has to remember to take it. Spec 38 is the contract for
 that pipeline and names the packages that deliver it, and they have landed: on
 that NAS, an ordinary upgrade is now `scripts/dev release <tag>` typed on the
-operator's machine (`deploy/synology/README.md`, "A release, start to finish").
+operator's machine, or the `release` workflow's "Run workflow" button on `main`
+(`deploy/synology/README.md`, "A release, start to finish").
 The four steps above remain the procedure wherever that pipeline is not — any
 deployment other than this NAS, and this NAS itself when the runner is down
 (`deploy/synology/README.md`, "Deploying by hand", which is the same script with
