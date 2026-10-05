@@ -178,21 +178,16 @@ export function renderNav(container, { storageId, current, startPage } = {}) {
 
   if (!container) return;
   clearChildren(container);
-  // PROTOTYPE SWITCH — removed once the owner has picked a layout.
-  const proto = globalThis.__navProto;
-  container.classList.toggle("nav--grid", proto === "A");
-  container.classList.toggle("nav--tabbar", proto === "B");
+  setMoreOpen(container, null, false);
 
-  // The entries a phone's tab bar keeps behind More live in their own group.
-  // On a wide screen the group is `display: contents`, so every entry sits in
-  // the one row and `order` puts it where the spec lists it.
+  // The entries a phone's tab bar keeps behind More live in their own group,
+  // which becomes the sheet above the bar when More is open. On a wide screen
+  // the group is `display: contents`, so every entry sits in the one row and
+  // `order` puts it where the spec lists it (docs/specs/34-navigation-and-start-page.md).
   const sheet = el("div", { class: "nav__sheet", id: "nav-sheet" });
 
-  let currentLink = null;
   for (const item of NAV_ITEMS) {
-    const link = navLink(item, withStorageParam(storageId, item.path), item.key === current);
-    if (item.key === current) currentLink = link;
-    (item.primary ? container : sheet).append(link);
+    (item.primary ? container : sheet).append(navLink(item, withStorageParam(storageId, item.path), item.key === current));
   }
 
   // The inbox entry is the existing badge component rather than a link built
@@ -202,9 +197,10 @@ export function renderNav(container, { storageId, current, startPage } = {}) {
   const inbox = el("span", { id: "inbox-link", class: "nav__item", style: "order: 9", "data-primary": "" });
   container.append(inbox);
   renderInboxLink(inbox, storageId, { current: current === "inbox" });
-  if (current === "inbox") currentLink = inbox;
 
-  // More: the phone tab bar's way to the rest. Hidden on a wide screen.
+  // More: the phone tab bar's way to the rest. Hidden on a wide screen, where
+  // the rest is already in the row. Escape and a tap anywhere outside the bar
+  // close the sheet again; a navigation closes it by leaving the page.
   const more = el(
     "button",
     {
@@ -213,39 +209,50 @@ export function renderNav(container, { storageId, current, startPage } = {}) {
       style: "order: 20",
       "aria-expanded": "false",
       "aria-controls": "nav-sheet",
-      onclick: () => {
-        const open = !container.classList.contains("nav--more-open");
-        container.classList.toggle("nav--more-open", open);
-        more.setAttribute("aria-expanded", String(open));
-      },
+      onclick: () => setMoreOpen(container, more, !container.classList.contains("nav--more-open")),
     },
     [icon("more"), el("span", { class: "nav__label" }, [text(t("nav.more"))])],
   );
   container.append(more);
+  container.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && container.classList.contains("nav--more-open")) {
+      setMoreOpen(container, more, false);
+      more.focus();
+    }
+  });
+  if (closeOnOutsideTap) document.removeEventListener("click", closeOnOutsideTap);
+  closeOnOutsideTap = (event) => {
+    if (!container.contains(event.target)) setMoreOpen(container, more, false);
+  };
+  document.addEventListener("click", closeOnOutsideTap);
 
-  // Settings and Log out, visually separated by a rule rather than by being
-  // pushed to the far end: inside a horizontally scrolling row there is no
-  // "far end" to push them to.
+  // Settings and Log out, visually separated by a rule: the last group of the
+  // row on a wide screen, the last group of the sheet on a phone.
   sheet.append(el("span", { class: "nav__separator", "aria-hidden": "true", style: "order: 10" }));
-  const settings = navLink(
-    { label: "common.settings", icon: "settings", order: 11 },
-    withStorageParam(storageId, "/settings.html"),
-    current === "settings",
+  sheet.append(
+    navLink({ label: "common.settings", icon: "settings", order: 11 }, withStorageParam(storageId, "/settings.html"), current === "settings"),
   );
-  sheet.append(settings);
-  if (current === "settings") currentLink = settings;
   sheet.append(logoutButton());
   container.append(sheet);
 
   container.hidden = false;
+}
 
-  // On a phone the bar scrolls sideways, so the entry for the page the user
-  // is on can start off-screen. `inline: "nearest"` scrolls the bar and not
-  // the page; omitting `block` would let the browser scroll the document
-  // vertically to reach it, which on load reads as the page jumping.
-  if (currentLink?.scrollIntoView) {
-    currentLink.scrollIntoView({ inline: "nearest", block: "nearest" });
-  }
+// closeOnOutsideTap is the document-level listener of the bar rendered last,
+// so a page that renders its bar again never stacks a second one.
+let closeOnOutsideTap = null;
+
+/**
+ * setMoreOpen shows or hides the sheet behind More. The class is for the eye
+ * and `aria-expanded` is for everything else; they never disagree.
+ *
+ * @param {Element} container - the bar
+ * @param {HTMLButtonElement|null} more - the More button, when it exists yet
+ * @param {boolean} open
+ */
+function setMoreOpen(container, more, open) {
+  container.classList.toggle("nav--more-open", open);
+  if (more) more.setAttribute("aria-expanded", String(open));
 }
 
 /**

@@ -192,30 +192,61 @@ for (const file of WIDE_PAGES) {
   });
 }
 
-// At phone width the bar scrolls sideways and the page body does not. A bar
-// that simply overflowed would look the same in a screenshot and make every
-// page horizontally scrollable, which is the failure this pins.
+// docs/specs/34-navigation-and-start-page.md, "On a phone": below 48rem the
+// bar is a tab bar fixed to the bottom of the screen with five destinations
+// and More, which holds the rest. A bar that merely overflowed would look the
+// same in a screenshot and make every page horizontally scrollable, which is
+// the failure this pins alongside the layout itself.
 test.describe("on a 375px phone", () => {
   test.use({ viewport: { width: 375, height: 720 } });
 
-  test("the bar scrolls sideways and the page body does not", async ({ page }) => {
+  test("the bar is a tab bar at the bottom, More holds the rest, and the page body does not scroll sideways", async ({
+    page,
+  }) => {
     await logIn(page, "e2e-start-multi");
     // logIn submits the form without awaiting the navigation it causes, so
     // the picker is what says the session exists. Navigating before it has
     // appeared would race the login and land on the login page instead.
     await expect(page.locator("#main")).toContainText("Choose a storage");
     await page.goto(`/locations.html?storage=${START_TWO}`);
-    await expect(page.locator("#nav")).toBeVisible();
+    const nav = page.locator("#nav");
+    await expect(nav).toBeVisible();
 
-    const bar = await page.locator("#nav").evaluate((el) => ({
-      scrollWidth: el.scrollWidth,
-      clientWidth: el.clientWidth,
-      overflowX: getComputedStyle(el).overflowX,
-    }));
-    expect(bar.overflowX).toBe("auto");
-    expect(bar.scrollWidth, "the bar has more entries than fit, so it must scroll").toBeGreaterThan(
-      bar.clientWidth,
-    );
+    // Fixed to the bottom edge of the viewport, and nothing in it cut off.
+    const bar = await nav.evaluate((el) => {
+      const rect = el.getBoundingClientRect();
+      return {
+        position: getComputedStyle(el).position,
+        bottom: Math.round(rect.bottom),
+        viewport: window.innerHeight,
+        scrollWidth: el.scrollWidth,
+        clientWidth: el.clientWidth,
+      };
+    });
+    expect(bar.position).toBe("fixed");
+    expect(bar.bottom).toBe(bar.viewport);
+    expect(bar.scrollWidth, "the bar must not scroll sideways").toBeLessThanOrEqual(bar.clientWidth);
+
+    for (const name of ["Dashboard", "Inventory", "Products", "Scan", "Inbox"]) {
+      await expect(nav.getByRole("link", { name })).toBeVisible();
+    }
+    const more = nav.getByRole("button", { name: "More" });
+    await expect(more).toBeVisible();
+    await expect(more).toHaveAttribute("aria-expanded", "false");
+
+    // The rest is one tap behind More, not a scroll away — including the
+    // current page's own entry, which is why it is Locations this opens on.
+    const categories = nav.getByRole("link", { name: "Categories" });
+    await expect(categories).toBeHidden();
+    await more.click();
+    await expect(more).toHaveAttribute("aria-expanded", "true");
+    await expect(categories).toBeVisible();
+    await expect(nav.getByRole("link", { name: "Locations" })).toHaveAttribute("aria-current", "page");
+    await expect(nav.getByRole("link", { name: "Shopping list" })).toBeVisible();
+    await expect(nav.locator("#logout")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(more).toHaveAttribute("aria-expanded", "false");
+    await expect(categories).toBeHidden();
 
     const body = await page.evaluate(() => ({
       scrollWidth: document.documentElement.scrollWidth,

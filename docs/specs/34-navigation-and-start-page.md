@@ -174,11 +174,24 @@ is the same rule `05` applies to the review component and the tree.
 - **No admin link, ever.** This is `03`'s rule, and `29` already routes an
   admin without a storage to the admin view on the server. `js/nav.js`
   receives nothing that would let it know who is an admin.
-- **On a phone** the bar is a single row that scrolls horizontally, with
-  the current item scrolled into view on load. It is not a hamburger menu:
-  every destination stays one tap away and visible, which suits the
-  one-handed use `05` requires. From the `36rem` breakpoint upwards it
-  wraps normally.
+- **On a phone — below `48rem` — the bar is a tab bar fixed to the bottom
+  of the screen**, in thumb reach, with five destinations shown directly:
+  **Dashboard**, **Inventory**, **Products**, **Scan** and **Inbox** with
+  its badge, plus **More**, which lifts the remaining entries — Locations,
+  Categories, Shopping list, Stocktake, then Settings and Log out behind
+  the rule — into a sheet above the bar. Escape, a tap outside the bar or
+  a navigation closes the sheet; `aria-expanded` on More says which state
+  it is in. Every entry carries an icon (`js/icons.js`), above its label
+  on the phone and beside it on a wide screen. The page's main content
+  keeps the bar's height free below it, so nothing ends up underneath.
+  *Amended 2026-10-05 by the owner.* The bar used to be a single
+  horizontally scrolling row with every destination visible, on the
+  argument that no destination should be more than one tap away. At eleven
+  entries it showed four of them at 375 px and needed more scrolling than
+  that saved, so the owner chose a tab bar: the five direct entries cover
+  the daily flows, and the rest are one tap behind More rather than a
+  scroll away. From `48rem` upwards the bar is the one wrapping row below
+  the header, in the order above, with nothing behind More.
 - Every page's existing header "Back" link that pointed to
   `/storages.html` is removed, because the bar replaces it. Contextual back
   links that point somewhere specific stay. Examples are review and
@@ -213,8 +226,10 @@ lead to empty states would imply storages exist that the user cannot see
   `storages.html`.
 - Every storage-scoped page renders the navigation bar with its own entry
   marked `aria-current="page"`. No page's JavaScript contains `/admin`.
-- At a width of 375 px the bar scrolls horizontally, and the page body does
-  not.
+- At a width of 375 px the bar is fixed to the bottom of the viewport and
+  shows Dashboard, Inventory, Products, Scan, Inbox and More; Categories
+  and the other remaining entries are reachable only once More is opened,
+  and Escape closes it again; the page body does not scroll sideways.
 - E2E fixture: `start_page` is durable, so these journeys **must not change
   it for a user that other spec files log in as** (`e2e-alice`, `e2e-bob`).
   `seed.sql` gains dedicated users:

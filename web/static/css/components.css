@@ -785,39 +785,26 @@ th[aria-sort="descending"] .sort-button::after {
 
 /* --- Navigation bar (docs/specs/34-navigation-and-start-page.md) --- */
 
-/* One row on a phone, scrolling sideways; wrapping normally from 36rem up.
-   Deliberately not a hamburger menu: every destination stays one tap away
-   and visible, which is what one-handed use on a phone needs
-   (docs/specs/05-frontend-pwa-foundations.md).
-
-   `overflow-x: auto` is on the bar and nothing else, so the bar is what
-   scrolls and the page body is not — at 375px the document must not move
-   sideways at all. The `.shell` ancestor caps the width; `min-width: 0`
-   stops a flex parent letting this grow to its content instead of
-   scrolling. */
+/* A wrapping row below the header from 48rem up; a tab bar fixed to the
+   bottom of the screen below that (the media block further down). The
+   phone layout changed on 2026-10-05: the single horizontally scrolling row
+   showed four of eleven entries at 375px, and the owner asked for the five
+   daily destinations in thumb reach with the rest one tap behind More
+   (docs/specs/34-navigation-and-start-page.md). The `.shell` ancestor caps
+   the width; `min-width: 0` stops a flex parent letting this grow to its
+   content. */
 .nav {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-1);
   min-width: 0;
-  overflow-x: auto;
-  overflow-y: hidden;
   padding-top: 0;
   padding-bottom: var(--space-3);
   border-bottom: 1px solid var(--color-border);
-  scrollbar-width: thin;
 }
 
-@media (min-width: 36rem) {
-  .nav {
-    flex-wrap: wrap;
-    overflow-x: visible;
-  }
-}
-
-/* Entries never wrap mid-label: a half-word is unreadable, and a bar that is
-   one row exactly is what the horizontal scroll above assumes. */
+/* Entries never wrap mid-label in the row: a half-word is unreadable. */
 .nav__link,
 .nav__item {
   flex: none;
@@ -884,38 +871,12 @@ th[aria-sort="descending"] .sort-button::after {
 }
 
 @media (max-width: 47.9375rem) {
-  /* Variant A — a wrapping grid of icon tiles: nothing scrolls, every
-     destination visible, at the price of two or three rows of header. */
-  .nav--grid {
-    flex-wrap: wrap;
-    overflow-x: visible;
-    gap: var(--space-1) 0;
-  }
-
-  .nav--grid .nav__link {
-    flex-direction: column;
-    gap: 2px;
-    width: 4.2rem;
-    padding: var(--space-1) 0;
-    font-size: 0.6875rem;
-    line-height: 1.1;
-    text-align: center;
-    white-space: normal;
-  }
-
-  .nav--grid .nav__separator {
-    display: none;
-  }
-
-  .nav--grid .btn__icon {
-    width: 1.375rem;
-    height: 1.375rem;
-  }
-
-  /* Variant B — a tab bar fixed to the bottom of the screen, in thumb reach:
-     the five main destinations and More, which lifts the rest into a sheet
-     above the bar. */
-  .nav--tabbar {
+  /* The phone layout: a tab bar fixed to the bottom of the screen, in thumb
+     reach, with the five main destinations and More, which lifts the rest
+     into a sheet above the bar. `.shell`'s width cap and margins are undone
+     so the bar spans the screen edge to edge, and the main content gets the
+     bar's height as bottom padding so nothing ends up underneath it. */
+  .nav {
     position: fixed;
     left: 0;
     right: 0;
@@ -934,11 +895,11 @@ th[aria-sort="descending"] .sort-button::after {
     overflow: visible;
   }
 
-  .nav--tabbar ~ main {
+  .nav ~ main {
     padding-bottom: 5.5rem;
   }
 
-  .nav--tabbar .nav__link {
+  .nav .nav__link {
     flex-direction: column;
     justify-content: center;
     gap: 2px;
@@ -950,30 +911,30 @@ th[aria-sort="descending"] .sort-button::after {
     white-space: normal;
   }
 
-  .nav--tabbar .nav__link--current {
+  .nav .nav__link--current {
     background: var(--color-bg);
     box-shadow: none;
   }
 
-  .nav--tabbar .nav__more {
+  .nav .nav__more {
     display: inline-flex;
   }
 
-  .nav--tabbar .inbox-link {
+  .nav .inbox-link {
     position: relative;
   }
 
-  .nav--tabbar .inbox-link .badge {
+  .nav .inbox-link .badge {
     position: absolute;
     top: 0;
     right: 12%;
   }
 
-  .nav--tabbar .nav__sheet {
+  .nav .nav__sheet {
     display: none;
   }
 
-  .nav--tabbar.nav--more-open .nav__sheet {
+  .nav.nav--more-open .nav__sheet {
     display: flex;
     flex-direction: column;
     position: fixed;
@@ -987,7 +948,7 @@ th[aria-sort="descending"] .sort-button::after {
     box-shadow: var(--shadow-card);
   }
 
-  .nav--tabbar .nav__sheet .nav__link {
+  .nav .nav__sheet .nav__link {
     flex-direction: row;
     justify-content: flex-start;
     gap: var(--space-2);
@@ -995,7 +956,7 @@ th[aria-sort="descending"] .sort-button::after {
     font-size: var(--text-sm);
   }
 
-  .nav--tabbar .nav__sheet .nav__separator {
+  .nav .nav__sheet .nav__separator {
     align-self: auto;
     width: auto;
     height: 1px;
