@@ -11,13 +11,32 @@
 # gives a tag pushed by hand no benefit of the doubt and checks the same things
 # again.
 #
-# Four jobs, not the two spec 38's sketch shows, for one mechanical reason: a
+# Since 2026-10-05 the tag can also be cut HERE: a `workflow_dispatch` on `main`
+# runs the `cut` job first, which performs scripts/dev release's own refusals
+# on GitHub — main only, a name of the release shape that does not exist yet,
+# a green `test` and `e2e` run for exactly that commit — and then creates the
+# annotated tag through the git database. It exists because an operator
+# without a clone to hand still needs a release to be one action. A tag made
+# with the run's own GITHUB_TOKEN starts no workflow of its own (GitHub does
+# not run workflows for pushes made with that token), so the run that cut the
+# tag is the run that deploys it, and restore.yml's `v*` trigger does not fire
+# for such a tag either — its own schedule covers that. `github.actor` on a
+# dispatched run is the person who dispatched it, which is exactly what the
+# actor guard below asks about.
+#
+# Five jobs, not the two spec 38's sketch shows, for one mechanical reason: a
 # reusable workflow is called from a `uses:` at JOB level, never from a step, so
 # "run `test` and `e2e` when the tag's commit has no green run of them" cannot
-# live inside `gate`. It is `gate` (decide) plus `test`/`e2e` (conditional
-# reusable calls) plus `deploy` (needs all three). The gate's own decision is
-# still one job and still costs one billed minute.
+# live inside `gate`. It is `cut` (dispatch only) plus `gate` (decide) plus
+# `test`/`e2e` (conditional reusable calls) plus `deploy` (needs the last
+# three). The gate's own decision is still one job and still costs one billed
+# minute.
 #
+#   cut     hosted, billed, `workflow_dispatch` only; skipped on a tag push.
+#           Names the tag (the input, or today's date with the next free `.n`),
+#           refuses everything scripts/dev release refuses, waits for a `test`
+#           and `e2e` run of main's head that is still running, and creates
+#           the annotated tag. The only job with `contents: write`.
 #   gate    hosted, billed. Resolves the tag to its COMMIT sha, reads the
 #           annotated tag's message for the `deploy: classic` override, and
 #           looks for a successful `test` and `e2e` run FOR THAT EXACT SHA.
@@ -47,9 +66,10 @@
 # Security posture (spec 38, and worth grepping in review): this is the only
 # workflow in the repository that names a self-hosted runner —
 # scripts/release_workflow_test.go fails the suite if that stops being true.
-# The trigger is a tag push only, which a fork cannot do to this repository, and
-# both jobs check `github.repository` and `github.actor` so a workflow file
-# carried into a fork never acts on the NAS. The residual risk is named in the
+# The triggers are a tag push and a dispatch of this workflow itself, neither
+# of which a fork can do to this repository, and every job checks
+# `github.repository` and `github.actor` so a workflow file carried into a fork
+# never acts on the NAS. The residual risk is named in the
 # spec and in deploy/synology/runner/README.md: the runner holds the Docker
 # socket, and a process that can talk to that socket is root on the NAS.
 name: release
@@ -68,6 +88,27 @@ on:
     # The `gate` job rejects those as its first action, before it resolves
     # anything.
     tags: ["v[0-9]*"]
+  # The other way for the tag to come into being: see `cut` below. Dispatched
+  # on `main` and nowhere else — the job refuses any other ref as its first
+  # action, the way the gate refuses a name that is not a release.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          Release tag, vYYYY.MM.DD or vYYYY.MM.DD.n. Empty: today's date
+          (Europe/Zurich), with the next free .n when that day already has a
+          release.
+        required: false
+        default: ""
+      classic:
+        description: >-
+          Force the classic deploy (stop, migrate, start) by writing the line
+          `deploy: classic` into the tag message. The override is one-way;
+          leave it off unless the pending migrations should have carried the
+          marker and do not.
+        type: boolean
+        required: false
+        default: false
 
 # `actions: read` is what the gate's run lookup needs
 # (GET /repos/{owner}/{repo}/actions/workflows/{file}/runs); `contents: read` is
@@ -77,6 +118,12 @@ on:
 #
 # A called workflow cannot exceed its caller's grant: `test.yml` and `e2e.yml`
 # each declare `permissions: contents: read`, a subset of this.
+#
+# `cut` is the one exception, and it raises `contents` to `write` for itself
+# alone (a job-level block): creating a ref is a write to the git database.
+# Nothing else in this file may carry that scope — spec 38's going-private
+# checklist, "any write scope granted per job", and
+# scripts/release_workflow_test.go holds it to that.
 permissions:
   contents: read
   actions: read
@@ -85,16 +132,169 @@ env:
   GH_TOKEN: ${{ github.token }}
 
 jobs:
+  # The tag, when this run was asked to make it. scripts/dev.d/release's checks,
+  # in its order, against GitHub's view instead of a clone's: there is no
+  # checkout here either, so "a clean, fetched main" becomes "dispatched on
+  # main", and `git rev-parse` becomes the git database API. Everything it
+  # refuses, it refuses before the tag exists.
+  cut:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'CDRO/Inventory' && github.actor == 'CDRO'
+    runs-on: ubuntu-latest
+    # Long enough to wait for an e2e run of main's head that is still going
+    # when the release is dispatched right after a merge; the script's own
+    # deadline is shorter.
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      tag: ${{ steps.cut.outputs.tag }}
+    steps:
+      - name: Cut the release tag on main's green head
+        id: cut
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_CLASSIC: ${{ inputs.classic }}
+          # The operator's clock, which is the clock scripts/dev release's
+          # operator types the date from: a release cut at 00:30 on the 6th is
+          # the 6th's.
+          RELEASE_TZ: Europe/Zurich
+          # How long to wait for a `test` or `e2e` run of this commit that is
+          # still in progress: POLL_ATTEMPTS polls, POLL_SECONDS apart. Twelve
+          # minutes covers an e2e run that started at the merge.
+          POLL_ATTEMPTS: "36"
+          POLL_SECONDS: "20"
+        run: |
+          set -eu
+          die() { echo "::error::$*"; exit 1; }
+          api="repos/$GITHUB_REPOSITORY"
+
+          # --- 1. main only ---------------------------------------------------
+          # A release tags what was reviewed and merged; a dispatch on a branch
+          # is refused the way scripts/dev release refuses a HEAD off main.
+          [ "$GITHUB_REF" = refs/heads/main ] \
+            || die "a release is cut from main; this run was dispatched on $GITHUB_REF_NAME. Nothing was tagged."
+          SHA="$GITHUB_SHA"
+
+          # --- 2. The name ----------------------------------------------------
+          # Given, or today's date with the next free counter: `vYYYY.MM.DD`
+          # when the day has no release yet, else the smallest `.n` from 1 that
+          # is not taken — the same rule scripts/wellen-orchestrator.ps1's
+          # Get-NextReleaseTagName applies. `matching-refs` is a prefix match,
+          # so the exact names are picked out of it line by line.
+          TAG="$INPUT_TAG"
+          if [ -z "$TAG" ]; then
+            base="v$(TZ="$RELEASE_TZ" date +%Y.%m.%d)"
+            existing=$(gh api --paginate "$api/git/matching-refs/tags/$base" --jq '.[].ref' | sed 's#^refs/tags/##')
+            TAG="$base"
+            if printf '%s\n' "$existing" | grep -qx "$base"; then
+              n=1
+              while printf '%s\n' "$existing" | grep -qx "$base.$n"; do
+                n=$((n + 1))
+              done
+              TAG="$base.$n"
+            fi
+          fi
+
+          # The shape check, the same construction as the gate's and as
+          # scripts/dev.d/release's, counter digit test included — a given name
+          # that the gate would refuse is refused here, before it exists.
+          ok=1
+          case "$TAG" in
+            v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]) ;;
+            v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].*)
+              n=${TAG#v[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].}
+              case "$n" in
+                ''|*[!0-9]*) ok=0 ;;
+              esac ;;
+            *) ok=0 ;;
+          esac
+          [ "$ok" -eq 1 ] \
+            || die "'$TAG' is not a release tag name - it is vYYYY.MM.DD, or vYYYY.MM.DD.n for the n-th release of one day. Nothing was tagged."
+
+          # --- 3. Not already there -------------------------------------------
+          # Releases are not re-pointed. The ref creation below would refuse a
+          # duplicate on its own (422); this is the refusal with the reason.
+          if gh api "$api/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            die "tag $TAG already exists. Releases are not re-pointed; the next one today is the next free .n (leave the tag input empty to get it)."
+          fi
+
+          # --- 4. Green test and e2e runs for exactly this commit -------------
+          # The gate's own lookup (by `head_sha`, `.conclusion == "success"`),
+          # with one addition: a run that is still going — the push to main
+          # that this release follows started one minutes ago — is waited for,
+          # up to the deadline above. No run at all, or a red one and no green
+          # one, is a refusal: only a green commit may be tagged, and this job
+          # fails before the tag exists rather than after.
+          runs() {
+            gh api "$api/actions/workflows/$1/runs?head_sha=$SHA&per_page=100" --jq "$2"
+          }
+          for wf in test e2e; do
+            i=0
+            while :; do
+              green=$(runs "$wf.yml" '[.workflow_runs[] | select(.conclusion == "success")] | length')
+              [ "${green:-0}" -gt 0 ] && break
+              pending=$(runs "$wf.yml" '[.workflow_runs[] | select(.status != "completed")] | length')
+              if [ "${pending:-0}" -eq 0 ]; then
+                die "no successful $wf.yml run for $SHA, and none in progress. Only a green commit may be tagged: run the $wf workflow on main (Actions, 'Run workflow'), and dispatch this release again when it is green."
+              fi
+              i=$((i + 1))
+              [ "$i" -lt "$POLL_ATTEMPTS" ] \
+                || die "the $wf.yml run for $SHA is still in progress after $((POLL_ATTEMPTS * POLL_SECONDS)) seconds. Nothing was tagged; dispatch this release again when it is green."
+              echo "$wf.yml: $pending run(s) for $SHA still in progress - waiting ($i/$POLL_ATTEMPTS)"
+              sleep "$POLL_SECONDS"
+            done
+            echo "$wf.yml: $green successful run(s) for $SHA"
+          done
+
+          # --- The tag --------------------------------------------------------
+          # Annotated: a tag OBJECT first, then the ref that names it, which is
+          # what `git tag -a` followed by `git push` produces. The keyword is a
+          # LINE of its own in the message, which is how the gate reads it
+          # (decision D3).
+          message="Release $TAG"
+          if [ "$INPUT_CLASSIC" = true ]; then
+            message="$message
+
+          deploy: classic"
+          fi
+          tagsha=$(gh api "$api/git/tags" \
+            -f tag="$TAG" -f message="$message" -f object="$SHA" -f type=commit \
+            -f 'tagger[name]=github-actions[bot]' \
+            -f 'tagger[email]=41898282+github-actions[bot]@users.noreply.github.com' \
+            -f "tagger[date]=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --jq .sha)
+          gh api "$api/git/refs" -f ref="refs/tags/$TAG" -f sha="$tagsha" --jq .ref
+
+          echo "cut $TAG -> $SHA (tag object $tagsha)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          {
+            printf '## Cut `%s`\n\n' "$TAG"
+            printf '| | |\n|---|---|\n'
+            printf '| commit | `%s` |\n' "$SHA"
+            printf '| message | `%s` |\n\n' "$(printf '%s' "$message" | tr '\n' ' ')"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Everything this workflow decides, decided once, on a hosted runner, before
   # anything reaches the NAS.
   gate:
     # Spec 38, "Security posture": checked here as well as on `deploy`, so that
     # a fork's copy of this file does not even spend a minute looking things up.
     # The one that matters is the one on `deploy`.
-    if: github.repository == 'CDRO/Inventory' && github.actor == 'CDRO'
+    #
+    # `needs: cut` with `cut` skipped is the tag-push path; `cut` failed is a
+    # release that was refused before its tag existed, and the gate has nothing
+    # to resolve.
+    needs: cut
+    if: >-
+      !cancelled()
+      && (needs.cut.result == 'success' || needs.cut.result == 'skipped')
+      && github.repository == 'CDRO/Inventory'
+      && github.actor == 'CDRO'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      tag: ${{ steps.tag.outputs.tag }}
       sha: ${{ steps.tag.outputs.sha }}
       deploy_mode: ${{ steps.tag.outputs.deploy_mode }}
       need_test: ${{ steps.runs.outputs.need_test }}
@@ -113,9 +313,15 @@ jobs:
       # commit it points at.
       - name: Resolve the tag, and read its message for the classic override
         id: tag
+        env:
+          # The tag this run is about: the one `cut` just made, or the one
+          # whose push started the run. On a dispatch `github.ref_name` is
+          # `main`, which the shape check below would refuse — so this is the
+          # one place the two paths are told apart.
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && needs.cut.outputs.tag || github.ref_name }}
         run: |
           set -eu
-          TAG="$GITHUB_REF_NAME"
+          TAG="$RELEASE_TAG"
 
           # The shape check the `tags:` glob cannot express, and the first thing
           # this job does: nothing is resolved, looked up or deployed until the
@@ -172,6 +378,7 @@ jobs:
 
           echo "tag=$TAG  object=$type  commit=$sha  deploy_mode=${mode:-<from the pending migrations>}"
           {
+            echo "tag=$TAG"
             echo "sha=$sha"
             echo "deploy_mode=$mode"
           } >> "$GITHUB_OUTPUT"
@@ -202,6 +409,7 @@ jobs:
 
       - name: Gate summary
         env:
+          TAG: ${{ steps.tag.outputs.tag }}
           SHA: ${{ steps.tag.outputs.sha }}
           MODE: ${{ steps.tag.outputs.deploy_mode }}
           NEED_TEST: ${{ steps.runs.outputs.need_test }}
@@ -216,7 +424,7 @@ jobs:
             fi
           }
           {
-            printf '## Release `%s`\n\n' "$GITHUB_REF_NAME"
+            printf '## Release `%s`\n\n' "$TAG"
             printf '| | |\n|---|---|\n'
             printf '| commit | `%s` |\n' "$SHA"
             printf '| test | %s |\n' "$(how "$NEED_TEST")"
@@ -230,8 +438,10 @@ jobs:
   # `skipped`, which `deploy`'s own `if` accepts beside `success` and nothing
   # else.
   #
-  # Both run on the CALLER's ref, which on this trigger is the tag — so what
-  # they test is exactly what is about to be deployed.
+  # Both run on the CALLER's ref: the tag on a tag push, `main` at the commit
+  # `cut` just tagged on a dispatch (`github.sha` is that commit either way) —
+  # so what they test is exactly what is about to be deployed. On the dispatch
+  # path `cut` has already insisted on green runs, so both are normally skipped.
   test:
     needs: gate
     if: needs.gate.outputs.need_test == 'true'
@@ -274,6 +484,11 @@ jobs:
       group: nas-deploy
       cancel-in-progress: false
     timeout-minutes: 30
+    env:
+      # The release being deployed, from the gate: `github.ref_name` is the
+      # tag on a tag push but `main` on a dispatch, and both steps below name
+      # the tag — the one to deploy, and the one /healthz has to report.
+      TAG: ${{ needs.gate.outputs.tag }}
     steps:
       # NO actions/checkout. The clone at /volume1/docker/inventory is the only
       # tree whose bind mounts resolve to the real data
@@ -285,7 +500,7 @@ jobs:
       #
       # This job reads the script's exit code and its last line, and nothing
       # else — never a grep of the log for success.
-      - name: Deploy ${{ github.ref_name }} onto the NAS
+      - name: Deploy ${{ needs.gate.outputs.tag }} onto the NAS
         env:
           # The standalone Compose the NAS and the runner image both carry; the
           # script's own default, passed explicitly so the log says which binary
@@ -299,7 +514,6 @@ jobs:
         run: |
           set -euo pipefail
           CLONE="${INVENTORY_CLONE:-/volume1/docker/inventory}"
-          TAG="$GITHUB_REF_NAME"
           log="$RUNNER_TEMP/update.log"
 
           rc=0
@@ -327,7 +541,7 @@ jobs:
       # health wait does it: an Alpine image with wget, on the compose network,
       # so it works where container addresses are not routable from the host and
       # needs no extra image.
-      - name: Assert /healthz reports ${{ github.ref_name }}
+      - name: Assert /healthz reports ${{ needs.gate.outputs.tag }}
         run: |
           set -euo pipefail
           CLONE="${INVENTORY_CLONE:-/volume1/docker/inventory}"
@@ -360,8 +574,8 @@ jobs:
           printf '### `GET /healthz`\n\n```json\n%s\n```\n' "$health" >> "$GITHUB_STEP_SUMMARY"
 
           version=$(printf '%s' "$health" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-          if [ "$version" != "$GITHUB_REF_NAME" ]; then
-            echo "release: /healthz reports version=\"$version\", not \"$GITHUB_REF_NAME\" - the stack is up, but not on this release" >&2
+          if [ "$version" != "$TAG" ]; then
+            echo "release: /healthz reports version=\"$version\", not \"$TAG\" - the stack is up, but not on this release" >&2
             exit 1
           fi
           echo "release: /healthz reports version=$version"

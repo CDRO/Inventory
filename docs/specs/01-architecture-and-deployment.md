@@ -947,7 +947,8 @@ from the tag and takes the pre-upgrade backup itself.
 [`38-release-pipeline-and-nas-runner.md`](38-release-pipeline-and-nas-runner.md)
 is the contract for that pipeline and names the packages that built it, and they
 have all landed: on that NAS an ordinary release is now `scripts/dev release <tag>`
-typed on the operator's machine
+typed on the operator's machine, or the `release` workflow's "Run workflow"
+button on `main`
 ([`deploy/synology/README.md`](../../deploy/synology/README.md), "A release,
 start to finish"). The manual procedure described here and in
 [`18-operations-and-observability.md`](18-operations-and-observability.md) stays

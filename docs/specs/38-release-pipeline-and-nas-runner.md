@@ -91,6 +91,12 @@ own rules, not by the deployment), and the question actually asked of a NAS is
   `scripts/dev release <tag>` refuses to create the tag otherwise, and the
   pipeline's `gate` job checks it again on GitHub — a tag pushed by hand gets no
   benefit of the doubt.
+- **Two ways to cut it, one rule.** `scripts/dev release <tag>` on the
+  operator's machine, or — owner's decision of 2026-10-05 — a
+  `workflow_dispatch` of `release.yml` itself, whose `cut` job makes the same
+  refusals against GitHub's view of the repository and then creates the
+  annotated tag through the git database (see "Cutting the tag from GitHub").
+  Neither path may tag a commit the other would refuse.
 - **`VERSION` is stamped from the tag.** `docker-compose.yml` already passes the
   build arg `VERSION: ${VERSION:-dev}` into the Dockerfile's
   `-ldflags "-X main.version=…"` (`18-operations-and-observability.md`,
@@ -105,15 +111,23 @@ One workflow, and it is the **only** workflow in the repository that names the
 NAS runner. Two jobs decide and deploy; the two between them exist because a
 reusable workflow is called from a `uses:` at **job** level and never from a
 step, so "run `test` and `e2e` when this commit has no green run of them"
-cannot live inside `gate` and has to be a conditional job of its own:
+cannot live inside `gate` and has to be a conditional job of its own. A fifth,
+`cut`, runs only when the workflow was dispatched rather than started by a tag
+push, and makes the tag (next section):
 
 ```yaml
 on:
   push:
     tags: ['v[0-9]*']       # the gate refuses anything not vYYYY.MM.DD[.n]
+  workflow_dispatch:        # cut the tag here instead: inputs `tag`, `classic`
 
 jobs:
+  cut:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest          # GitHub-hosted, billed
+    permissions: { contents: write } # the one write scope in the file
   gate:
+    needs: cut                      # skipped on a tag push, which is fine
     runs-on: ubuntu-latest          # GitHub-hosted, billed
   test:
     needs: gate
@@ -165,6 +179,41 @@ jobs:
   it proves is that the *rollback* works, and the backup this deploy takes
   before migrating is that rollback. A red restore run on a release tag is a
   reason to stop releasing until it is green, not an interlock on this job.
+
+### Cutting the tag from GitHub (`workflow_dispatch`)
+
+Owner's decision, 2026-10-05: the operator is not always at a machine with a
+clone and `gh`, and a session whose git access is limited to branches cannot
+push a tag at all — so a release has to be one action from GitHub itself.
+`release.yml` therefore also triggers on `workflow_dispatch`, with two inputs:
+`tag` (empty for today's) and `classic` (a boolean that writes the
+`deploy: classic` line). A dispatch runs one extra job, `cut`, before the gate:
+
+- **It refuses, in `scripts/dev release`'s order, before the tag exists:** a
+  dispatch on any ref but `main`; a name that is not `vYYYY.MM.DD[.n]` (the
+  same `case` construction as the gate's and the script's); a tag that already
+  exists; a commit — `main`'s head at the dispatch — without a successful
+  `test` and `e2e` run. A run still in progress is waited for, up to twelve
+  minutes, because the common case is a release dispatched right after the
+  merge whose runs it needs. No run at all is a refusal that names the
+  dispatch which starts one, never a reason to tag first and test later.
+- **It names the tag the way the orchestrator does** (`scripts/wellen-planen.md`,
+  "Automatic release tagging"): `vYYYY.MM.DD` from today's date on the
+  operator's clock (`Europe/Zurich`), or the smallest free `.n` from 1 when
+  that day already has a release.
+- **It creates an annotated tag through the git database** — a tag object
+  carrying the message, then the ref — and is the only job in the workflow
+  with `contents: write`, granted at job level (the going-private checklist's
+  "any write scope granted per job").
+- **The same run deploys it.** A ref created with the run's own `GITHUB_TOKEN`
+  starts no workflow (GitHub does not run workflows for pushes made with that
+  token), so there is no second `release` run and no double deploy — and no
+  `restore.yml` run for that tag either; its weekly schedule and its `main`
+  trigger cover it. `gate` takes the tag's name from `cut` on this path and
+  from the pushed ref otherwise; `deploy` takes it from `gate` on both, for the
+  `--ref` it deploys and the version `/healthz` has to report.
+- **`github.actor` is the person who dispatched**, so the repository/actor
+  guard applies to a dispatched release exactly as to a pushed tag.
 
 ## The runner: a container on the NAS
 
@@ -429,9 +478,12 @@ The runner is the one component in this system that GitHub can cause to run code
 on the NAS. While the repository is **public**, these controls are what stand
 between a tag push and that:
 
-- **The trigger is a tag push only.** A fork cannot push a tag to this
-  repository, and a `pull_request` from a fork never runs this workflow. That
-  push itself may now come from the orchestrator rather than a person -
+- **The triggers are a tag push and a dispatch of the workflow itself.** A
+  fork can do neither to this repository, and a `pull_request` from a fork
+  never runs this workflow. The dispatch runs as the person who dispatched,
+  which the actor guard then checks; the tag it creates is the one write the
+  workflow makes, with the scope granted to that job alone. A tag push
+  itself may now come from the orchestrator rather than a person -
   `scripts/wellen-orchestrator.ps1`'s `Invoke-AutoReleaseTagIfNeeded`
   (`scripts/wellen-planen.md`, "Automatic release tagging") pushes a real
   triggering tag with no human review at push-time, the moment it decides a
@@ -482,7 +534,9 @@ paid, a runner group restricted to `release.yml` closes this properly.
   `update --ref` fetches through the clone's own remote, so neither the script
   nor the workflow ever learns the key.
 - **Actions permissions:** keep "allow selected actions"; workflow permissions
-  read-only by default, with any write scope granted per job.
+  read-only by default, with any write scope granted per job (`cut`'s
+  `contents: write` is the one such grant, and
+  `scripts/release_workflow_test.go` holds the file to exactly one).
 - **Secrets: none are needed.** The gate runs on the automatic `GITHUB_TOKEN`,
   and the runner authenticates with the credentials from its own registration. A
   release pipeline that needs no stored secret is the reason `--ephemeral` was
@@ -503,8 +557,9 @@ commands: a runbook that disagrees with a spec is worse than either alone.
 - **Registering the runner** (H16): minting the one-hour token, the state
   directory, the first `docker-compose -f docker-compose.runner.yml up -d`, and
   how to confirm the runner shows up idle in the repository's runner list.
-- **Cutting the first release** (H17): `scripts/dev release <tag>`, what the gate
-  does, where to watch the deploy job, and the `/healthz` check.
+- **Cutting the first release** (H17): `scripts/dev release <tag>`, or the
+  `release` workflow's "Run workflow" button on `main`; what the gate does,
+  where to watch the deploy job, and the `/healthz` check.
 - **Forcing classic** (H17): writing `deploy: classic` into the tag message, and
   the marker as the ordinary case that needs no tag keyword.
 - **When a deploy fails** (H15): the failure table above as a lookup — which
@@ -584,12 +639,20 @@ container; **H17** `release.yml` and `scripts/dev release`.
 
 ### H17 — `release.yml` and `scripts/dev release`
 
-- `release.yml` triggers on `push: tags: ['v[0-9]*']` only, and `gate` refuses
-  any name that is not `vYYYY.MM.DD[.n]` before it resolves anything (see "The
-  release unit"); `gate` runs on a hosted
-  runner and resolves green `test` and `e2e` runs **by the tag's SHA**, running
-  them on the tag when they are missing and failing the release when they are
-  red.
+- `release.yml` triggers on `push: tags: ['v[0-9]*']` and on
+  `workflow_dispatch`, and `gate` refuses any name that is not
+  `vYYYY.MM.DD[.n]` before it resolves anything (see "The release unit");
+  `gate` runs on a hosted runner and resolves green `test` and `e2e` runs **by
+  the tag's SHA**, running them on the tag when they are missing and failing
+  the release when they are red.
+- A `workflow_dispatch` runs `cut` first (see "Cutting the tag from GitHub"):
+  it refuses a ref other than `main`, a name that is not `vYYYY.MM.DD[.n]`, an
+  existing tag, and a commit without green `test` and `e2e` runs (waiting for
+  one still in progress); it names an empty `tag` input from today's date and
+  the next free `.n`; it creates the annotated tag through the git database
+  with `contents: write` granted to that job alone; and it hands the name to
+  `gate` and `deploy`. `scripts/release_cut_test.go` runs the step's script
+  against a stubbed `gh` and pins the guards.
 - `deploy` runs with `runs-on: [self-hosted, nas]`, `environment: production`,
   `concurrency: { group: nas-deploy }`, `needs: [gate, test, e2e]` (a skipped
   reusable call counts as satisfied), no checkout, and calls
