@@ -13,7 +13,16 @@
 ARG VERSION=dev
 
 # ---- builder ----
-FROM golang:1-alpine AS builder
+#
+# An exact patch, not the floating `1-alpine` tag: that tag moved to 1.27.3
+# while this file still pinned staticcheck below to v0.8.1, whose export-data
+# reader does not understand what 1.27.3's compiler emits (`internal error in
+# importing "image/color" ... export data version 5 is greater than maximum
+# supported version 4`) — a break with no code change behind it, caught by
+# CI on an unrelated PR (issue #498). Bump this and the dev stage's pin below
+# together, deliberately, the same way every other version in this file is
+# pinned — never back to a floating tag.
+FROM golang:1.27.1-alpine AS builder
 RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -32,7 +41,9 @@ RUN go test ./... \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/inventory ./cmd/inventory
 
 # ---- dev stage (used by docker-compose.override.yml) ----
-FROM golang:1-alpine AS dev
+# Same exact pin as the builder stage above, for the same reason: this is the
+# stage staticcheck actually runs in.
+FROM golang:1.27.1-alpine AS dev
 RUN apk add --no-cache ca-certificates tzdata
 # The pre-gate's linters (scripts/dev.d/check, H6, docs/plans/2026-09-harness-
 # optimization.md). Pinned versions, installed before go.mod is even copied in:
