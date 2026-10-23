@@ -1,0 +1,114 @@
+#!/bin/sh
+# Brings the Synology NAS stack up after the NAS reboots. Meant to be the
+# command of a DSM Task Scheduler "Boot-up" triggered task (see
+# deploy/synology/README.md, "`boot` — survive a reboot"):
+#
+#   sh /volume1/docker/inventory/deploy/synology/boot
+#
+# docker-compose.yml already puts `restart: unless-stopped` on every service,
+# which is what brings a container back after it crashes or the Docker daemon
+# itself restarts. It is not what this script is for. On a NAS reboot DSM can
+# start the Docker package before the network, or before the volume this
+# clone's bind mounts (./pgdata, ./uploads, ./imagecache) sit on, is actually
+# ready for containers that need either — and a container whose bind mount or
+# network was not there yet does not come back on its own once they are. This
+# script is the safety net that was missing the time the stack needed `up -d`
+# run by hand after a reboot: wait for the daemon to actually answer, then ask
+# Compose to bring up whatever restart's own attempt left down.
+#
+#   sh deploy/synology/boot              # the Task Scheduler command
+#   sh deploy/synology/boot --no-wait    # skip the wait, for a manual check
+#
+# DSM gives a user no equivalent of systemd's `network-online.target` or an
+# `After=docker.service` unit dependency — Task Scheduler's "Boot-up" trigger
+# is the one hook it exposes, and it fires with no guarantee the daemon is
+# ready. So instead of a blind sleep this script polls `docker-compose
+# version` every BOOT_POLL seconds (default 5) until it answers, which is the
+# earliest point Compose can do anything at all, up to BOOT_MAX_WAIT seconds
+# (default 600 = 10 minutes) before giving up — long enough that the NAS's
+# network and Docker daemon are normally ready well inside it, short enough
+# that a daemon that never comes up does not hang the task forever.
+#
+# Once the daemon answers, `up -d` is retried BOOT_RETRIES times (default 3),
+# BOOT_RETRY_WAIT seconds apart (default 30): the daemon answering a version
+# probe does not guarantee the volume's mount or the bridge network it needs
+# are ready a second later. The whole attempt is retried, not just a daemon
+# probe, because a `docker-compose up -d` that fails partway through is no
+# better left alone than one never tried.
+#
+# Every attempt, and the wait, is appended to BOOT_LOG (default ./boot.log
+# inside the clone) as well as printed, because a Task Scheduler run's own
+# output only lives inside DSM's own UI, one run at a time.
+#
+# Both -f files, like every other script here, so the dev override is never
+# merged in and the merged model is checked before anything is started: see
+# docs/specs/01-architecture-and-deployment.md, "Synology NAS variant".
+
+set -eu
+
+COMPOSE=${DOCKER_COMPOSE:-docker-compose}
+PROJECT=${INVENTORY_PROJECT:-inventory}
+MAX_WAIT=${BOOT_MAX_WAIT:-600}
+POLL=${BOOT_POLL:-5}
+RETRIES=${BOOT_RETRIES:-3}
+RETRY_WAIT=${BOOT_RETRY_WAIT:-30}
+
+# The whole leading comment block, exactly as `update`'s usage() reads it: from
+# the block itself, not a fixed line range, so adding an option cannot leave
+# --help printing half of it.
+usage() {
+  awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
+}
+
+wait_for_daemon=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-wait) wait_for_daemon=0 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "boot: unknown option: $1 (try --help)" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+cd "$(dirname "$0")/../.." || { echo "boot: cannot enter the clone" >&2; exit 1; }
+ROOT=$(pwd)
+LOG=${BOOT_LOG:-$ROOT/boot.log}
+DC="$COMPOSE -p $PROJECT -f docker-compose.yml -f docker-compose.nas.yml"
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') boot: $*" | tee -a "$LOG"; }
+
+if [ "$wait_for_daemon" -eq 1 ]; then
+  log "waiting for the Docker daemon to answer (up to ${MAX_WAIT}s)"
+  t=0
+  until $COMPOSE version >/dev/null 2>&1; do
+    t=$((t + POLL))
+    [ "$t" -lt "$MAX_WAIT" ] || { log "the Docker daemon never answered after ${MAX_WAIT}s; giving up"; exit 1; }
+    sleep "$POLL"
+  done
+  log "the Docker daemon answered after ${t}s"
+fi
+
+# Same guard as `update`: refuse rather than start the dev stack (traefik) or a
+# clone whose NAS layer is missing a service it depends on.
+services=$($DC config --services 2>&1) || { log "cannot read the merged model: $services"; exit 1; }
+for s in app db ts-inventory; do
+  echo "$services" | grep -qx "$s" || { log "the merged model has no service '$s'; nothing was started"; exit 1; }
+done
+if echo "$services" | grep -qx traefik; then
+  log "the merged model lists traefik: the NAS layer is not active. Nothing was started."
+  exit 1
+fi
+
+attempt=1
+while :; do
+  log "attempt $attempt/$RETRIES: $DC up -d"
+  if out=$($DC up -d 2>&1); then
+    [ -z "$out" ] || printf '%s\n' "$out" | tee -a "$LOG"
+    log "done"
+    exit 0
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out" | tee -a "$LOG"
+  [ "$attempt" -lt "$RETRIES" ] || { log "failed after $attempt attempt(s)"; exit 1; }
+  attempt=$((attempt + 1))
+  sleep "$RETRY_WAIT"
+done

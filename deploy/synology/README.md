@@ -12,12 +12,13 @@ spec, not the older one bundled with Container Manager.
 | File | What it is |
 |---|---|
 | `install-shell` | Puts `$DC` and the alias `dc` into your login shell, from any directory. |
+| `boot` | Brings the stack up after the NAS reboots. Meant for a Task Scheduler "Boot-up" trigger. |
 | `update` | Updates the stack without replacing a working app by a broken one. |
 | `compose` | Optional shorthand: the compose prefix as a script. Nothing depends on it. |
 | `tailscale/serve.json` | The `tailscale serve` rule of the sidecar. |
 | `runner/` | The self-hosted GitHub Actions runner that deploys tagged releases onto this NAS — its own Compose project, its own README ([`runner/README.md`](runner/README.md)). It holds the Docker socket: read that README before you start it. |
 
-All three scripts must keep their executable bit and **LF** line endings
+Every script here must keep its executable bit and **LF** line endings
 (`.gitattributes` enforces that for the repository; a copy made by hand from a
 Windows checkout has CRLF and will not run). If one will not run, start it as
 `sh deploy/synology/<name>`; that fixes a missing executable bit, not CRLF.
@@ -66,6 +67,59 @@ alias dc="$DC"
 
 Without the script, set the same thing by hand, once per session, in the clone's
 folder: `DC="docker-compose -p inventory -f docker-compose.yml -f docker-compose.nas.yml"`.
+
+## `boot` — survive a reboot
+
+`restart: unless-stopped` on every service in `docker-compose.yml` is what brings a
+container back after it crashes, or after the Docker daemon itself restarts. It is
+not enough for a full NAS reboot: DSM can start the Docker package before the
+network, or before the volume this clone's bind mounts (`./pgdata`, `./uploads`,
+`./imagecache`) sit on, is actually ready — and a container whose bind mount or
+network was not there yet does not come back on its own once they are. That is what
+needed `$DC up -d` run by hand after the NAS came back up.
+
+```console
+$ sh deploy/synology/boot              # the Task Scheduler command, below
+$ sh deploy/synology/boot --no-wait    # skip the daemon wait, for a manual check
+```
+
+DSM gives a user no equivalent of systemd's `network-online.target` or an
+`After=docker.service` unit dependency — Task Scheduler's "Boot-up" trigger is the
+one hook it exposes, and it fires with no guarantee the daemon is ready yet. So
+instead of a blind sleep the script **polls** `docker-compose version` every
+`BOOT_POLL` seconds (default 5) until it answers, up to `BOOT_MAX_WAIT` seconds
+(default 600 = 10 minutes) before giving up. Once the daemon answers it checks the
+merged model (same guard as `update`: refuses if it lists `traefik` or lacks `app`,
+`db` or `ts-inventory`), then runs `$DC up -d`, retried `BOOT_RETRIES` times
+(default 3), `BOOT_RETRY_WAIT` seconds apart (default 30) — the daemon answering a
+version probe does not guarantee the volume's mount or the bridge network the stack
+needs are ready a second later. Every attempt and the wait are appended to
+`BOOT_LOG` (default `./boot.log` in the clone) as well as printed, since a Task
+Scheduler run's own output only lives inside DSM's UI, one run at a time.
+
+### Setting up the Boot-up trigger
+
+In DSM: **Control Panel → Task Scheduler → Create → Triggered Task → User-defined
+script**.
+
+- **General**: User `root`, Event `Boot-up`.
+- **Task Settings → Run command**:
+  ```
+  sh /volume1/docker/inventory/deploy/synology/boot
+  ```
+  (adjust the path to the clone). No `~/.profile` is read here (see
+  "Only login shells read `~/.profile`" below), so `docker-compose` has to be
+  reachable without it — either it is already on the default `PATH`, or set
+  `DOCKER_COMPOSE` to its full path in the command:
+  ```
+  DOCKER_COMPOSE=/volume1/docker/bin/docker-compose sh /volume1/docker/inventory/deploy/synology/boot
+  ```
+- Leave the schedule tab alone — `Boot-up` is the trigger, not a recurring time.
+
+The task fires once per boot and exits on its own (success or giving up after
+`BOOT_MAX_WAIT`); there is nothing to stop separately. Check `./boot.log` in the
+clone, or the task's own "Action" → "View Result" in Task Scheduler, after the next
+reboot to confirm it ran.
 
 ## `update` — the safe update
 

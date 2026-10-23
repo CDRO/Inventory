@@ -1032,6 +1032,16 @@ must keep its executable bit (otherwise start it as `sh deploy/synology/compose
 `.gitattributes` pins that for the repository, not for a copy made by hand). If
 it does not run, use `$DC`: nothing in this section depends on the script.
 
+[`deploy/synology/boot`](../../deploy/synology/boot) is what brings the stack back
+up after the NAS reboots. `restart: unless-stopped` on every service handles a
+crash or a Docker daemon restart on its own, but not a NAS reboot where DSM can
+start the Docker package before the network, or the volume the clone's bind
+mounts sit on, is actually ready — which is what otherwise needs `$DC up -d` run
+by hand once the NAS is back. It is meant to be the command of a DSM Task
+Scheduler "Boot-up" triggered task; see
+[`deploy/synology/README.md`](../../deploy/synology/README.md), "`boot` — survive
+a reboot", for the exact Task Scheduler setup and its options.
+
 Consequently, on the NAS:
 
 - **Never run a bare `docker-compose up`** — or `docker compose`, or `-f
