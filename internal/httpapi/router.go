@@ -159,6 +159,11 @@ type Deps struct {
 	// is an internal error; one that does not is unaffected — and every stored
 	// picture answers 404.
 	ProductImages PhotoStore
+	// Variants serves job photos and product pictures at the sizes screens
+	// show them (docs/specs/43-image-derivatives.md), making a missing size
+	// on request. Nil — no usable cache volume — answers the job variant
+	// routes 404 and serves product pictures at their stored size.
+	Variants VariantStore
 	// Consumer starts consumption-photo ingestion
 	// (docs/specs/09-consumption-logging.md), the same way Ingester starts
 	// shelf and product ingestion. With no Consumer the upload route is
@@ -487,9 +492,17 @@ func NewRouter(d Deps) http.Handler {
 			}
 
 			jobsAPI := NewJobHandler(d.Store, d.Photos, reanalyzers(d), cutouts, backgrounds, errs)
+			jobsAPI.variants = d.Variants
 			sr.Get("/jobs", jobsAPI.List)
 			sr.Get("/jobs/{id}", jobsAPI.Get)
 			sr.Get("/jobs/{id}/image", jobsAPI.Image)
+			// The photo at the sizes screens show it, and each detected item
+			// cut from it (docs/specs/43-image-derivatives.md). The bare
+			// route above keeps serving the original: it is the URL the API
+			// contract hands out, and a native client's only full-resolution
+			// path (docs/specs/12-client-api-contract.md).
+			sr.Get("/jobs/{id}/image/{variant}", jobsAPI.ImageVariant)
+			sr.Get("/jobs/{id}/image/rows/{row_id}/{variant}", jobsAPI.ImageRowVariant)
 			sr.Delete("/jobs/{id}", jobsAPI.Delete)
 			// "Analyze again" (docs/specs/09-consumption-logging.md), for
 			// every kind of job whose service is wired.
@@ -513,7 +526,9 @@ func NewRouter(d Deps) http.Handler {
 			// Product pictures cut from a reviewed photo, behind the same
 			// membership gate as everything else here.
 			productImages := NewProductImageHandler(d.Store, d.ProductImages, errs)
+			productImages.variants = d.Variants
 			sr.Get("/product-images/{name}", productImages.Serve)
+			sr.Get("/product-images/{name}/{variant}", productImages.ServeVariant)
 
 			// Consumption logging (docs/specs/09-consumption-logging.md), the
 			// same upload-then-confirm shape as ingestion above.

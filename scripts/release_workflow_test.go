@@ -200,10 +200,12 @@ func TestReleaseDeployJobKeepsItsGuards(t *testing.T) {
 	// `v[0-9]*` rather than `v*`, and the difference is load-bearing now that
 	// the runner can actually fetch: a tag matching this filter deploys to the
 	// NAS for real, so `v-test` or `vendor-pin` must not match. Widening it
-	// back would not fail anything else in this repository.
+	// back would not fail anything else in this repository. (The workflow's
+	// other trigger, the dispatch that cuts the tag itself, is
+	// release_cut_test.go's subject.)
 	if !strings.Contains(body, `tags: ["v[0-9]*"]`) {
-		t.Error(`release.yml's tag filter is no longer tags: ["v[0-9]*"] - a tag push is the only ` +
-			"trigger, and narrowing it to names starting with a digit is what stops a stray " +
+		t.Error(`release.yml's tag filter is no longer tags: ["v[0-9]*"] - a tag push is one of the two ` +
+			"triggers, and narrowing it to names starting with a digit is what stops a stray " +
 			"tag like v-test from deploying to the NAS")
 	}
 
@@ -287,14 +289,18 @@ func TestReleaseGateReadsTheTagMessageAsSpecifiedByD3(t *testing.T) {
 // deploy is not done because the script exited 0 - it is done when the NAS
 // serves the tag. Flip this comparison, or drop its `exit 1`, and a release
 // that left the previous version serving reports green.
+//
+// `$TAG` is the deploy job's environment, set from the gate's output
+// (release_cut_test.go pins that): on a tag push it is `github.ref_name`, on
+// a dispatched release `github.ref_name` would be `main`.
 func TestReleaseAssertsHealthzReportsTheTag(t *testing.T) {
 	body := significantLines(workflowFiles(t)["release.yml"])
 	for _, want := range []struct {
 		text string
 		why  string
 	}{
-		{`if [ "$version" != "$GITHUB_REF_NAME" ]; then`, "the version served is compared against the tag that triggered the run"},
-		{`"$version" != "$GITHUB_REF_NAME"`, "the comparison is inequality-then-fail, not equality-then-pass"},
+		{`if [ "$version" != "$TAG" ]; then`, "the version served is compared against the tag being released"},
+		{`"$version" != "$TAG"`, "the comparison is inequality-then-fail, not equality-then-pass"},
 		{"/healthz", "the assertion probes the health endpoint"},
 	} {
 		if !strings.Contains(body, want.text) {
@@ -303,7 +309,7 @@ func TestReleaseAssertsHealthzReportsTheTag(t *testing.T) {
 	}
 	// The `exit 1` has to be inside that branch: an assertion that reports the
 	// mismatch and exits 0 is not an assertion.
-	_, after, found := strings.Cut(body, `if [ "$version" != "$GITHUB_REF_NAME" ]; then`)
+	_, after, found := strings.Cut(body, `if [ "$version" != "$TAG" ]; then`)
 	if !found {
 		return // already reported above
 	}

@@ -95,6 +95,12 @@ from `07-shopping-list-reconciliation.md`). This complements the
 existing orphan-file sweep — together the cache self-heals in both
 directions, and a restore needs no cache-specific step.
 
+The derived pictures beside it (`/data/cache/derived/`,
+`43-image-derivatives.md`) follow the same rule from the other side: they
+are never archived, a missing one is made again on the first request for it,
+and the hourly sweep removes any whose source the restore did not bring
+back.
+
 ## Member export — one storage as portable files
 
 `GET /api/storages/{storage_id}/export` — storage-scoped behind

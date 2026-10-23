@@ -240,6 +240,7 @@ it, with different lifetimes:
 | `/data/uploads/products/` | The image finally chosen for a product | Permanent, until the product is deleted |
 | `/data/uploads/cutouts/{job_id}/` | Background-removed pictures offered during a review (`09-consumption-logging.md`) | Until that job is confirmed, discarded, or analysed again |
 | `/data/cache/imagesearch/` | Fetched SerpAPI/Iconify suggestion images | Evictable; hard 1GB cap (`07-shopping-list-reconciliation.md`) |
+| `/data/cache/derived/{area}/{source}/` | Thumbnails, previews and row crops made from the two upload areas above (`43-image-derivatives.md`) | Removed with their source; re-made on request if missing; never backed up |
 
 No external image URL is ever handed to the browser: suggestions are
 fetched server-side, cached, and served from our own origin

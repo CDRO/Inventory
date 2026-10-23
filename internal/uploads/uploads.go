@@ -44,6 +44,14 @@ var generatedPictureName = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]
 type Dir struct {
 	root  string
 	names *regexp.Regexp
+
+	// derived, when set, is where this area's derivatives live, under
+	// derivedArea. Remove then removes a file's derivatives with it, which is
+	// what makes "a derivative never outlives its source" hold at every call
+	// site that deletes a photo or a picture, without any of them knowing
+	// (docs/specs/43-image-derivatives.md).
+	derived     *Derived
+	derivedArea Area
 }
 
 // NewDir returns a photo area at root, creating it if needed.
@@ -109,8 +117,13 @@ func (d *Dir) Read(name string) ([]byte, error) {
 	return os.ReadFile(target)
 }
 
-// Remove deletes a photo. Removing one that is already gone is not an error:
-// the end state the caller wanted already holds.
+// Remove deletes a photo, and its derivatives when the area has them.
+// Removing one that is already gone is not an error: the end state the caller
+// wanted already holds.
+//
+// The source goes first. If that fails the derivatives are still consistent
+// with a file that still exists; if the derivatives then fail to go, the
+// orphan sweep picks them up, which is the recoverable direction.
 func (d *Dir) Remove(name string) error {
 	target, err := d.path(name)
 	if err != nil {
@@ -119,5 +132,42 @@ func (d *Dir) Remove(name string) error {
 	if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("uploads: remove: %w", err)
 	}
+	if d.derived != nil {
+		return d.derived.RemoveSource(d.derivedArea, Stem(name))
+	}
 	return nil
+}
+
+// RemoveDerivedWith links the area to its derivatives, so that Remove takes
+// them with the source.
+func (d *Dir) RemoveDerivedWith(store *Derived, area Area) {
+	d.derived = store
+	d.derivedArea = area
+}
+
+// Exists reports whether a photo is on disk. A name the server would never
+// generate does not exist.
+func (d *Dir) Exists(name string) bool {
+	target, err := d.path(name)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(target)
+	return err == nil
+}
+
+// List returns the names of every photo in the area — only the ones with a
+// generated name; a temporary file mid-write or anything else is left out.
+func (d *Dir) List() ([]string, error) {
+	entries, err := os.ReadDir(d.root)
+	if err != nil {
+		return nil, fmt.Errorf("uploads: list %s: %w", d.root, err)
+	}
+	var names []string
+	for _, entry := range entries {
+		if !entry.IsDir() && d.names.MatchString(entry.Name()) {
+			names = append(names, entry.Name())
+		}
+	}
+	return names, nil
 }

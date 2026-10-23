@@ -524,7 +524,7 @@ is installed on the host.
 
 ```dockerfile
 # ---- builder ----
-FROM golang:1-alpine AS builder
+FROM golang:1.27.1-alpine AS builder
 RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -534,7 +534,7 @@ RUN go test ./... \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/inventory ./cmd/inventory
 
 # ---- dev stage (used by docker-compose.override.yml) ----
-FROM golang:1-alpine AS dev
+FROM golang:1.27.1-alpine AS dev
 RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -552,6 +552,13 @@ EXPOSE 8000
 ENTRYPOINT ["/inventory"]
 CMD ["serve"]
 ```
+
+**The base image is pinned to an exact patch, not the floating `golang:1-alpine`
+tag.** That tag moved out from under this file once already: Go published a
+point release whose compiler emits an export-data format the Dockerfile's
+pinned `staticcheck` version could not read, breaking `scripts/dev check` with
+no code change behind it (issue #498). Bump the pin deliberately when there is
+a reason to, in both stages together — never back to a floating tag.
 
 The frontend needs no build stage: `web/static` is embedded into the
 binary by `embed.FS` at compile time. In dev, setting `STATIC_DIR=/src/web/static`
@@ -947,7 +954,8 @@ from the tag and takes the pre-upgrade backup itself.
 [`38-release-pipeline-and-nas-runner.md`](38-release-pipeline-and-nas-runner.md)
 is the contract for that pipeline and names the packages that built it, and they
 have all landed: on that NAS an ordinary release is now `scripts/dev release <tag>`
-typed on the operator's machine
+typed on the operator's machine, or the `release` workflow's "Run workflow"
+button on `main`
 ([`deploy/synology/README.md`](../../deploy/synology/README.md), "A release,
 start to finish"). The manual procedure described here and in
 [`18-operations-and-observability.md`](18-operations-and-observability.md) stays

@@ -24,6 +24,7 @@ import { TreeView } from "../tree.js";
 import { createShelfLifeDetail, resolveInheritance } from "../category-shelf-life.js";
 import { get, post, patch, ApiError } from "../api.js";
 import { clearChildren, el, text } from "../dom.js";
+import { iconLabel } from "../icons.js";
 import { t, apiErrorMessage } from "../i18n.js";
 
 const switcherContainer = document.querySelector("#storage-switcher");
@@ -116,7 +117,7 @@ function showAddRootForm() {
     "form",
     {
       id: "add-root-form",
-      class: "row",
+      class: "row inline-form",
       onsubmit: (event) => {
         event.preventDefault();
         const name = input.value.trim();
@@ -127,8 +128,8 @@ function showAddRootForm() {
     },
     [
       input,
-      el("button", { type: "submit", class: "btn" }, [text(t("categories.add"))]),
-      el("button", { type: "button", class: "btn btn--ghost", onclick: () => form.remove() }, [text(t("common.cancel"))]),
+      el("button", { type: "submit", class: "btn btn--compact" }, iconLabel("plus", t("categories.add"))),
+      el("button", { type: "button", class: "btn btn--ghost btn--compact", onclick: () => form.remove() }, iconLabel("x", t("common.cancel"))),
     ],
   );
 

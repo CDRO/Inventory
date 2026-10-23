@@ -30,6 +30,11 @@
 # refused too: re-pointing a release tag would make "what is v2026.09.30"
 # depend on when you asked.
 #
+# The same tag can be cut without a clone: the release workflow's own
+# `workflow_dispatch` on main runs these refusals on GitHub and creates the tag
+# there (docs/specs/38-release-pipeline-and-nas-runner.md, "Cutting the tag
+# from GitHub"). Both paths tag the same commits and refuse the same ones.
+#
 # --classic puts the line
 #
 #   deploy: classic

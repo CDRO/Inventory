@@ -59,7 +59,9 @@
        or a form control's value, never as markup. -->
   <template id="row-template">
     <div class="review-row">
-      <div class="review-crop" data-role="crop" role="img"></div>
+      <!-- One detected item, cut from the photo on the server at the size
+           shown (docs/specs/43-image-derivatives.md); alt is set per row. -->
+      <img class="review-crop" data-role="crop" alt="" hidden>
       <div class="review-row__fields">
         <div class="row row--between">
           <strong data-field="label"></strong>

@@ -15,6 +15,7 @@ import { renderNav, startPageFor } from "../nav.js";
 import { initGamification } from "../gamification.js";
 import { get, del, ApiError } from "../api.js";
 import { el, fromTemplate, qs, text } from "../dom.js";
+import { setThumb } from "../images.js";
 import { t, tCount, apiErrorMessage } from "../i18n.js";
 
 const jobsList = qs("#jobs");
@@ -172,8 +173,10 @@ function renderJob(job) {
   qs('[data-role="status"]', card).textContent = STATUS_KEYS[job.status] ? t(STATUS_KEYS[job.status]) : job.status;
 
   if (job.has_image) {
+    // The card's 72 px thumbnail, never the whole photo
+    // (docs/specs/43-image-derivatives.md).
     const thumb = qs('[data-role="thumb"]', card);
-    thumb.src = `/api/storages/${storageId}/jobs/${job.id}/image`;
+    setThumb(thumb, `/api/storages/${storageId}/jobs/${job.id}/image`, 72);
     thumb.hidden = false;
   }
 

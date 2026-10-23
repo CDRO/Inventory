@@ -8,6 +8,7 @@
 // sync by hand.
 
 import { el, text, clearChildren } from "./dom.js";
+import { iconLabel } from "./icons.js";
 import { patch } from "./api.js";
 import { t, tCount } from "./i18n.js";
 
@@ -86,7 +87,9 @@ export function createShelfLifeDetail({ basePath, runMutation, showStatus, getIn
           title: t("categoryShelfLife.editTitle", { name: node.name }),
           onclick: () => openShelfLifeEditor(node, wrapper),
         },
-        [text(shelfLifeLabel(node, getInherited()))],
+        // The label is the information itself ("365 days"), so it is never
+        // reduced to the icon.
+        iconLabel("clock", shelfLifeLabel(node, getInherited())),
       ),
     );
   }
@@ -107,7 +110,7 @@ export function createShelfLifeDetail({ basePath, runMutation, showStatus, getIn
     const form = el(
       "form",
       {
-        class: "row",
+        class: "row inline-form",
         onsubmit: (event) => {
           event.preventDefault();
           if (!input.reportValidity()) return;
@@ -118,10 +121,12 @@ export function createShelfLifeDetail({ basePath, runMutation, showStatus, getIn
       },
       [
         input,
-        el("button", { type: "submit", class: "btn btn--primary" }, [text(t("common.save"))]),
-        el("button", { type: "button", class: "btn btn--ghost", onclick: () => showLabel(node, wrapper) }, [
-          text(t("common.cancel")),
-        ]),
+        el("button", { type: "submit", class: "btn btn--primary btn--compact" }, iconLabel("check", t("common.save"))),
+        el(
+          "button",
+          { type: "button", class: "btn btn--ghost btn--compact", onclick: () => showLabel(node, wrapper) },
+          iconLabel("x", t("common.cancel")),
+        ),
       ],
     );
 

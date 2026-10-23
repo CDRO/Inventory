@@ -10,6 +10,7 @@
 // textContent, never through a template string turned into markup.
 
 import { el, text, clearChildren } from "./dom.js";
+import { iconLabel } from "./icons.js";
 import { t } from "./i18n.js";
 
 /**
@@ -129,16 +130,25 @@ export class TreeView {
         ...(detail ? [detail] : []),
         ...(this.editable
           ? [
-              el("div", { class: "row" }, [
-                el("button", { type: "button", class: "btn btn--ghost", onclick: () => this._startRename(node, nameSpan) }, [
-                  text(t("tree.rename")),
-                ]),
-                el("button", { type: "button", class: "btn btn--ghost", onclick: () => this._startAddChild(node.id, li) }, [
-                  text(t("tree.add")),
-                ]),
-                el("button", { type: "button", class: "btn btn--ghost", onclick: () => this._openMovePicker(node.id) }, [
-                  text(t("tree.moveTo")),
-                ]),
+              // Icon alone below 48rem, icon and label above it (js/icons.js,
+              // `.btn--compact`): three text buttons beside a name left the
+              // name no width at all on a phone.
+              el("div", { class: "row tree-actions" }, [
+                el(
+                  "button",
+                  { type: "button", class: "btn btn--ghost btn--compact", onclick: () => this._startRename(node, nameSpan) },
+                  iconLabel("pencil", t("tree.rename")),
+                ),
+                el(
+                  "button",
+                  { type: "button", class: "btn btn--ghost btn--compact", onclick: () => this._startAddChild(node.id, li) },
+                  iconLabel("plus", t("tree.add")),
+                ),
+                el(
+                  "button",
+                  { type: "button", class: "btn btn--ghost btn--compact", onclick: () => this._openMovePicker(node.id) },
+                  iconLabel("move", t("tree.moveTo")),
+                ),
               ]),
             ]
           : []),
@@ -192,9 +202,9 @@ export class TreeView {
 
   _startAddChild(parentId, afterLi) {
     const input = el("input", { type: "text", placeholder: t("tree.newNamePlaceholder") });
-    const confirmBtn = el("button", { type: "button", class: "btn btn--primary" }, [text(t("tree.add"))]);
-    const cancelBtn = el("button", { type: "button", class: "btn btn--ghost" }, [text(t("common.cancel"))]);
-    const row = el("li", { class: "row" }, [input, confirmBtn, cancelBtn]);
+    const confirmBtn = el("button", { type: "button", class: "btn btn--primary btn--compact" }, iconLabel("plus", t("tree.add")));
+    const cancelBtn = el("button", { type: "button", class: "btn btn--ghost btn--compact" }, iconLabel("x", t("common.cancel")));
+    const row = el("li", { class: "row inline-form" }, [input, confirmBtn, cancelBtn]);
 
     afterLi.after(row);
     input.focus();

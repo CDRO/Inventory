@@ -61,6 +61,10 @@ type Service struct {
 	matcher  Matcher
 	photos   Photos
 	log      *slog.Logger
+	// derivatives, when set, makes the pictures a review screen shows from a
+	// job's photo ahead of the first request (derivatives.go). Nil makes none;
+	// the serving route makes them on request instead.
+	derivatives Derivatives
 }
 
 // NewService wires the consumption-logging flow.
@@ -153,6 +157,11 @@ func (s *Service) work(storageID uuid.UUID, filename string) jobs.Work {
 			return nil, err
 		}
 
+		// The inbox thumbnail and the review preview are made while the
+		// model call is in flight; the row crops follow the proposal.
+		wait := s.startPhotoSet(ctx, filename, image)
+		defer wait()
+
 		model, err := s.models.EffectiveModel(ctx)
 		if err != nil {
 			return nil, err
@@ -177,6 +186,7 @@ func (s *Service) work(storageID uuid.UUID, filename string) jobs.Work {
 		if err != nil {
 			return nil, err
 		}
+		s.replaceRowSet(ctx, filename, image, proposal.Rows)
 		return json.Marshal(proposal)
 	}
 }

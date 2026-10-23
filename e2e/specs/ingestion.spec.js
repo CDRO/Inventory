@@ -232,16 +232,16 @@ test("the barcode scan sheet's photograph control decodes through the same looku
   // is not a barcode — so a mode that has one has to be picked first.
   await page.locator('input[name="mode"][value="stocking_up"]').check();
 
-  let decodeRequest = null;
-  await page.route("**/barcodes/decode", async (route) => {
-    decodeRequest = route.request();
-    await route.fulfill({ json: { barcode: "4006381333931" } });
-  });
+  await page.route("**/barcodes/decode", (route) => route.fulfill({ json: { barcode: "4006381333931" } }));
 
   await page.getByRole("button", { name: "Scan a barcode" }).click();
   const dialog = page.locator("dialog[aria-labelledby='barcode-sheet-title']");
   await expect(dialog).toBeVisible();
 
+  // The decode is issued from the input's change handler, so the request is
+  // awaited as such. Checking a flag the moment setInputFiles() returned raced
+  // the interception event that would have set it, and lost in CI now and then.
+  const decodeRequested = page.waitForRequest("**/barcodes/decode");
   // Only the sheet's library input has no `capture` attribute — its own
   // camera input does, exactly as the multi-photo picker's does.
   await dialog.locator('input[type="file"]:not([capture])').setInputFiles({
@@ -250,7 +250,8 @@ test("the barcode scan sheet's photograph control decodes through the same looku
     buffer: TINY_JPEG,
   });
 
-  expect(decodeRequest, "expected the photo to reach the decode route").not.toBeNull();
+  const decodeRequest = await decodeRequested;
+  expect(decodeRequest.method(), "expected the photo to reach the decode route").toBe("POST");
 
   // HOUSEHOLD has never associated this code, so the decoded string reaches
   // exactly the miss path a typed one would (docs/specs/20-barcode-recall.md;
@@ -1264,7 +1265,10 @@ test("a new product's picture can be taken from the reviewed photo", async ({ pa
     job.payload.rows[1].bounding_box = null;
     await route.fulfill({ response, json: job });
   });
-  await page.route(`**/jobs/${LOOK_ONLY_JOB}/image`, (route) =>
+  // The original and every variant beneath it (docs/specs/43-image-derivatives.md):
+  // the review page asks for `/image/rows/{row}/thumb-…` and `/image/preview`,
+  // never for the bare route.
+  await page.route(new RegExp(`/jobs/${LOOK_ONLY_JOB}/image(/|$)`), (route) =>
     route.fulfill({ contentType: "image/png", body: TINY_PNG }),
   );
 
@@ -1274,9 +1278,17 @@ test("a new product's picture can be taken from the reviewed photo", async ({ pa
     await route.fulfill({ json: { batch_ids: [], products_created: 2, locations_created: 0 } });
   });
 
+  // docs/specs/43-image-derivatives.md: the review shows server-cut crops and
+  // the preview, and never asks for the original photo — the one request
+  // that could cost a phone a 50 MP decode.
+  const originals = [];
+  page.on("request", (request) => {
+    if (/\/jobs\/[^/]+\/image$/.test(new URL(request.url()).pathname)) originals.push(request.url());
+  });
   await page.goto(`/review.html?storage=${HOUSEHOLD}&job=${LOOK_ONLY_JOB}`);
   const rows = page.locator("#rows .review-row");
   await expect(rows).toHaveCount(2);
+  expect(originals, "the original photo must never be requested by the review").toEqual([]);
 
   const rice = rows.nth(0);
   const lentils = rows.nth(1);

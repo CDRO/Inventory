@@ -20,6 +20,7 @@
 import { TreeView } from "./tree.js";
 import { get, post, patch, ApiError } from "./api.js";
 import { el, text, clearChildren } from "./dom.js";
+import { iconLabel } from "./icons.js";
 import { createShelfLifeDetail, resolveInheritance } from "./category-shelf-life.js";
 import { t, apiErrorMessage } from "./i18n.js";
 
@@ -454,7 +455,7 @@ export function openTreeManager(storageId, { kind }) {
       "form",
       {
         id: config.addRootFormId,
-        class: "row",
+        class: "row inline-form",
         onsubmit: (event) => {
           event.preventDefault();
           const name = input.value.trim();
@@ -465,8 +466,8 @@ export function openTreeManager(storageId, { kind }) {
       },
       [
         input,
-        el("button", { type: "submit", class: "btn" }, [text(t("tree.add"))]),
-        el("button", { type: "button", class: "btn btn--ghost", onclick: () => form.remove() }, [text(t("common.cancel"))]),
+        el("button", { type: "submit", class: "btn btn--compact" }, iconLabel("plus", t("tree.add"))),
+        el("button", { type: "button", class: "btn btn--ghost btn--compact", onclick: () => form.remove() }, iconLabel("x", t("common.cancel"))),
       ],
     );
 

@@ -122,6 +122,16 @@ func cropRect(bounds image.Rectangle, box Box) (image.Rectangle, error) {
 	return rect, nil
 }
 
+// BoxSelectsNothing reports whether cropRect would refuse box: no area, not
+// a number, or entirely outside the picture. It needs no picture to answer —
+// a normalized interval that is empty is empty at every pixel size — so a
+// caller can tell a row with no crop apart from one not yet made without
+// decoding anything.
+func BoxSelectsNothing(box Box) bool {
+	_, err := cropRect(image.Rect(0, 0, 1, 1), box)
+	return err != nil
+}
+
 func clamp(v, lo, hi float64) float64 {
 	return math.Max(lo, math.Min(hi, v))
 }

@@ -27,6 +27,7 @@ import { TreeView } from "../tree.js";
 import { formatAudited } from "../audited.js";
 import { get, post, ApiError } from "../api.js";
 import { clearChildren, el, text, qs } from "../dom.js";
+import { thumbAttrs } from "../images.js";
 import { t, tCount, apiErrorMessage, formatDate } from "../i18n.js";
 
 // Locations shown in the "Stalest first" list, at most
@@ -342,7 +343,7 @@ function renderRow(batch) {
   }
 
   const thumb = batch.image_url
-    ? [el("img", { class: "review-row__thumb", src: batch.image_url, alt: "" })]
+    ? [el("img", { class: "review-row__thumb", ...thumbAttrs(batch.image_url, 56), alt: "", loading: "lazy", width: "56", height: "56" })]
     : [];
 
   return el("div", { class: "review-row" }, [
