@@ -434,6 +434,148 @@ SHA). Validated by replaying the tuned reviewers on six past PRs — three that
 were blocked in round 2, three approved in round 1 — and comparing verdicts;
 the results table goes into this plan.
 
+#### Replay validation (D2's method)
+
+Six merged PRs, each replayed at the exact head SHA its **round-1** reviewers
+saw. Ground truth is the round-1 verdict on GitHub, not the issue's
+description of it.
+
+| PR | round-1 head | original round-1 verdicts |
+|---|---|---|
+| #274 | `e2d0e91` | docs **BLOCK** (1), go APPROVE, tests APPROVE |
+| #278 | `33fa891` | go **BLOCK** (2), docs **BLOCK** (3), tests **BLOCK** (1) |
+| #220 | `8ceff28` | go **BLOCK** (1), docs APPROVE, tests APPROVE |
+| #279 | `e04b3a8` | all three APPROVE |
+| #271 | `af552c6` | all three APPROVE |
+| #266 | `5e91580` | all three APPROVE |
+
+Two corrections to the issue's own description of the set, from the record:
+#274's round-1 **tests** review APPROVEd — only docs blocked, and `8c0df3d`
+answered a should-fix — and #264, a candidate in the issue, never received a
+`review-go` verdict at all, so #278 and #220 are the two most recent round-1
+BLOCKs per reviewer whose finding was fixed rather than disputed.
+`review-tests` has exactly one round-1 BLOCK in the entire candidate list
+(#278); that is a property of the history, not a choice.
+
+**What the columns mean.** `turns` is the harness's own tool-call count for
+the cell, against the `maxTurns` the configuration pins in production. It
+includes roughly two calls per cell that production does not spend (reading
+the instruction file, writing the verdict file), so a count one or two above
+the budget is marginal. **No cell terminated on its budget**: a count above
+it is an estimate that production would have exited there, not an observed
+exit. `model` is the only frontmatter dimension the replay actually
+controlled — see the fidelity limits.
+
+##### Attempt A — D2 as written, with `model` controlled and `effort` uncontrolled (go sonnet · tests sonnet · docs **haiku**)
+
+| PR | reviewer | original | tuned | turns/budget | outcome |
+|---|---|---|---|---|---|
+| #266 | go | APPROVE | APPROVE | 7/20 | match |
+| #274 | go | APPROVE | APPROVE | 8/20 | match |
+| #220 | go | BLOCK (1) | BLOCK (1) | 13/20 | match — same single-slot `pendingMutation` race |
+| #278 | go | BLOCK (2) | BLOCK (1) | 13/20 | **MISS** — caught the `external: true` volume breaking CI, missed the stale "deliberately **not** triggered on `pull_request`" claims (`docs/specs/01-…:126,176`, `.github/workflows/e2e.yml` header). Verified still false at that head: `test.yml` there carries `pull_request: branches: [main]`. Not attributable to effort — see fidelity limit 1. |
+| #279 | go | APPROVE | APPROVE | 7/20 | match |
+| #271 | go | APPROVE | APPROVE | 16/20 | match |
+| #266 | tests | APPROVE | APPROVE | 25/25 | match (local suite exit 0) |
+| #274 | tests | APPROVE | BLOCK (1) | 19/25 | **escalation** — `location-options.js:140`'s refusal path untested. The finding is real: the author fixed exactly that in `8c0df3d`, as a should-fix. |
+| #220 | tests | APPROVE | BLOCK (1) | 11/25 | **escalation** — failed-POST branch untested. Real: round 2 of that PR blocked on the same defect class. |
+| #278 | tests | BLOCK (1) | BLOCK (2) | 15/25 | match — same root cause (the shipped config cannot pass CI), plus the `headRefSha` typo the original docs review held as blocking |
+| #279 | tests | APPROVE | APPROVE | 13/25 | match (local suite exit 0) |
+| #271 | tests | APPROVE | BLOCK (1) | 23/25 | **escalation** — `TestBackgroundLoopsCoversAllSix` cannot distinguish a `ctx`-forwarding regression. A real finding; the original approved. |
+| #266 | docs | APPROVE | APPROVE | 14/15 | match |
+| #274 | docs | BLOCK (1) | APPROVE | 14/15 | **MISS** — approved, asserting specs 26/27 "correctly don't document implementation details"; the blocking finding was spec 27:41-43 still publishing the old `openTreeManager` return shape |
+| #220 | docs | APPROVE | BLOCK (1) | 19/15 | **escalation, and 4 calls over budget** — spec 28's stale `js/review.js` claim (real: fixed later in the same wave by `e3b12dd`) |
+| #278 | docs | BLOCK (3) | APPROVE | 18/15 | **MISS ×3, and 3 over budget** — approved, asserting the stale CI claims "have been properly updated" |
+| #279 | docs | APPROVE | APPROVE | 25/15 | match, 10 calls over budget |
+| #271 | docs | APPROVE | APPROVE | 16/15 | match, 1 call over budget |
+
+**What attempt A establishes.** For **docs on haiku**: four missed blocking
+findings across two PRs, plus turn counts over budget on four of six — the
+model change fails. For **go and tests**: the verdict differences cannot be
+attributed to `effort: high`, because no cell ran at a pinned effort; they
+are unattributable between effort, the general-purpose-agent harness and
+run-to-run variance.
+
+**The three `review-tests` escalations are a separate question, and the
+owner ruled on them.** Asked mid-run, with the evidence that each finding
+was real and had been fixed later in history, Tizian was offered "Not real —
+count them as failures" and chose **"Real, but blocking is too harsh"** —
+treat them as should-fix-level, and count the escalation against the tuned
+setting. Asked again once the count reached three of six, he answered **"No
+— tests reverts to xhigh too"**. So the findings are real (`review-go`'s
+round-1 review is right that #220's own round 2 later blocked on the same
+class), and what disqualifies the setting is the owner's judgement about a
+3-in-6 escalation rate turning one-round PRs into two-round PRs — the cost
+H12 exists to cut — not a bar this PR invented.
+
+##### Attempt B — docs stepped back one notch (docs **sonnet**)
+
+go and tests are unchanged from attempt A, so their twelve rows above stand
+as attempt B's; the six re-run docs rows are:
+
+| PR | reviewer | original | tuned | turns/budget | outcome |
+|---|---|---|---|---|---|
+| #266 | docs | APPROVE | APPROVE | 9/15 | match |
+| #274 | docs | BLOCK (1) | BLOCK (1) | 12/15 | **match — the exact finding haiku missed** (spec 27:41) |
+| #220 | docs | APPROVE | BLOCK (1) | 11/15 | escalation (the same spec 28 finding), within budget |
+| #278 | docs | BLOCK (3) | BLOCK (1) | 16/15 | **MISS ×2**, 1 over budget — caught the undocumented `docker volume create` prerequisite, missed the stale CI claims and the `headRefSha` typo |
+| #279 | docs | APPROVE | APPROVE | 11/15 | match |
+| #271 | docs | APPROVE | APPROVE | 14/15 | match |
+
+**Attempt B fails too** (#278). The next step-back for docs is
+`sonnet`/`xhigh` — its current value.
+
+##### What is *not* claimed about `sonnet`/`xhigh`
+
+The originals in the ground-truth table were produced by `sonnet`/`xhigh`
+reviewers — `effort: xhigh` has been pinned in all three agent files since
+`7a93865` (2026-09-07), well before the earliest replayed round 1 (#220,
+2026-09-26 00:10) — so every accepted blocking finding above is a finding
+that configuration did catch, on the real PR, in the real loop. That is the
+reason it is kept, and it is a statement about **those original runs**, not
+about the replay cells: the cells' misses are not evidence for or against
+`xhigh`, because their effort was never pinned. The one part of the current
+configuration the originals did not run under is `maxTurns` 20/25/15, which
+landed later in H7 (`f68a9d0`); all three reviewers have posted complete
+verdicts under those budgets on #337, #353 and #356 — **and `review-docs`
+failed to on this PR's own round 1**, see H12's PR (#368) for the observed
+`maxTurns` exit, tracked separately in #370.
+
+##### Fidelity limits of the replay
+
+1. A **new** subagent name created mid-session is not resolvable (probed
+   twice, minutes apart), so the replay could not spawn
+   `review-go`/`review-tests`/`review-docs` themselves under new frontmatter.
+   Each cell is a general-purpose agent whose prompt is the tuned reviewer
+   definition verbatim, with the model passed explicitly. **`effort` and
+   `maxTurns` therefore could not be pinned per cell**: effort was the
+   session's, and the budget was an instruction with the harness's tool-call
+   count recorded. This is why the tables above attribute nothing to effort,
+   and why attempt A is labelled by model. (An **edited** existing agent *is*
+   live mid-session — `review-tests` confirmed it reads the new section —
+   which is why H12's own PR rounds exercise the shipped prompts. Editing the
+   real agent files to pin effort per cell would have been the
+   higher-fidelity method; it would also have meant rewriting the shipped
+   frontmatter 24 times mid-replay, and it was not done.)
+2. `effort` is accepted but **ignored** on Haiku (Haiku is absent from the
+   CLI's effort-capable model list), so attempt A's docs cell is "haiku,
+   session effort" — which is exactly what a shipped `model: haiku,
+   effort: high` would also have been.
+3. These PRs predate `scripts/dev check` (H6), so the tuned reviewers faced
+   inputs still carrying the mechanical findings the pre-gate now removes.
+   That biases towards *more* findings, the conservative direction for a
+   miss test.
+4. `gh pr checks` on a merged PR reports today, not round 1. That matters
+   for one ground-truth finding — #278's tests BLOCK was "this PR's own live
+   CI run failed" — so that row is judged on the finding's substance.
+5. The packet builder does not exist at these SHAs (it landed in H7 on
+   2026-09-27); the current `scripts/dev` was copied into the replay
+   checkout, and a small `gh` shim reported the round-1 head as
+   `headRefOid` and a local branch at the PR's base SHA as `baseRefName`, so
+   each packet is the one that reviewer would have read. The reviewers ran
+   with posting disabled and wrote verdicts to files: **nothing was posted
+   to any of the six PRs.**
+
 ### D — Agent time, subscription caps, attention
 
 **D1 · H4 `h4-attention` — allowlist and notifications.** Scan the recent
