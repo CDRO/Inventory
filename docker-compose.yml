@@ -15,8 +15,9 @@ services:
   traefik:
     image: traefik:v3
     command:
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
+      # Routes come from a file (deploy/traefik/dev.yml), not from container labels:
+      # the Docker provider would need /var/run/docker.sock, which is root on the host.
+      - --providers.file.filename=/etc/traefik/dynamic.yml
       - --entrypoints.web.address=:80
     # Overridable for the same reason as $HTTP_PORT below: a concurrent local
     # instance (a second worktree brought up with `docker compose up -d` for
@@ -26,7 +27,7 @@ services:
     ports:
       - "${TRAEFIK_PORT:-80}:80"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./deploy/traefik/dev.yml:/etc/traefik/dynamic.yml:ro
     restart: unless-stopped
 
   app:
@@ -54,10 +55,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.app.rule=PathPrefix(`/`)
-      - traefik.http.services.app.loadbalancer.server.port=8000
     volumes:
       - uploads:/data/uploads
       # The suggestion-image cache (docs/specs/07-shopping-list-reconciliation.md)

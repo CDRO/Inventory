@@ -181,8 +181,8 @@ services:
   traefik:
     image: traefik:v3
     command:
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
+      # Routes from deploy/traefik/e2e.yml, not container labels: no Docker socket.
+      - --providers.file.filename=/etc/traefik/dynamic.yml
       - --entrypoints.websecure.address=:443
     # No `ports:` (#358) — nothing outside this compose project needs to
     # reach traefik. The `e2e` service below already talks to it by service
@@ -192,7 +192,7 @@ services:
     # here used to collide silently with an ordinary dev stack in the very
     # worktree running the gate, not just with another checkout's E2E run.
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./deploy/traefik/e2e.yml:/etc/traefik/dynamic.yml:ro
 
   app:
     build:
@@ -247,25 +247,20 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    labels:
-      - traefik.enable=true
-      # HTTPS only, on Traefik's own auto-generated self-signed default
-      # certificate (no certresolver, no cert files — Traefik v3 always has
-      # one to fall back to). Service workers, and every other
-      # secure-context-gated browser API, are unavailable over plain HTTP
-      # unless the origin is literally "localhost" — which a Docker service
-      # name never is. `--unsafely-treat-insecure-origin-as-secure` is the
-      # documented Chromium flag for the plain-HTTP case, and it was tried
-      # first; verified live via a raw Playwright script (bypassing this
-      # compose file and playwright.config.js entirely) that it does not
-      # make `window.isSecureContext` true in this Playwright/Chromium
-      # build, with or without `channel: "chromium"`. Real HTTPS, even on an
-      # untrusted cert accepted via Playwright's ignoreHTTPSErrors, is what
-      # actually works.
-      - traefik.http.routers.app.rule=PathPrefix(`/`)
-      - traefik.http.routers.app.entrypoints=websecure
-      - traefik.http.routers.app.tls=true
-      - traefik.http.services.app.loadbalancer.server.port=8000
+    # Routing: deploy/traefik/e2e.yml (a file, so Traefik holds no Docker socket).
+    # HTTPS only, on Traefik's own auto-generated self-signed default
+    # certificate (no certresolver, no cert files — Traefik v3 always has
+    # one to fall back to). Service workers, and every other
+    # secure-context-gated browser API, are unavailable over plain HTTP
+    # unless the origin is literally "localhost" — which a Docker service
+    # name never is. `--unsafely-treat-insecure-origin-as-secure` is the
+    # documented Chromium flag for the plain-HTTP case, and it was tried
+    # first; verified live via a raw Playwright script (bypassing this
+    # compose file and playwright.config.js entirely) that it does not
+    # make `window.isSecureContext` true in this Playwright/Chromium
+    # build, with or without `channel: "chromium"`. Real HTTPS, even on an
+    # untrusted cert accepted via Playwright's ignoreHTTPSErrors, is what
+    # actually works.
 
   db:
     image: postgres:16-alpine

@@ -492,3 +492,31 @@ func TestBackupScriptIsPinnedToLFEndings(t *testing.T) {
 	assert.NotContains(t, repoFile(t, "scripts/backup"), "\r",
 		"the working copy of the script must have LF endings, whatever the platform checked it out")
 }
+
+// TestTraefikHoldsNoDockerSocket: Traefik routes from a file (deploy/traefik/*.yml),
+// not from container labels, because the Docker provider needs /var/run/docker.sock and a
+// process that can talk to that socket is root on the host. An ingress that only proxies
+// HTTP to `app:8000` must not hold that. Both halves are pinned, because each fails
+// silently on its own: a socket mount brought back next to the file provider changes
+// nothing visible, and a route file that no longer names `app:8000` still starts cleanly
+// and only answers 404 to everything.
+func TestTraefikHoldsNoDockerSocket(t *testing.T) {
+	t.Parallel()
+
+	for file, routes := range map[string]string{
+		"docker-compose.yml":     "deploy/traefik/dev.yml",
+		"docker-compose.e2e.yml": "deploy/traefik/e2e.yml",
+	} {
+		block := composeService(t, file, "traefik")
+		assert.NotContains(t, block, "docker.sock",
+			"%s: traefik must not mount the Docker socket - access to it is root on the host", file)
+		assert.NotContains(t, block, "providers.docker",
+			"%s: traefik routes from %s, not from container labels", file, routes)
+		assert.Contains(t, block, "--providers.file.filename=/etc/traefik/dynamic.yml",
+			"%s: traefik must read its routes from the mounted file", file)
+		assert.Contains(t, block, "./"+routes+":/etc/traefik/dynamic.yml:ro",
+			"%s: the route file is %s, mounted read-only", file, routes)
+		assert.Contains(t, repoFile(t, routes), `url: "http://app:8000"`,
+			"%s must route to the app service on its listening port", routes)
+	}
+}

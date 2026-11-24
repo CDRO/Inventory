@@ -750,13 +750,12 @@ services:
   traefik:
     image: traefik:v3
     command:
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
+      - --providers.file.filename=/etc/traefik/dynamic.yml
       - --entrypoints.web.address=:80
     ports:
       - "80:80"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./deploy/traefik/dev.yml:/etc/traefik/dynamic.yml:ro
     restart: unless-stopped
 
   app:
@@ -769,10 +768,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.app.rule=PathPrefix(`/`)
-      - traefik.http.services.app.loadbalancer.server.port=8000
     volumes:
       - uploads:/data/uploads
       # The suggestion-image cache (07-shopping-list-reconciliation.md). A
@@ -826,6 +821,17 @@ the JSON API at `/api`, and the server-rendered admin UI at `/admin`.
 Traefik is the only ingress, which is what makes the remote-access layer
 swappable (below) — except on the operator's own NAS, where Traefik is switched
 off and a Tailscale sidecar is the ingress (see "Synology NAS variant").
+
+**Traefik reads its routes from a file, not from container labels.**
+`deploy/traefik/dev.yml` (and `deploy/traefik/e2e.yml` for the E2E stack) routes
+`PathPrefix(/)` to `http://app:8000`, reached by Compose service name over the
+project network. The label-based Docker provider would need
+`/var/run/docker.sock`, and a process that can talk to that socket is root on
+the host — the same trade the app itself refuses (see "If setup is run while
+the stack is already up"). An ingress that only proxies HTTP to one service has
+no use for it. `cmd/inventory/compose_test.go`
+(`TestTraefikHoldsNoDockerSocket`) pins both halves: no socket on `traefik`,
+and a route file that still names `app:8000`.
 
 ## `docker-compose.override.yml` (local staging overrides)
 

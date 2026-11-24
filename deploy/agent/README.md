@@ -38,6 +38,26 @@ protection is the same as the runner's — **reach**, not privilege. This
 container mounts nothing beyond the socket, the repository, and its own
 `~/.claude` state volume.
 
+### With a rootless Docker: no root reach
+
+The reach described above is the **host's** Docker daemon. Point the container at a
+**rootless** Docker instead, meaning a daemon that runs as an ordinary user, and the same
+`docker run -v /:/host` only reaches what that user can reach. Nothing inside the container
+changes: it still sees `/var/run/docker.sock`, `entrypoint.sh` still joins the socket's
+group (gid 0 inside a rootless daemon's user namespace, which is the unprivileged user on
+the host), and `scripts/doctor` still checks the same things.
+
+```sh
+# as the unprivileged user that owns the rootless daemon (e.g. gh-agents on witchcraftvault003)
+export DOCKER_HOST=unix:///run/gh-agents/docker.sock   # the client talks to it
+export DOCKER_SOCKET=/run/gh-agents/docker.sock        # the agent container mounts it
+REPO_PATH=$PWD docker compose -f deploy/agent/docker-compose.agent.yml run --rm agent
+```
+
+`DOCKER_SOCKET` defaults to `/var/run/docker.sock`, so an unset variable behaves exactly as
+before. The identical-path rule below still applies: the rootless daemon resolves
+bind-mount sources on the same host filesystem, as its own user.
+
 ## Install and first run
 
 **1. Copy the env file:**
