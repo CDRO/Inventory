@@ -55,7 +55,12 @@ services:
       #    without it mounted, scripts/doctor reports why and the container
       #    refuses to start anything else (this package's other acceptance
       #    criterion — the doctor output with the socket removed).
-      - /var/run/docker.sock:/var/run/docker.sock
+      #    DOCKER_SOCKET picks which daemon's socket: the default is the
+      #    host's (root on the host, see README), a rootless Docker's socket
+      #    (e.g. /run/gh-agents/docker.sock) makes the same agent only as
+      #    powerful as that unprivileged user. Inside it is always
+      #    /var/run/docker.sock, so nothing else here changes.
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
 
       # 2. The clone, at THE IDENTICAL PATH inside and out. Load-bearing, not
       #    tidy, for the same reason as the NAS runner's own clone mount

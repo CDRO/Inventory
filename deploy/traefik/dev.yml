@@ -1,0 +1,15 @@
+# Traefik's routes for docker-compose.yml, as a file instead of container labels.
+# The file provider needs no access to the Docker socket: Traefik reaches `app` by its
+# Compose service name over the project network. Docker access is root on the host, so an
+# ingress that only proxies HTTP has no business holding it.
+http:
+  routers:
+    app:
+      rule: "PathPrefix(`/`)"
+      entryPoints: [web]
+      service: app
+  services:
+    app:
+      loadBalancer:
+        servers:
+          - url: "http://app:8000"

@@ -1,0 +1,15 @@
+# Traefik's routes for docker-compose.e2e.yml: HTTPS only, on Traefik's own self-signed
+# default certificate (see the comment on `app` in that file for why HTTPS). A file instead of
+# container labels, so Traefik needs no Docker socket.
+http:
+  routers:
+    app:
+      rule: "PathPrefix(`/`)"
+      entryPoints: [websecure]
+      service: app
+      tls: {}
+  services:
+    app:
+      loadBalancer:
+        servers:
+          - url: "http://app:8000"
